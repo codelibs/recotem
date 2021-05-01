@@ -16,6 +16,11 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 
-from .top.views import index_view
+from .api.views import index_view
+from rest_framework.authtoken import views as drf_views
 
-urlpatterns = [path("admin/", admin.site.urls), path("", index_view, name="index")]
+urlpatterns = [
+    path("admin/", admin.site.urls),
+    path("", index_view, name="index"),
+    path("api-token-auth/", drf_views.obtain_auth_token),
+]

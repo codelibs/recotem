@@ -36,8 +36,11 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
-    "django.contrib.staticfiles",
     "rest_framework",
+    "rest_framework.authtoken",
+    "whitenoise.runserver_nostatic",
+    "django.contrib.staticfiles",
+    "recotem.api",
 ]
 
 MIDDLEWARE = [
@@ -48,14 +51,23 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
 ]
+MIDDLEWARE_CLASSES = ("whitenoise.middleware.WhiteNoiseMiddleware",)
+
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.BasicAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
+    ]
+}
 
 ROOT_URLCONF = "recotem.urls"
 
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": ["dist"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -119,6 +131,17 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/3.2/howto/static-files/
 
 STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "dist" / "static"
+
+STATICFILES_DIRS = []
+
+
+##########
+# STATIC #
+##########
+
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/3.2/ref/settings/#default-auto-field

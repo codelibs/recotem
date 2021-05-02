@@ -1,12 +1,17 @@
-from django.shortcuts import render
-from django.views.generic import TemplateView
-from django.views.decorators.cache import never_cache
+from .models import Project, TrainingData
+from .serializers import ProjectSerializer, TrainingDataSerializer
+from rest_framework import viewsets
 
 
-# Serve Vue Application
-class TopPageView(TemplateView):
-    template_name = "index.html"
+class ProjectViewSet(viewsets.ModelViewSet):
+    queryset = Project.objects.all()
+    serializer_class = ProjectSerializer
 
 
-index_view = never_cache(TopPageView.as_view())
-# Create your views here.
+class TrainingDataViewset(viewsets.ModelViewSet):
+    queryset = TrainingData.objects.all()
+    serializer_class = TrainingDataSerializer
+
+
+class ProjectDetailViewset(viewsets.ReadOnlyModelViewSet):
+    queryset = Project

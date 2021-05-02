@@ -14,13 +14,24 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-from django.urls import path
+from django.urls import path, include
 
-from .api.views import index_view
 from rest_framework.authtoken import views as drf_views
+
+from django.views.generic import TemplateView
+from django.views.decorators.cache import never_cache
+from .api.urls import router as api_router
+
+
+class TopPageView(TemplateView):
+    template_name = "index.html"
+
+
+index_view = never_cache(TopPageView.as_view())
 
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("", index_view, name="index"),
-    path("api-token-auth/", drf_views.obtain_auth_token),
+    path("api/token-auth/", drf_views.obtain_auth_token, name="api-token"),
+    path("api/", include(api_router.urls)),
 ]

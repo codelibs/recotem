@@ -131,6 +131,13 @@ USE_L10N = True
 
 USE_TZ = True
 
+# Data & Trained Model storage
+
+_DEFAULT_FILE_STORAGE = env("DEFAULT_FILE_STORAGE", default="")
+if _DEFAULT_FILE_STORAGE:
+    DEFAULT_FILE_STORAGE = _DEFAULT_FILE_STORAGE
+else:
+    MEDIA_ROOT = BASE_DIR / "data"
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/3.2/howto/static-files/

@@ -19,10 +19,3 @@ class Command(BaseCommand):
                 self.stdout.write("Connection not found. Wait for 2 second...")
                 time.sleep(2)
         self.stdout.write(self.style.SUCCESS("Found connection."))
-        n_users = User.objects.count()
-        if n_users > 0:
-            return
-        self.stdout.write(
-            'No user found. Create an administrative user with password "very_bad_password".'
-        )
-        User.objects.create(username="admin", password="very_bad_password")

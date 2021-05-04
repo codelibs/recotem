@@ -1,4 +1,3 @@
-#!/bih/sh
-
+#!/bin/bash
 python manage.py migrate
-python manager.py runserver 80
+python manage.py runserver 80

@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     "whitenoise.runserver_nostatic",
     "django.contrib.staticfiles",
     "recotem.api",
+    "django_cleanup.apps.CleanupConfig",
 ]
 
 MIDDLEWARE = [

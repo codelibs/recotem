@@ -1,12 +1,17 @@
 from typing import Any, Type, Optional
-from django.conf import settings
-from django.core.files.uploadhandler import TemporaryFileUploadHandler
+from django.core.files.storage import default_storage
+
 from django.db import models
-from django.db.models.signals import post_save, post_delete
+from django.db.models import constraints
+from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django.utils.translation import gettext_lazy as _
+
 from rest_framework.authtoken.models import Token
 
 from django.contrib.auth.models import User
+
+# Create your models here.
 
 
 @receiver(post_save, sender=User)
@@ -20,65 +25,83 @@ def create_auth_token(
         Token.objects.create(user=instance)
 
 
-# Create your models here.
-
-
 class Project(models.Model):
-    project_name = models.TextField(unique=True)
+    name = models.TextField(unique=True)
     user_column = models.CharField(max_length=256)
     item_column = models.CharField(max_length=256)
     time_column = models.CharField(max_length=256, blank=True, null=True)
-
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
 
 
 class TrainingData(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE)
-    upload_path = models.FileField(upload_to="training_data/")
+    upload_path = models.FileField(upload_to="training_data/", null=False)
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
 
 
-class ModelConfiguration(models.Model):
-    project = models.ForeignKey(Project, on_delete=models.CASCADE)
-    parameters_json = models.TextField()
+class SplitConfig(models.Model):
+    name = models.CharField(max_length=256, null=True)
+
+    class SplitScheme(models.TextChoices):
+        RANDOM = "RG", _("Random")
+        TIME_GLOBAL = "TG", _("Time Global")
+        TIME_USER = "TU", _("Time User")
+
+    scheme = models.CharField(
+        choices=SplitScheme.choices, max_length=2, default=SplitScheme.RANDOM
+    )
+    heldout_ratio = models.FloatField(default=0.1)
+    n_heldout = models.IntegerField(null=True)
+
+    test_user_ratio = models.FloatField(default=1.0)
+    n_test_users = models.IntegerField(null=True)
+
+    random_seed = models.IntegerField(default=42)
 
 
 class EvaluationConfig(models.Model):
+    name = models.CharField(max_length=256, null=True)
+    cutoff = models.IntegerField(default=20)
+
+    class TargetMetric(models.TextChoices):
+        NDCG = "NDCG", "Normalized discounted cumulative gain"
+        MAP = "MAP", "mean average precision"
+        RECALL = "recall", "recall"
+        HIT = "hit", "hit"
+
     scheme = models.CharField(
-        choices=[
-            ("RG", "RANDOM_GLOBAL"),
-            ("RU", "RANDOM_USER"),
-            ("TG", "TIME_GLOBAL"),
-            ("TU", "TIME_USER"),
-        ],
-        max_length=3,
+        choices=TargetMetric.choices, max_length=10, default=TargetMetric.NDCG
     )
-    split_args_json = models.TextField()
+
+
+class ModelConfiguration(models.Model):
+    name = models.CharField(max_length=256, null=True)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE)
+    parameters_json = models.TextField()
+    ins_datetime = models.DateTimeField(auto_now_add=True)
+    upd_datetime = models.DateTimeField(auto_now=True)
 
 
 class TrainedModel(models.Model):
     configuration = models.ForeignKey(ModelConfiguration, on_delete=models.CASCADE)
     data_loc = models.ForeignKey(TrainingData, on_delete=models.CASCADE)
     model_path = models.FileField(upload_to="models/")
-
-
-@receiver(signal=post_delete, sender=TrainingData)
-def delete_file(
-    sender: Type[TrainingData], instance: TrainingData, **kwargs: Any
-) -> None:
-    instance.upload_path.delete()
-    pass
+    ins_datetime = models.DateTimeField(auto_now_add=True)
+    upd_datetime = models.DateTimeField(auto_now=True)
 
 
 class ParameterTuningJob(models.Model):
     data = models.ForeignKey(TrainingData, on_delete=models.CASCADE)
+    split = models.ForeignKey(SplitConfig, null=True, on_delete=models.CASCADE)
     evaluation = models.ForeignKey(EvaluationConfig, on_delete=models.CASCADE)
     best_config = models.ForeignKey(
         ModelConfiguration, null=True, on_delete=models.CASCADE
     )
     tuned_model = models.ForeignKey(TrainedModel, null=True, on_delete=models.CASCADE)
+    ins_datetime = models.DateTimeField(auto_now_add=True)
+    upd_datetime = models.DateTimeField(auto_now=True)
 
 
 class ParameterTuningLog(models.Model):

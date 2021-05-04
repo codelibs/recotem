@@ -1,5 +1,10 @@
-from .models import Project, TrainingData
-from .serializers import ProjectSerializer, TrainingDataSerializer
+from .models import Project, TrainingData, SplitConfig, EvaluationConfig
+from .serializers import (
+    ProjectSerializer,
+    TrainingDataSerializer,
+    SplitConfigSerializer,
+    EvaluationConfigSerializer,
+)
 from rest_framework import viewsets
 
 
@@ -13,5 +18,11 @@ class TrainingDataViewset(viewsets.ModelViewSet):
     serializer_class = TrainingDataSerializer
 
 
-class ProjectDetailViewset(viewsets.ReadOnlyModelViewSet):
-    queryset = Project
+class SplitConfigViewSet(viewsets.ModelViewSet):
+    queryset = SplitConfig.objects.all()
+    serializer_class = SplitConfigSerializer
+
+
+class EvaluationConfigViewSet(viewsets.ModelViewSet):
+    queryset = EvaluationConfig.objects.all()
+    serializer_class = EvaluationConfigSerializer

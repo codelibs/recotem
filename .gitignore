@@ -1,6 +1,7 @@
 .DS_Store
 node_modules
 /dist
+backend/recotem/dist/
 
 
 # local env files
@@ -25,3 +26,5 @@ pnpm-debug.log*
 **db.sqlite3
 .python-version
 **.pyc
+
+*.csv

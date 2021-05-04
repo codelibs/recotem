@@ -1,20 +1,19 @@
 version: "3.3"
 services:
-  queue:
-    image: rabbitmq:3
-    ports:
-      - "5673:5672"
+  #  queue:
+  #    image: rabbitmq:3
+  #    ports:
+  #      - "5673:5672"
   backend:
     build:
       context: ./backend
       dockerfile: backend.dockerfile
     volumes:
       - data-location:/app/data
-      - sqlite3-location:/app/db
     ports:
-      - "9999:80"
+      - "8000:80"
+    environment:
+      - DEBUG=on
 volumes:
   data-location:
-    driver: local
-  sqlite3-location:
     driver: local

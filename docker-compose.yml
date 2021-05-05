@@ -1,9 +1,7 @@
 version: "3.3"
 services:
-  #  queue:
-  #    image: rabbitmq:3
-  #    ports:
-  #      - "5673:5672"
+  queue:
+    image: rabbitmq:3
   backend:
     build:
       context: ./backend
@@ -14,6 +12,15 @@ services:
       - "8000:80"
     environment:
       - DEBUG=on
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: celery.dockerfile
+    volumes:
+      - data-location:/app/data
+    environment:
+      - DEBUG=on
+      - CELERY_BROKER_URL=amqp://guest@queue:5672
 volumes:
   data-location:
     driver: local

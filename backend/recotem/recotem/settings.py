@@ -45,7 +45,8 @@ INSTALLED_APPS = [
     "whitenoise.runserver_nostatic",
     "django.contrib.staticfiles",
     "recotem.api",
-    "django_cleanup.apps.CleanupConfig",
+    "django_celery_results",
+    "django_cleanup.apps.CleanupConfig",  # always the last one
 ]
 
 MIDDLEWARE = [
@@ -159,3 +160,11 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 # https://docs.djangoproject.com/en/3.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+
+# Celery settings
+CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="amqp://guest:guest@localhost")
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_RESULT_BACKEND = "django-db"
+CELERY_RESULT_BACKEND = "django-cache"
+CELERY_TASK_SERIALIZER = "json"

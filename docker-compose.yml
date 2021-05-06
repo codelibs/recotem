@@ -1,4 +1,4 @@
-version: "3.3"
+version: "3.7"
 services:
   queue:
     image: rabbitmq:3
@@ -12,6 +12,7 @@ services:
       - "8000:80"
     environment:
       - DEBUG=on
+      - CELERY_BROKER_URL=amqp://guest@queue:5672
   celery_worker:
     build:
       context: ./backend
@@ -19,7 +20,6 @@ services:
     volumes:
       - data-location:/app/data
     environment:
-      - DEBUG=on
       - CELERY_BROKER_URL=amqp://guest@queue:5672
 volumes:
   data-location:

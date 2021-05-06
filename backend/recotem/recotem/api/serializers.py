@@ -1,7 +1,16 @@
 from django.db.models import fields
 from typing import Optional, Any
 from rest_framework import serializers
-from .models import EvaluationConfig, Project, SplitConfig, TrainingData
+from .tasks import execute_irspack
+from django_celery_results.models import TaskResult
+
+from .models import (
+    EvaluationConfig,
+    Project,
+    SplitConfig,
+    TrainingData,
+    ParameterTuningJob,
+)
 from django.core.files.uploadedfile import UploadedFile
 import pandas as pd
 from rest_framework.exceptions import ValidationError
@@ -99,3 +108,17 @@ class EvaluationConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = EvaluationConfig
         fields = "__all__"
+
+
+class ParameterTuningJobSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ParameterTuningJob
+        fields = "__all__"
+
+    def create(self, validated_data):
+        obj: ParameterTuningJob = ParameterTuningJob.objects.create(**validated_data)
+        task = execute_irspack.delay(obj.id)
+        task_result, _ = TaskResult.objects.get_or_create(task_id=task.task_id)
+        obj.task_result = task_result
+        obj.save()
+        return obj

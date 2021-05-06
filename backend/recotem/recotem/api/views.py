@@ -1,5 +1,12 @@
-from .models import Project, TrainingData, SplitConfig, EvaluationConfig
+from .models import (
+    Project,
+    TrainingData,
+    SplitConfig,
+    EvaluationConfig,
+    ParameterTuningJob,
+)
 from .serializers import (
+    ParameterTuningJobSerializer,
     ProjectSerializer,
     TrainingDataSerializer,
     SplitConfigSerializer,
@@ -26,3 +33,8 @@ class SplitConfigViewSet(viewsets.ModelViewSet):
 class EvaluationConfigViewSet(viewsets.ModelViewSet):
     queryset = EvaluationConfig.objects.all()
     serializer_class = EvaluationConfigSerializer
+
+
+class ParameterTuningJobViewSet(viewsets.ModelViewSet):
+    queryset = ParameterTuningJob.objects.all()
+    serializer_class = ParameterTuningJobSerializer

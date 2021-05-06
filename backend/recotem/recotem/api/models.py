@@ -4,6 +4,7 @@ from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils.translation import gettext_lazy as _
+from django_celery_results.models import TaskResult
 
 from rest_framework.authtoken.models import Token
 
@@ -64,12 +65,12 @@ class EvaluationConfig(models.Model):
     cutoff = models.IntegerField(default=20)
 
     class TargetMetric(models.TextChoices):
-        NDCG = "NDCG", "Normalized discounted cumulative gain"
-        MAP = "MAP", "mean average precision"
+        NDCG = "ndcg", "Normalized discounted cumulative gain"
+        MAP = "map", "mean average precision"
         RECALL = "recall", "recall"
         HIT = "hit", "hit"
 
-    scheme = models.CharField(
+    target_metric = models.CharField(
         choices=TargetMetric.choices, max_length=10, default=TargetMetric.NDCG
     )
 
@@ -83,6 +84,7 @@ class ModelConfiguration(models.Model):
 
 
 class TrainedModel(models.Model):
+    name = models.CharField(max_length=256, null=True)
     configuration = models.ForeignKey(ModelConfiguration, on_delete=models.CASCADE)
     data_loc = models.ForeignKey(TrainingData, on_delete=models.CASCADE)
     model_path = models.FileField(upload_to="models/")
@@ -94,10 +96,18 @@ class ParameterTuningJob(models.Model):
     data = models.ForeignKey(TrainingData, on_delete=models.CASCADE)
     split = models.ForeignKey(SplitConfig, null=True, on_delete=models.CASCADE)
     evaluation = models.ForeignKey(EvaluationConfig, on_delete=models.CASCADE)
+
+    n_trials = models.IntegerField(default=40)
+    memory_budget = models.IntegerField(default=8000)
+    timeout_overall = models.IntegerField(null=True)
+    timeout_singlestep = models.IntegerField(null=True)
+    random_seed = models.IntegerField(null=True)
+
     best_config = models.ForeignKey(
         ModelConfiguration, null=True, on_delete=models.CASCADE
     )
     tuned_model = models.ForeignKey(TrainedModel, null=True, on_delete=models.CASCADE)
+    task_result = models.ForeignKey(TaskResult, null=True, on_delete=models.PROTECT)
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
 

@@ -6,6 +6,6 @@ django-storages==1.11.1
 django-stubs==1.8.0
 django-stubs-ext==0.2.0
 djangorestframework==3.12.4
-irspack==0.1.12
+irspack==0.1.13
 whitenoise==5.2.0
 django-environ==0.4.5

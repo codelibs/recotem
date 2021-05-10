@@ -2,6 +2,8 @@ version: "3.7"
 services:
   queue:
     image: rabbitmq:3
+    ports:
+      - "5672:5672"
   backend:
     build:
       context: ./backend
@@ -11,7 +13,7 @@ services:
     ports:
       - "8000:80"
     environment:
-      - DEBUG=on
+      #- DEBUG=on
       - CELERY_BROKER_URL=amqp://guest@queue:5672
   celery_worker:
     build:

@@ -78,6 +78,7 @@ class EvaluationConfig(models.Model):
 class ModelConfiguration(models.Model):
     name = models.CharField(max_length=256, null=True)
     project = models.ForeignKey(Project, on_delete=models.CASCADE)
+    recommender_class_name = models.CharField(max_length=256)
     parameters_json = models.TextField()
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
@@ -108,12 +109,5 @@ class ParameterTuningJob(models.Model):
     )
     tuned_model = models.ForeignKey(TrainedModel, null=True, on_delete=models.CASCADE)
     task_result = models.ForeignKey(TaskResult, null=True, on_delete=models.PROTECT)
-    ins_datetime = models.DateTimeField(auto_now_add=True)
-    upd_datetime = models.DateTimeField(auto_now=True)
-
-
-class ParameterTuningLog(models.Model):
-    job = models.ForeignKey(ParameterTuningJob, on_delete=models.CASCADE)
-    log_str = models.TextField()
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)

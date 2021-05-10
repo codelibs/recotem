@@ -2,6 +2,7 @@ from django.db.models import fields
 from typing import Optional, Any
 from rest_framework import serializers
 from .tasks import execute_irspack
+from .utils import read_dataframe
 from django_celery_results.models import TaskResult
 
 from .models import (
@@ -31,30 +32,10 @@ class TrainingDataSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def create(self, validated_data):
+
         upload_path: UploadedFile = validated_data["upload_path"]
         pathname = Path(upload_path.name)
-        suffix = pathname.suffix
-        df: pd.DataFrame
-        if suffix == ".csv":
-            try:
-                df = pd.read_csv(upload_path)
-            except ParserError:
-                raise ValidationError(f"Failed to parse {pathname.name} as CSV.")
-        elif suffix == ".json":
-            try:
-                df = pd.read_json(upload_path)
-            except ParserError:
-                raise ValidationError(f"Failed to parse {pathname.name} as json.")
-        elif suffix in (".pkl", ".pickle"):
-            try:
-                df = pd.read_pickle(upload_path)
-            except UnpicklingError:
-                raise ValidationError(
-                    f"Failed to read {pathname.name} as a pickle file."
-                )
-        else:
-            raise ValidationError(f"Supported file formats are .csv/.json/.pkl/.pickle")
-
+        df = read_dataframe(pathname, upload_path)
         obj: TrainingData = TrainingData.objects.create(**validated_data)
         time_column: Optional[str] = obj.project.time_column
         if time_column is not None:

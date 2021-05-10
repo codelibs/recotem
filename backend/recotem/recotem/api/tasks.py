@@ -9,15 +9,14 @@ from irspack import (
     Evaluator,
     split_dataframe_partial_user_holdout,
 )
-from .task_function import autopilot
 import scipy.sparse as sps
+from irspack import autopilot
 from .models import (
     EvaluationConfig,
     Project,
     SplitConfig,
     ParameterTuningJob,
     ModelConfiguration,
-    ParameterTuningLog,
     TrainedModel,
     TrainingData,
 )
@@ -27,7 +26,9 @@ from ..celery import app
 
 @app.task(bind=True)
 def execute_irspack(self, parameter_tuning_job_id: int) -> None:
-    logs = []
+    logs = [
+        dict(message=f"Started the parameter tuning jog {parameter_tuning_job_id} ")
+    ]
     self.update_state(state="STARTED", meta=logs)
     tl: ParameterTuningJob = ParameterTuningJob.objects.get(id=parameter_tuning_job_id)
     data: TrainingData = tl.data
@@ -63,7 +64,11 @@ def execute_irspack(self, parameter_tuning_job_id: int) -> None:
     def callback(i: int, df: pd.DataFrame) -> None:
         if df.shape[0] == 0:
             return
-        logs.append(df.iloc[-1].to_json())
+        logs.append(
+            dict(
+                message=f"Trial {i} finished.", result=json.loads(df.iloc[-1].to_json())
+            )
+        )
         self.update_state(state="STARTED", meta=logs)
 
     recommender_class, bp, _ = autopilot(
@@ -85,8 +90,12 @@ def execute_irspack(self, parameter_tuning_job_id: int) -> None:
         pickle.dump(mapped_rec, temp_fs)
         temp_fs.seek(0)
         file_ = default_storage.save(f"models/{project_name}.pkl", temp_fs)
+
     model_config = ModelConfiguration.objects.create(
-        name=None, project=project, parameters_json=json.dumps(bp)
+        name=None,
+        project=project,
+        parameters_json=json.dumps(bp),
+        recommender_class_name=recommender_class.__name__,
     )
     model = TrainedModel.objects.create(
         configuration=model_config, data_loc=data, model_path=file_

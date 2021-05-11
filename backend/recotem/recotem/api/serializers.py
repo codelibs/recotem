@@ -11,6 +11,8 @@ from .models import (
     SplitConfig,
     TrainingData,
     ParameterTuningJob,
+    ParameterTuningLog,
+    TrainedModel,
 )
 from django.core.files.uploadedfile import UploadedFile
 import pandas as pd
@@ -18,6 +20,12 @@ from rest_framework.exceptions import ValidationError
 from pathlib import Path
 from pandas.errors import ParserError
 from pickle import UnpicklingError
+
+
+class TrainedModelSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TrainedModel
+        fields = "__all__"
 
 
 class ProjectSerializer(serializers.ModelSerializer):
@@ -88,6 +96,12 @@ class SplitConfigSerializer(serializers.ModelSerializer):
 class EvaluationConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = EvaluationConfig
+        fields = "__all__"
+
+
+class ParameterTuningLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ParameterTuningLog
         fields = "__all__"
 
 

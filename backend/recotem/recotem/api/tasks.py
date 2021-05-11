@@ -1,18 +1,20 @@
 import pandas as pd
 import pickle
+from optuna.storages import RDBStorage
 import json
 import tempfile
 from django.core.files.storage import default_storage
 from irspack.utils import df_to_sparse
-from irspack.utils.id_mapping import IDMappedRecommender
 from irspack import (
+    IDMappedRecommender,
     Evaluator,
     split_dataframe_partial_user_holdout,
+    autopilot,
 )
 import scipy.sparse as sps
-from irspack import autopilot
 from .models import (
     EvaluationConfig,
+    ParameterTuningLog,
     Project,
     SplitConfig,
     ParameterTuningJob,
@@ -20,6 +22,7 @@ from .models import (
     TrainedModel,
     TrainingData,
 )
+from .task_function import BilliardBackend
 
 from ..celery import app
 
@@ -30,15 +33,20 @@ def execute_irspack(self, parameter_tuning_job_id: int) -> None:
         dict(message=f"Started the parameter tuning jog {parameter_tuning_job_id} ")
     ]
     self.update_state(state="STARTED", meta=logs)
-    tl: ParameterTuningJob = ParameterTuningJob.objects.get(id=parameter_tuning_job_id)
-    data: TrainingData = tl.data
+    job: ParameterTuningJob = ParameterTuningJob.objects.get(id=parameter_tuning_job_id)
+    data: TrainingData = job.data
     project: Project = data.project
     project_name: str = project.name
-    split: SplitConfig = tl.split
-    evaluation: EvaluationConfig = tl.evaluation
+    split: SplitConfig = job.split
+    evaluation: EvaluationConfig = job.evaluation
     df: pd.DataFrame = pd.read_csv(data.upload_path)
     user_column = project.user_column
     item_column = project.item_column
+
+    ParameterTuningLog.objects.create(
+        job=job,
+        contents=f"""Start job {parameter_tuning_job_id}.""",
+    )
 
     dataset, _ = split_dataframe_partial_user_holdout(
         df,
@@ -61,25 +69,42 @@ def execute_irspack(self, parameter_tuning_job_id: int) -> None:
         cutoff=evaluation.cutoff,
     )
 
+    optuna_storage_file = tempfile.NamedTemporaryFile()
+    optuna_storage = RDBStorage(f"sqlite:///{optuna_storage_file.name}")
+    study_name = f"recotem_tune_job_{parameter_tuning_job_id}"
+    study_id = optuna_storage.create_new_study(study_name)
+
     def callback(i: int, df: pd.DataFrame) -> None:
-        if df.shape[0] == 0:
-            return
-        logs.append(
-            dict(
-                message=f"Trial {i} finished.", result=json.loads(df.iloc[-1].to_json())
-            )
-        )
-        self.update_state(state="STARTED", meta=logs)
+        trial_id = optuna_storage.get_trial_id_from_study_id_trial_number(study_id, i)
+        trial = optuna_storage.get_trial(trial_id)
+        params = trial.params.copy()
+        algo: str = params.pop("optimizer_name")
+        if trial.value is None or trial.value == 0.0:
+            message = f"Trial {i} with {algo} / {params}: timeout."
+        else:
+            message = f"""Trial {i} with {algo} / {params}: {trial.state.name}.
+{evaluator.target_metric.name}@{evaluator.cutoff}={-trial.value}"""
+        ParameterTuningLog.objects.create(job=job, contents=message)
 
     recommender_class, bp, _ = autopilot(
         X_tv_train,
         evaluator,
-        n_trials=tl.n_trials,
-        memory_budget=tl.memory_budget,
-        timeout_overall=tl.timeout_overall,
-        timeout_singlestep=tl.timeout_singlestep,
-        random_seed=tl.random_seed,
+        n_trials=job.n_trials,
+        memory_budget=job.memory_budget,
+        timeout_overall=job.timeout_overall,
+        timeout_singlestep=job.timeout_singlestep,
+        random_seed=job.random_seed,
         callback=callback,
+        storage=optuna_storage,
+        study_name=study_name,
+        task_resource_provider=BilliardBackend,
+    )
+
+    ParameterTuningLog.objects.create(
+        job=job,
+        contents=f"""Found best configuration: {recommender_class.__name__} / {bp}.
+Start fitting the entire data using this config.
+""",
     )
 
     X, uid, iid = df_to_sparse(df, user_column, item_column)
@@ -101,7 +126,12 @@ def execute_irspack(self, parameter_tuning_job_id: int) -> None:
         configuration=model_config, data_loc=data, model_path=file_
     )
 
-    tl.best_config = model_config
-    tl.tuned_model = model
-    tl.save()
-    return logs
+    job.best_config = model_config
+    job.tuned_model = model
+    job.save()
+    ParameterTuningLog.objects.create(
+        job=job,
+        contents=f"""Job {parameter_tuning_job_id} complete.""",
+    )
+
+    return ["complete"]

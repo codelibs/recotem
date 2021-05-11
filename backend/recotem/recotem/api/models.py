@@ -28,7 +28,7 @@ class Project(models.Model):
     name = models.TextField(unique=True)
     user_column = models.CharField(max_length=256)
     item_column = models.CharField(max_length=256)
-    time_column = models.CharField(max_length=256, blank=True, null=True)
+    time_column = models.CharField(max_length=256, blank=False, null=True)
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
 
@@ -78,7 +78,7 @@ class EvaluationConfig(models.Model):
 class ModelConfiguration(models.Model):
     name = models.CharField(max_length=256, null=True)
     project = models.ForeignKey(Project, on_delete=models.CASCADE)
-    recommender_class_name = models.CharField(max_length=256)
+    recommender_class_name = models.CharField(max_length=128)
     parameters_json = models.TextField()
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
@@ -111,3 +111,9 @@ class ParameterTuningJob(models.Model):
     task_result = models.ForeignKey(TaskResult, null=True, on_delete=models.PROTECT)
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
+
+
+class ParameterTuningLog(models.Model):
+    job = models.ForeignKey(ParameterTuningJob, on_delete=models.CASCADE)
+    contents = models.TextField(blank=True)
+    ins_datetime = models.DateTimeField(auto_now_add=True)

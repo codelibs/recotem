@@ -65,7 +65,8 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.BasicAuthentication",
         "rest_framework.authentication.SessionAuthentication",
-    ]
+    ],
+    "UPLOADED_FILES_USE_URL": False,
 }
 
 ROOT_URLCONF = "recotem.urls"

@@ -1,7 +1,9 @@
 from rest_framework.routers import DefaultRouter
 from .views import (
     ParameterTuningJobViewSet,
+    ParameterTuningLogViewSet,
     ProjectViewSet,
+    TrainedModelViewset,
     TrainingDataViewset,
     SplitConfigViewSet,
     EvaluationConfigViewSet,
@@ -16,4 +18,8 @@ router.register(
 )
 router.register(
     r"parameter_tuning_job", ParameterTuningJobViewSet, basename="parameter_tuning_job"
+)
+router.register(r"trained_model", TrainedModelViewset, basename="trained_model")
+router.register(
+    r"parameter_tuning_log", ParameterTuningLogViewSet, basename="parameter_tuning_log"
 )

@@ -4,6 +4,14 @@ services:
     image: rabbitmq:3
     ports:
       - "5672:5672"
+  db:
+    image: postgres:12
+    volumes:
+      - db-data:/var/lib/postgresql/data/pgdata
+    env_file:
+      - .env
+    environment:
+      - PGDATA=/var/lib/postgresql/data/pgdata
   backend:
     build:
       context: ./backend
@@ -12,17 +20,18 @@ services:
       - data-location:/app/data
     ports:
       - "8000:80"
-    environment:
-      #- DEBUG=on
-      - CELERY_BROKER_URL=amqp://guest@queue:5672
+    env_file:
+      - .env
   celery_worker:
     build:
       context: ./backend
       dockerfile: celery.dockerfile
     volumes:
       - data-location:/app/data
-    environment:
-      - CELERY_BROKER_URL=amqp://guest@queue:5672
+    env_file:
+      - .env
 volumes:
   data-location:
+    driver: local
+  db-data:
     driver: local

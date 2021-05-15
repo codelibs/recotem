@@ -1,0 +1,20 @@
+version: "3.7"
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: backend.dockerfile
+      args:
+        - RECOTEM_TESTING=true
+    volumes:
+      - ./backend/recotem:/app
+    ports:
+      - "8000:80"
+    environment:
+      - CELERY_BROKER_URL=amqp://
+      - DJANGO_SETTINGS_MODULE=recotem.settings
+    command: >
+      pytest -rs
+volumes:
+  test-data-location:
+    driver: local

@@ -5,6 +5,10 @@ from typing import List, Dict, Optional
 from irspack import InteractionMatrix, Evaluator
 from irspack.parameter_tuning import Suggestion
 from irspack.optimizers.autopilot import TaskBackend, search_one
+from irspack.utils import df_to_sparse
+from irspack.recommenders import get_recommender_class
+
+from .models import TrainingData, ModelConfiguration
 
 
 class BilliardBackend(TaskBackend):
@@ -50,3 +54,7 @@ class BilliardBackend(TaskBackend):
 
     def terminate(self) -> None:
         self._p.terminate()
+
+
+def learn_model(data: TrainingData, model_config: ModelConfiguration):
+    model_config.recommender_class_name

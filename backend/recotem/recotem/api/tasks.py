@@ -2,6 +2,7 @@ import pandas as pd
 import pickle
 from optuna.storages import RDBStorage
 import json
+from pathlib import Path
 import tempfile
 from django.core.files.storage import default_storage
 from irspack.utils import df_to_sparse
@@ -14,7 +15,7 @@ from irspack import (
 import scipy.sparse as sps
 from .models import (
     EvaluationConfig,
-    ParameterTuningLog,
+    TaskLog,
     Project,
     SplitConfig,
     ParameterTuningJob,
@@ -23,6 +24,7 @@ from .models import (
     TrainingData,
 )
 from .task_function import BilliardBackend
+from .utils import read_dataframe
 
 from ..celery import app
 
@@ -39,12 +41,12 @@ def execute_irspack(self, parameter_tuning_job_id: int) -> None:
     project_name: str = project.name
     split: SplitConfig = job.split
     evaluation: EvaluationConfig = job.evaluation
-    df: pd.DataFrame = pd.read_csv(data.upload_path)
+    df: pd.DataFrame = read_dataframe(Path(data.upload_path.name), data.upload_path)
     user_column = project.user_column
     item_column = project.item_column
 
-    ParameterTuningLog.objects.create(
-        job=job,
+    TaskLog.objects.create(
+        task=self,
         contents=f"""Start job {parameter_tuning_job_id}.""",
     )
 
@@ -84,7 +86,7 @@ def execute_irspack(self, parameter_tuning_job_id: int) -> None:
         else:
             message = f"""Trial {i} with {algo} / {params}: {trial.state.name}.
 {evaluator.target_metric.name}@{evaluator.cutoff}={-trial.value}"""
-        ParameterTuningLog.objects.create(job=job, contents=message)
+        TaskLog.objects.create(job=job, contents=message)
 
     recommender_class, bp, _ = autopilot(
         X_tv_train,
@@ -100,11 +102,17 @@ def execute_irspack(self, parameter_tuning_job_id: int) -> None:
         task_resource_provider=BilliardBackend,
     )
 
-    ParameterTuningLog.objects.create(
-        job=job,
+    TaskLog.objects.create(
+        task=self,
         contents=f"""Found best configuration: {recommender_class.__name__} / {bp}.
 Start fitting the entire data using this config.
 """,
+    )
+    model_config = ModelConfiguration.objects.create(
+        name=None,
+        project=project,
+        parameters_json=json.dumps(bp),
+        recommender_class_name=recommender_class.__name__,
     )
 
     X, uid, iid = df_to_sparse(df, user_column, item_column)
@@ -116,12 +124,6 @@ Start fitting the entire data using this config.
         temp_fs.seek(0)
         file_ = default_storage.save(f"models/{project_name}.pkl", temp_fs)
 
-    model_config = ModelConfiguration.objects.create(
-        name=None,
-        project=project,
-        parameters_json=json.dumps(bp),
-        recommender_class_name=recommender_class.__name__,
-    )
     model = TrainedModel.objects.create(
         configuration=model_config, data_loc=data, model_path=file_
     )
@@ -129,8 +131,8 @@ Start fitting the entire data using this config.
     job.best_config = model_config
     job.tuned_model = model
     job.save()
-    ParameterTuningLog.objects.create(
-        job=job,
+    TaskLog.objects.create(
+        task=self,
         contents=f"""Job {parameter_tuning_job_id} complete.""",
     )
 

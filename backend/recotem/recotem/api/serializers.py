@@ -11,15 +11,13 @@ from .models import (
     SplitConfig,
     TrainingData,
     ParameterTuningJob,
-    ParameterTuningLog,
     TrainedModel,
+    TaskLog,
 )
 from django.core.files.uploadedfile import UploadedFile
 import pandas as pd
 from rest_framework.exceptions import ValidationError
 from pathlib import Path
-from pandas.errors import ParserError
-from pickle import UnpicklingError
 
 
 class TrainedModelSerializer(serializers.ModelSerializer):
@@ -40,38 +38,8 @@ class TrainingDataSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def create(self, validated_data):
-
-        upload_path: UploadedFile = validated_data["upload_path"]
-        pathname = Path(upload_path.name)
-        df = read_dataframe(pathname, upload_path)
         obj: TrainingData = TrainingData.objects.create(**validated_data)
-        time_column: Optional[str] = obj.project.time_column
-        if time_column is not None:
-            try:
-                df[time_column] = pd.to_datetime(df[time_column])
-            except ValueError:
-                raise ValidationError(f"Could not interpret {time_column} as datetime.")
-
-        user_column: str = obj.project.user_column
-        item_column: str = obj.project.item_column
-        time_column: Optional[str] = obj.project.time_column
-
-        if user_column not in df:
-            obj.delete()
-            raise ValidationError(
-                f'Column "{user_column}" not found in the upload file.'
-            )
-        if item_column not in df:
-            obj.delete()
-            raise ValidationError(
-                f'Column "{item_column}" not found in the upload file.'
-            )
-        if time_column is not None:
-            obj.delete()
-            if time_column not in df:
-                raise ValidationError(
-                    f'Column "{time_column}" not found in the upload file.'
-                )
+        obj.validate_return_df()
         return obj
 
 
@@ -99,9 +67,9 @@ class EvaluationConfigSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
-class ParameterTuningLogSerializer(serializers.ModelSerializer):
+class TaskLogSerializer(serializers.ModelSerializer):
     class Meta:
-        model = ParameterTuningLog
+        model = TaskLog
         fields = "__all__"
 
 
@@ -112,8 +80,6 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         obj: ParameterTuningJob = ParameterTuningJob.objects.create(**validated_data)
-        task = execute_irspack.delay(obj.id)
-        task_result, _ = TaskResult.objects.get_or_create(task_id=task.task_id)
-        obj.task_result = task_result
-        obj.save()
+        for _ in range(obj.n_tasks_parallel):
+            task = execute_irspack.delay(obj.id)
         return obj

@@ -1,4 +1,5 @@
 from typing import Any, Type, Optional
+from pathlib import Path
 
 from django.db import models
 from django.db.models.signals import post_save
@@ -7,8 +8,11 @@ from django.utils.translation import gettext_lazy as _
 from django_celery_results.models import TaskResult
 
 from rest_framework.authtoken.models import Token
+from rest_framework.exceptions import ValidationError
 
 from django.contrib.auth.models import User
+import pandas as pd
+from .utils import read_dataframe
 
 # Create your models here.
 
@@ -18,7 +22,7 @@ def create_auth_token(
     sender: Type[User],
     instance: Optional[User] = None,
     created: bool = False,
-    **kwargs: Any
+    **kwargs: Any,
 ) -> None:
     if created:
         Token.objects.create(user=instance)
@@ -38,6 +42,35 @@ class TrainingData(models.Model):
     upload_path = models.FileField(upload_to="training_data/", null=False)
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
+
+    def validate_return_df(self) -> pd.DataFrame:
+        pathname = Path(self.upload_path.name)
+        df = read_dataframe(pathname, self.upload_path)
+        user_column: str = self.project.user_column
+        item_column: str = self.project.item_column
+        time_column: Optional[str] = self.project.time_column
+
+        if time_column is not None:
+            if time_column not in df:
+                raise ValidationError(
+                    f'Column "{time_column}" not found in the upload file.'
+                )
+            try:
+                df[time_column] = pd.to_datetime(df[time_column])
+            except ValueError:
+                raise ValidationError(
+                    f'Could not interpret "{time_column}" as datetime.'
+                )
+
+        if user_column not in df:
+            raise ValidationError(
+                f'Column "{user_column}" not found in the upload file.'
+            )
+        if item_column not in df:
+            raise ValidationError(
+                f'Column "{item_column}" not found in the upload file.'
+            )
+        return df
 
 
 class SplitConfig(models.Model):
@@ -94,6 +127,7 @@ class TrainedModel(models.Model):
 
 
 class ParameterTuningJob(models.Model):
+    name = models.CharField(max_length=256, null=True)
     data = models.ForeignKey(TrainingData, on_delete=models.CASCADE)
     split = models.ForeignKey(SplitConfig, null=True, on_delete=models.CASCADE)
     evaluation = models.ForeignKey(EvaluationConfig, on_delete=models.CASCADE)
@@ -108,12 +142,17 @@ class ParameterTuningJob(models.Model):
         ModelConfiguration, null=True, on_delete=models.CASCADE
     )
     tuned_model = models.ForeignKey(TrainedModel, null=True, on_delete=models.CASCADE)
-    task_result = models.ForeignKey(TaskResult, null=True, on_delete=models.PROTECT)
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
 
 
-class ParameterTuningLog(models.Model):
+class TaskAndParameterJobLink(models.Model):
     job = models.ForeignKey(ParameterTuningJob, on_delete=models.CASCADE)
+    task = models.ForeignKey(TaskResult, on_delete=models.CASCADE)
+    ins_datetime = models.DateTimeField(auto_now_add=True)
+
+
+class TaskLog(models.Model):
+    task = models.ForeignKey(TaskResult, on_delete=models.CASCADE)
     contents = models.TextField(blank=True)
     ins_datetime = models.DateTimeField(auto_now_add=True)

@@ -1,5 +1,5 @@
 from .models import (
-    ParameterTuningLog,
+    TaskLog,
     Project,
     TrainingData,
     SplitConfig,
@@ -9,7 +9,7 @@ from .models import (
 )
 from .serializers import (
     ParameterTuningJobSerializer,
-    ParameterTuningLogSerializer,
+    TaskLogSerializer,
     ProjectSerializer,
     TrainedModelSerializer,
     TrainingDataSerializer,
@@ -49,6 +49,6 @@ class ParameterTuningJobViewSet(viewsets.ModelViewSet):
     serializer_class = ParameterTuningJobSerializer
 
 
-class ParameterTuningLogViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = ParameterTuningLog.objects.all()
-    serializer_class = ParameterTuningLogSerializer
+class TaskLogViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = TaskLog.objects.all()
+    serializer_class = TaskLogSerializer

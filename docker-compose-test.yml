@@ -14,7 +14,7 @@ services:
       - CELERY_BROKER_URL=amqp://
       - DJANGO_SETTINGS_MODULE=recotem.settings
     command: >
-      pytest -rs
+      pytest --cov=./recotem/api/ --cov-report=html tests/
 volumes:
   test-data-location:
     driver: local

@@ -1,17 +1,16 @@
-from typing import Any, Type, Optional
 from pathlib import Path
+from typing import Any, Optional, Type
 
+import pandas as pd
+from django.contrib.auth.models import User
 from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils.translation import gettext_lazy as _
 from django_celery_results.models import TaskResult
-
 from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import ValidationError
 
-from django.contrib.auth.models import User
-import pandas as pd
 from .utils import read_dataframe
 
 # Create your models here.

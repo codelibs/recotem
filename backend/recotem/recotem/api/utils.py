@@ -1,8 +1,8 @@
-from typing import IO, Callable, Dict
-from pathlib import Path
-import pandas as pd
 import gzip
+from pathlib import Path
+from typing import IO, Callable, Dict
 
+import pandas as pd
 from rest_framework.exceptions import ValidationError
 
 READ_RULES: Dict[str, Callable[[IO], pd.DataFrame]] = {

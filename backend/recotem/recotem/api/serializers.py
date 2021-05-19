@@ -1,20 +1,21 @@
-from celery import chord
 from typing import Any
+
+from celery import chord
+from django.conf import settings
+from optuna.storages import RDBStorage
 from rest_framework import serializers
-from .tasks import run_search, create_best_config, train_recommender
 
 from .models import (
     EvaluationConfig,
     ModelConfiguration,
+    ParameterTuningJob,
     Project,
     SplitConfig,
-    TrainingData,
-    ParameterTuningJob,
-    TrainedModel,
     TaskLog,
+    TrainedModel,
+    TrainingData,
 )
-from optuna.storages import RDBStorage
-from django.conf import settings
+from .tasks import create_best_config, run_search, train_recommender
 
 
 class TrainedModelSerializer(serializers.ModelSerializer):

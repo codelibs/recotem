@@ -1,11 +1,12 @@
 from django.contrib import admin
+
 from .models import (
-    Project,
-    ParameterTuningJob,
-    TrainingData,
-    TrainedModel,
     EvaluationConfig,
+    ParameterTuningJob,
+    Project,
     SplitConfig,
+    TrainedModel,
+    TrainingData,
 )
 
 # Register your models here.

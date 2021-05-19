@@ -1,39 +1,40 @@
-from irspack.recommenders.base import get_recommender_class
-import pandas as pd
-import re
-import pickle
-from optuna.storages import RDBStorage
-from django.conf import settings
 import json
-from pathlib import Path
+import pickle
+import re
 import tempfile
-from django.core.files.storage import default_storage
-from irspack.utils import df_to_sparse
-from irspack.parameter_tuning.parameter_range import is_valid_param_name
-from irspack import (
-    get_optimizer_class,
-    IDMappedRecommender,
-    Evaluator,
-    split_dataframe_partial_user_holdout,
-    autopilot,
-)
+from pathlib import Path
+
+import pandas as pd
 import scipy.sparse as sps
+from django.conf import settings
+from django.core.files.storage import default_storage
+from django_celery_results.models import TaskResult
+from irspack import (
+    Evaluator,
+    IDMappedRecommender,
+    autopilot,
+    get_optimizer_class,
+    split_dataframe_partial_user_holdout,
+)
+from irspack.parameter_tuning.parameter_range import is_valid_param_name
+from irspack.recommenders.base import get_recommender_class
+from irspack.utils import df_to_sparse
+from optuna.storages import RDBStorage
+
+from ..celery import app
 from .models import (
     EvaluationConfig,
-    TaskLog,
+    ModelConfiguration,
+    ParameterTuningJob,
     Project,
     SplitConfig,
-    ParameterTuningJob,
-    ModelConfiguration,
+    TaskAndParameterJobLink,
+    TaskLog,
     TrainedModel,
     TrainingData,
-    TaskAndParameterJobLink,
 )
 from .task_function import BilliardBackend
 from .utils import read_dataframe
-
-from ..celery import app
-from django_celery_results.models import TaskResult
 
 
 @app.task(bind=True)

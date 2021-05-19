@@ -1,9 +1,9 @@
 import time
 
+from django.contrib.auth.models import User
+from django.core.management.base import BaseCommand
 from django.db import connections
 from django.db.utils import ConnectionDoesNotExist
-from django.core.management.base import BaseCommand
-from django.contrib.auth.models import User
 
 
 class Command(BaseCommand):

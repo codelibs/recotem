@@ -2,13 +2,12 @@ import gzip
 import typing
 from tempfile import NamedTemporaryFile
 
+import pandas as pd
+import pytest
+from django.test import Client
 from django.urls import reverse
 from irspack.dataset import MovieLens100KDataManager
-from django.test import Client
-import pandas as pd
 from pandas import testing as pd_testing
-
-import pytest
 
 from recotem.api.models import TrainingData
 

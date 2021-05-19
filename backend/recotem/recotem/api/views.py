@@ -1,24 +1,25 @@
+from rest_framework import viewsets
+
 from .models import (
-    ModelConfiguration,
-    TaskLog,
-    Project,
-    TrainingData,
-    SplitConfig,
     EvaluationConfig,
+    ModelConfiguration,
     ParameterTuningJob,
+    Project,
+    SplitConfig,
+    TaskLog,
     TrainedModel,
+    TrainingData,
 )
 from .serializers import (
+    EvaluationConfigSerializer,
     ModelConfigurationSerializer,
     ParameterTuningJobSerializer,
-    TaskLogSerializer,
     ProjectSerializer,
+    SplitConfigSerializer,
+    TaskLogSerializer,
     TrainedModelSerializer,
     TrainingDataSerializer,
-    SplitConfigSerializer,
-    EvaluationConfigSerializer,
 )
-from rest_framework import viewsets
 
 
 class ProjectViewSet(viewsets.ModelViewSet):

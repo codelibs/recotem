@@ -1,12 +1,13 @@
 from logging import Logger
-from billiard.context import Process
-from billiard.connection import Pipe
-from typing import List, Dict, Optional
-from irspack import InteractionMatrix, Evaluator
-from irspack.parameter_tuning import Suggestion
-from irspack.optimizers.autopilot import TaskBackend, search_one
+from typing import Dict, List, Optional
 
-from .models import TrainingData, ModelConfiguration
+from billiard.connection import Pipe
+from billiard.context import Process
+from irspack import Evaluator, InteractionMatrix
+from irspack.optimizers.autopilot import TaskBackend, search_one
+from irspack.parameter_tuning import Suggestion
+
+from .models import ModelConfiguration, TrainingData
 
 
 class BilliardBackend(TaskBackend):

@@ -1,13 +1,14 @@
 from rest_framework.routers import DefaultRouter
+
 from .views import (
+    EvaluationConfigViewSet,
+    ModelConfigurationViewset,
     ParameterTuningJobViewSet,
     ProjectViewSet,
+    SplitConfigViewSet,
     TaskLogViewSet,
     TrainedModelViewset,
     TrainingDataViewset,
-    SplitConfigViewSet,
-    EvaluationConfigViewSet,
-    ModelConfigurationViewset,
 )
 
 router = DefaultRouter()

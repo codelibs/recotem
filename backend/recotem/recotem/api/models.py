@@ -132,6 +132,7 @@ class ParameterTuningJob(models.Model):
     split = models.ForeignKey(SplitConfig, null=True, on_delete=models.CASCADE)
     evaluation = models.ForeignKey(EvaluationConfig, on_delete=models.CASCADE)
 
+    n_tasks_parallel = models.IntegerField(default=1)
     n_trials = models.IntegerField(default=40)
     memory_budget = models.IntegerField(default=8000)
     timeout_overall = models.IntegerField(null=True)
@@ -139,9 +140,9 @@ class ParameterTuningJob(models.Model):
     random_seed = models.IntegerField(null=True)
 
     best_config = models.ForeignKey(
-        ModelConfiguration, null=True, on_delete=models.CASCADE
+        ModelConfiguration, null=True, on_delete=models.PROTECT
     )
-    tuned_model = models.ForeignKey(TrainedModel, null=True, on_delete=models.CASCADE)
+    tuned_model = models.ForeignKey(TrainedModel, null=True, on_delete=models.PROTECT)
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
 

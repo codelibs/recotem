@@ -5,8 +5,6 @@ from typing import List, Dict, Optional
 from irspack import InteractionMatrix, Evaluator
 from irspack.parameter_tuning import Suggestion
 from irspack.optimizers.autopilot import TaskBackend, search_one
-from irspack.utils import df_to_sparse
-from irspack.recommenders import get_recommender_class
 
 from .models import TrainingData, ModelConfiguration
 

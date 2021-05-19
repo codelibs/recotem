@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "rest_framework",
+    "django_filters",
     "rest_framework.authtoken",
     "django_extensions",
     "whitenoise.runserver_nostatic",
@@ -67,6 +68,7 @@ REST_FRAMEWORK = {
         "rest_framework.authentication.BasicAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
+    "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
     "UPLOADED_FILES_USE_URL": False,
 }
 
@@ -100,6 +102,9 @@ DATABASES = {
         default=f'sqlite:///{(BASE_DIR / "data" / "db.sqlite3")}',
     )
 }
+DATABASE_URL = env(
+    "DATABASE_URL", default=f'sqlite:///{(BASE_DIR / "data" / "db.sqlite3")}'
+)
 
 
 # Password validation

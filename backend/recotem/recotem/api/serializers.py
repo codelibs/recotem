@@ -1,12 +1,11 @@
-from django.db.models import fields
-from typing import Optional, Any
+from celery import chord
+from typing import Any
 from rest_framework import serializers
-from .tasks import execute_irspack
-from .utils import read_dataframe
-from django_celery_results.models import TaskResult
+from .tasks import run_search, create_best_config, train_recommender
 
 from .models import (
     EvaluationConfig,
+    ModelConfiguration,
     Project,
     SplitConfig,
     TrainingData,
@@ -14,10 +13,8 @@ from .models import (
     TrainedModel,
     TaskLog,
 )
-from django.core.files.uploadedfile import UploadedFile
-import pandas as pd
-from rest_framework.exceptions import ValidationError
-from pathlib import Path
+from optuna.storages import RDBStorage
+from django.conf import settings
 
 
 class TrainedModelSerializer(serializers.ModelSerializer):
@@ -73,6 +70,12 @@ class TaskLogSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+class ModelConfigurationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ModelConfiguration
+        fields = "__all__"
+
+
 class ParameterTuningJobSerializer(serializers.ModelSerializer):
     class Meta:
         model = ParameterTuningJob
@@ -80,6 +83,12 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         obj: ParameterTuningJob = ParameterTuningJob.objects.create(**validated_data)
-        for _ in range(obj.n_tasks_parallel):
-            task = execute_irspack.delay(obj.id)
+        optuna_storage = RDBStorage(settings.DATABASE_URL)
+        study_name = f"recotem_tune_job_{obj.id}"
+        optuna_storage.create_new_study(study_name)
+
+        chord(
+            (run_search.s(obj.id, _) for _ in range(obj.n_tasks_parallel)),
+            create_best_config.si(obj.id),
+        ).delay()
         return obj

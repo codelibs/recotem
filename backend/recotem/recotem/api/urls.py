@@ -7,6 +7,7 @@ from .views import (
     TrainingDataViewset,
     SplitConfigViewSet,
     EvaluationConfigViewSet,
+    ModelConfigurationViewset,
 )
 
 router = DefaultRouter()
@@ -18,6 +19,9 @@ router.register(
 )
 router.register(
     r"parameter_tuning_job", ParameterTuningJobViewSet, basename="parameter_tuning_job"
+)
+router.register(
+    r"model_configuration", ModelConfigurationViewset, basename="model_configuration"
 )
 router.register(r"trained_model", TrainedModelViewset, basename="trained_model")
 router.register(r"task_log", TaskLogViewSet, basename="task_log")

@@ -90,21 +90,14 @@ class BilliardBackend(TaskBackend):
         self._p.terminate()
 
 
-def learn_model(data: TrainingData, model_config: ModelConfiguration):
-    model_config.recommender_class_name
-
-
 @app.task(bind=True)
-def train_recommender(self, model_config_data_id: Tuple[int, int]):
-    model_config_id, data_id = model_config_data_id
+def train_recommender(self, model_id: int) -> None:
+    model: TrainedModel = TrainedModel.objects.get(id=model_id)
+
+    model_config: ModelConfiguration = model.configuration
+    data: TrainingData = model.data_loc
+
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
-    model_config: ModelConfiguration = ModelConfiguration.objects.get(
-        id=model_config_id
-    )
-    data: TrainingData = TrainingData.objects.get(id=data_id)
-    model = TrainedModel.objects.create(
-        configuration=model_config, data_loc=data, model_path=None
-    )
     TaskAndTrainedModelLink.objects.create(model=model, task=task_result)
     assert model_config.project.id == data.project.id
     project: Project = data.project
@@ -118,9 +111,9 @@ def train_recommender(self, model_config_data_id: Tuple[int, int]):
     rec = recommender_class(X, **param).learn()
     with tempfile.TemporaryFile() as temp_fs:
         mapped_rec = IDMappedRecommender(rec, uid, iid)
-        pickle.dump(mapped_rec, temp_fs)
+        pickle.dump(dict(id_mapped_recommender=mapped_rec), temp_fs)
         temp_fs.seek(0)
-        file_ = default_storage.save(f"models/{model_config.name}.pkl", temp_fs)
+        file_ = default_storage.save(f"models/model-{model.id}.pkl", temp_fs)
         model.model_path = file_
         model.save()
 

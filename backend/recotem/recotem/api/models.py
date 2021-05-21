@@ -125,6 +125,19 @@ class TrainedModel(models.Model):
     upd_datetime = models.DateTimeField(auto_now=True)
 
 
+@receiver(post_save, sender=TrainedModel)
+def run_tuning_job_after_creation(
+    sender: Type[TrainedModel],
+    instance: Optional[TrainedModel] = None,
+    created: bool = False,
+    **kwargs: Any,
+) -> None:
+    if created and instance is not None:
+        from .tasks import train_recommender
+
+        train_recommender.delay(instance.id)
+
+
 class ParameterTuningJob(models.Model):
     name = models.CharField(max_length=256, null=True)
     data = models.ForeignKey(TrainingData, on_delete=models.CASCADE)
@@ -150,7 +163,7 @@ class ParameterTuningJob(models.Model):
 
 
 @receiver(post_save, sender=ParameterTuningJob)
-def start_tuning_job(
+def run_tuning_job_after_creation(
     sender: Type[ParameterTuningJob],
     instance: Optional[ParameterTuningJob] = None,
     created: bool = False,

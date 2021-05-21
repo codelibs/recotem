@@ -1,6 +1,8 @@
 import gzip
+import pickle
 from tempfile import NamedTemporaryFile
 from time import sleep
+from typing import IO, Optional
 
 import pandas as pd
 import pytest
@@ -9,11 +11,13 @@ from django.urls import reverse
 
 from recotem.api.models import (
     EvaluationConfig,
+    ModelConfiguration,
     ParameterTuningJob,
     SplitConfig,
+    TrainedModel,
     TrainingData,
 )
-from recotem.api.tasks import start_tuning_job
+from recotem.api.tasks import start_tuning_job, train_recommender
 
 
 @pytest.mark.django_db(transaction=True)
@@ -66,11 +70,25 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         timeout_singlestep=5,
     )
     job_id = job.id
-    best_config = None
+    best_config: Optional[ModelConfiguration] = None
     for _ in range(100):
         job = ParameterTuningJob.objects.get(id=job_id)
-        if job.best_config is not None:
-            best_config = job.best_config
+        best_config = job.best_config
+        if best_config is not None:
             break
         sleep(1.0)
     assert best_config is not None
+    model_id: int = TrainedModel.objects.create(
+        configuration=best_config, data_loc=TrainingData.objects.get(id=data_id)
+    ).id
+    train_model_path: Optional[IO] = None
+    for _ in range(100):
+        model = TrainedModel.objects.get(id=model_id)
+        train_model_path = model.model_path
+        if train_model_path.name:
+            break
+        sleep(1.0)
+    assert train_model_path is not None
+    model = TrainedModel.objects.get(id=model_id)
+    result = pickle.load(model.model_path)
+    assert "id_mapped_recommender" in result

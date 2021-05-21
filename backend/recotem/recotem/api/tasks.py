@@ -255,6 +255,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         callback=callback,
         storage=optuna_storage,
         study_name=study_name,
+        task_resource_provider=BilliardBackend,
     )
 
 

@@ -9,7 +9,7 @@ services:
     volumes:
       - db-data:/var/lib/postgresql/data/pgdata
     env_file:
-      - .env
+      - envs/production.env
     environment:
       - PGDATA=/var/lib/postgresql/data/pgdata
   backend:
@@ -21,7 +21,7 @@ services:
     ports:
       - "8000:80"
     env_file:
-      - .env
+      - envs/production.env
   celery_worker:
     build:
       context: ./backend
@@ -29,7 +29,7 @@ services:
     volumes:
       - data-location:/app/data
     env_file:
-      - .env
+      - envs/production.env
 volumes:
   data-location:
     driver: local

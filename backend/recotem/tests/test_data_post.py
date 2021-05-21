@@ -6,16 +6,9 @@ import pandas as pd
 import pytest
 from django.test import Client
 from django.urls import reverse
-from irspack.dataset import MovieLens100KDataManager
 from pandas import testing as pd_testing
 
 from recotem.api.models import TrainingData
-
-
-@pytest.fixture
-def ml100k():
-    yield MovieLens100KDataManager().read_interaction()
-
 
 I_O_functions: typing.List[
     typing.Tuple[

@@ -1,8 +1,5 @@
 from typing import Any
 
-from celery import chord
-from django.conf import settings
-from optuna.storages import RDBStorage
 from rest_framework import serializers
 
 from .models import (
@@ -15,7 +12,7 @@ from .models import (
     TrainedModel,
     TrainingData,
 )
-from .tasks import create_best_config, run_search, train_recommender
+from .tasks import start_tuning_job
 
 
 class TrainedModelSerializer(serializers.ModelSerializer):
@@ -81,15 +78,3 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
     class Meta:
         model = ParameterTuningJob
         fields = "__all__"
-
-    def create(self, validated_data):
-        obj: ParameterTuningJob = ParameterTuningJob.objects.create(**validated_data)
-        optuna_storage = RDBStorage(settings.DATABASE_URL)
-        study_name = f"recotem_tune_job_{obj.id}"
-        optuna_storage.create_new_study(study_name)
-
-        chord(
-            (run_search.s(obj.id, _) for _ in range(obj.n_tasks_parallel)),
-            create_best_config.si(obj.id),
-        ).delay()
-        return obj

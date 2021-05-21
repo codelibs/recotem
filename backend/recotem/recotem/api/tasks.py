@@ -3,6 +3,7 @@ import pickle
 import re
 import tempfile
 from pathlib import Path
+from typing import Tuple
 
 import pandas as pd
 import scipy.sparse as sps
@@ -29,6 +30,7 @@ from .models import (
     Project,
     SplitConfig,
     TaskAndParameterJobLink,
+    TaskAndTrainedModelLink,
     TaskLog,
     TrainedModel,
     TrainingData,
@@ -38,11 +40,18 @@ from .utils import read_dataframe
 
 
 @app.task(bind=True)
-def train_recommender(model_config_id: int, data_id: int):
+def train_recommender(self, model_config_data_id: Tuple[int, int]):
+    print(model_config_data_id)
+    model_config_id, data_id = model_config_data_id
+    task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
     model_config: ModelConfiguration = ModelConfiguration.objects.get(
         id=model_config_id
     )
     data: TrainingData = TrainingData.objects.get(id=data_id)
+    model = TrainedModel.objects.create(
+        configuration=model_config, data_loc=data, model_path=None
+    )
+    TaskAndTrainedModelLink.objects.create(model=model, task=task_result)
     assert model_config.project.id == data.project.id
     project: Project = data.project
     user_column = project.user_column
@@ -58,12 +67,10 @@ def train_recommender(model_config_id: int, data_id: int):
         pickle.dump(mapped_rec, temp_fs)
         temp_fs.seek(0)
         file_ = default_storage.save(f"models/{model_config.name}.pkl", temp_fs)
+        model.model_path = file_
+        model.save()
 
-    TrainedModel.objects.create(
-        configuration=model_config, data_loc=data, model_path=file_
-    )
-
-    return ["complete"]
+    return "complete"
 
 
 @app.task(bind=True)
@@ -77,7 +84,7 @@ def create_best_config(self, parameter_tuning_job_id, *args):
     project: TrainingData = data.project
 
     optuna_storage = RDBStorage(settings.DATABASE_URL)
-    study_name = f"recotem_tune_job_{parameter_tuning_job_id}"
+    study_name = job.study_name()
     study_id = optuna_storage.get_study_id_from_name(study_name)
     best_trial = optuna_storage.get_best_trial(study_id)
     best_params_with_prefix = dict(
@@ -119,6 +126,9 @@ def create_best_config(self, parameter_tuning_job_id, *args):
 
 @app.task(bind=True)
 def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
+    print(f"{parameter_tuning_job_id} : {index}")
+    print("Line 135")
+
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
     logs = [
         dict(message=f"Started the parameter tuning jog {parameter_tuning_job_id} ")
@@ -167,7 +177,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
     )
 
     optuna_storage = RDBStorage(settings.DATABASE_URL)
-    study_name = f"recotem_tune_job_{parameter_tuning_job_id}"
+    study_name = job.study_name()
     study_id = optuna_storage.get_study_id_from_name(study_name)
 
     def callback(i: int, df: pd.DataFrame) -> None:
@@ -193,5 +203,4 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         callback=callback,
         storage=optuna_storage,
         study_name=study_name,
-        task_resource_provider=BilliardBackend,
     )

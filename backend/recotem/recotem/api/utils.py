@@ -1,11 +1,13 @@
 import gzip
 from pathlib import Path
-from typing import IO, Callable, Dict
+from typing import IO, Callable, Dict, Union
 
 import pandas as pd
 from rest_framework.exceptions import ValidationError
 
-READ_RULES: Dict[str, Callable[[IO], pd.DataFrame]] = {
+INPUT_STREAM_TYPE = Union[IO, gzip.GzipFile]
+
+READ_RULES: Dict[str, Callable[[INPUT_STREAM_TYPE], pd.DataFrame]] = {
     ".csv": lambda f: pd.read_csv(f),
     ".tsv": lambda f: pd.read_csv(f, sep="\t"),
     ".json": lambda f: pd.read_json(f),
@@ -17,6 +19,7 @@ READ_RULES: Dict[str, Callable[[IO], pd.DataFrame]] = {
 
 
 def read_dataframe(filepath: Path, file: IO) -> pd.DataFrame:
+    input_stream: INPUT_STREAM_TYPE = file
     suffixes = filepath.suffixes
     suffix: str
     if len(suffixes) > 2:
@@ -27,7 +30,7 @@ def read_dataframe(filepath: Path, file: IO) -> pd.DataFrame:
         if compression not in (".gz", ".gzip"):
             raise ValidationError(f"Only .gzip or .gz compression are supported.")
         else:
-            file = gzip.open(file, mode="rb")
+            input_stream = gzip.open(file, mode="rb")
     elif len(suffixes) == 1:
         suffix = suffixes[0]
     else:
@@ -36,7 +39,7 @@ def read_dataframe(filepath: Path, file: IO) -> pd.DataFrame:
 
     if suffix in READ_RULES:
         try:
-            df = READ_RULES[suffix](file)
+            df = READ_RULES[suffix](input_stream)
         except Exception:
             raise ValidationError(f"Failed to parse {filepath.name} as {suffix} file.")
     else:

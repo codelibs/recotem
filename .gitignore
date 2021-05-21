@@ -26,6 +26,7 @@ pnpm-debug.log*
 **db.sqlite3
 .python-version
 **.pyc
+.coverage
 
 *.csv
 backend/recotem/htmlcov/*

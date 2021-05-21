@@ -1,4 +1,5 @@
 import time
+from typing import Any
 
 from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand
@@ -9,7 +10,7 @@ from django.db.utils import ConnectionDoesNotExist
 class Command(BaseCommand):
     r"""Wait for the db to start & create a superuser."""
 
-    def handle(self, *args, **kwargs):
+    def handle(self, *args: Any, **kwargs: Any) -> None:
         self.stdout.write("Wait for the database to start...")
         conn = None
         while conn is None:

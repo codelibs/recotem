@@ -61,10 +61,14 @@ class EvaluationConfigViewSet(viewsets.ModelViewSet):
 class ParameterTuningJobViewSet(viewsets.ModelViewSet):
     queryset = ParameterTuningJob.objects.all()
     serializer_class = ParameterTuningJobSerializer
-    filterset_fields = ["id", "project"]
+    filterset_fields = ["id", "data__project"]
 
 
 class TaskLogViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = TaskLog.objects.all()
     serializer_class = TaskLogSerializer
-    filterset_fields = ["id", "task__taskandparameterjoblink__job"]
+    filterset_fields = [
+        "id",
+        "task__taskandparameterjoblink__job",
+        "task__taskandtrainedmodellink__model",
+    ]

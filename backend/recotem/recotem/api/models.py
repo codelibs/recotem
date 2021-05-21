@@ -120,7 +120,7 @@ class TrainedModel(models.Model):
     name = models.CharField(max_length=256, null=True)
     configuration = models.ForeignKey(ModelConfiguration, on_delete=models.CASCADE)
     data_loc = models.ForeignKey(TrainingData, on_delete=models.CASCADE)
-    model_path = models.FileField(upload_to="models/")
+    model_path = models.FileField(upload_to="models/", null=True)
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
 
@@ -145,9 +145,31 @@ class ParameterTuningJob(models.Model):
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
 
+    def study_name(self):
+        return f"job-{self.id}-{self.ins_datetime}"
+
+
+@receiver(post_save, sender=ParameterTuningJob)
+def start_tuning_job(
+    sender: Type[ParameterTuningJob],
+    instance: Optional[ParameterTuningJob] = None,
+    created: bool = False,
+    **kwargs: Any,
+) -> None:
+    if created and instance is not None:
+        from .tasks import start_tuning_job
+
+        start_tuning_job(instance)
+
 
 class TaskAndParameterJobLink(models.Model):
     job = models.ForeignKey(ParameterTuningJob, on_delete=models.CASCADE)
+    task = models.ForeignKey(TaskResult, on_delete=models.CASCADE)
+    ins_datetime = models.DateTimeField(auto_now_add=True)
+
+
+class TaskAndTrainedModelLink(models.Model):
+    model = models.ForeignKey(TrainedModel, on_delete=models.CASCADE)
     task = models.ForeignKey(TaskResult, on_delete=models.CASCADE)
     ins_datetime = models.DateTimeField(auto_now_add=True)
 

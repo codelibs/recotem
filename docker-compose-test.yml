@@ -1,6 +1,12 @@
 version: "3.7"
 services:
+  queue:
+    image: rabbitmq:3
+    ports:
+      - "5672:5672"
   backend:
+    depends_on:
+      - queue
     build:
       context: ./backend
       dockerfile: backend.dockerfile
@@ -11,10 +17,7 @@ services:
     ports:
       - "8000:80"
     environment:
-      - CELERY_BROKER_URL=amqp://
       - DJANGO_SETTINGS_MODULE=recotem.settings
+      - CELERY_BROKER_URL=amqp://guest@queue:5672
     command: >
-      pytest --cov=./recotem/api/ --cov-report=html tests/
-volumes:
-  test-data-location:
-    driver: local
+      pytest -s --cov=./recotem/api/ --cov-report=html

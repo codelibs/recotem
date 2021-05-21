@@ -2,21 +2,28 @@ import json
 import pickle
 import re
 import tempfile
+from logging import Logger
 from pathlib import Path
-from typing import Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import scipy.sparse as sps
+from billiard.connection import Pipe
+from billiard.context import Process
+from celery import chain, group
 from django.conf import settings
 from django.core.files.storage import default_storage
 from django_celery_results.models import TaskResult
 from irspack import (
     Evaluator,
     IDMappedRecommender,
+    InteractionMatrix,
     autopilot,
     get_optimizer_class,
     split_dataframe_partial_user_holdout,
 )
+from irspack.optimizers.autopilot import TaskBackend, search_one
+from irspack.parameter_tuning import Suggestion
 from irspack.parameter_tuning.parameter_range import is_valid_param_name
 from irspack.recommenders.base import get_recommender_class
 from irspack.utils import df_to_sparse
@@ -35,13 +42,60 @@ from .models import (
     TrainedModel,
     TrainingData,
 )
-from .task_function import BilliardBackend
 from .utils import read_dataframe
+
+
+class BilliardBackend(TaskBackend):
+    def __init__(
+        self,
+        X: InteractionMatrix,
+        evaluator: Evaluator,
+        optimizer_names: List[str],
+        suggest_overwrites: Dict[str, List[Suggestion]],
+        db_url: str,
+        study_name: str,
+        random_seed: int,
+        logger: Logger,
+    ):
+        self.pipe_parent, pipe_child = Pipe()
+        self._p = Process(
+            target=search_one,
+            args=(
+                pipe_child,
+                X,
+                evaluator,
+                optimizer_names,
+                suggest_overwrites,
+                db_url,
+                study_name,
+                random_seed,
+                logger,
+            ),
+        )
+
+    def _exit_code(self) -> Optional[int]:
+        return self._p.exitcode
+
+    def receive_trial_number(self) -> int:
+        result: int = self.pipe_parent.recv()
+        return result
+
+    def start(self) -> None:
+        self._p.start()
+
+    def join(self, timeout: Optional[int]) -> None:
+        self._p.join(timeout=timeout)
+
+    def terminate(self) -> None:
+        self._p.terminate()
+
+
+def learn_model(data: TrainingData, model_config: ModelConfiguration):
+    model_config.recommender_class_name
 
 
 @app.task(bind=True)
 def train_recommender(self, model_config_data_id: Tuple[int, int]):
-    print(model_config_data_id)
     model_config_id, data_id = model_config_data_id
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
     model_config: ModelConfiguration = ModelConfiguration.objects.get(
@@ -126,8 +180,6 @@ def create_best_config(self, parameter_tuning_job_id, *args):
 
 @app.task(bind=True)
 def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
-    print(f"{parameter_tuning_job_id} : {index}")
-    print("Line 135")
 
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
     logs = [
@@ -204,3 +256,14 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         storage=optuna_storage,
         study_name=study_name,
     )
+
+
+def start_tuning_job(job: ParameterTuningJob) -> None:
+    optuna_storage = RDBStorage(settings.DATABASE_URL)
+    study_name = job.study_name()
+    optuna_storage.create_new_study(study_name)
+
+    chain(
+        group(run_search.si(job.id, i) for i in range(max(1, job.n_tasks_parallel))),
+        create_best_config.si(job.id),
+    ).delay()

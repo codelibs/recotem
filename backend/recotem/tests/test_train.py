@@ -17,11 +17,7 @@ from recotem.api.tasks import start_tuning_job
 
 
 @pytest.mark.django_db(transaction=True)
-def test_tuning(
-    client: Client,
-    ml100k: pd.DataFrame,
-    celery_session_worker,
-) -> None:
+def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
     project_url = reverse("project-list")
     data_url = reverse("training_data-list")
     split_config_url = reverse("split_config-list")
@@ -59,7 +55,6 @@ def test_tuning(
         evaluation_config_url, dict(cutoff=10, target_metric="map")
     ).json()["id"]
 
-    print("call training job")
     job = ParameterTuningJob.objects.create(
         data=TrainingData.objects.get(id=data_id),
         split=SplitConfig.objects.get(id=split_id),
@@ -73,7 +68,6 @@ def test_tuning(
     job_id = job.id
     best_config = None
     for _ in range(100):
-        print(_)
         job = ParameterTuningJob.objects.get(id=job_id)
         if job.best_config is not None:
             best_config = job.best_config

@@ -20,4 +20,8 @@ services:
       - DJANGO_SETTINGS_MODULE=recotem.settings
       - CELERY_BROKER_URL=amqp://guest@queue:5672
     command: >
-      pytest -s --cov=./recotem/api/ --cov-report=html
+      sh -c '
+        pytest -s --cov=./recotem/ --cov-report=html
+        coverage xml
+        rm -rf data/training_data
+      '

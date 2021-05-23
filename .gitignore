@@ -30,3 +30,5 @@ pnpm-debug.log*
 
 *.csv
 backend/recotem/htmlcov/*
+
+**/coverage.xml

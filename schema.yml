@@ -1,0 +1,1718 @@
+openapi: 3.0.3
+info:
+  title: ''
+  version: 0.0.0
+paths:
+  /api/evaluation_config/:
+    get:
+      operationId: evaluation_config_list
+      description: ''
+      parameters:
+      - in: query
+        name: id
+        schema:
+          type: integer
+      - in: query
+        name: name
+        schema:
+          type: string
+      tags:
+      - evaluation_config
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EvaluationConfig'
+          description: ''
+    post:
+      operationId: evaluation_config_create
+      description: ''
+      tags:
+      - evaluation_config
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluationConfig'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/EvaluationConfig'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/EvaluationConfig'
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationConfig'
+          description: ''
+  /api/evaluation_config/{id}/:
+    get:
+      operationId: evaluation_config_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this evaluation config.
+        required: true
+      tags:
+      - evaluation_config
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationConfig'
+          description: ''
+    put:
+      operationId: evaluation_config_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this evaluation config.
+        required: true
+      tags:
+      - evaluation_config
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluationConfig'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/EvaluationConfig'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/EvaluationConfig'
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationConfig'
+          description: ''
+    patch:
+      operationId: evaluation_config_partial_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this evaluation config.
+        required: true
+      tags:
+      - evaluation_config
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedEvaluationConfig'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedEvaluationConfig'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedEvaluationConfig'
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationConfig'
+          description: ''
+    delete:
+      operationId: evaluation_config_destroy
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this evaluation config.
+        required: true
+      tags:
+      - evaluation_config
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '204':
+          description: No response body
+  /api/model_configuration/:
+    get:
+      operationId: model_configuration_list
+      description: ''
+      parameters:
+      - in: query
+        name: id
+        schema:
+          type: integer
+      - in: query
+        name: project
+        schema:
+          type: integer
+      tags:
+      - model_configuration
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ModelConfiguration'
+          description: ''
+    post:
+      operationId: model_configuration_create
+      description: ''
+      tags:
+      - model_configuration
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelConfiguration'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ModelConfiguration'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ModelConfiguration'
+        required: true
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelConfiguration'
+          description: ''
+  /api/model_configuration/{id}/:
+    get:
+      operationId: model_configuration_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this model configuration.
+        required: true
+      tags:
+      - model_configuration
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelConfiguration'
+          description: ''
+    put:
+      operationId: model_configuration_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this model configuration.
+        required: true
+      tags:
+      - model_configuration
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelConfiguration'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ModelConfiguration'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ModelConfiguration'
+        required: true
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelConfiguration'
+          description: ''
+    patch:
+      operationId: model_configuration_partial_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this model configuration.
+        required: true
+      tags:
+      - model_configuration
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedModelConfiguration'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedModelConfiguration'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedModelConfiguration'
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelConfiguration'
+          description: ''
+    delete:
+      operationId: model_configuration_destroy
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this model configuration.
+        required: true
+      tags:
+      - model_configuration
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '204':
+          description: No response body
+  /api/parameter_tuning_job/:
+    get:
+      operationId: parameter_tuning_job_list
+      description: ''
+      parameters:
+      - in: query
+        name: data__project
+        schema:
+          type: integer
+      - in: query
+        name: id
+        schema:
+          type: integer
+      tags:
+      - parameter_tuning_job
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ParameterTuningJob'
+          description: ''
+    post:
+      operationId: parameter_tuning_job_create
+      description: ''
+      tags:
+      - parameter_tuning_job
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ParameterTuningJob'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ParameterTuningJob'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ParameterTuningJob'
+        required: true
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParameterTuningJob'
+          description: ''
+  /api/parameter_tuning_job/{id}/:
+    get:
+      operationId: parameter_tuning_job_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this parameter tuning job.
+        required: true
+      tags:
+      - parameter_tuning_job
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParameterTuningJob'
+          description: ''
+    put:
+      operationId: parameter_tuning_job_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this parameter tuning job.
+        required: true
+      tags:
+      - parameter_tuning_job
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ParameterTuningJob'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ParameterTuningJob'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ParameterTuningJob'
+        required: true
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParameterTuningJob'
+          description: ''
+    patch:
+      operationId: parameter_tuning_job_partial_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this parameter tuning job.
+        required: true
+      tags:
+      - parameter_tuning_job
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedParameterTuningJob'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedParameterTuningJob'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedParameterTuningJob'
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParameterTuningJob'
+          description: ''
+    delete:
+      operationId: parameter_tuning_job_destroy
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this parameter tuning job.
+        required: true
+      tags:
+      - parameter_tuning_job
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '204':
+          description: No response body
+  /api/project/:
+    get:
+      operationId: project_list
+      description: ''
+      parameters:
+      - in: query
+        name: id
+        schema:
+          type: integer
+      - in: query
+        name: name
+        schema:
+          type: string
+      tags:
+      - project
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Project'
+          description: ''
+    post:
+      operationId: project_create
+      description: ''
+      tags:
+      - project
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Project'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Project'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Project'
+        required: true
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+          description: ''
+  /api/project/{id}/:
+    get:
+      operationId: project_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this project.
+        required: true
+      tags:
+      - project
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+          description: ''
+    put:
+      operationId: project_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this project.
+        required: true
+      tags:
+      - project
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Project'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Project'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Project'
+        required: true
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+          description: ''
+    patch:
+      operationId: project_partial_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this project.
+        required: true
+      tags:
+      - project
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedProject'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedProject'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedProject'
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+          description: ''
+    delete:
+      operationId: project_destroy
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this project.
+        required: true
+      tags:
+      - project
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '204':
+          description: No response body
+  /api/split_config/:
+    get:
+      operationId: split_config_list
+      description: ''
+      parameters:
+      - in: query
+        name: id
+        schema:
+          type: integer
+      - in: query
+        name: name
+        schema:
+          type: string
+      tags:
+      - split_config
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SplitConfig'
+          description: ''
+    post:
+      operationId: split_config_create
+      description: ''
+      tags:
+      - split_config
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SplitConfig'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SplitConfig'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/SplitConfig'
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SplitConfig'
+          description: ''
+  /api/split_config/{id}/:
+    get:
+      operationId: split_config_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this split config.
+        required: true
+      tags:
+      - split_config
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SplitConfig'
+          description: ''
+    put:
+      operationId: split_config_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this split config.
+        required: true
+      tags:
+      - split_config
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SplitConfig'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SplitConfig'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/SplitConfig'
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SplitConfig'
+          description: ''
+    patch:
+      operationId: split_config_partial_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this split config.
+        required: true
+      tags:
+      - split_config
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedSplitConfig'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedSplitConfig'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedSplitConfig'
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SplitConfig'
+          description: ''
+    delete:
+      operationId: split_config_destroy
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this split config.
+        required: true
+      tags:
+      - split_config
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '204':
+          description: No response body
+  /api/task_log/:
+    get:
+      operationId: task_log_list
+      description: ''
+      parameters:
+      - in: query
+        name: id
+        schema:
+          type: integer
+      - in: query
+        name: task__taskandparameterjoblink__job
+        schema:
+          type: integer
+      - in: query
+        name: task__taskandtrainedmodellink__model
+        schema:
+          type: integer
+      tags:
+      - task_log
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TaskLog'
+          description: ''
+  /api/task_log/{id}/:
+    get:
+      operationId: task_log_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this task log.
+        required: true
+      tags:
+      - task_log
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskLog'
+          description: ''
+  /api/token-auth/:
+    post:
+      operationId: token_auth_create
+      description: ''
+      tags:
+      - token-auth
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AuthToken'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AuthToken'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthToken'
+        required: true
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthToken'
+          description: ''
+  /api/trained_model/:
+    get:
+      operationId: trained_model_list
+      description: ''
+      parameters:
+      - in: query
+        name: data_loc
+        schema:
+          type: integer
+      - in: query
+        name: data_loc__project
+        schema:
+          type: integer
+      - in: query
+        name: id
+        schema:
+          type: integer
+      tags:
+      - trained_model
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TrainedModel'
+          description: ''
+    post:
+      operationId: trained_model_create
+      description: ''
+      tags:
+      - trained_model
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrainedModel'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TrainedModel'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TrainedModel'
+        required: true
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrainedModel'
+          description: ''
+  /api/trained_model/{id}/:
+    get:
+      operationId: trained_model_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this trained model.
+        required: true
+      tags:
+      - trained_model
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrainedModel'
+          description: ''
+    put:
+      operationId: trained_model_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this trained model.
+        required: true
+      tags:
+      - trained_model
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrainedModel'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TrainedModel'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TrainedModel'
+        required: true
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrainedModel'
+          description: ''
+    patch:
+      operationId: trained_model_partial_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this trained model.
+        required: true
+      tags:
+      - trained_model
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedTrainedModel'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedTrainedModel'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedTrainedModel'
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrainedModel'
+          description: ''
+    delete:
+      operationId: trained_model_destroy
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this trained model.
+        required: true
+      tags:
+      - trained_model
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '204':
+          description: No response body
+  /api/training_data/:
+    get:
+      operationId: training_data_list
+      description: ''
+      parameters:
+      - in: query
+        name: id
+        schema:
+          type: integer
+      - in: query
+        name: project
+        schema:
+          type: integer
+      tags:
+      - training_data
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TrainingData'
+          description: ''
+    post:
+      operationId: training_data_create
+      description: ''
+      tags:
+      - training_data
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrainingData'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TrainingData'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TrainingData'
+        required: true
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrainingData'
+          description: ''
+  /api/training_data/{id}/:
+    get:
+      operationId: training_data_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this training data.
+        required: true
+      tags:
+      - training_data
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrainingData'
+          description: ''
+    put:
+      operationId: training_data_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this training data.
+        required: true
+      tags:
+      - training_data
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrainingData'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TrainingData'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TrainingData'
+        required: true
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrainingData'
+          description: ''
+    patch:
+      operationId: training_data_partial_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this training data.
+        required: true
+      tags:
+      - training_data
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedTrainingData'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedTrainingData'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedTrainingData'
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrainingData'
+          description: ''
+    delete:
+      operationId: training_data_destroy
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this training data.
+        required: true
+      tags:
+      - training_data
+      security:
+      - basicAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '204':
+          description: No response body
+components:
+  schemas:
+    AuthToken:
+      type: object
+      properties:
+        username:
+          type: string
+          writeOnly: true
+        password:
+          type: string
+          writeOnly: true
+        token:
+          type: string
+          readOnly: true
+      required:
+      - password
+      - token
+      - username
+    EvaluationConfig:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          nullable: true
+          maxLength: 256
+        cutoff:
+          type: integer
+        target_metric:
+          $ref: '#/components/schemas/TargetMetricEnum'
+      required:
+      - id
+    ModelConfiguration:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          nullable: true
+          maxLength: 256
+        recommender_class_name:
+          type: string
+          maxLength: 128
+        parameters_json:
+          type: string
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        upd_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        project:
+          type: integer
+      required:
+      - id
+      - ins_datetime
+      - parameters_json
+      - project
+      - recommender_class_name
+      - upd_datetime
+    ParameterTuningJob:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          nullable: true
+          maxLength: 256
+        n_tasks_parallel:
+          type: integer
+        n_trials:
+          type: integer
+        memory_budget:
+          type: integer
+        timeout_overall:
+          type: integer
+          nullable: true
+        timeout_singlestep:
+          type: integer
+          nullable: true
+        random_seed:
+          type: integer
+          nullable: true
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        upd_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        data:
+          type: integer
+        split:
+          type: integer
+          nullable: true
+        evaluation:
+          type: integer
+        best_config:
+          type: integer
+          nullable: true
+        tuned_model:
+          type: integer
+          nullable: true
+      required:
+      - data
+      - evaluation
+      - id
+      - ins_datetime
+      - upd_datetime
+    PatchedEvaluationConfig:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          nullable: true
+          maxLength: 256
+        cutoff:
+          type: integer
+        target_metric:
+          $ref: '#/components/schemas/TargetMetricEnum'
+    PatchedModelConfiguration:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          nullable: true
+          maxLength: 256
+        recommender_class_name:
+          type: string
+          maxLength: 128
+        parameters_json:
+          type: string
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        upd_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        project:
+          type: integer
+    PatchedParameterTuningJob:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          nullable: true
+          maxLength: 256
+        n_tasks_parallel:
+          type: integer
+        n_trials:
+          type: integer
+        memory_budget:
+          type: integer
+        timeout_overall:
+          type: integer
+          nullable: true
+        timeout_singlestep:
+          type: integer
+          nullable: true
+        random_seed:
+          type: integer
+          nullable: true
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        upd_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        data:
+          type: integer
+        split:
+          type: integer
+          nullable: true
+        evaluation:
+          type: integer
+        best_config:
+          type: integer
+          nullable: true
+        tuned_model:
+          type: integer
+          nullable: true
+    PatchedProject:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+        user_column:
+          type: string
+          maxLength: 256
+        item_column:
+          type: string
+          maxLength: 256
+        time_column:
+          type: string
+          nullable: true
+          maxLength: 256
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        upd_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+    PatchedSplitConfig:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          nullable: true
+          maxLength: 256
+        scheme:
+          $ref: '#/components/schemas/SchemeEnum'
+        heldout_ratio:
+          type: number
+          format: float
+        n_heldout:
+          type: integer
+          nullable: true
+        test_user_ratio:
+          type: number
+          format: float
+        n_test_users:
+          type: integer
+          nullable: true
+        random_seed:
+          type: integer
+    PatchedTrainedModel:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          nullable: true
+          maxLength: 256
+        model_path:
+          type: string
+          nullable: true
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        upd_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        configuration:
+          type: integer
+        data_loc:
+          type: integer
+    PatchedTrainingData:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        upload_path:
+          type: string
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        upd_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        project:
+          type: integer
+    Project:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+        user_column:
+          type: string
+          maxLength: 256
+        item_column:
+          type: string
+          maxLength: 256
+        time_column:
+          type: string
+          nullable: true
+          maxLength: 256
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        upd_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - id
+      - ins_datetime
+      - item_column
+      - name
+      - upd_datetime
+      - user_column
+    SchemeEnum:
+      enum:
+      - RG
+      - TG
+      - TU
+      type: string
+    SplitConfig:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          nullable: true
+          maxLength: 256
+        scheme:
+          $ref: '#/components/schemas/SchemeEnum'
+        heldout_ratio:
+          type: number
+          format: float
+        n_heldout:
+          type: integer
+          nullable: true
+        test_user_ratio:
+          type: number
+          format: float
+        n_test_users:
+          type: integer
+          nullable: true
+        random_seed:
+          type: integer
+      required:
+      - id
+    TargetMetricEnum:
+      enum:
+      - ndcg
+      - map
+      - recall
+      - hit
+      type: string
+    TaskLog:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        contents:
+          type: string
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        task:
+          type: integer
+      required:
+      - id
+      - ins_datetime
+      - task
+    TrainedModel:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          nullable: true
+          maxLength: 256
+        model_path:
+          type: string
+          nullable: true
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        upd_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        configuration:
+          type: integer
+        data_loc:
+          type: integer
+      required:
+      - configuration
+      - data_loc
+      - id
+      - ins_datetime
+      - upd_datetime
+    TrainingData:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        upload_path:
+          type: string
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        upd_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        project:
+          type: integer
+      required:
+      - id
+      - ins_datetime
+      - project
+      - upd_datetime
+      - upload_path
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: Session

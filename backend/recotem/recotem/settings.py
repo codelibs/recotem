@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "recotem.api",
     "django_celery_results",
+    "drf_spectacular",
     "django_cleanup.apps.CleanupConfig",  # always the last one
 ]
 
@@ -70,6 +71,7 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
     "UPLOADED_FILES_USE_URL": False,
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
 
 ROOT_URLCONF = "recotem.urls"

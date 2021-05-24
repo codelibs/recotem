@@ -8,6 +8,7 @@ django-filter==2.4.0
 django-stubs==1.8.0
 django-stubs-ext==0.2.0
 djangorestframework==3.12.4
+drf_spectacular==0.16.0
 optuna==2.7.0
 irspack==0.1.16
 whitenoise==5.2.0

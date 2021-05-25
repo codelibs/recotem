@@ -19,9 +19,8 @@ paths:
       tags:
       - evaluation_config
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -48,9 +47,8 @@ paths:
             schema:
               $ref: '#/components/schemas/EvaluationConfig'
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '201':
           content:
@@ -72,9 +70,8 @@ paths:
       tags:
       - evaluation_config
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -106,9 +103,8 @@ paths:
             schema:
               $ref: '#/components/schemas/EvaluationConfig'
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -140,9 +136,8 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedEvaluationConfig'
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -163,9 +158,8 @@ paths:
       tags:
       - evaluation_config
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '204':
           description: No response body
@@ -185,9 +179,8 @@ paths:
       tags:
       - model_configuration
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -215,9 +208,8 @@ paths:
               $ref: '#/components/schemas/ModelConfiguration'
         required: true
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '201':
           content:
@@ -239,9 +231,8 @@ paths:
       tags:
       - model_configuration
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -274,9 +265,8 @@ paths:
               $ref: '#/components/schemas/ModelConfiguration'
         required: true
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -308,9 +298,8 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedModelConfiguration'
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -331,9 +320,8 @@ paths:
       tags:
       - model_configuration
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '204':
           description: No response body
@@ -353,9 +341,8 @@ paths:
       tags:
       - parameter_tuning_job
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -383,9 +370,8 @@ paths:
               $ref: '#/components/schemas/ParameterTuningJob'
         required: true
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '201':
           content:
@@ -407,9 +393,8 @@ paths:
       tags:
       - parameter_tuning_job
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -442,9 +427,8 @@ paths:
               $ref: '#/components/schemas/ParameterTuningJob'
         required: true
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -476,9 +460,8 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedParameterTuningJob'
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -499,9 +482,8 @@ paths:
       tags:
       - parameter_tuning_job
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '204':
           description: No response body
@@ -521,9 +503,8 @@ paths:
       tags:
       - project
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -551,9 +532,8 @@ paths:
               $ref: '#/components/schemas/Project'
         required: true
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '201':
           content:
@@ -575,9 +555,8 @@ paths:
       tags:
       - project
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -610,9 +589,8 @@ paths:
               $ref: '#/components/schemas/Project'
         required: true
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -644,9 +622,8 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedProject'
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -667,9 +644,8 @@ paths:
       tags:
       - project
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '204':
           description: No response body
@@ -689,9 +665,8 @@ paths:
       tags:
       - split_config
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -718,9 +693,8 @@ paths:
             schema:
               $ref: '#/components/schemas/SplitConfig'
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '201':
           content:
@@ -742,9 +716,8 @@ paths:
       tags:
       - split_config
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -776,9 +749,8 @@ paths:
             schema:
               $ref: '#/components/schemas/SplitConfig'
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -810,9 +782,8 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedSplitConfig'
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -833,9 +804,8 @@ paths:
       tags:
       - split_config
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '204':
           description: No response body
@@ -859,9 +829,8 @@ paths:
       tags:
       - task_log
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -885,9 +854,8 @@ paths:
       tags:
       - task_log
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -895,33 +863,59 @@ paths:
               schema:
                 $ref: '#/components/schemas/TaskLog'
           description: ''
-  /api/token-auth/:
+  /api/token/:
     post:
-      operationId: token_auth_create
-      description: ''
+      operationId: token_create
+      description: |-
+        Takes a set of user credentials and returns an access and refresh JSON web
+        token pair to prove the authentication of those credentials.
       tags:
-      - token-auth
+      - token
       requestBody:
         content:
-          application/x-www-form-urlencoded:
-            schema:
-              $ref: '#/components/schemas/AuthToken'
-          multipart/form-data:
-            schema:
-              $ref: '#/components/schemas/AuthToken'
           application/json:
             schema:
-              $ref: '#/components/schemas/AuthToken'
+              $ref: '#/components/schemas/TokenObtainPair'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenObtainPair'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenObtainPair'
         required: true
-      security:
-      - basicAuth: []
-      - cookieAuth: []
       responses:
         '200':
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AuthToken'
+                $ref: '#/components/schemas/TokenObtainPair'
+          description: ''
+  /api/token/refresh/:
+    post:
+      operationId: token_refresh_create
+      description: |-
+        Takes a refresh type JSON web token and returns an access type JSON web
+        token if the refresh token is valid.
+      tags:
+      - token
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenRefresh'
           description: ''
   /api/trained_model/:
     get:
@@ -943,9 +937,8 @@ paths:
       tags:
       - trained_model
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -973,9 +966,8 @@ paths:
               $ref: '#/components/schemas/TrainedModel'
         required: true
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '201':
           content:
@@ -997,9 +989,8 @@ paths:
       tags:
       - trained_model
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -1032,9 +1023,8 @@ paths:
               $ref: '#/components/schemas/TrainedModel'
         required: true
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -1066,9 +1056,8 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedTrainedModel'
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -1089,9 +1078,8 @@ paths:
       tags:
       - trained_model
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '204':
           description: No response body
@@ -1111,9 +1099,8 @@ paths:
       tags:
       - training_data
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -1141,9 +1128,8 @@ paths:
               $ref: '#/components/schemas/TrainingData'
         required: true
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '201':
           content:
@@ -1165,9 +1151,8 @@ paths:
       tags:
       - training_data
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -1200,9 +1185,8 @@ paths:
               $ref: '#/components/schemas/TrainingData'
         required: true
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -1234,9 +1218,8 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedTrainingData'
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '200':
           content:
@@ -1257,30 +1240,13 @@ paths:
       tags:
       - training_data
       security:
-      - basicAuth: []
       - cookieAuth: []
-      - {}
+      - jwtAuth: []
       responses:
         '204':
           description: No response body
 components:
   schemas:
-    AuthToken:
-      type: object
-      properties:
-        username:
-          type: string
-          writeOnly: true
-        password:
-          type: string
-          writeOnly: true
-        token:
-          type: string
-          readOnly: true
-      required:
-      - password
-      - token
-      - username
     EvaluationConfig:
       type: object
       properties:
@@ -1653,6 +1619,38 @@ components:
       - id
       - ins_datetime
       - task
+    TokenObtainPair:
+      type: object
+      properties:
+        username:
+          type: string
+          writeOnly: true
+        password:
+          type: string
+          writeOnly: true
+        access:
+          type: string
+          readOnly: true
+        refresh:
+          type: string
+          readOnly: true
+      required:
+      - access
+      - password
+      - refresh
+      - username
+    TokenRefresh:
+      type: object
+      properties:
+        access:
+          type: string
+          readOnly: true
+        refresh:
+          type: string
+          writeOnly: true
+      required:
+      - access
+      - refresh
     TrainedModel:
       type: object
       properties:
@@ -1709,10 +1707,11 @@ components:
       - upd_datetime
       - upload_path
   securitySchemes:
-    basicAuth:
-      type: http
-      scheme: basic
     cookieAuth:
       type: apiKey
       in: cookie
       name: Session
+    jwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Bearer

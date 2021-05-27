@@ -16,17 +16,6 @@ from .utils import read_dataframe
 # Create your models here.
 
 
-@receiver(post_save, sender=User)
-def create_auth_token(
-    sender: Type[User],
-    instance: Optional[User] = None,
-    created: bool = False,
-    **kwargs: Any,
-) -> None:
-    if created:
-        Token.objects.create(user=instance)
-
-
 class Project(models.Model):
     name = models.TextField(unique=True)
     user_column = models.CharField(max_length=256)
@@ -126,7 +115,7 @@ class TrainedModel(models.Model):
 
 
 @receiver(post_save, sender=TrainedModel)
-def run_tuning_job_after_creation(
+def run_training_after_creation(
     sender: Type[TrainedModel],
     instance: Optional[TrainedModel] = None,
     created: bool = False,

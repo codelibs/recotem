@@ -1,3 +1,1 @@
-export default {
-  baseURL: "/api/",
-};
+export const baseURL = "/api/";

@@ -1,14 +1,7 @@
 <template>
   <v-container>
     <v-row class="text-center">
-      <v-col cols="12">
-        <v-img
-          :src="require('../assets/logo.svg')"
-          class="my-3"
-          contain
-          height="200"
-        />
-      </v-col>
+      <v-col cols="12"> </v-col>
 
       <v-col class="mb-4">
         <h1 class="display-2 font-weight-bold mb-3">Welcome to Vuetify</h1>
@@ -75,10 +68,15 @@
 
 <script lang="ts">
 import Vue from "vue";
+import axios from "axios";
+
+interface Token {
+  access: string;
+  refresh: string;
+}
 
 export default Vue.extend({
   name: "HelloWorld",
-
   data: () => ({
     ecosystem: [
       {

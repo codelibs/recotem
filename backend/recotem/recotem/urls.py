@@ -16,7 +16,6 @@ index_view = never_cache(TopPageView.as_view())
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("", index_view, name="index"),
-    # path("api/token-auth/", drf_views.obtain_auth_token, name="api-token"),
     path("api/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/", include(api_router.urls)),

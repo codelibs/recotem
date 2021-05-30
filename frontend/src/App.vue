@@ -1,19 +1,13 @@
 <template>
   <v-app>
-    <v-app-bar app color="primary" dark>
-      <div class="d-flex align-center">Recotem</div>
-
-      <v-spacer></v-spacer>
-    </v-app-bar>
-
-    <v-main>
-      <router-view />
-    </v-main>
+    <router-view />
   </v-app>
 </template>
 
 <script lang="ts">
 import Vue from "vue";
+
+import { AuthModule } from "@/store/auth";
 
 export default Vue.extend({
   name: "App",
@@ -21,5 +15,11 @@ export default Vue.extend({
   data: () => ({
     //
   }),
+  computed: {
+    username() {
+      return AuthModule.username;
+    },
+  },
+  watch: {},
 });
 </script>

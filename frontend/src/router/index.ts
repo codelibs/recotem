@@ -6,9 +6,31 @@ Vue.use(VueRouter);
 
 const routes: Array<RouteConfig> = [
   {
-    path: "/login",
-    name: "Login",
-    component: Login,
+    path: "/",
+    component: () => import("../views/Main.vue"),
+    children: [
+      {
+        path: "",
+        redirect: { name: "project" },
+      },
+      {
+        path: "login",
+        name: "login",
+        component: Login,
+      },
+      {
+        path: "project",
+        name: "project",
+        component: () => import("../views/project/Projects.vue"),
+        children: [
+          {
+            path: "create",
+            name: "project-create",
+            component: () => import("../components/ProjectCreate.vue"),
+          },
+        ],
+      },
+    ],
   },
 ];
 

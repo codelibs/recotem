@@ -1,4 +1,4 @@
-from rest_framework import viewsets
+from rest_framework import serializers, viewsets
 from rest_framework.permissions import IsAuthenticated
 
 from .models import (
@@ -10,6 +10,7 @@ from .models import (
     TaskLog,
     TrainedModel,
     TrainingData,
+    User,
 )
 from .serializers import (
     EvaluationConfigSerializer,
@@ -20,7 +21,14 @@ from .serializers import (
     TaskLogSerializer,
     TrainedModelSerializer,
     TrainingDataSerializer,
+    UserSerializer,
 )
+
+
+class GetMeViewset(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated]
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
 
 
 class ProjectViewSet(viewsets.ModelViewSet):

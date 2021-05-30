@@ -1,19 +1,20 @@
 import {
   Module,
   VuexModule,
-  MutationAction,
   getModule,
-  //  Action,
+  Action,
   Mutation,
 } from "vuex-module-decorators";
 import store from "@/store";
-import { TokenApiFactory, TokenObtainPair } from "@/api/client";
-import Axios from "axios";
+import axios, { AxiosError } from "axios";
 import { baseURL } from "@/env";
+import { paths } from "@/api/schema";
 
-function retrieveToken(): string | null {
-  return localStorage.getItem("recotem_token");
-}
+const tokenObtainUrl = "/api/token/";
+type tokenRequest =
+  paths["/api/token/"]["post"]["requestBody"]["content"]["application/json"];
+type tokenReturn =
+  paths["/api/token/"]["post"]["responses"]["200"]["content"]["application/json"];
 
 interface refreshTokenResult {
   access: string;
@@ -25,69 +26,80 @@ interface refreshTokenResult {
   name: "auth",
 })
 export class Auth extends VuexModule {
-  token = "";
-  refresh = "";
-  isLoggedIn = false;
-  logInError = false;
+  token: string | null = null;
+  refresh: string | null = null;
+  loginErrorMessages: string[] = [];
+  username: string | null = null;
 
   @Mutation
-  setToken(token: string) {
+  setToken(token: string | null) {
     this.token = token;
   }
 
-  @MutationAction
+  @Mutation
+  setLoginErrorMessage(vals: string[]) {
+    this.loginErrorMessages = vals;
+  }
+
+  @Mutation
+  setRefresh(refresh: string | null) {
+    this.refresh = refresh;
+  }
+
+  @Mutation
+  setUsername(username: string | null) {
+    this.username = username;
+    console.log(`username is ${username}`);
+  }
+
+  @Action
   async login(payload: { username: string; password: string }) {
-    const p: TokenObtainPair = {
+    const p = {
       username: payload.username,
       password: payload.password,
       access: "",
       refresh: "",
-    };
-    try {
-      const response = await TokenApiFactory(undefined, "").tokenCreate(p);
-      return {
-        token: response.data.access,
-        refresh: response.data.refresh,
-        isLoggedIn: true,
-      };
-    } catch (err) {
-      alert(err);
-    }
-  }
-  @MutationAction
-  async refreshToken() {
-    try {
-      const refresh_token = (this.state as any).refresh as string;
-      const refreshed = await Axios.post<refreshTokenResult>(
-        `${baseURL}/token/refresh/`,
-        {
-          refresh: refresh_token,
+    } as tokenRequest;
+
+    const response = await axios
+      .post<tokenReturn>(tokenObtainUrl, p)
+      .catch((error: AxiosError) => {
+        const detail = error.response?.data?.detail;
+        if (typeof detail === "string") {
+          this.setLoginErrorMessage([detail]);
         }
-      ).catch((error) => {
         return null;
       });
-      if (refreshed === null) {
-        return {
-          token: "",
-          isLoggedIn: false,
-        };
-      } else {
-        return {
-          token: refreshed.data.access,
-          isLoggedIn: true,
-        };
-      }
-    } catch (err) {
-      this.context.dispatch("logout");
+    if (response !== null) {
+      this.setToken(response.data.access);
+      this.setRefresh(response.data.refresh);
+      localStorage.setItem("refresh", response.data.refresh);
+      await this.getUserName();
+    } else {
+      this.setToken(null);
+      this.setRefresh(null);
     }
   }
 
-  @MutationAction
+  @Action
+  async getUserName() {
+    const token = this.token as string | null;
+    const result = await axios
+      .get<{ username: string }>(`${baseURL}/getme/`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      .catch((error: AxiosError) => {
+        return null;
+      });
+    if (result !== null) {
+      this.setUsername(result.data.username);
+    }
+  }
+
+  @Action
   async logout() {
-    return {
-      token: "",
-      isLoggedIn: true,
-    };
+    this.setToken(null);
+    this.setRefresh(null);
   }
 }
 

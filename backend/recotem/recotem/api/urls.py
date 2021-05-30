@@ -2,6 +2,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     EvaluationConfigViewSet,
+    GetMeViewset,
     ModelConfigurationViewset,
     ParameterTuningJobViewSet,
     ProjectViewSet,
@@ -12,6 +13,7 @@ from .views import (
 )
 
 router = DefaultRouter()
+router.register(r"getme", GetMeViewset, basename="getme")
 router.register(r"project", ProjectViewSet, basename="project")
 router.register(r"training_data", TrainingDataViewset, basename="training_data")
 router.register(r"split_config", SplitConfigViewSet, basename="split_config")

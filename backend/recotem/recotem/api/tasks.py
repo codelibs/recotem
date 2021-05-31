@@ -1,5 +1,6 @@
 import json
 import pickle
+import random
 import re
 import tempfile
 from logging import Logger
@@ -237,6 +238,10 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
 {evaluator.target_metric.name}@{evaluator.cutoff}={-trial.value}"""
         TaskLog.objects.create(task=task_result, contents=message)
 
+    if job.random_seed is None:
+        random_seed = random.randint(0, 2 ** 16)
+    else:
+        random_seed = job.random_seed
     autopilot(
         X_tv_train,
         evaluator,
@@ -244,7 +249,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         memory_budget=job.memory_budget,
         timeout_overall=job.timeout_overall,
         timeout_singlestep=job.timeout_singlestep,
-        random_seed=job.random_seed + index,
+        random_seed=random_seed,
         callback=callback,
         storage=optuna_storage,
         study_name=study_name,

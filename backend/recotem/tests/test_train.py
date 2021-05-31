@@ -24,11 +24,13 @@ from .test_data_post import login_client
 @pytest.mark.django_db(transaction=True)
 def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
     login_client(client)
-    project_url = reverse("project-list")
-    data_url = reverse("training_data-list")
-    split_config_url = reverse("split_config-list")
-    evaluation_config_url = reverse("evaluation_config-list")
-    job_url = reverse("parameter_tuning_job-list")
+    project_url = "/api/project/"
+    data_url = "/api/training_data/"
+    split_config_url = "/api/split_config/"
+    evaluation_config_url = "/api/evaluation_config/"
+
+    parameter_tuning_job_url = "/api/parameter_tuning_job/"
+    model_url = "/api/trained_model/"
 
     project_resp = client.post(
         project_url,
@@ -61,17 +63,19 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         evaluation_config_url, dict(cutoff=10, target_metric="map")
     ).json()["id"]
 
-    job = ParameterTuningJob.objects.create(
-        data=TrainingData.objects.get(id=data_id),
-        split=SplitConfig.objects.get(id=split_id),
-        evaluation=EvaluationConfig.objects.get(id=evaluation_id),
-        n_tasks_parallel=1,
-        n_trials=5,
-        memory_budget=1,
-        random_seed=0,
-        timeout_singlestep=5,
-    )
-    job_id = job.id
+    job_id = client.post(
+        parameter_tuning_job_url,
+        dict(
+            data=data_id,
+            split=split_id,
+            evaluation=evaluation_id,
+            n_tasks_parallel=1,
+            n_trials=5,
+            memory_budget=1,
+            timeout_singlestep=5,
+        ),
+    ).json()["id"]
+
     best_config: Optional[ModelConfiguration] = None
     for _ in range(100):
         job = ParameterTuningJob.objects.get(id=job_id)
@@ -80,9 +84,14 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
             break
         sleep(1.0)
     assert best_config is not None
-    model_id: int = TrainedModel.objects.create(
-        configuration=best_config, data_loc=TrainingData.objects.get(id=data_id)
-    ).id
+
+    model_id = client.post(
+        model_url,
+        dict(
+            configuration=best_config.id,
+            data_loc=data_id,
+        ),
+    ).json()["id"]
     train_model_path: Optional[IO] = None
     for _ in range(100):
         model = TrainedModel.objects.get(id=model_id)

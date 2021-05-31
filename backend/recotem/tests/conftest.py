@@ -1,7 +1,10 @@
+from typing import Type
+
 import pytest
+from django.test import Client
 from irspack.dataset import MovieLens100KDataManager
 
-from recotem.api.models import TrainingData
+from recotem.api.models import TrainingData, User
 
 
 @pytest.fixture

@@ -8,7 +8,7 @@ from django.test import Client
 from django.urls import reverse
 from pandas import testing as pd_testing
 
-from recotem.api.models import TrainingData
+from recotem.api.models import TrainingData, User
 
 I_O_functions: typing.List[
     typing.Tuple[
@@ -55,8 +55,14 @@ I_O_functions: typing.List[
 ]
 
 
+def login_client(client: Client) -> None:
+    user, _ = User.objects.get_or_create(username="admin", password="admin")
+    client.force_login(user)
+
+
 @pytest.mark.django_db
 def test_invalid_compression(client: Client, ml100k: pd.DataFrame):
+    login_client(client)
     project_url = reverse("project-list")
     data_url = reverse("training_data-list")
 
@@ -82,6 +88,8 @@ def test_invalid_compression(client: Client, ml100k: pd.DataFrame):
 
 @pytest.mark.django_db
 def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
+    login_client(client)
+
     project_url = reverse("project-list")
     data_url = reverse("training_data-list")
 
@@ -135,6 +143,8 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
 
 @pytest.mark.django_db
 def test_data_post(client: Client, ml100k: pd.DataFrame):
+    login_client(client)
+
     project_url = reverse("project-list")
     data_url = reverse("training_data-list")
     resp_failing_project_creation_invalid_item = client.post(
@@ -210,6 +220,8 @@ def test_data_post_with_pkl_compression(
     dump_function: typing.Callable[[pd.DataFrame, typing.IO], None],
     load_function: typing.Callable[[typing.IO], pd.DataFrame],
 ):
+    login_client(client)
+
     project_url = reverse("project-list")
     data_url = reverse("training_data-list")
     project_resp = client.post(
@@ -241,6 +253,8 @@ def test_datetime(
     client: Client,
     ml100k: pd.DataFrame,
 ):
+    login_client(client)
+
     project_url = reverse("project-list")
     data_url = reverse("training_data-list")
     project_resp = client.post(

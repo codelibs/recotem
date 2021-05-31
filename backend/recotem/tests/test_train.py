@@ -17,11 +17,13 @@ from recotem.api.models import (
     TrainedModel,
     TrainingData,
 )
-from recotem.api.tasks import start_tuning_job, train_recommender
+
+from .test_data_post import login_client
 
 
 @pytest.mark.django_db(transaction=True)
 def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
+    login_client(client)
     project_url = reverse("project-list")
     data_url = reverse("training_data-list")
     split_config_url = reverse("split_config-list")

@@ -11,22 +11,32 @@ const routes: Array<RouteConfig> = [
     children: [
       {
         path: "",
-        redirect: { name: "project" },
+        redirect: { name: "project-list" },
       },
       {
-        path: "login",
+        path: "login/",
         name: "login",
         component: Login,
       },
       {
-        path: "project",
+        path: "project-list/",
+        name: "project-list",
+        component: () => import("../views/ProjectList.vue"),
+      },
+      {
+        path: "project/:projectId/",
+        component: () => import("../views/project/ProjectTop.vue"),
         name: "project",
-        component: () => import("../views/project/Projects.vue"),
         children: [
           {
-            path: "create",
-            name: "project-create",
-            component: () => import("../components/ProjectCreate.vue"),
+            path: "data-list/",
+            name: "data-list",
+            component: () => import("../views/project/DataList.vue"),
+          },
+          {
+            path: "data/:dataId/",
+            name: "data",
+            component: () => import("../views/project/Data.vue"),
           },
         ],
       },

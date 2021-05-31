@@ -1,6 +1,6 @@
 <template>
-  <v-card>
-    <v-toolbar color="primary" dark flat>
+  <div>
+    <v-toolbar color="#4c64f5" dark flat>
       <v-toolbar-title>Recotem Project Manager</v-toolbar-title>
 
       <v-spacer></v-spacer>
@@ -26,13 +26,28 @@
     </v-toolbar>
     <v-tabs-items v-model="tab">
       <v-tab-item>
-        {{ projects }}
+        <v-list>
+          <v-list-item
+            v-for="(project, i) in projects"
+            :key="i"
+            :to="{ name: 'project', params: { projectId: project.id } }"
+          >
+            <v-list-item-content>
+              <v-list-item-title>
+                {{ project.name }}
+              </v-list-item-title>
+              <v-list-item-subtitle>
+                Created on {{ project.ins_datetime }}
+              </v-list-item-subtitle>
+            </v-list-item-content>
+          </v-list-item>
+        </v-list>
       </v-tab-item>
       <v-tab-item>
         <ProjectCreation />
       </v-tab-item>
     </v-tabs-items>
-  </v-card>
+  </div>
 </template>
 <script lang="ts">
 import Vue from "vue";

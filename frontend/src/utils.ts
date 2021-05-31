@@ -51,6 +51,7 @@ export async function checkLogin(module: Auth): Promise<boolean> {
   if (module.refresh === null) {
     return false;
   } else {
+    await module.getUserName();
     return true;
   }
 }

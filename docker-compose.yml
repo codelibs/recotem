@@ -17,7 +17,7 @@ services:
       context: ./backend
       dockerfile: backend.dockerfile
     volumes:
-      - data-location:/app/data
+      - ./test_upload:/app/data
     ports:
       - "8000:80"
     env_file:
@@ -27,7 +27,7 @@ services:
       context: ./backend
       dockerfile: celery.dockerfile
     volumes:
-      - data-location:/app/data
+      - ./test_upload:/app/data
     env_file:
       - envs/production.env
 volumes:

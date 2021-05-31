@@ -37,10 +37,15 @@
                 </ValidationProvider>
               </v-form>
             </v-card-text>
-            <v-card-actions class="text-center">
-              <v-btn color="primary" :disabled="invalid" @click.prevent="submit"
-                >Login</v-btn
-              >
+            <v-card-actions class="pt-2 pb-8">
+              <v-row justify="center">
+                <v-btn
+                  color="primary"
+                  :disabled="invalid"
+                  @click.prevent="submit"
+                  >Login</v-btn
+                >
+              </v-row>
             </v-card-actions>
             <v-alert
               v-for="(message, i_m) in errorMessages"

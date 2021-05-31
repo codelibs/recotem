@@ -10,6 +10,7 @@ import qs from "qs";
 import { components, paths } from "@/api/schema";
 import { getWithRefreshToken } from "@/utils";
 import { AuthModule } from "@/store/auth";
+import { AxiosError } from "axios";
 
 const trainingDataListURL = "/api/training_data/";
 type TrainingData = components["schemas"]["TrainingData"];
@@ -39,15 +40,17 @@ export default Vue.extend({
       }
       let trainingData = await getWithRefreshToken<TrainingData[]>(
         AuthModule,
-        `trainingDataListURL?${qs.stringify({ project: this.projectId })}`
-      );
+        trainingDataListURL + `?${qs.stringify({ project: this.projectId })}`
+      ).catch((error: AxiosError) => {
+        console.log(error.response?.data);
+        return null;
+      });
       if (trainingData !== null) {
         this.trainingData = trainingData;
       }
     },
   },
   async mounted() {
-    alert("mounted");
     await this.fetchData();
   },
 });

@@ -5,9 +5,12 @@
 
       <v-spacer></v-spacer>
 
+      <CurrentUser />
+      <!--
       <v-btn icon>
         <v-icon>mdi-dots-vertical</v-icon>
       </v-btn>
+      -->
 
       <template v-slot:extension>
         <v-tabs fixed-tabs v-model="tab">
@@ -52,6 +55,7 @@
 <script lang="ts">
 import Vue from "vue";
 import ProjectCreation from "@/components/ProjectCreate.vue";
+import CurrentUser from "@/components/CurrentUser.vue";
 import { components } from "@/api/schema";
 import { getWithRefreshToken } from "@/utils";
 import { AuthModule } from "@/store/auth";
@@ -73,6 +77,7 @@ export default Vue.extend({
   },
   components: {
     ProjectCreation,
+    CurrentUser,
   },
   async mounted() {
     await this.getProjects();

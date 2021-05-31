@@ -13,6 +13,7 @@ export default Vue.extend({
   async beforeRouteEnter(to, from, next) {
     const authModule = getModule(Auth, store);
     const loggedIn = await checkLogin(authModule);
+    console.log("login", loggedIn);
     if (loggedIn) {
       next();
     } else {

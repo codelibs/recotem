@@ -1,21 +1,38 @@
 <template>
   <div class="fill-height">
-    <v-navigation-drawer permanent dark color="#4c6ef5" v-if="project !== null">
-      <v-list>
-        <v-list-item>
-          <v-list-item-title>
-            {{ project.name }}
-          </v-list-item-title>
-        </v-list-item>
-        <v-divider></v-divider>
-        <v-list-item :to="{ name: 'data-list', params: { projectId } }">
-          <v-list-item-title> Data </v-list-item-title>
-        </v-list-item>
-      </v-list>
-    </v-navigation-drawer>
-    <div>
-      <router-view></router-view>
-    </div>
+    <v-row class="fill-height">
+      <v-col cols="3">
+        <v-navigation-drawer
+          floating
+          permanent
+          dark
+          color="#4c6ef5"
+          v-if="project !== null"
+        >
+          <v-list>
+            <v-list-item>
+              <v-list-item-content>
+                <v-list-item-title>
+                  {{ project.name }}
+                </v-list-item-title>
+              </v-list-item-content>
+            </v-list-item>
+            <v-divider></v-divider>
+            <v-list-item :to="{ name: 'data-list', params: { projectId } }">
+              <v-list-item-content>
+                <v-list-item-title> Data </v-list-item-title>
+              </v-list-item-content>
+            </v-list-item>
+          </v-list>
+        </v-navigation-drawer>
+      </v-col>
+      <v-col>
+        <div>
+          <!--<router-view></router-view>-->
+          TEST
+        </div>
+      </v-col>
+    </v-row>
   </div>
 </template>
 <script lang="ts">

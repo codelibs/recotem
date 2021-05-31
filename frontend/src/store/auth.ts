@@ -48,8 +48,8 @@ export class Auth extends VuexModule {
 
   @Mutation
   setUsername(username: string | null) {
+    console.log("username", username);
     this.username = username;
-    console.log(`username is ${username}`);
   }
 
   @Action
@@ -85,12 +85,13 @@ export class Auth extends VuexModule {
   async getUserName() {
     const token = this.token as string | null;
     const result = await axios
-      .get<{ username: string }>(`${baseURL}/getme/`, {
+      .get<{ username: string }>(`${baseURL}/getme/current/`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       .catch((error: AxiosError) => {
         return null;
       });
+
     if (result !== null) {
       this.setUsername(result.data.username);
     }

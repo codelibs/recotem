@@ -14,6 +14,9 @@ export interface paths {
     delete: operations["evaluation_config_destroy"];
     patch: operations["evaluation_config_partial_update"];
   };
+  "/api/getme/{id}/": {
+    get: operations["getme_retrieve"];
+  };
   "/api/model_configuration/": {
     get: operations["model_configuration_list"];
     post: operations["model_configuration_create"];
@@ -192,10 +195,12 @@ export interface components {
     };
     PatchedTrainingData: {
       id?: number;
+      project?: number;
       upload_path?: string;
       ins_datetime?: string;
       upd_datetime?: string;
-      project?: number;
+      basename?: string;
+      filesize?: number;
     };
     Project: {
       id: number;
@@ -245,10 +250,12 @@ export interface components {
     };
     TrainingData: {
       id: number;
+      project: number;
       upload_path: string;
       ins_datetime: string;
       upd_datetime: string;
-      project: number;
+      basename: string;
+      filesize: number;
     };
   };
 }
@@ -354,6 +361,17 @@ export interface operations {
         "application/x-www-form-urlencoded": components["schemas"]["PatchedEvaluationConfig"];
         "multipart/form-data": components["schemas"]["PatchedEvaluationConfig"];
       };
+    };
+  };
+  getme_retrieve: {
+    parameters: {
+      path: {
+        id: string;
+      };
+    };
+    responses: {
+      /** No response body */
+      200: unknown;
     };
   };
   model_configuration_list: {

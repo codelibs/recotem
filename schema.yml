@@ -163,6 +163,24 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/getme/{id}/:
+    get:
+      operationId: getme_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+        required: true
+      tags:
+      - getme
+      security:
+      - cookieAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
   /api/model_configuration/:
     get:
       operationId: model_configuration_list
@@ -1515,6 +1533,8 @@ components:
         id:
           type: integer
           readOnly: true
+        project:
+          type: integer
         upload_path:
           type: string
         ins_datetime:
@@ -1525,8 +1545,12 @@ components:
           type: string
           format: date-time
           readOnly: true
-        project:
+        basename:
+          type: string
+          readOnly: true
+        filesize:
           type: integer
+          readOnly: true
     Project:
       type: object
       properties:
@@ -1688,6 +1712,8 @@ components:
         id:
           type: integer
           readOnly: true
+        project:
+          type: integer
         upload_path:
           type: string
         ins_datetime:
@@ -1698,9 +1724,15 @@ components:
           type: string
           format: date-time
           readOnly: true
-        project:
+        basename:
+          type: string
+          readOnly: true
+        filesize:
           type: integer
+          readOnly: true
       required:
+      - basename
+      - filesize
       - id
       - ins_datetime
       - project

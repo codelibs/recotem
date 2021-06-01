@@ -1,6 +1,6 @@
+from pathlib import Path
 from typing import Any
 
-from django.db.models import fields
 from rest_framework import serializers
 
 from .models import (
@@ -36,9 +36,32 @@ class ProjectSerializer(serializers.ModelSerializer):
 
 
 class TrainingDataSerializer(serializers.ModelSerializer):
+    basename = serializers.SerializerMethodField()
+    filesize = serializers.SerializerMethodField()
+
     class Meta:
         model = TrainingData
-        fields = "__all__"
+        fields = [
+            "id",
+            "project",
+            "upload_path",
+            "ins_datetime",
+            "upd_datetime",
+            "basename",
+            "filesize",
+        ]
+        read_only_fields = [
+            "ins_datetime",
+            "upd_datetime",
+            "basename",
+            "filesize",
+        ]
+
+    def get_basename(self, instance: TrainingData) -> str:
+        return Path(instance.upload_path.name).name
+
+    def get_filesize(self, instance: TrainingData) -> int:
+        return instance.upload_path.size
 
     def create(self, validated_data):
         obj: TrainingData = TrainingData.objects.create(**validated_data)

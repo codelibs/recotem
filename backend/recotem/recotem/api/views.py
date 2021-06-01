@@ -30,7 +30,7 @@ from .serializers import (
 )
 
 
-class GetMeViewset(viewsets.ViewSet):
+class GetMeViewset(viewsets.GenericViewSet):
     permission_classes = [IsAuthenticated]
 
     def retrieve(self, request: Request, pk: Union[str, int] = "current"):

@@ -1,6 +1,13 @@
 <template>
   <div>
-    {{ trainingData }}
+    <v-list>
+      <v-list-item v-for="(td, i) in trainingData" :key="i">
+        <v-list-title>
+          {{ td.upload_path }}
+        </v-list-title>
+        <v-list-item-content> </v-list-item-content>
+      </v-list-item>
+    </v-list>
   </div>
 </template>
 

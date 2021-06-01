@@ -26,8 +26,12 @@ const routes: Array<RouteConfig> = [
       {
         path: "project/:projectId/",
         component: () => import("../views/project/ProjectTop.vue"),
-        name: "project",
         children: [
+          {
+            path: "/",
+            name: "project",
+            component: () => import("../views/project/Dashboard.vue"),
+          },
           {
             path: "data-list/",
             name: "data-list",

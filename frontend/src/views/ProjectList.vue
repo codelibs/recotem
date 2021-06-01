@@ -5,7 +5,6 @@
 
       <v-spacer></v-spacer>
 
-      <CurrentUser />
       <!--
       <v-btn icon>
         <v-icon>mdi-dots-vertical</v-icon>
@@ -43,8 +42,14 @@
                 Created on {{ project.ins_datetime }}
               </v-list-item-subtitle>
             </v-list-item-content>
+            <v-list-item-action>
+              <v-btn icon @click="deleteProject(project)">
+                <v-icon>mdi-delete</v-icon>
+              </v-btn>
+            </v-list-item-action>
           </v-list-item>
         </v-list>
+        <v-dialog :value="deleteTargetProject !== null"> </v-dialog>
       </v-tab-item>
       <v-tab-item>
         <ProjectCreation />
@@ -55,7 +60,6 @@
 <script lang="ts">
 import Vue from "vue";
 import ProjectCreation from "@/components/ProjectCreate.vue";
-import CurrentUser from "@/components/CurrentUser.vue";
 import { components } from "@/api/schema";
 import { getWithRefreshToken } from "@/utils";
 import { AuthModule } from "@/store/auth";
@@ -66,6 +70,7 @@ type Project = components["schemas"]["Project"];
 interface Data {
   tab: number;
   projects: Project[];
+  deleteTargetProject: Project | null;
 }
 
 export default Vue.extend({
@@ -73,16 +78,19 @@ export default Vue.extend({
     return {
       tab: 0,
       projects: [],
+      deleteTargetProject: null,
     };
   },
   components: {
     ProjectCreation,
-    CurrentUser,
   },
   async mounted() {
     await this.getProjects();
   },
   methods: {
+    async deleteProject(project: Project) {
+      this.deleteTargetProject = project;
+    },
     async getProjects() {
       const result = await getWithRefreshToken<Project[]>(
         AuthModule,

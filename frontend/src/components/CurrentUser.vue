@@ -1,21 +1,25 @@
 <template>
   <v-menu v-if="username !== null">
     <template v-slot:activator="{ on }">
-      <v-btn icon x-large v-on="on">
-        <v-avatar color="brown" size="48">
-          <span class="white--text headline">{{ userInitial }}</span>
+      <v-btn icon v-on="on" class="mr-1">
+        <v-avatar color="brown" size="32">
+          <span class="white--text title">{{ userInitial }}</span>
         </v-avatar>
       </v-btn>
     </template>
     <v-card>
-      <v-list-item-content class="justify-center">
-        <div class="mx-auto text-center">
-          <h3>{{ username }}</h3>
-          <v-divider class="my-3"></v-divider>
-          <v-divider class="my-3"></v-divider>
-          <v-btn depressed rounded text> Disconnect </v-btn>
-        </div>
-      </v-list-item-content>
+      <v-list>
+        <v-list-item>
+          <v-list-item-content class="justify-center">
+            <v-list-item-title class="text-center">
+              {{ username }}
+            </v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+        <v-list-item>
+          <v-btn @click="logout" depressed rounded text> logout </v-btn>
+        </v-list-item>
+      </v-list>
     </v-card>
   </v-menu>
 </template>
@@ -32,6 +36,12 @@ export default Vue.extend({
       if (this.username === null) return null;
       if (this.username.length === 0) return null;
       return this.username.slice(0, 1);
+    },
+  },
+  methods: {
+    async logout(): Promise<void> {
+      await AuthModule.logout();
+      this.$router.push({ name: "login" });
     },
   },
 });

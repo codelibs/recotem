@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from rest_framework import serializers
+from rest_framework.exceptions import ValidationError
 
 from .models import (
     EvaluationConfig,
@@ -65,7 +66,11 @@ class TrainingDataSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         obj: TrainingData = TrainingData.objects.create(**validated_data)
-        obj.validate_return_df()
+        try:
+            obj.validate_return_df()
+        except ValidationError as e:
+            obj.delete()
+            raise e
         return obj
 
 

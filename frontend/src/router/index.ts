@@ -33,14 +33,20 @@ const routes: Array<RouteConfig> = [
             component: () => import("../views/project/Dashboard.vue"),
           },
           {
-            path: "data-list/",
-            name: "data-list",
-            component: () => import("../views/project/DataList.vue"),
-          },
-          {
-            path: "data/:dataId/",
-            name: "data",
+            path: "data/",
             component: () => import("../views/project/Data.vue"),
+            children: [
+              {
+                path: ":dataId/",
+                name: "data-detail",
+                component: () => import("../views/project/data/Detail.vue"),
+              },
+              {
+                path: "",
+                name: "data-list",
+                component: () => import("../views/project/data/List.vue"),
+              },
+            ],
           },
         ],
       },

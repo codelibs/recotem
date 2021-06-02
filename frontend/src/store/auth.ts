@@ -101,6 +101,7 @@ export class Auth extends VuexModule {
   async logout() {
     this.setToken(null);
     this.setRefresh(null);
+    localStorage.removeItem("refresh");
   }
 }
 

@@ -1,60 +1,54 @@
 <template>
   <div>
-    <v-toolbar color="#4c64f5" dark flat>
-      <v-toolbar-title>Recotem Project Manager</v-toolbar-title>
+    <v-toolbar flat>
+      <v-tabs fixed-tabs v-model="tab">
+        <v-tabs-slider></v-tabs-slider>
+        <v-tab>
+          <v-icon>mdi-view-list</v-icon>
+          Projects
+        </v-tab>
 
-      <v-spacer></v-spacer>
-
-      <!--
-      <v-btn icon>
-        <v-icon>mdi-dots-vertical</v-icon>
-      </v-btn>
-      -->
-
-      <template v-slot:extension>
-        <v-tabs fixed-tabs v-model="tab">
-          <v-tabs-slider></v-tabs-slider>
-          <v-tab>
-            <v-icon>mdi-view-list</v-icon>
-            Projects
-          </v-tab>
-
-          <v-tab>
-            <v-icon>mdi-plus-box</v-icon>
-            <span> Create </span>
-          </v-tab>
-        </v-tabs>
-      </template>
+        <v-tab>
+          <v-icon>mdi-plus-box</v-icon>
+          <span> Create </span>
+        </v-tab>
+      </v-tabs>
     </v-toolbar>
-    <v-tabs-items v-model="tab">
-      <v-tab-item>
-        <v-list>
-          <v-list-item
-            v-for="(project, i) in projects"
-            :key="i"
-            :to="{ name: 'project', params: { projectId: project.id } }"
-          >
-            <v-list-item-content>
-              <v-list-item-title>
-                {{ project.name }}
-              </v-list-item-title>
-              <v-list-item-subtitle>
-                Created on {{ project.ins_datetime }}
-              </v-list-item-subtitle>
-            </v-list-item-content>
-            <v-list-item-action>
-              <v-btn icon @click="deleteProject(project)">
-                <v-icon>mdi-delete</v-icon>
-              </v-btn>
-            </v-list-item-action>
-          </v-list-item>
-        </v-list>
-        <v-dialog :value="deleteTargetProject !== null"> </v-dialog>
-      </v-tab-item>
-      <v-tab-item>
-        <ProjectCreation />
-      </v-tab-item>
-    </v-tabs-items>
+
+    <v-container>
+      <v-tabs-items v-model="tab">
+        <v-tab-item>
+          <v-list>
+            <template v-for="(project, i) in projects">
+              <v-list-item
+                :key="i"
+                :to="{ name: 'project', params: { projectId: project.id } }"
+              >
+                <v-list-item-content>
+                  <v-list-item-title>
+                    {{ project.name }}
+                  </v-list-item-title>
+                  <v-list-item-subtitle>
+                    Created on {{ project.ins_datetime }}
+                  </v-list-item-subtitle>
+                </v-list-item-content>
+                <v-list-item-action>
+                  <v-btn icon @click="deleteProject(project)">
+                    <v-icon>mdi-delete</v-icon>
+                  </v-btn>
+                </v-list-item-action>
+              </v-list-item>
+              <v-divider :key="i + 0.5" v-if="i < projects.length - 1">
+              </v-divider>
+            </template>
+          </v-list>
+          <v-dialog :value="deleteTargetProject !== null"> </v-dialog>
+        </v-tab-item>
+        <v-tab-item>
+          <ProjectCreation />
+        </v-tab-item>
+      </v-tabs-items>
+    </v-container>
   </div>
 </template>
 <script lang="ts">

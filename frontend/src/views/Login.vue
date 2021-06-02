@@ -99,7 +99,7 @@ export default Vue.extend({
         if (typeof to === "string") {
           this.$router.push({ path: to });
         } else {
-          this.$router.push({ path: "/projects" });
+          this.$router.push({ name: "project-list" });
         }
       }
     },

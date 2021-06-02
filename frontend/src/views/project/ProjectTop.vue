@@ -1,14 +1,6 @@
 <template>
-  <div>
-    <v-navigation-drawer
-      floating
-      permanent
-      dark
-      app
-      color="#4c6ef5"
-      v-if="project !== null"
-      expand-on-hover
-    >
+  <v-row>
+    <v-col cols="2" v-if="project !== null">
       <v-list nav>
         <v-list-item>
           <v-list-item-content>
@@ -29,15 +21,14 @@
           <v-list-item-title> Data </v-list-item-title>
         </v-list-item>
       </v-list>
-    </v-navigation-drawer>
-    <v-row>
-      <v-col>
-        <v-container>
-          <router-view></router-view>
-        </v-container>
-      </v-col>
-    </v-row>
-  </div>
+    </v-col>
+    <v-divider vertical></v-divider>
+    <v-col>
+      <v-container>
+        <router-view></router-view>
+      </v-container>
+    </v-col>
+  </v-row>
 </template>
 <script lang="ts">
 import Vue from "vue";

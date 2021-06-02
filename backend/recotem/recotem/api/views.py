@@ -1,10 +1,7 @@
 from typing import Union
 
-from django.shortcuts import get_object_or_404
-from rest_framework import serializers, views, viewsets
+from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.request import Request
-from rest_framework.response import Response
 
 from .models import (
     EvaluationConfig,
@@ -15,7 +12,6 @@ from .models import (
     TaskLog,
     TrainedModel,
     TrainingData,
-    User,
 )
 from .serializers import (
     EvaluationConfigSerializer,
@@ -26,15 +22,8 @@ from .serializers import (
     TaskLogSerializer,
     TrainedModelSerializer,
     TrainingDataSerializer,
-    UserSerializer,
 )
-
-
-class GetMeViewset(viewsets.GenericViewSet):
-    permission_classes = [IsAuthenticated]
-
-    def retrieve(self, request: Request, pk: Union[str, int] = "current"):
-        return Response(UserSerializer(request.user).data)
+from .view_utils.getme import GetMeViewset
 
 
 class ProjectViewSet(viewsets.ModelViewSet):

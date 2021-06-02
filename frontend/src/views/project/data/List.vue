@@ -43,7 +43,7 @@
         </v-dialog>
       </v-row>
     </div>
-    <v-list>
+    <v-list v-if="trainingData.length > 0">
       <template v-for="(td, i) in trainingData">
         <v-list-item
           :key="i"
@@ -79,6 +79,7 @@
         ></v-divider>
       </template>
     </v-list>
+    <div v-else class="text-center">No data yet.</div>
     <v-dialog v-model="deleteDialog">
       <v-card v-if="deleteTargetId !== null">
         <v-container>

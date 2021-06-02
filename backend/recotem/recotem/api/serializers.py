@@ -8,31 +8,25 @@ from .models import (
     EvaluationConfig,
     ModelConfiguration,
     ParameterTuningJob,
-    Project,
     SplitConfig,
     TaskLog,
     TrainedModel,
     TrainingData,
     User,
 )
+from .serializer_utils.project import ProjectSerializer
 from .tasks import start_tuning_job
 
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["username"]
+        fields = ["username", "is_staff", "is_superuser"]
 
 
 class TrainedModelSerializer(serializers.ModelSerializer):
     class Meta:
         model = TrainedModel
-        fields = "__all__"
-
-
-class ProjectSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Project
         fields = "__all__"
 
 

@@ -103,17 +103,13 @@ export async function postWithRefreshToken<Payload, Return>(
     headers: { Authorization: `Bearer ${module.token}` },
   }).catch(async (error: AxiosError) => {
     if (error.response?.status === 403) {
-      try {
-        await refreshToken(module);
-        const result = await Axios.post<Return>(path, payload, {
-          headers: {
-            Authorization: `Bearer ${module.token}`,
-          },
-        });
-        return result;
-      } catch (e) {
-        return null;
-      }
+      await refreshToken(module);
+      const result = await Axios.post<Return>(path, payload, {
+        headers: {
+          Authorization: `Bearer ${module.token}`,
+        },
+      });
+      return result;
     } else {
       throw error;
     }

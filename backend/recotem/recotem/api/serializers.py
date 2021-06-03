@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Any
 
 from rest_framework import serializers
@@ -6,15 +5,16 @@ from rest_framework import serializers
 from .models import (
     EvaluationConfig,
     ModelConfiguration,
-    ParameterTuningJob,
     SplitConfig,
     TaskLog,
     TrainedModel,
-    TrainingData,
     User,
 )
-from .serializer_utils import ProjectSerializer, TrainingDataSerializer
-from .tasks import start_tuning_job
+from .serializer_utils import (
+    ParameterTuningJobSerializer,
+    ProjectSerializer,
+    TrainingDataSerializer,
+)
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -62,10 +62,4 @@ class TaskLogSerializer(serializers.ModelSerializer):
 class ModelConfigurationSerializer(serializers.ModelSerializer):
     class Meta:
         model = ModelConfiguration
-        fields = "__all__"
-
-
-class ParameterTuningJobSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = ParameterTuningJob
         fields = "__all__"

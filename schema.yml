@@ -3,6 +3,30 @@ info:
   title: ''
   version: 0.0.0
 paths:
+  /api/data_detail/{id}/:
+    get:
+      operationId: data_detail_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this training data.
+        required: true
+      tags:
+      - data_detail
+      security:
+      - cookieAuth: []
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrainingDataDetail'
+          description: ''
   /api/evaluation_config/:
     get:
       operationId: evaluation_config_list
@@ -163,16 +187,10 @@ paths:
       responses:
         '204':
           description: No response body
-  /api/getme/{id}/:
+  /api/getme/:
     get:
-      operationId: getme_retrieve
+      operationId: getme_list
       description: ''
-      parameters:
-      - in: path
-        name: id
-        schema:
-          type: string
-        required: true
       tags:
       - getme
       security:
@@ -180,7 +198,13 @@ paths:
       - jwtAuth: []
       responses:
         '200':
-          description: No response body
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+          description: ''
   /api/model_configuration/:
     get:
       operationId: model_configuration_list
@@ -667,6 +691,29 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/project_summary/{id}/:
+    get:
+      operationId: project_summary_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this project.
+        required: true
+      tags:
+      - project_summary
+      security:
+      - cookieAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectSummary'
+          description: ''
   /api/split_config/:
     get:
       operationId: split_config_list
@@ -1263,6 +1310,24 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/tuning_log_summary/:
+    get:
+      operationId: tuning_log_summary_list
+      description: ''
+      tags:
+      - tuning_log_summary
+      security:
+      - cookieAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ParameterTuningJobList'
+          description: ''
 components:
   schemas:
     EvaluationConfig:
@@ -1365,6 +1430,31 @@ components:
       - id
       - ins_datetime
       - upd_datetime
+    ParameterTuningJobList:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        taskandparameterjoblink_set:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskAndParameterJobLink'
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        name:
+          type: string
+          nullable: true
+          maxLength: 256
+        data:
+          type: integer
+      required:
+      - data
+      - id
+      - ins_datetime
+      - taskandparameterjoblink_set
     PatchedEvaluationConfig:
       type: object
       properties:
@@ -1584,6 +1674,39 @@ components:
       - name
       - upd_datetime
       - user_column
+    ProjectSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+        user_column:
+          type: string
+          maxLength: 256
+        item_column:
+          type: string
+          maxLength: 256
+        time_column:
+          type: string
+          nullable: true
+          maxLength: 256
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        trainingdata_set:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrainingDataForSummary'
+      required:
+      - id
+      - ins_datetime
+      - item_column
+      - name
+      - trainingdata_set
+      - user_column
     SchemeEnum:
       enum:
       - RG
@@ -1618,6 +1741,16 @@ components:
           type: integer
       required:
       - id
+    StatusEnum:
+      enum:
+      - FAILURE
+      - PENDING
+      - RECEIVED
+      - RETRY
+      - REVOKED
+      - STARTED
+      - SUCCESS
+      type: string
     TargetMetricEnum:
       enum:
       - ndcg
@@ -1625,6 +1758,13 @@ components:
       - recall
       - hit
       type: string
+    TaskAndParameterJobLink:
+      type: object
+      properties:
+        task:
+          $ref: '#/components/schemas/TaskResult'
+      required:
+      - task
     TaskLog:
       type: object
       properties:
@@ -1643,6 +1783,34 @@ components:
       - id
       - ins_datetime
       - task
+    TaskResult:
+      type: object
+      properties:
+        task_id:
+          type: string
+          description: Celery ID for the Task that was run
+          maxLength: 255
+        status:
+          allOf:
+          - $ref: '#/components/schemas/StatusEnum'
+          title: Task State
+          description: Current state of the task being run
+        date_created:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Created DateTime
+          description: Datetime field when the task result was created in UTC
+        date_done:
+          type: string
+          format: date-time
+          readOnly: true
+          title: Completed DateTime
+          description: Datetime field when the task was completed in UTC
+      required:
+      - date_created
+      - date_done
+      - task_id
     TokenObtainPair:
       type: object
       properties:
@@ -1738,6 +1906,69 @@ components:
       - project
       - upd_datetime
       - upload_path
+    TrainingDataDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        upload_path:
+          type: string
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        basename:
+          type: string
+          readOnly: true
+        filesize:
+          type: integer
+          readOnly: true
+        parametertuningjob_set:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParameterTuningJobList'
+      required:
+      - basename
+      - filesize
+      - id
+      - ins_datetime
+      - parametertuningjob_set
+      - upload_path
+    TrainingDataForSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        n_parameter_tuning_jobs:
+          type: integer
+        n_trained_models:
+          type: integer
+      required:
+      - id
+      - n_parameter_tuning_jobs
+      - n_trained_models
+    User:
+      type: object
+      properties:
+        username:
+          type: string
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        is_staff:
+          type: boolean
+          title: Staff status
+          description: Designates whether the user can log into this admin site.
+        is_superuser:
+          type: boolean
+          title: Superuser status
+          description: Designates that this user has all permissions without explicitly
+            assigning them.
+      required:
+      - username
   securitySchemes:
     cookieAuth:
       type: apiKey

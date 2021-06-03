@@ -1,13 +1,17 @@
 <template>
-  <v-row>
-    <v-col cols="2" v-if="project !== null">
+  <v-row class="fill-height">
+    <v-col cols="3" v-if="project !== null">
       <v-list nav>
         <v-list-item>
-          <v-list-item-content>
-            <v-list-item-title>
-              {{ project.name }}
-            </v-list-item-title>
-          </v-list-item-content>
+          <v-list-item-icon>
+            <v-btn icon dark color="primary" :to="{ name: 'project' }">
+              <v-icon> mdi-home</v-icon>
+            </v-btn>
+          </v-list-item-icon>
+          <v-list-item-title>
+            <span class="text-caption"> Project </span><br />
+            {{ project.name }}
+          </v-list-item-title>
         </v-list-item>
         <v-divider></v-divider>
         <v-list-item
@@ -76,3 +80,9 @@ export default Vue.extend({
   },
 });
 </script>
+
+<style scoped>
+.active {
+  background-color: aqua;
+}
+</style>

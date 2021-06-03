@@ -1,84 +1,81 @@
 <template>
-  <div class="mt-4">
-    <div>
-      <v-row>
-        <v-spacer> </v-spacer>
-        <v-btn class="mr-4" color="green" dark @click="uploadDialog = true">
-          <v-icon> mdi-upload</v-icon> Upload new data
-        </v-btn>
-        <v-dialog v-model="uploadDialog" max-width="800">
-          <v-card>
-            <v-container>
-              <ValidationObserver v-slot="{ invalid }">
-                <v-form>
-                  <ValidationProvider
-                    v-slot="{ errors }"
-                    rules="uploadFileRequired"
-                  >
-                    <v-file-input
-                      label="The interaction data."
-                      accept=".csv,.tsv,.ndjson,.jsonl,.pkl,.pickle,.csv.gz,.tsv.gz,.ndjson.gz,.jsonl.gz,.pkl.gz,.pickle.gz"
-                      :error-messages="errors"
-                      v-model="uploadFile"
-                    >
-                    </v-file-input>
-                  </ValidationProvider>
-                  <div></div>
-                </v-form>
-                <v-row justify="center" class="mb-4">
-                  <v-btn color="primary" :disabled="invalid" @click="upload"
-                    >Upload</v-btn
-                  >
-                </v-row>
-                <v-alert
-                  v-for="(message, i_m) in uploadErrorMessages"
-                  type="error"
-                  :key="i_m"
+  <div class="mt-1">
+    <div style="text-align: right">
+      <v-dialog v-model="uploadDialog" max-width="800">
+        <template v-slot:activator="{ on, attrs }">
+          <v-btn class="mr-4" color="green" dark v-on="on" v-bind="attrs">
+            <v-icon> mdi-upload</v-icon> Upload new data
+          </v-btn>
+        </template>
+        <v-card>
+          <v-container>
+            <ValidationObserver v-slot="{ invalid }">
+              <v-form>
+                <ValidationProvider
+                  v-slot="{ errors }"
+                  rules="uploadFileRequired"
                 >
-                  {{ message }}
-                </v-alert>
-              </ValidationObserver>
-            </v-container>
-          </v-card>
-        </v-dialog>
-      </v-row>
-    </div>
-    <v-list v-if="trainingData.length > 0">
-      <template v-for="(td, i) in trainingData">
-        <v-list-item
-          :key="i"
-          :to="{ name: 'data-detail', params: { dataId: td.id } }"
-        >
-          <v-list-item-content>
-            <v-list-item-title>
-              {{ td.basename }}
-            </v-list-item-title>
-            <v-list-item-subtitle>
-              <v-row>
-                <v-col cols="4"> {{ td.ins_datetime }} </v-col>
-                <v-col cols="4">
-                  {{ prettyFilesize(td.filesize) }}
-                </v-col>
+                  <v-file-input
+                    label="The interaction data."
+                    accept=".csv,.tsv,.ndjson,.jsonl,.pkl,.pickle,.csv.gz,.tsv.gz,.ndjson.gz,.jsonl.gz,.pkl.gz,.pickle.gz"
+                    :error-messages="errors"
+                    v-model="uploadFile"
+                  >
+                  </v-file-input>
+                </ValidationProvider>
+                <div></div>
+              </v-form>
+              <v-row justify="center" class="mb-4">
+                <v-btn color="primary" :disabled="invalid" @click="upload"
+                  >Upload</v-btn
+                >
               </v-row>
-            </v-list-item-subtitle>
-          </v-list-item-content>
-          <v-list-item-action>
-            <v-btn icon color="primary" dark>
-              <v-icon>mdi-tune</v-icon>
-            </v-btn>
-          </v-list-item-action>
-          <v-list-item-action>
-            <v-btn icon color="warning" @click="setDeleteTarget(td)">
-              <v-icon>mdi-delete</v-icon>
-            </v-btn>
-          </v-list-item-action>
-        </v-list-item>
-        <v-divider
-          v-if="i < trainingData.length - 1"
-          :key="i + 0.5"
-        ></v-divider>
-      </template>
-    </v-list>
+              <v-alert
+                v-for="(message, i_m) in uploadErrorMessages"
+                type="error"
+                :key="i_m"
+              >
+                {{ message }}
+              </v-alert>
+            </ValidationObserver>
+          </v-container>
+        </v-card>
+      </v-dialog>
+    </div>
+    <v-container v-if="trainingData.length > 0">
+      <v-list>
+        <template v-for="(td, i) in trainingData">
+          <v-list-item
+            :key="i"
+            :to="{ name: 'data-detail', params: { dataId: td.id } }"
+          >
+            <v-list-item-content>
+              <v-list-item-title>
+                {{ td.basename }}
+              </v-list-item-title>
+              <v-list-item-subtitle>
+                <v-row>
+                  <v-col cols="5"> {{ td.ins_datetime }} </v-col>
+                  <v-col cols="4" class="ml-4">
+                    {{ prettyFilesize(td.filesize) }}
+                  </v-col>
+                  <v-spacer></v-spacer>
+                </v-row>
+              </v-list-item-subtitle>
+            </v-list-item-content>
+            <v-list-item-action>
+              <v-btn icon color="primary" dark>
+                <v-icon>mdi-tune</v-icon>
+              </v-btn>
+            </v-list-item-action>
+          </v-list-item>
+          <v-divider
+            v-if="i < trainingData.length - 1"
+            :key="i + 0.5"
+          ></v-divider>
+        </template>
+      </v-list>
+    </v-container>
     <div v-else class="text-center">No data yet.</div>
     <v-dialog v-model="deleteDialog">
       <v-card v-if="deleteTargetId !== null">

@@ -4,6 +4,9 @@
  */
 
 export interface paths {
+  "/api/data_detail/{id}/": {
+    get: operations["data_detail_retrieve"];
+  };
   "/api/evaluation_config/": {
     get: operations["evaluation_config_list"];
     post: operations["evaluation_config_create"];
@@ -14,8 +17,8 @@ export interface paths {
     delete: operations["evaluation_config_destroy"];
     patch: operations["evaluation_config_partial_update"];
   };
-  "/api/getme/{id}/": {
-    get: operations["getme_retrieve"];
+  "/api/getme/": {
+    get: operations["getme_list"];
   };
   "/api/model_configuration/": {
     get: operations["model_configuration_list"];
@@ -46,6 +49,9 @@ export interface paths {
     put: operations["project_update"];
     delete: operations["project_destroy"];
     patch: operations["project_partial_update"];
+  };
+  "/api/project_summary/{id}/": {
+    get: operations["project_summary_retrieve"];
   };
   "/api/split_config/": {
     get: operations["split_config_list"];
@@ -97,6 +103,9 @@ export interface paths {
     delete: operations["training_data_destroy"];
     patch: operations["training_data_partial_update"];
   };
+  "/api/tuning_log_summary/": {
+    get: operations["tuning_log_summary_list"];
+  };
 }
 
 export interface components {
@@ -132,6 +141,13 @@ export interface components {
       evaluation: number;
       best_config?: number | null;
       tuned_model?: number | null;
+    };
+    ParameterTuningJobList: {
+      id: number;
+      taskandparameterjoblink_set: components["schemas"]["TaskAndParameterJobLink"][];
+      ins_datetime: string;
+      name?: string | null;
+      data: number;
     };
     PatchedEvaluationConfig: {
       id?: number;
@@ -211,6 +227,15 @@ export interface components {
       ins_datetime: string;
       upd_datetime: string;
     };
+    ProjectSummary: {
+      id: number;
+      name: string;
+      user_column: string;
+      item_column: string;
+      time_column?: string | null;
+      ins_datetime: string;
+      trainingdata_set: components["schemas"]["TrainingDataForSummary"][];
+    };
     SchemeEnum: "RG" | "TG" | "TU";
     SplitConfig: {
       id: number;
@@ -222,12 +247,33 @@ export interface components {
       n_test_users?: number | null;
       random_seed?: number;
     };
+    StatusEnum:
+      | "FAILURE"
+      | "PENDING"
+      | "RECEIVED"
+      | "RETRY"
+      | "REVOKED"
+      | "STARTED"
+      | "SUCCESS";
     TargetMetricEnum: "ndcg" | "map" | "recall" | "hit";
+    TaskAndParameterJobLink: {
+      task: components["schemas"]["TaskResult"];
+    };
     TaskLog: {
       id: number;
       contents?: string;
       ins_datetime: string;
       task: number;
+    };
+    TaskResult: {
+      /** Celery ID for the Task that was run */
+      task_id: string;
+      /** Current state of the task being run */
+      status?: components["schemas"]["StatusEnum"];
+      /** Datetime field when the task result was created in UTC */
+      date_created: string;
+      /** Datetime field when the task was completed in UTC */
+      date_done: string;
     };
     TokenObtainPair: {
       username: string;
@@ -257,10 +303,46 @@ export interface components {
       basename: string;
       filesize: number;
     };
+    TrainingDataDetail: {
+      id: number;
+      upload_path: string;
+      ins_datetime: string;
+      basename: string;
+      filesize: number;
+      parametertuningjob_set: components["schemas"]["ParameterTuningJobList"][];
+    };
+    TrainingDataForSummary: {
+      id: number;
+      n_parameter_tuning_jobs: number;
+      n_trained_models: number;
+    };
+    User: {
+      /** Required. 150 characters or fewer. Letters, digits and @/./+/-/_ only. */
+      username: string;
+      /** Designates whether the user can log into this admin site. */
+      is_staff?: boolean;
+      /** Designates that this user has all permissions without explicitly assigning them. */
+      is_superuser?: boolean;
+    };
   };
 }
 
 export interface operations {
+  data_detail_retrieve: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this training data. */
+        id: number;
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["TrainingDataDetail"];
+        };
+      };
+    };
+  };
   evaluation_config_list: {
     parameters: {
       query: {
@@ -363,15 +445,13 @@ export interface operations {
       };
     };
   };
-  getme_retrieve: {
-    parameters: {
-      path: {
-        id: string;
-      };
-    };
+  getme_list: {
     responses: {
-      /** No response body */
-      200: unknown;
+      200: {
+        content: {
+          "application/json": components["schemas"]["User"][];
+        };
+      };
     };
   };
   model_configuration_list: {
@@ -677,6 +757,21 @@ export interface operations {
         "application/json": components["schemas"]["PatchedProject"];
         "application/x-www-form-urlencoded": components["schemas"]["PatchedProject"];
         "multipart/form-data": components["schemas"]["PatchedProject"];
+      };
+    };
+  };
+  project_summary_retrieve: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this project. */
+        id: number;
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["ProjectSummary"];
+        };
       };
     };
   };
@@ -1055,6 +1150,15 @@ export interface operations {
         "application/json": components["schemas"]["PatchedTrainingData"];
         "application/x-www-form-urlencoded": components["schemas"]["PatchedTrainingData"];
         "multipart/form-data": components["schemas"]["PatchedTrainingData"];
+      };
+    };
+  };
+  tuning_log_summary_list: {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["ParameterTuningJobList"][];
+        };
       };
     };
   };

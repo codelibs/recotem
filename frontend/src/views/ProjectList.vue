@@ -32,17 +32,11 @@
                     Created on {{ project.ins_datetime }}
                   </v-list-item-subtitle>
                 </v-list-item-content>
-                <v-list-item-action>
-                  <v-btn icon @click="deleteProject(project)">
-                    <v-icon>mdi-delete</v-icon>
-                  </v-btn>
-                </v-list-item-action>
               </v-list-item>
               <v-divider :key="i + 0.5" v-if="i < projects.length - 1">
               </v-divider>
             </template>
           </v-list>
-          <v-dialog :value="deleteTargetProject !== null"> </v-dialog>
         </v-tab-item>
         <v-tab-item>
           <ProjectCreation />
@@ -64,7 +58,6 @@ type Project = components["schemas"]["Project"];
 interface Data {
   tab: number;
   projects: Project[];
-  deleteTargetProject: Project | null;
 }
 
 export default Vue.extend({
@@ -72,7 +65,6 @@ export default Vue.extend({
     return {
       tab: 0,
       projects: [],
-      deleteTargetProject: null,
     };
   },
   components: {
@@ -82,9 +74,6 @@ export default Vue.extend({
     await this.getProjects();
   },
   methods: {
-    async deleteProject(project: Project) {
-      this.deleteTargetProject = project;
-    },
     async getProjects() {
       const result = await getWithRefreshToken<Project[]>(
         AuthModule,

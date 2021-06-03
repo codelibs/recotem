@@ -117,10 +117,16 @@ export default Vue.extend({
         ListProjectURL,
         this.project
       ).catch((error: AxiosError) => {
-        console.log(error.response?.data);
+        console.log(error);
         alert("Uncaught error");
         return null;
       });
+      if (result !== null) {
+        this.$router.push({
+          name: "project",
+          params: { projectId: `${result.id}` },
+        });
+      }
     },
   },
   data(): Data {

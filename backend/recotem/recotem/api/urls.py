@@ -30,3 +30,13 @@ router.register(
 )
 router.register(r"trained_model", TrainedModelViewset, basename="trained_model")
 router.register(r"task_log", TaskLogViewSet, basename="task_log")
+
+
+###
+from .view_utils.tuning_job import TrainingDataDetailViewset, TuningJobSummaryViewset
+
+router.register(
+    "tuning_log_summary", TuningJobSummaryViewset, basename="tuning-log-summary"
+)
+
+router.register("data_detail", TrainingDataDetailViewset, basename="data-detail")

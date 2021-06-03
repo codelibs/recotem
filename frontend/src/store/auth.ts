@@ -85,7 +85,7 @@ export class Auth extends VuexModule {
   async getUserName() {
     const token = this.token as string | null;
     const result = await axios
-      .get<{ username: string }>(`${baseURL}/getme/current/`, {
+      .get<{ username: string }[]>(`${baseURL}/getme/`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       .catch((error: AxiosError) => {
@@ -93,7 +93,7 @@ export class Auth extends VuexModule {
       });
 
     if (result !== null) {
-      this.setUsername(result.data.username);
+      this.setUsername(result.data[0].username);
     }
   }
 

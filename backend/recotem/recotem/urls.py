@@ -6,16 +6,8 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from .api.urls import router as api_router
 
-
-class TopPageView(TemplateView):
-    template_name = "index.html"
-
-
-index_view = never_cache(TopPageView.as_view())
-
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("", index_view, name="index"),
     path("api/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/", include(api_router.urls)),

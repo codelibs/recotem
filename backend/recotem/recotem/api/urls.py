@@ -5,6 +5,7 @@ from .views import (
     GetMeViewset,
     ModelConfigurationViewset,
     ParameterTuningJobViewSet,
+    ProjectSummaryViewSet,
     ProjectViewSet,
     SplitConfigViewSet,
     TaskLogViewSet,
@@ -15,6 +16,7 @@ from .views import (
 router = DefaultRouter()
 router.register(r"getme", GetMeViewset, basename="getme")
 router.register(r"project", ProjectViewSet, basename="project")
+router.register(r"project_summary", ProjectSummaryViewSet, basename="project_summary")
 router.register(r"training_data", TrainingDataViewset, basename="training_data")
 router.register(r"split_config", SplitConfigViewSet, basename="split_config")
 router.register(

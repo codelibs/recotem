@@ -7,7 +7,6 @@ from .models import (
     EvaluationConfig,
     ModelConfiguration,
     ParameterTuningJob,
-    Project,
     SplitConfig,
     TaskLog,
     TrainedModel,
@@ -17,20 +16,13 @@ from .serializers import (
     EvaluationConfigSerializer,
     ModelConfigurationSerializer,
     ParameterTuningJobSerializer,
-    ProjectSerializer,
     SplitConfigSerializer,
     TaskLogSerializer,
     TrainedModelSerializer,
     TrainingDataSerializer,
 )
 from .view_utils.getme import GetMeViewset
-
-
-class ProjectViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
-    queryset = Project.objects.all()
-    serializer_class = ProjectSerializer
-    filterset_fields = ["id", "name"]
+from .view_utils.project import ProjectSummaryViewSet, ProjectViewSet
 
 
 class TrainedModelViewset(viewsets.ModelViewSet):

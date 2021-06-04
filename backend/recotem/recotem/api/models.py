@@ -33,7 +33,7 @@ def upload_to(save_directory, instance, filename: str):
     while filename_as_path.suffix:
         filename_as_path = filename_as_path.with_suffix("")
     random_string = get_random_string(length=7)
-    res = f"{save_directory}/{filename_as_path}_{random_string}{''.join(suffixes)}"
+    res = f"{save_directory}/{filename_as_path.name}_{random_string}{''.join(suffixes)}"
     return res
 
 

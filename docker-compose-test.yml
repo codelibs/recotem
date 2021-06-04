@@ -21,7 +21,11 @@ services:
       - CELERY_BROKER_URL=amqp://guest@queue:5672
     command: >
       sh -c '
-        pytest -s --cov=./recotem/ --cov-report=html
+        if ! pytest -s --cov=./recotem/ --cov-report=html; then
+          echo "test failed"
+          exit 1;
+        fi
         coverage xml
         rm -rf data/training_data
+        rm -rf data/models
       '

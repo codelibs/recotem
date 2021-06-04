@@ -1,7 +1,7 @@
 from rest_framework import mixins, permissions, viewsets
 
-from ..models import ParameterTuningJob, TrainingData
-from ..serializer_utils import (
+from recotem.api.models import ParameterTuningJob, TrainingData
+from recotem.api.serializer_utils import (
     ParameterTuningJobListSerializer,
     TrainingDataDetailSerializer,
 )

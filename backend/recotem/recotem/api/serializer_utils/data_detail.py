@@ -2,7 +2,7 @@ from pathlib import Path
 
 from rest_framework import exceptions, serializers
 
-from ..models import Project, TrainingData
+from recotem.api.models import Project, TrainingData
 
 
 class TrainingDataSerializer(serializers.ModelSerializer):

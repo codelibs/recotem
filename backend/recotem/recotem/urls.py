@@ -4,7 +4,7 @@ from django.views.decorators.cache import never_cache
 from django.views.generic import TemplateView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
-from .api.urls import router as api_router
+from recotem.api.urls import router as api_router
 
 urlpatterns = [
     path("admin/", admin.site.urls),

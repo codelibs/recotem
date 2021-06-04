@@ -3,7 +3,7 @@ from typing import Union
 from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated
 
-from .models import (
+from recotem.api.models import (
     EvaluationConfig,
     ModelConfiguration,
     ParameterTuningJob,
@@ -12,7 +12,7 @@ from .models import (
     TrainedModel,
     TrainingData,
 )
-from .serializers import (
+from recotem.api.serializers import (
     EvaluationConfigSerializer,
     ModelConfigurationSerializer,
     ParameterTuningJobSerializer,
@@ -21,8 +21,8 @@ from .serializers import (
     TrainedModelSerializer,
     TrainingDataSerializer,
 )
-from .view_utils.getme import GetMeViewset
-from .view_utils.project import ProjectSummaryViewSet, ProjectViewSet
+from recotem.api.view_utils.getme import GetMeViewset
+from recotem.api.view_utils.project import ProjectSummaryViewSet, ProjectViewSet
 
 
 class TrainedModelViewset(viewsets.ModelViewSet):

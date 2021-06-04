@@ -13,7 +13,7 @@ from django_celery_results.models import TaskResult
 from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import ValidationError
 
-from .utils import read_dataframe
+from recotem.api.utils import read_dataframe
 
 # Create your models here.
 
@@ -137,7 +137,7 @@ def run_training_after_creation(
     **kwargs: Any,
 ) -> None:
     if created and instance is not None:
-        from .tasks import train_recommender
+        from recotem.api.tasks import train_recommender
 
         train_recommender.delay(instance.id)
 
@@ -174,7 +174,7 @@ def run_tuning_job_after_creation(
     **kwargs: Any,
 ) -> None:
     if created and instance is not None:
-        from .tasks import start_tuning_job
+        from recotem.api.tasks import start_tuning_job
 
         start_tuning_job(instance)
 

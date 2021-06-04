@@ -2,7 +2,7 @@ from typing import Any
 
 from rest_framework import serializers
 
-from .models import (
+from recotem.api.models import (
     EvaluationConfig,
     ModelConfiguration,
     SplitConfig,
@@ -10,7 +10,7 @@ from .models import (
     TrainedModel,
     User,
 )
-from .serializer_utils import (
+from recotem.api.serializer_utils import (
     ParameterTuningJobSerializer,
     ProjectSerializer,
     TrainingDataSerializer,

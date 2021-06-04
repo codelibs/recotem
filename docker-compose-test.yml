@@ -4,8 +4,6 @@ services:
     image: rabbitmq:3
     ports:
       - "5672:5672"
-    logging:
-      driver: none
   backend:
     depends_on:
       - queue

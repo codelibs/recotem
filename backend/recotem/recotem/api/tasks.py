@@ -30,8 +30,7 @@ from irspack.recommenders.base import get_recommender_class
 from irspack.utils import df_to_sparse
 from optuna.storages import RDBStorage
 
-from ..celery import app
-from .models import (
+from recotem.api.models import (
     EvaluationConfig,
     ModelConfiguration,
     ParameterTuningJob,
@@ -43,7 +42,8 @@ from .models import (
     TrainedModel,
     TrainingData,
 )
-from .utils import read_dataframe
+from recotem.api.utils import read_dataframe
+from recotem.celery import app
 
 
 class BilliardBackend(TaskBackend):

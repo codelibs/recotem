@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from ..models import Project, TrainingData
+from recotem.api.models import Project, TrainingData
 
 
 class ProjectSerializer(serializers.ModelSerializer):

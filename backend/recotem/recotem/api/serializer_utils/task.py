@@ -1,7 +1,7 @@
 from django_celery_results.models import TaskResult
 from rest_framework import serializers
 
-from ..models import TaskLog
+from recotem.api.models import TaskLog
 
 
 class TaskLogSerializer(serializers.ModelSerializer):

@@ -1,6 +1,6 @@
 from rest_framework.routers import DefaultRouter
 
-from .views import (
+from recotem.api.views import (
     EvaluationConfigViewSet,
     GetMeViewset,
     ModelConfigurationViewset,
@@ -32,8 +32,10 @@ router.register(r"trained_model", TrainedModelViewset, basename="trained_model")
 router.register(r"task_log", TaskLogViewSet, basename="task_log")
 
 
-###
-from .view_utils.tuning_job import TrainingDataDetailViewset, TuningJobSummaryViewset
+from recotem.api.view_utils.tuning_job import (
+    TrainingDataDetailViewset,
+    TuningJobSummaryViewset,
+)
 
 router.register(
     "tuning_log_summary", TuningJobSummaryViewset, basename="tuning-log-summary"

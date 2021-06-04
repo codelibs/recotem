@@ -241,6 +241,11 @@ def test_data_post_with_pkl_compression(
     response = client.post(data_url, dict(project=project_id, upload_path=dump_file))
     assert response.status_code == 201
     data_id = response.json()["id"]
+
+    dump_file.seek(0)
+    response2 = client.post(data_url, dict(project=project_id, upload_path=dump_file))
+    assert response2.status_code == 201
+
     dump_file.close()
 
     data_created: TrainingData = TrainingData.objects.get(id=data_id)

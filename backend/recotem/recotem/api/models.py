@@ -1,4 +1,5 @@
-from pathlib import Path
+from functools import partial
+from pathlib import Path, PurePath
 from typing import Any, Optional, Type
 
 import pandas as pd
@@ -6,6 +7,7 @@ from django.contrib.auth.models import User
 from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django.utils.crypto import get_random_string
 from django.utils.translation import gettext_lazy as _
 from django_celery_results.models import TaskResult
 from rest_framework.authtoken.models import Token
@@ -25,9 +27,22 @@ class Project(models.Model):
     upd_datetime = models.DateTimeField(auto_now=True)
 
 
+def upload_to(save_directory, instance, filename: str):
+    filename_as_path = PurePath(filename)
+    suffixes = filename_as_path.suffixes
+    while filename_as_path.suffix:
+        filename_as_path = filename_as_path.with_suffix("")
+    random_string = get_random_string(length=7)
+    res = f"{save_directory}/{filename_as_path}_{random_string}{''.join(suffixes)}"
+    return res
+
+
+trainingdata_upload_to = partial(upload_to, "training_data")
+
+
 class TrainingData(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE)
-    upload_path = models.FileField(upload_to="training_data/", null=False)
+    upload_path = models.FileField(upload_to=trainingdata_upload_to, null=False)
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
 

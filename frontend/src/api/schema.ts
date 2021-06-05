@@ -140,6 +140,8 @@ export interface components {
       timeout_overall?: number | null;
       timeout_singlestep?: number | null;
       random_seed?: number | null;
+      irspack_version?: string | null;
+      train_after_tuning?: boolean;
       ins_datetime: string;
       upd_datetime: string;
       data: number;
@@ -179,6 +181,8 @@ export interface components {
       timeout_overall?: number | null;
       timeout_singlestep?: number | null;
       random_seed?: number | null;
+      irspack_version?: string | null;
+      train_after_tuning?: boolean;
       ins_datetime?: string;
       upd_datetime?: string;
       data?: number;
@@ -210,6 +214,7 @@ export interface components {
       id?: number;
       name?: string | null;
       model_path?: string | null;
+      irspack_version?: string | null;
       ins_datetime?: string;
       upd_datetime?: string;
       configuration?: number;
@@ -295,6 +300,7 @@ export interface components {
       id: number;
       name?: string | null;
       model_path?: string | null;
+      irspack_version?: string | null;
       ins_datetime: string;
       upd_datetime: string;
       configuration: number;

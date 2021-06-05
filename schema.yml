@@ -17,7 +17,6 @@ paths:
       tags:
       - data_detail
       security:
-      - cookieAuth: []
       - jwtAuth: []
       - {}
       responses:
@@ -43,7 +42,6 @@ paths:
       tags:
       - evaluation_config
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -71,7 +69,6 @@ paths:
             schema:
               $ref: '#/components/schemas/EvaluationConfig'
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '201':
@@ -94,7 +91,6 @@ paths:
       tags:
       - evaluation_config
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -127,7 +123,6 @@ paths:
             schema:
               $ref: '#/components/schemas/EvaluationConfig'
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -160,7 +155,6 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedEvaluationConfig'
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -182,7 +176,6 @@ paths:
       tags:
       - evaluation_config
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '204':
@@ -194,7 +187,6 @@ paths:
       tags:
       - getme
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -221,7 +213,6 @@ paths:
       tags:
       - model_configuration
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -250,7 +241,6 @@ paths:
               $ref: '#/components/schemas/ModelConfiguration'
         required: true
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '201':
@@ -273,7 +263,6 @@ paths:
       tags:
       - model_configuration
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -307,7 +296,6 @@ paths:
               $ref: '#/components/schemas/ModelConfiguration'
         required: true
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -340,7 +328,6 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedModelConfiguration'
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -362,7 +349,6 @@ paths:
       tags:
       - model_configuration
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '204':
@@ -383,7 +369,6 @@ paths:
       tags:
       - parameter_tuning_job
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -412,7 +397,6 @@ paths:
               $ref: '#/components/schemas/ParameterTuningJob'
         required: true
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '201':
@@ -435,7 +419,6 @@ paths:
       tags:
       - parameter_tuning_job
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -469,7 +452,6 @@ paths:
               $ref: '#/components/schemas/ParameterTuningJob'
         required: true
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -502,7 +484,6 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedParameterTuningJob'
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -524,7 +505,6 @@ paths:
       tags:
       - parameter_tuning_job
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '204':
@@ -545,7 +525,6 @@ paths:
       tags:
       - project
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -574,7 +553,6 @@ paths:
               $ref: '#/components/schemas/Project'
         required: true
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '201':
@@ -597,7 +575,6 @@ paths:
       tags:
       - project
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -631,7 +608,6 @@ paths:
               $ref: '#/components/schemas/Project'
         required: true
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -664,7 +640,6 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedProject'
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -686,7 +661,6 @@ paths:
       tags:
       - project
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '204':
@@ -705,7 +679,6 @@ paths:
       tags:
       - project_summary
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -730,7 +703,6 @@ paths:
       tags:
       - split_config
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -758,7 +730,6 @@ paths:
             schema:
               $ref: '#/components/schemas/SplitConfig'
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '201':
@@ -781,7 +752,6 @@ paths:
       tags:
       - split_config
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -814,7 +784,6 @@ paths:
             schema:
               $ref: '#/components/schemas/SplitConfig'
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -847,7 +816,6 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedSplitConfig'
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -869,7 +837,6 @@ paths:
       tags:
       - split_config
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '204':
@@ -894,7 +861,6 @@ paths:
       tags:
       - task_log
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -919,7 +885,6 @@ paths:
       tags:
       - task_log
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -1002,7 +967,6 @@ paths:
       tags:
       - trained_model
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -1031,7 +995,6 @@ paths:
               $ref: '#/components/schemas/TrainedModel'
         required: true
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '201':
@@ -1054,7 +1017,6 @@ paths:
       tags:
       - trained_model
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -1088,7 +1050,6 @@ paths:
               $ref: '#/components/schemas/TrainedModel'
         required: true
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -1121,7 +1082,6 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedTrainedModel'
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -1143,7 +1103,6 @@ paths:
       tags:
       - trained_model
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '204':
@@ -1157,6 +1116,18 @@ paths:
         name: id
         schema:
           type: integer
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
       - in: query
         name: project
         schema:
@@ -1164,16 +1135,13 @@ paths:
       tags:
       - training_data
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/TrainingData'
+                $ref: '#/components/schemas/PaginatedTrainingDataList'
           description: ''
     post:
       operationId: training_data_create
@@ -1193,7 +1161,6 @@ paths:
               $ref: '#/components/schemas/TrainingData'
         required: true
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '201':
@@ -1216,7 +1183,6 @@ paths:
       tags:
       - training_data
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -1250,7 +1216,6 @@ paths:
               $ref: '#/components/schemas/TrainingData'
         required: true
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -1283,7 +1248,6 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedTrainingData'
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -1305,7 +1269,6 @@ paths:
       tags:
       - training_data
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '204':
@@ -1317,7 +1280,6 @@ paths:
       tags:
       - tuning_log_summary
       security:
-      - cookieAuth: []
       - jwtAuth: []
       responses:
         '200':
@@ -1378,6 +1340,26 @@ components:
       - project
       - recommender_class_name
       - upd_datetime
+    PaginatedTrainingDataList:
+      type: object
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrainingData'
     ParameterTuningJob:
       type: object
       properties:
@@ -1403,6 +1385,12 @@ components:
         random_seed:
           type: integer
           nullable: true
+        irspack_version:
+          type: string
+          nullable: true
+          maxLength: 16
+        train_after_tuning:
+          type: boolean
         ins_datetime:
           type: string
           format: date-time
@@ -1519,6 +1507,12 @@ components:
         random_seed:
           type: integer
           nullable: true
+        irspack_version:
+          type: string
+          nullable: true
+          maxLength: 16
+        train_after_tuning:
+          type: boolean
         ins_datetime:
           type: string
           format: date-time
@@ -1605,6 +1599,10 @@ components:
         model_path:
           type: string
           nullable: true
+        irspack_version:
+          type: string
+          nullable: true
+          maxLength: 16
         ins_datetime:
           type: string
           format: date-time
@@ -1640,6 +1638,7 @@ components:
           readOnly: true
         filesize:
           type: integer
+          nullable: true
           readOnly: true
     Project:
       type: object
@@ -1856,6 +1855,10 @@ components:
         model_path:
           type: string
           nullable: true
+        irspack_version:
+          type: string
+          nullable: true
+          maxLength: 16
         ins_datetime:
           type: string
           format: date-time
@@ -1897,6 +1900,7 @@ components:
           readOnly: true
         filesize:
           type: integer
+          nullable: true
           readOnly: true
       required:
       - basename
@@ -1923,6 +1927,7 @@ components:
           readOnly: true
         filesize:
           type: integer
+          nullable: true
           readOnly: true
         parametertuningjob_set:
           type: array
@@ -1970,10 +1975,6 @@ components:
       required:
       - username
   securitySchemes:
-    cookieAuth:
-      type: apiKey
-      in: cookie
-      name: Session
     jwtAuth:
       type: http
       scheme: bearer

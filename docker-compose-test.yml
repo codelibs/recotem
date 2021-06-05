@@ -22,7 +22,7 @@ services:
       - RECOTEM_TESTING=true
     command: >
       sh -c '
-        if ! pytest -s --cov=./recotem/ --cov-report=html tests/test_train.py; then
+        if ! pytest -s --cov=./recotem/ --cov-report=html ; then
           echo "test failed"
           exit 1;
         fi

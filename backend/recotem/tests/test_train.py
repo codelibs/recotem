@@ -122,17 +122,18 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         ),
     ).json()["id"]
 
-    tuned_model = None
+    model_after_tuning_job = None
     for _ in range(20):
-        job = ParameterTuningJob.objects.get(id=job_with_train_afterward_id)
-        tuned_model = job.tuned_model
-        if tuned_model is not None:
-            assert job.irspack_version is not None
-            assert tuned_model.irspack_version is not None
+        job_ = ParameterTuningJob.objects.get(id=job_with_train_afterward_id)
+        model_after_tuning_job = job_.tuned_model
+        if model_after_tuning_job is not None:
+            assert job_.irspack_version is not None
+            assert model_after_tuning_job.irspack_version is not None
             break
         sleep(1.0)
-    assert tuned_model is not None
+    assert model_after_tuning_job is not None
 
-    result = pickle.load(tuned_model.model_path)
+    result = pickle.load(model_after_tuning_job.model_path)
     assert "id_mapped_recommender" in result
     assert "irspack_version" in result
+    assert result["recotem_trained_model_id"] == model_after_tuning_job.id

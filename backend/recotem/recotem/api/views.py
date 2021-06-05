@@ -57,7 +57,7 @@ class ModelConfigurationViewset(viewsets.ModelViewSet):
 class SplitConfigViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
-    queryset = SplitConfig.objects.all()
+    queryset = SplitConfig.objects.all().filter(name__isnull=False)
     serializer_class = SplitConfigSerializer
     filterset_fields = ["id", "name"]
 

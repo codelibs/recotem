@@ -9,7 +9,11 @@
         <v-stepper-step step="3"> Job Configuration </v-stepper-step>
       </v-stepper-header>
       <v-stepper-content step="1">
-        <SplitConfigForm v-model="evaluationConfig" />
+        <SplitConfigForm v-model="evaluationConfig">
+          <template v-slot="{ isValid }">
+            <v-btn :disabled="!isValid" color="primary"> Next </v-btn>
+          </template>
+        </SplitConfigForm>
       </v-stepper-content>
     </v-stepper>
     {{ evaluationConfig }}

@@ -116,16 +116,15 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
             split=split_id,
             evaluation=evaluation_id,
             n_tasks_parallel=1,
-            n_trials=5,
+            n_trials=3,
             memory_budget=1,
-            timeout_singlestep=5,
             train_after_tuning=True,
         ),
     ).json()["id"]
 
     tuned_model = None
-    for _ in range(100):
-        job = ParameterTuningJob.objects.get(id=job_id)
+    for _ in range(20):
+        job = ParameterTuningJob.objects.get(id=job_with_train_afterward_id)
         tuned_model = job.tuned_model
         if tuned_model is not None:
             assert job.irspack_version is not None

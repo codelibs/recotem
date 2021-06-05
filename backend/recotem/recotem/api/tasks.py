@@ -5,7 +5,7 @@ import re
 import tempfile
 from logging import Logger
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import pandas as pd
 import scipy.sparse as sps
@@ -86,14 +86,14 @@ class BilliardBackend(TaskBackend):
         self._p.terminate()
 
 
-@app.task(bind=True)
-def train_recommender(self, model_id: int) -> None:
+def train_recommender_func(
+    task_result, model_id: int, parameter_tuning_job_id: Optional[int] = None
+):
     model: TrainedModel = TrainedModel.objects.get(id=model_id)
 
     model_config: ModelConfiguration = model.configuration
     data: TrainingData = model.data_loc
 
-    task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
     TaskAndTrainedModelLink.objects.create(model=model, task=task_result)
     assert model_config.project.id == data.project.id
     project: Project = data.project
@@ -110,7 +110,11 @@ def train_recommender(self, model_id: int) -> None:
     with tempfile.TemporaryFile() as temp_fs:
         mapped_rec = IDMappedRecommender(rec, uid, iid)
         pickle.dump(
-            dict(id_mapped_recommender=mapped_rec, irspack_version=irspack_version),
+            dict(
+                id_mapped_recommender=mapped_rec,
+                irspack_version=irspack_version,
+                recotem_trained_model_id=model_id,
+            ),
             temp_fs,
         )
         temp_fs.seek(0)
@@ -118,12 +122,21 @@ def train_recommender(self, model_id: int) -> None:
         model.model_path = file_
         model.save()
 
-    return "complete"
+    if parameter_tuning_job_id is not None:
+        job: ParameterTuningJob = ParameterTuningJob.objects.get(
+            id=parameter_tuning_job_id
+        )
+        job.tuned_model = model
+        job.save()
 
 
 @app.task(bind=True)
-def create_best_config(self, parameter_tuning_job_id, *args):
+def task_train_recommender(self, model_id: int) -> None:
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
+    train_recommender_func(task_result, model_id)
+
+
+def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
     job: ParameterTuningJob = ParameterTuningJob.objects.get(id=parameter_tuning_job_id)
 
     TaskAndParameterJobLink.objects.create(job=job, task=task_result)
@@ -172,7 +185,24 @@ def create_best_config(self, parameter_tuning_job_id, *args):
         contents=f"""Found best configuration: {recommender_class_name} / {best_params}.""",
     )
 
-    return config.id, data.id, parameter_tuning_job_id
+    return config.id
+
+
+@app.task(bind=True)
+def task_create_best_config(self, parameter_tuning_job_id: int, *args) -> int:
+    task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
+    return create_best_config_fun(task_result, parameter_tuning_job_id)
+
+
+@app.task(bind=True)
+def task_create_best_config_train_rec(self, parameter_tuning_job_id: int, *args) -> int:
+    task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
+    config_id = create_best_config_fun(task_result, parameter_tuning_job_id)
+    job: ParameterTuningJob = ParameterTuningJob.objects.get(id=parameter_tuning_job_id)
+    config: ModelConfiguration = ModelConfiguration.objects.get(id=config_id)
+    model = TrainedModel.objects.create(configuration=config, data_loc=job.data)
+
+    train_recommender_func(task_result, model.id, parameter_tuning_job_id)
 
 
 @app.task(bind=True)
@@ -265,7 +295,17 @@ def start_tuning_job(job: ParameterTuningJob) -> None:
     study_name = job.study_name()
     optuna_storage.create_new_study(study_name)
 
-    chain(
-        group(run_search.si(job.id, i) for i in range(max(1, job.n_tasks_parallel))),
-        create_best_config.si(job.id),
-    ).delay()
+    if job.train_after_tuning:
+        chain(
+            group(
+                run_search.si(job.id, i) for i in range(max(1, job.n_tasks_parallel))
+            ),
+            task_create_best_config_train_rec.si(job.id),
+        ).delay()
+    else:
+        chain(
+            group(
+                run_search.si(job.id, i) for i in range(max(1, job.n_tasks_parallel))
+            ),
+            task_create_best_config.si(job.id),
+        ).delay()

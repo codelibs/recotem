@@ -30,9 +30,9 @@ class TrainedModelSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         obj: TrainedModel = TrainedModel.objects.create(**validated_data)
-        from recotem.api.tasks import train_recommender
+        from recotem.api.tasks import task_train_recommender
 
-        train_recommender.delay(obj.id)
+        task_train_recommender.delay(obj.id)
         return obj
 
 

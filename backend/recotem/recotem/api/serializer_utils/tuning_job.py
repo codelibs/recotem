@@ -9,6 +9,13 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
         model = ParameterTuningJob
         fields = "__all__"
 
+    def create(self, validated_data):
+        obj: ParameterTuningJob = ParameterTuningJob.objects.create(**validated_data)
+        from recotem.api.tasks import start_tuning_job
+
+        start_tuning_job(obj)
+        return obj
+
 
 class TaskAndParameterJobLinkSerializer(serializers.ModelSerializer):
     task = TaskResultSerializer()

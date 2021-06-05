@@ -42,6 +42,12 @@ const routes: Array<RouteConfig> = [
                 component: () => import("../views/project/data/Detail.vue"),
               },
               {
+                path: ":dataId/start_tuning_with",
+                name: "start-tuning-with-data",
+                component: () =>
+                  import("../views/project/data/StartTuningWithData.vue"),
+              },
+              {
                 path: "",
                 name: "data-list",
                 component: () => import("../views/project/data/List.vue"),

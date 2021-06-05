@@ -1,6 +1,7 @@
 from typing import Union
 
 from rest_framework import viewsets
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 
 from recotem.api.models import (
@@ -38,6 +39,11 @@ class TrainingDataViewset(viewsets.ModelViewSet):
     queryset = TrainingData.objects.all()
     serializer_class = TrainingDataSerializer
     filterset_fields = ["id", "project"]
+
+    class pagination_class(PageNumberPagination):
+        page_size = 10
+        page_size_query_param = "page_size"
+        max_page_size = 10000
 
 
 class ModelConfigurationViewset(viewsets.ModelViewSet):

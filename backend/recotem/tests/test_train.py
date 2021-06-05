@@ -41,6 +41,8 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
             time_column="timestamp",
         ),
     )
+    if project_resp.status_code != 201:
+        raise RuntimeError(project_resp.json())
 
     project_id = project_resp.json()["id"]
     pkl_file = NamedTemporaryFile(suffix=f".json.gz")
@@ -81,6 +83,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         job = ParameterTuningJob.objects.get(id=job_id)
         best_config = job.best_config
         if best_config is not None:
+            assert job.irspack_version is not None
             break
         sleep(1.0)
     assert best_config is not None
@@ -97,9 +100,40 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         model = TrainedModel.objects.get(id=model_id)
         train_model_path = model.model_path
         if train_model_path.name:
+            assert model.irspack_version is not None
             break
         sleep(1.0)
     assert train_model_path is not None
     model = TrainedModel.objects.get(id=model_id)
     result = pickle.load(model.model_path)
     assert "id_mapped_recommender" in result
+    assert "irspack_version" in result
+
+    job_with_train_afterward_id = client.post(
+        parameter_tuning_job_url,
+        dict(
+            data=data_id,
+            split=split_id,
+            evaluation=evaluation_id,
+            n_tasks_parallel=1,
+            n_trials=5,
+            memory_budget=1,
+            timeout_singlestep=5,
+            train_after_tuning=True,
+        ),
+    ).json()["id"]
+
+    tuned_model = None
+    for _ in range(100):
+        job = ParameterTuningJob.objects.get(id=job_id)
+        tuned_model = job.tuned_model
+        if tuned_model is not None:
+            assert job.irspack_version is not None
+            assert tuned_model.irspack_version is not None
+            break
+        sleep(1.0)
+    assert tuned_model is not None
+
+    result = pickle.load(tuned_model.model_path)
+    assert "id_mapped_recommender" in result
+    assert "irspack_version" in result

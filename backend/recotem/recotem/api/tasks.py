@@ -15,14 +15,9 @@ from celery import chain, group
 from django.conf import settings
 from django.core.files.storage import default_storage
 from django_celery_results.models import TaskResult
-from irspack import (
-    Evaluator,
-    IDMappedRecommender,
-    InteractionMatrix,
-    autopilot,
-    get_optimizer_class,
-    split_dataframe_partial_user_holdout,
-)
+from irspack import Evaluator, IDMappedRecommender, InteractionMatrix
+from irspack import __version__ as irspack_version
+from irspack import autopilot, get_optimizer_class, split_dataframe_partial_user_holdout
 from irspack.optimizers.autopilot import TaskBackend, search_one
 from irspack.parameter_tuning import Suggestion
 from irspack.parameter_tuning.parameter_range import is_valid_param_name
@@ -108,11 +103,16 @@ def train_recommender(self, model_id: int) -> None:
 
     X, uid, iid = df_to_sparse(data.validate_return_df(), user_column, item_column)
 
+    model.irspack_version = irspack_version
+
     param = json.loads(model_config.parameters_json)
     rec = recommender_class(X, **param).learn()
     with tempfile.TemporaryFile() as temp_fs:
         mapped_rec = IDMappedRecommender(rec, uid, iid)
-        pickle.dump(dict(id_mapped_recommender=mapped_rec), temp_fs)
+        pickle.dump(
+            dict(id_mapped_recommender=mapped_rec, irspack_version=irspack_version),
+            temp_fs,
+        )
         temp_fs.seek(0)
         file_ = default_storage.save(f"models/model-{model.id}.pkl", temp_fs)
         model.model_path = file_
@@ -158,8 +158,11 @@ def create_best_config(self, parameter_tuning_job_id, *args):
         parameters_json=json.dumps(best_params),
         recommender_class_name=recommender_class_name,
     )
+
     job.best_config = config
+    job.irspack_version = irspack_version
     job.save()
+
     TaskLog.objects.create(
         task=task_result,
         contents=f"""Job {parameter_tuning_job_id} complete.""",
@@ -169,7 +172,7 @@ def create_best_config(self, parameter_tuning_job_id, *args):
         contents=f"""Found best configuration: {recommender_class_name} / {best_params}.""",
     )
 
-    return config.id, data.id
+    return config.id, data.id, parameter_tuning_job_id
 
 
 @app.task(bind=True)

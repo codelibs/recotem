@@ -1,27 +1,22 @@
 <template>
-  <div>
-    <v-list v-if="trainingData !== null">
-      <v-list-item
-        v-for="(td, i) in trainingData.parametertuningjob_set"
-        :key="i"
-      >
-        <v-list-item-title>
-          {{ td.name }} <br />
-          id: {{ td.id }}
-        </v-list-item-title>
-        <v-list-item-subtitle>
-          {{ td.ins_datetime }}
-        </v-list-item-subtitle>
-        <ul>
-          <li
-            v-for="(tpjl, i_tpjl) in td.taskandparameterjoblink_set"
-            :key="i_tpjl"
-          >
-            {{ tpjl.task.status }}
-          </li>
-        </ul>
-      </v-list-item>
-    </v-list>
+  <div v-if="dataDetail !== undefined">
+    <v-row>
+      <v-col cols="8">
+        <div class="text-h5">Data {{ dataDetail.basename }}</div>
+        <div class="text-subtitle-1">Saved as {{ dataDetail.upload_path }}</div>
+      </v-col>
+      <v-col>
+        <v-btn color="info" dark :to="{ name: 'start-tuning-with-data' }">
+          <v-icon> mdi-tune </v-icon>
+          <span class="pl-2"> Start Tuning </span>
+        </v-btn>
+      </v-col>
+    </v-row>
+
+    <div>Tuning Job List</div>
+    <tuning-job-list
+      :parameterTuningJobList="dataDetail.parametertuningjob_set"
+    />
   </div>
 </template>
 <script lang="ts">
@@ -29,16 +24,21 @@ import Vue from "vue";
 import { components, paths } from "@/api/schema";
 import { AuthModule } from "@/store/auth";
 import { getWithRefreshToken } from "@/utils";
+import TuningJobList from "@/components/TuningJobList.vue";
 type TrainingDataType = components["schemas"]["TrainingDataDetail"];
+
 const retrieveURL = "/api/data_detail";
+const dataDetailURL = "/api/data_detail/{id}";
+type responses = paths["/api/data_detail/{id}/"]["get"]["responses"];
+type respose200 = responses["200"]["content"]["application/json"];
 
 type Data = {
-  trainingData: TrainingDataType | null;
+  dataDetail: respose200 | undefined;
 };
 export default Vue.extend({
   data(): Data {
     return {
-      trainingData: null,
+      dataDetail: undefined,
     };
   },
   async mounted() {
@@ -57,8 +57,12 @@ export default Vue.extend({
         `${retrieveURL}/${this.dataId}`
       );
       if (result === null) return;
-      this.trainingData = result;
+      console.log(result);
+      this.dataDetail = result;
     },
+  },
+  components: {
+    TuningJobList,
   },
   computed: {
     dataId(): number | null {

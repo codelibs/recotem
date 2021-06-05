@@ -1,3 +1,4 @@
+import re
 from functools import partial
 from pathlib import Path, PurePath
 from typing import Any, Optional, Type
@@ -5,12 +6,9 @@ from typing import Any, Optional, Type
 import pandas as pd
 from django.contrib.auth.models import User
 from django.db import models
-from django.db.models.signals import post_save
-from django.dispatch import receiver
 from django.utils.crypto import get_random_string
 from django.utils.translation import gettext_lazy as _
 from django_celery_results.models import TaskResult
-from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import ValidationError
 
 from recotem.api.utils import read_dataframe
@@ -38,6 +36,7 @@ def upload_to(save_directory, instance, filename: str):
 
 
 trainingdata_upload_to = partial(upload_to, "training_data")
+remove_rand = re.compile("_.{7}$")
 
 
 class TrainingData(models.Model):
@@ -74,6 +73,19 @@ class TrainingData(models.Model):
                 f'Column "{item_column}" not found in the upload file.'
             )
         return df
+
+    def basename(self) -> str:
+        path = PurePath(self.upload_path.name)
+        suffixes = path.suffixes
+        while path.suffixes:
+            path = path.with_suffix("")
+        return remove_rand.sub("", path.name) + ("".join(suffixes))
+
+    def filesize(self) -> Optional[int]:
+        try:
+            return self.upload_path.size
+        except:
+            return None
 
 
 class SplitConfig(models.Model):
@@ -125,21 +137,9 @@ class TrainedModel(models.Model):
     configuration = models.ForeignKey(ModelConfiguration, on_delete=models.CASCADE)
     data_loc = models.ForeignKey(TrainingData, on_delete=models.CASCADE)
     model_path = models.FileField(upload_to="models/", null=True)
+    irspack_version = models.CharField(max_length=16, null=True)
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
-
-
-@receiver(post_save, sender=TrainedModel)
-def run_training_after_creation(
-    sender: Type[TrainedModel],
-    instance: Optional[TrainedModel] = None,
-    created: bool = False,
-    **kwargs: Any,
-) -> None:
-    if created and instance is not None:
-        from recotem.api.tasks import train_recommender
-
-        train_recommender.delay(instance.id)
 
 
 class ParameterTuningJob(models.Model):
@@ -155,28 +155,20 @@ class ParameterTuningJob(models.Model):
     timeout_singlestep = models.IntegerField(null=True)
     random_seed = models.IntegerField(null=True)
 
+    irspack_version = models.CharField(max_length=16, null=True)
+
     best_config = models.ForeignKey(
         ModelConfiguration, null=True, on_delete=models.PROTECT
     )
-    tuned_model = models.ForeignKey(TrainedModel, null=True, on_delete=models.PROTECT)
+
+    train_after_tuning = models.BooleanField(default=False)
+    tuned_model = models.ForeignKey(TrainedModel, null=True, on_delete=models.SET_NULL)
+
     ins_datetime = models.DateTimeField(auto_now_add=True)
     upd_datetime = models.DateTimeField(auto_now=True)
 
     def study_name(self):
         return f"job-{self.id}-{self.ins_datetime}"
-
-
-@receiver(post_save, sender=ParameterTuningJob)
-def run_tuning_job_after_creation(
-    sender: Type[ParameterTuningJob],
-    instance: Optional[ParameterTuningJob] = None,
-    created: bool = False,
-    **kwargs: Any,
-) -> None:
-    if created and instance is not None:
-        from recotem.api.tasks import start_tuning_job
-
-        start_tuning_job(instance)
 
 
 class TaskAndParameterJobLink(models.Model):

@@ -53,14 +53,22 @@ MIDDLEWARE = [
 ]
 MIDDLEWARE_CLASSES = ("whitenoise.middleware.WhiteNoiseMiddleware",)
 
+RECOTEM_API_AUTH = [
+    "rest_framework_simplejwt.authentication.JWTAuthentication",
+]
+
+
+if env("RECOTEM_TESTING", cast=bool, default=False):
+    RECOTEM_API_AUTH.append(
+        "rest_framework.authentication.SessionAuthentication",
+    )
+
+
 REST_FRAMEWORK = {
     # "DEFAULT_AUTHENTICATION_CLASSES": [
     #    "rest_framework.authentication.BasicAuthentication",
     # ],
-    "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework.authentication.SessionAuthentication",
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
-    ),
+    "DEFAULT_AUTHENTICATION_CLASSES": RECOTEM_API_AUTH,
     "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
     "UPLOADED_FILES_USE_URL": False,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",

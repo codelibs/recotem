@@ -37,6 +37,10 @@ export async function refreshToken(module: Auth) {
 }
 
 export async function checkLogin(module: Auth): Promise<boolean> {
+  if (module.token !== null) {
+    return true;
+  }
+
   let refresh_token = module.refresh;
   if (!refresh_token) {
     refresh_token = localStorage.getItem("refresh");
@@ -103,6 +107,8 @@ export async function postWithRefreshToken<Payload, Return>(
     headers: { Authorization: `Bearer ${module.token}` },
   }).catch(async (error: AxiosError) => {
     if (error.response?.status === 403) {
+      console.log("token expired?");
+      console.log(error.response.data);
       await refreshToken(module);
       const result = await Axios.post<Return>(path, payload, {
         headers: {

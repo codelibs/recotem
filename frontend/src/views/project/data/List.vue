@@ -42,8 +42,10 @@
         </v-card>
       </v-dialog>
     </div>
-    <v-container v-if="trainingData.length > 0">
+    <v-container v-if="trainingData !== undefined">
       <v-list>
+        <v-divider></v-divider>
+
         <template v-for="(td, i) in trainingData">
           <v-list-item
             :key="i"
@@ -64,15 +66,20 @@
               </v-list-item-subtitle>
             </v-list-item-content>
             <v-list-item-action>
-              <v-btn icon color="primary" dark>
+              <v-btn
+                icon
+                color="primary"
+                dark
+                :to="{
+                  name: 'start-tuning-with-data',
+                  params: { dataId: td.id },
+                }"
+              >
                 <v-icon>mdi-tune</v-icon>
               </v-btn>
             </v-list-item-action>
           </v-list-item>
-          <v-divider
-            v-if="i < trainingData.length - 1"
-            :key="i + 0.5"
-          ></v-divider>
+          <v-divider :key="i + 0.5"></v-divider>
         </template>
       </v-list>
     </v-container>
@@ -97,6 +104,7 @@ import { AuthModule } from "@/store/auth";
 import { AxiosError } from "axios";
 import { required } from "vee-validate/dist/rules";
 import { ValidationObserver, ValidationProvider, extend } from "vee-validate";
+import { ThisTypedComponentOptionsWithRecordProps } from "vue/types/options";
 
 extend("uploadFileRequired", {
   ...required,
@@ -105,8 +113,17 @@ extend("uploadFileRequired", {
 
 const trainingDataListURL = "/api/training_data/";
 type TrainingData = components["schemas"]["TrainingData"];
+type responseType =
+  paths["/api/training_data/"]["get"]["responses"]["200"]["content"]["application/json"];
+type responseContent = responseType["results"];
+
+const pageSize = 2;
+
 type Data = {
-  trainingData: TrainingData[];
+  trainingData: responseContent;
+  pageNumber: number;
+  totalSize: number | null;
+  maxPageNumber: number | null;
   uploadDialog: boolean;
   uploadProgress: null | number;
   uploadFile: null | File;
@@ -118,7 +135,10 @@ type Data = {
 export default Vue.extend({
   data(): Data {
     return {
-      trainingData: [],
+      trainingData: undefined,
+      pageNumber: 1,
+      totalSize: null,
+      maxPageNumber: null,
       uploadDialog: false,
       uploadProgress: null,
       uploadFile: null,
@@ -134,6 +154,11 @@ export default Vue.extend({
       } catch {
         return null;
       }
+    },
+  },
+  watch: {
+    async pageNumber() {
+      await this.fetchData();
     },
   },
   methods: {
@@ -160,7 +185,10 @@ export default Vue.extend({
         await this.fetchData();
       }
     },
-    prettyFilesize(x: number): string {
+    prettyFilesize(x: number | null): string {
+      if (x === null) {
+        return "Unknown";
+      }
       if (x < 1024) {
         return `${x}B`;
       }
@@ -176,15 +204,21 @@ export default Vue.extend({
       if (this.projectId === null) {
         return;
       }
-      let trainingData = await getWithRefreshToken<TrainingData[]>(
+      let trainingData = await getWithRefreshToken<responseType>(
         AuthModule,
-        trainingDataListURL + `?${qs.stringify({ project: this.projectId })}`
+        trainingDataListURL +
+          `?${qs.stringify({
+            project: this.projectId,
+            page: this.pageNumber,
+            page_size: pageSize,
+          })}`
       ).catch((error: AxiosError) => {
         console.log(error.response?.data);
         return null;
       });
-      if (trainingData !== null) {
-        this.trainingData = trainingData;
+      if (trainingData?.results !== undefined) {
+        this.trainingData = trainingData.results;
+        this.totalSize = trainingData.count || null;
       }
     },
   },

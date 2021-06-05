@@ -28,6 +28,13 @@ class TrainedModelSerializer(serializers.ModelSerializer):
         model = TrainedModel
         fields = "__all__"
 
+    def create(self, validated_data):
+        obj: TrainedModel = TrainedModel.objects.create(**validated_data)
+        from recotem.api.tasks import train_recommender
+
+        train_recommender.delay(obj.id)
+        return obj
+
 
 class SplitConfigSerializer(serializers.ModelSerializer):
     class Meta:

@@ -125,6 +125,12 @@ export interface components {
       upd_datetime: string;
       project: number;
     };
+    PaginatedTrainingDataList: {
+      count?: number;
+      next?: string | null;
+      previous?: string | null;
+      results?: components["schemas"]["TrainingData"][];
+    };
     ParameterTuningJob: {
       id: number;
       name?: string | null;
@@ -216,7 +222,7 @@ export interface components {
       ins_datetime?: string;
       upd_datetime?: string;
       basename?: string;
-      filesize?: number;
+      filesize?: number | null;
     };
     Project: {
       id: number;
@@ -301,14 +307,14 @@ export interface components {
       ins_datetime: string;
       upd_datetime: string;
       basename: string;
-      filesize: number;
+      filesize: number | null;
     };
     TrainingDataDetail: {
       id: number;
       upload_path: string;
       ins_datetime: string;
       basename: string;
-      filesize: number;
+      filesize: number | null;
       parametertuningjob_set: components["schemas"]["ParameterTuningJobList"][];
     };
     TrainingDataForSummary: {
@@ -1055,13 +1061,17 @@ export interface operations {
     parameters: {
       query: {
         id?: number;
+        /** A page number within the paginated result set. */
+        page?: number;
+        /** Number of results to return per page. */
+        page_size?: number;
         project?: number;
       };
     };
     responses: {
       200: {
         content: {
-          "application/json": components["schemas"]["TrainingData"][];
+          "application/json": components["schemas"]["PaginatedTrainingDataList"];
         };
       };
     };

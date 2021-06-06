@@ -1,4 +1,3 @@
-<style scoped></style>
 <template>
   <v-container>
     <ValidationObserver v-slot="{ valid }">

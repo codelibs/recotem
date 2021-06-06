@@ -8,13 +8,16 @@
         <v-divider></v-divider>
         <v-stepper-step step="3"> Job Configuration </v-stepper-step>
       </v-stepper-header>
-      <v-stepper-content step="1">
+      <v-stepper-content step="1" class="pt-2">
         <SplitConfigForm v-model="evaluationConfig">
           <template v-slot="{ isValid }">
-            <v-btn :disabled="!isValid" color="primary"> Next </v-btn>
+            <v-btn :disabled="!isValid" color="primary" @click="step = 2">
+              Continue
+            </v-btn>
           </template>
         </SplitConfigForm>
       </v-stepper-content>
+      <v-stepper-content step="2"> </v-stepper-content>
     </v-stepper>
     {{ evaluationConfig }}
   </div>

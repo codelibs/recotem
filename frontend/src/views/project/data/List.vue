@@ -68,14 +68,13 @@
             <v-list-item-action>
               <v-btn
                 icon
-                color="primary"
-                dark
+                ripple=""
                 :to="{
                   name: 'start-tuning-with-data',
                   params: { dataId: td.id },
                 }"
               >
-                <v-icon>mdi-tune</v-icon>
+                <v-icon color="primary">mdi-tune</v-icon>
               </v-btn>
             </v-list-item-action>
           </v-list-item>

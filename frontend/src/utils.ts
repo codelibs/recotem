@@ -70,7 +70,7 @@ export async function getWithRefreshToken<Return>(
   const result = await Axios.get<Return>(path, {
     headers: authHeader(module.token),
   }).catch(async (error: AxiosError) => {
-    if (error.response?.status === 403) {
+    if (error.response?.status === 401) {
       try {
         await refreshToken(module);
         const result = await Axios.get<Return>(path, {
@@ -106,7 +106,7 @@ export async function postWithRefreshToken<Payload, Return>(
   const result = await Axios.post<Return>(path, payload, {
     headers: { Authorization: `Bearer ${module.token}` },
   }).catch(async (error: AxiosError) => {
-    if (error.response?.status === 403) {
+    if (error.response?.status === 401) {
       console.log("token expired?");
       console.log(error.response.data);
       await refreshToken(module);
@@ -140,7 +140,7 @@ export async function putWithRefreshToken<Payload, Return>(
   const result = await Axios.put<Return>(path, payload, {
     headers: { Authorization: `Bearer ${module.token}` },
   }).catch(async (error: AxiosError) => {
-    if (error.response?.status === 403) {
+    if (error.response?.status === 401) {
       try {
         await refreshToken(module);
         const result = await Axios.put<Return>(path, payload, {
@@ -172,7 +172,7 @@ export async function deleteWithRefreshToken(
   const result = await Axios.delete(path, {
     headers: { Authorization: `Bearer ${module.token}` },
   }).catch(async (error: AxiosError) => {
-    if (error.response?.status === 403) {
+    if (error.response?.status === 401) {
       try {
         await refreshToken(module);
         const result = await Axios.delete(path, {
@@ -193,5 +193,15 @@ export async function deleteWithRefreshToken(
     return;
   } else {
     return result.data;
+  }
+}
+
+export function numberInputValueToNumberOrNull(
+  value: number | undefined | null | string
+): number | undefined {
+  if (typeof value === "number" || value === undefined) {
+    return value;
+  } else {
+    return undefined;
   }
 }

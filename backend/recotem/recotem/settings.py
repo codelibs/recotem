@@ -178,3 +178,10 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "default"
 CELERY_TASK_SERIALIZER = "json"
+
+# JWT
+SIMPLE_JWT = dict(
+    ACCESS_TOKEN_LIFETIME=timedelta(
+        seconds=env("JWT_ACCESS_TOKEN_LIFETIME_IN_SECONDS", cast=float, default=300)
+    )
+)

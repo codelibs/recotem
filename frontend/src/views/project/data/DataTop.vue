@@ -22,7 +22,8 @@
 import Vue from "vue";
 import { components, paths } from "@/api/schema";
 import { AuthModule } from "@/store/auth";
-import { getWithRefreshToken, prettyFileSize } from "@/utils";
+import { getWithRefreshToken } from "@/utils";
+import { prettyFileSize } from "@/utils/conversion";
 
 //import TuningJobList from "@/components/TuningJobList.vue";
 type TrainingDataType = components["schemas"]["TrainingData"];

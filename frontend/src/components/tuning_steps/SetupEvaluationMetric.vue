@@ -13,7 +13,7 @@
 
         <div class="flex-grow-1">
           <v-container v-if="how == 2" fluid>
-            <v-list>
+            <v-list v-if="existingConfigs.length > 0">
               <v-list-item>
                 <v-list-item-content>
                   <v-list-item-title>
@@ -22,6 +22,7 @@
                 </v-list-item-content>
               </v-list-item>
               <v-divider></v-divider>
+
               <template v-for="(config, i) in existingConfigs">
                 <v-list-item
                   :key="i"
@@ -41,64 +42,31 @@
                 <v-divider :key="i + 0.5"></v-divider>
               </template>
             </v-list>
+            <div v-else class="text-h5 text-center pa-4">
+              No available preset found.
+            </div>
           </v-container>
           <v-container v-if="how == 3" class="pl-8">
+            <v-select
+              :items="metricChoice"
+              v-model="customConfig.target_metric"
+            >
+            </v-select>
             <ValidationProvider
               name="test_user_ratio"
-              rules="max_value:1.0|min_value:0.0"
+              rules="min_value:0.0|"
               v-slot="{ errors }"
             >
               <v-text-field
                 label="Ratio of test users."
                 type="number"
-                v-model.number="customConfig.test_user_ratio"
+                v-model.number="customConfig.cutoff"
                 :error-messages="errors"
               ></v-text-field>
             </ValidationProvider>
-            <ValidationProvider
-              name="n_test_users"
-              rules="min_value:0|is_integral"
-              v-slot="{ errors }"
-            >
-              <v-text-field
-                label="(Optional) Number of test users."
-                type="number"
-                v-model.number="customConfig.n_test_users"
-                :error-messages="errors"
-              ></v-text-field>
-            </ValidationProvider>
-            <ValidationProvider
-              name="test_user_ratio"
-              rules="max_value:1.0|min_value:0.0"
-              v-slot="{ errors }"
-            >
-              <v-text-field
-                label="Ratio of held-out interactions."
-                type="number"
-                v-model.number="customConfig.heldout_ratio"
-                :error-messages="errors"
-              ></v-text-field>
-            </ValidationProvider>
-            <ValidationProvider
-              name="heldout-interactions"
-              rules="min_value:0.0"
-              v-slot="{ errors }"
-            >
-              <v-text-field
-                label="(Optional) Number of held-out interactions per user."
-                type="number"
-                v-model.number="customConfig.n_heldout"
-                :error-messages="errors"
-              ></v-text-field>
-            </ValidationProvider>
-            <v-text-field
-              label="(Optional) Random Seed."
-              type="number"
-              v-model.number="customConfig.random_seed"
-            ></v-text-field>
             <ValidationProvider
               name="savename"
-              rules="splitConfigNameExists"
+              rules="evaluationConfigNameExists"
               v-slot="{ errors }"
               :debounce="500"
             >
@@ -125,17 +93,18 @@
 import Vue, { PropType } from "vue";
 import { ValidationObserver, ValidationProvider, extend } from "vee-validate";
 import { AuthModule } from "@/store/auth";
-import { getWithRefreshToken, numberInputValueToNumberOrNull } from "@/utils";
+import { getWithRefreshToken } from "@/utils";
+import { is_integral, max_value, min_value } from "@/utils/rules";
+import { numberInputValueToNumberOrNull } from "@/utils/conversion";
 import { paths } from "@/api/schema";
-import { max_value, min_value } from "vee-validate/dist/rules";
 import qs from "qs";
 
 type ExistingConfigs =
-  paths["/api/split_config/"]["get"]["responses"]["200"]["content"]["application/json"];
-const existingConfigsUrl = "/api/split_config/";
+  paths["/api/evaluation_config/"]["get"]["responses"]["200"]["content"]["application/json"];
+const existingConfigsUrl = "/api/evaluation_config/";
 
 type createConfigArg = Omit<
-  paths["/api/split_config/"]["post"]["requestBody"]["content"]["application/json"],
+  paths["/api/evaluation_config/"]["post"]["requestBody"]["content"]["application/json"],
   "id"
 >;
 
@@ -145,30 +114,14 @@ type Data = {
   id: number | null;
   saveName: string;
   existingConfigs: ExistingConfigs;
-  formValid: boolean;
 };
 export type ResultType = createConfigArg | number | null;
 
-extend("max_value", {
-  ...max_value,
-  message: "The value must not be greater than 1.0",
-});
-extend("min_value", {
-  ...min_value,
-  message: "The value must not be smaller than 0.",
-});
-extend("is_integral", {
-  ...min_value,
-  validate(value) {
-    if (value === undefined || value === null) return true;
-    if (parseInt(value) - value === 0.0) {
-      return true;
-    } else return false;
-  },
-  message: "The value must be an integer.",
-});
+extend("max_value", max_value);
+extend("min_value", min_value);
+extend("is_integral", is_integral);
 
-extend("splitConfigNameExists", {
+extend("evaluationConfigNameExists", {
   async validate(value: string) {
     const result = await getWithRefreshToken<ExistingConfigs>(
       AuthModule,
@@ -180,6 +133,13 @@ extend("splitConfigNameExists", {
     return `A preset with this name already exists.`;
   },
 });
+type SelectChoice = { value: string; text: string }[];
+const metricChoices: SelectChoice = [
+  { value: "ndcg", text: "Normalized discounted cumulative gain (NDCG)" },
+  { value: "recall", text: "Recall" },
+  { value: "hit", text: "Hit" },
+  { value: "map", text: "Mean average precision (MAP)" },
+];
 
 export default Vue.extend({
   props: {
@@ -193,14 +153,9 @@ export default Vue.extend({
       how: 1,
       id: null,
       customConfig: {
-        scheme: "RG",
-        heldout_ratio: 0.1,
-        n_heldout: null,
-        test_user_ratio: 1.0,
-        n_test_users: null,
-        random_seed: undefined,
+        cutoff: 20,
+        target_metric: "ndcg",
       },
-      formValid: true,
       existingConfigs: [],
       saveName: "",
     };
@@ -242,6 +197,9 @@ export default Vue.extend({
     },
   },
   computed: {
+    metricChoice(): SelectChoice {
+      return metricChoices;
+    },
     result(): ResultType {
       let result: createConfigArg = new Object();
       if (this.how === 1) {
@@ -253,20 +211,7 @@ export default Vue.extend({
         if (this.saveName) {
           result.name = this.saveName;
         }
-        result["heldout_ratio"] = numberInputValueToNumberOrNull(
-          result.heldout_ratio
-        );
-
-        result["n_heldout"] = numberInputValueToNumberOrNull(result.n_heldout);
-        result["test_user_ratio"] = numberInputValueToNumberOrNull(
-          result.test_user_ratio
-        );
-        result["n_test_users"] = numberInputValueToNumberOrNull(
-          result.n_test_users
-        );
-        result["random_seed"] = numberInputValueToNumberOrNull(
-          result.random_seed
-        );
+        result["cutoff"] = numberInputValueToNumberOrNull(result.cutoff);
         return result;
       }
     },

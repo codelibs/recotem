@@ -13,13 +13,13 @@
         <v-divider vertical v-if="how !== 1"></v-divider>
 
         <div class="flex-grow-1">
-          <v-container v-if="how == 2" fluid>
+          <v-container v-if="how == 2" fluid class="pt-0">
             <v-list>
-              <v-list-item>
-                <v-list-item-content>
-                  <v-list-item-title>
+              <v-list-item class="pa-0">
+                <v-list-item-content class="pa-0">
+                  <v-list-item-subtitle>
                     Select preset configurations
-                  </v-list-item-title>
+                  </v-list-item-subtitle>
                 </v-list-item-content>
               </v-list-item>
               <v-divider></v-divider>
@@ -92,11 +92,18 @@
                 :error-messages="errors"
               ></v-text-field>
             </ValidationProvider>
-            <v-text-field
-              label="(Optional) Random Seed."
-              type="number"
-              v-model.number="customConfig.random_seed"
-            ></v-text-field>
+            <ValidationProvider
+              name="random_seed"
+              rules="is_integral|min_value:0.0"
+              v-slot="{ errors }"
+            >
+              <v-text-field
+                label="(Optional) Random Seed."
+                type="number"
+                v-model.number="customConfig.random_seed"
+                :error-messages="errors"
+              ></v-text-field>
+            </ValidationProvider>
             <ValidationProvider
               name="savename"
               rules="splitConfigNameExists"
@@ -122,13 +129,15 @@
     </ValidationObserver>
   </v-container>
 </template>
+
 <script lang="ts">
 import Vue, { PropType } from "vue";
 import { ValidationObserver, ValidationProvider, extend } from "vee-validate";
 import { AuthModule } from "@/store/auth";
-import { getWithRefreshToken, numberInputValueToNumberOrNull } from "@/utils";
+import { getWithRefreshToken } from "@/utils";
+import { is_integral, max_value, min_value } from "@/utils/rules";
+import { numberInputValueToNumberOrNull } from "@/utils/conversion";
 import { paths } from "@/api/schema";
-import { max_value, min_value } from "vee-validate/dist/rules";
 import qs from "qs";
 
 type ExistingConfigs =
@@ -150,24 +159,9 @@ type Data = {
 };
 export type ResultType = createConfigArg | number | null;
 
-extend("max_value", {
-  ...max_value,
-  message: "The value must not be greater than 1.0",
-});
-extend("min_value", {
-  ...min_value,
-  message: "The value must not be smaller than 0.",
-});
-extend("is_integral", {
-  ...min_value,
-  validate(value) {
-    if (value === undefined || value === null) return true;
-    if (parseInt(value) - value === 0.0) {
-      return true;
-    } else return false;
-  },
-  message: "The value must be an integer.",
-});
+extend("max_value", max_value);
+extend("min_value", min_value);
+extend("is_integral", is_integral);
 
 extend("splitConfigNameExists", {
   async validate(value: string) {

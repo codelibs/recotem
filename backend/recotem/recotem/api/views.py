@@ -3,6 +3,7 @@ from typing import Union
 from rest_framework import viewsets
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
 
 from recotem.api.models import (
     EvaluationConfig,
@@ -36,14 +37,13 @@ class TrainedModelViewset(viewsets.ModelViewSet):
 class TrainingDataViewset(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
-    queryset = TrainingData.objects.all()
+    queryset = TrainingData.objects.all().order_by("-ins_datetime")
     serializer_class = TrainingDataSerializer
     filterset_fields = ["id", "project"]
 
     class pagination_class(PageNumberPagination):
         page_size = 10
         page_size_query_param = "page_size"
-        max_page_size = 10000
 
 
 class ModelConfigurationViewset(viewsets.ModelViewSet):
@@ -65,7 +65,7 @@ class SplitConfigViewSet(viewsets.ModelViewSet):
 class EvaluationConfigViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
-    queryset = EvaluationConfig.objects.all()
+    queryset = EvaluationConfig.objects.all().filter(name__isnull=False)
     serializer_class = EvaluationConfigSerializer
     filterset_fields = ["id", "name"]
 
@@ -75,7 +75,11 @@ class ParameterTuningJobViewSet(viewsets.ModelViewSet):
 
     queryset = ParameterTuningJob.objects.all()
     serializer_class = ParameterTuningJobSerializer
-    filterset_fields = ["id", "data__project"]
+    filterset_fields = ["id", "data__project", "data"]
+
+    class pagination_class(PageNumberPagination):
+        page_size = 10
+        page_size_query_param = "page_size"
 
 
 class TaskLogViewSet(viewsets.ReadOnlyModelViewSet):

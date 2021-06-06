@@ -3,7 +3,14 @@
     <div style="text-align: right">
       <v-dialog v-model="uploadDialog" max-width="800">
         <template v-slot:activator="{ on, attrs }">
-          <v-btn class="mr-4" color="green" dark v-on="on" v-bind="attrs">
+          <v-btn
+            class="mr-4"
+            color="green"
+            dark
+            v-on="on"
+            v-bind="attrs"
+            :disabled="uploadProgress !== null"
+          >
             <v-icon> mdi-upload</v-icon> Upload new data
           </v-btn>
         </template>
@@ -21,11 +28,25 @@
                 </ValidationProvider>
                 <div></div>
               </v-form>
+
               <v-row justify="center" class="mb-4">
-                <v-btn color="primary" :disabled="invalid" @click="upload"
+                <v-btn
+                  color="primary"
+                  :disabled="invalid"
+                  @click="upload"
+                  v-if="uploadProgress === null"
                   >Upload</v-btn
                 >
+                <v-col cols="12" v-else>
+                  <div class="text-subtitle-1 text-center">Uploading..</div>
+                  <v-progress-linear
+                    :value="uploadProgress"
+                    :active="uploadProgress !== null"
+                    :query="true"
+                  ></v-progress-linear>
+                </v-col>
               </v-row>
+
               <v-alert
                 v-for="(message, i_m) in uploadErrorMessages"
                 type="error"
@@ -95,14 +116,12 @@
 import Vue from "vue";
 import qs from "qs";
 import { components, paths } from "@/api/schema";
-import {
-  getWithRefreshToken,
-  postWithRefreshToken,
-  prettyFileSize,
-} from "@/utils";
+import { getWithRefreshToken, postWithRefreshToken } from "@/utils";
+import { refreshToken } from "@/utils/request";
+import { prettyFileSize } from "@/utils/conversion";
 
 import { AuthModule } from "@/store/auth";
-import { AxiosError } from "axios";
+import { AxiosError, AxiosRequestConfig } from "axios";
 import { required } from "vee-validate/dist/rules";
 import { ValidationObserver, ValidationProvider, extend } from "vee-validate";
 
@@ -180,22 +199,41 @@ export default Vue.extend({
       this.deleteTargetId = td;
     },
     async upload(): Promise<void> {
+      refreshToken(AuthModule);
       if (this.uploadFile === null) return;
       if (this.projectId === null) return;
       const data = new FormData();
       data.append("project", `${this.projectId}`);
       data.append("upload_path", this.uploadFile);
-      const result = await postWithRefreshToken<any, TrainingData>(
+
+      this.uploadProgress = 0;
+
+      const config: AxiosRequestConfig = {
+        onUploadProgress: (progressEvent: any) => {
+          console.log(progressEvent);
+          var percentCompleted = Math.round(
+            (progressEvent.loaded * 100) / progressEvent.total
+          );
+          this.uploadProgress = percentCompleted;
+        },
+      };
+      const result = await postWithRefreshToken<FormData, TrainingData>(
         AuthModule,
         trainingDataListURL,
-        data
+        data,
+        config
       ).catch((error: AxiosError) => {
+        console.log(error);
         this.uploadErrorMessages = [error.response?.data.detail];
+        this.uploadProgress = null;
         return undefined;
       });
       if (result) {
         this.uploadDialog = false;
+        this.uploadProgress = null;
         await this.fetchData();
+      } else {
+        alert("Failed to upload the data.");
       }
     },
 

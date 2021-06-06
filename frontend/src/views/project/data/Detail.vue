@@ -1,23 +1,26 @@
 <template>
-  <div v-if="dataDetail !== undefined">
-    <v-row>
-      <v-col cols="8">
-        <div class="text-h5">Data {{ dataDetail.basename }}</div>
-        <div class="text-subtitle-1">Saved as {{ dataDetail.upload_path }}</div>
-      </v-col>
-      <v-col>
-        <v-btn color="info" dark :to="{ name: 'start-tuning-with-data' }">
-          <v-icon> mdi-tune </v-icon>
-          <span class="pl-2"> Start Tuning </span>
-        </v-btn>
-      </v-col>
-    </v-row>
+  <v-card v-if="dataDetail !== undefined">
+    <v-container fluid>
+      <v-row>
+        <v-col class="flex-grow1">
+          <div class="text-h5">Tuning Jobs</div>
+        </v-col>
+        <v-spacer></v-spacer>
+        <v-col>
+          <v-btn color="info" dark :to="{ name: 'start-tuning-with-data' }">
+            <v-icon> mdi-tune </v-icon>
+            <span class="pl-2"> Start New Job </span>
+          </v-btn>
+        </v-col>
+      </v-row>
 
-    <div>Tuning Job List</div>
-    <tuning-job-list
-      :parameterTuningJobList="dataDetail.parametertuningjob_set"
-    />
-  </div>
+      <tuning-job-list
+        :parameterTuningJobList="dataDetail.parametertuningjob_set"
+        v-if="dataDetail.parametertuningjob_set.length > 0"
+      />
+      <div v-else class="text-h6 text-center pt-6 pb-6">No jobs.</div>
+    </v-container>
+  </v-card>
 </template>
 <script lang="ts">
 import Vue from "vue";

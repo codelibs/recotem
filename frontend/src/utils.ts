@@ -103,9 +103,11 @@ export async function postWithRefreshToken<Payload, Return>(
     return null;
   }
 
+  console.log("start posting");
   const result = await Axios.post<Return>(path, payload, {
     headers: { Authorization: `Bearer ${module.token}` },
   }).catch(async (error: AxiosError) => {
+    console.log(error);
     if (error.response?.status === 401) {
       console.log("token expired?");
       console.log(error.response.data);
@@ -117,9 +119,11 @@ export async function postWithRefreshToken<Payload, Return>(
       });
       return result;
     } else {
+      console.log(error);
       throw error;
     }
   });
+  console.log("done");
   if (result === null) {
     module.logout();
     return null;
@@ -204,4 +208,20 @@ export function numberInputValueToNumberOrNull(
   } else {
     return undefined;
   }
+}
+
+export function prettyFileSize(x: number | null): string {
+  if (x === null) {
+    return "Unknown";
+  }
+  if (x < 1024) {
+    return `${x}B`;
+  }
+  if (x < 1048576) {
+    return `${(x / 1024).toFixed(1)}kB`;
+  }
+  if (x < 1073741824) {
+    return `${(x / 1048576).toFixed(1)}MB`;
+  }
+  return `${(x / 1073741824).toFixed(1)}GB`;
 }

@@ -38,14 +38,20 @@ const routes: Array<RouteConfig> = [
             children: [
               {
                 path: ":dataId/",
-                name: "data-detail",
-                component: () => import("../views/project/data/Detail.vue"),
-              },
-              {
-                path: ":dataId/start_tuning_with",
-                name: "start-tuning-with-data",
-                component: () =>
-                  import("../views/project/data/StartTuningWithData.vue"),
+                component: () => import("../views/project/data/DataTop.vue"),
+                children: [
+                  {
+                    path: "",
+                    name: "data-detail",
+                    component: () => import("../views/project/data/Detail.vue"),
+                  },
+                  {
+                    path: "start_tuning_with",
+                    name: "start-tuning-with-data",
+                    component: () =>
+                      import("../views/project/data/StartTuningWithData.vue"),
+                  },
+                ],
               },
               {
                 path: "",

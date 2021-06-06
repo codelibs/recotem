@@ -11,14 +11,10 @@
           <v-container>
             <ValidationObserver v-slot="{ invalid }">
               <v-form>
-                <ValidationProvider
-                  v-slot="{ errors }"
-                  rules="uploadFileRequired"
-                >
+                <ValidationProvider rules="uploadFileRequired">
                   <v-file-input
                     label="The interaction data."
                     accept=".csv,.tsv,.ndjson,.jsonl,.pkl,.pickle,.csv.gz,.tsv.gz,.ndjson.gz,.jsonl.gz,.pkl.gz,.pickle.gz"
-                    :error-messages="errors"
                     v-model="uploadFile"
                   >
                   </v-file-input>
@@ -59,7 +55,7 @@
                 <v-row>
                   <v-col cols="5"> {{ td.ins_datetime }} </v-col>
                   <v-col cols="4" class="ml-4">
-                    {{ prettyFilesize(td.filesize) }}
+                    {{ prettyFileSize(td.filesize) }}
                   </v-col>
                   <v-spacer></v-spacer>
                 </v-row>
@@ -81,6 +77,7 @@
           <v-divider :key="i + 0.5"></v-divider>
         </template>
       </v-list>
+      <v-pagination v-model="pageNumber" :length="maxPageSize"> </v-pagination>
     </v-container>
     <div v-else class="text-center">No data yet.</div>
     <v-dialog v-model="deleteDialog">
@@ -98,12 +95,16 @@
 import Vue from "vue";
 import qs from "qs";
 import { components, paths } from "@/api/schema";
-import { getWithRefreshToken, postWithRefreshToken } from "@/utils";
+import {
+  getWithRefreshToken,
+  postWithRefreshToken,
+  prettyFileSize,
+} from "@/utils";
+
 import { AuthModule } from "@/store/auth";
 import { AxiosError } from "axios";
 import { required } from "vee-validate/dist/rules";
 import { ValidationObserver, ValidationProvider, extend } from "vee-validate";
-import { ThisTypedComponentOptionsWithRecordProps } from "vue/types/options";
 
 extend("uploadFileRequired", {
   ...required,
@@ -147,6 +148,16 @@ export default Vue.extend({
     };
   },
   computed: {
+    maxPageSize(): number | null {
+      if (this.totalSize == null) {
+        return null;
+      }
+      let result = Math.floor(this.totalSize / pageSize);
+      if (this.totalSize % pageSize) {
+        result++;
+      }
+      return result;
+    },
     projectId(): number | null {
       try {
         return parseInt(this.$route.params.projectId);
@@ -161,6 +172,9 @@ export default Vue.extend({
     },
   },
   methods: {
+    prettyFileSize(value: number | null) {
+      return prettyFileSize(value);
+    },
     setDeleteTarget(td: TrainingData) {
       this.deleteDialog = true;
       this.deleteTargetId = td;
@@ -184,21 +198,7 @@ export default Vue.extend({
         await this.fetchData();
       }
     },
-    prettyFilesize(x: number | null): string {
-      if (x === null) {
-        return "Unknown";
-      }
-      if (x < 1024) {
-        return `${x}B`;
-      }
-      if (x < 1048576) {
-        return `${(x / 1024).toFixed(1)}kB`;
-      }
-      if (x < 1073741824) {
-        return `${(x / 1048576).toFixed(1)}MB`;
-      }
-      return `${(x / 1073741824).toFixed(1)}MB`;
-    },
+
     async fetchData() {
       if (this.projectId === null) {
         return;

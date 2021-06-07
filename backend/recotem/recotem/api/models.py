@@ -161,7 +161,7 @@ class ParameterTuningJob(models.Model):
         ModelConfiguration, null=True, on_delete=models.PROTECT
     )
 
-    train_after_tuning = models.BooleanField(default=False)
+    train_after_tuning = models.BooleanField(default=True)
     tuned_model = models.ForeignKey(TrainedModel, null=True, on_delete=models.SET_NULL)
 
     ins_datetime = models.DateTimeField(auto_now_add=True)

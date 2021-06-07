@@ -7,6 +7,11 @@ export const min_value = {
   message: "The value must not be negative.",
 };
 
+export const min_value_1 = {
+  ...min_value_default,
+  message: "The value must be positive.",
+};
+
 export const max_value = {
   ...max_value_default,
   message: "The value must not exceed 1.0.",

@@ -1,38 +1,164 @@
 <template>
-  <v-list>
-    <v-list-item v-for="(td, i) in parameterTuningJobList" :key="i">
-      <v-list-item-title>
-        {{ td.name }} <br />
-        id: {{ td.id }}
-      </v-list-item-title>
-      {{ td.ins_datetime }}
-      <ul>
-        <li
-          v-for="(tpjl, i_tpjl) in td.taskandparameterjoblink_set"
-          :key="i_tpjl"
+  <div>
+    <template v-if="tuningJobs !== null">
+      <template v-if="tuningJobs !== undefined && tuningJobs.length > 0">
+        <v-list>
+          <template v-for="(td, i) in tuningJobs">
+            <v-list-item
+              :key="i"
+              :to="{
+                name: 'tuning-job-detail',
+                params: { parameterTuningJobId: td.id },
+              }"
+            >
+              <v-list-item-content>
+                <v-row>
+                  <v-col cols="2">
+                    <v-list-item-title> id: {{ td.id }} </v-list-item-title>
+                  </v-col>
+                  <v-col cols="6">
+                    <v-list-item-subtitle>
+                      {{ td.ins_datetime }}
+                    </v-list-item-subtitle>
+                  </v-col>
+                  <v-col cols="2">
+                    {{ prettyStatus(td.taskandparameterjoblink_set) }}
+                  </v-col>
+                </v-row>
+              </v-list-item-content>
+              <v-list-item-action>
+                <v-btn icon v-if="typeof td.tuned_model == 'number'">
+                  <v-icon color="green"> mdi-calculator </v-icon>
+                </v-btn>
+              </v-list-item-action>
+            </v-list-item>
+            <v-divider :key="i + 0.5"></v-divider>
+          </template>
+        </v-list>
+        <v-pagination
+          v-if="maxPageSize !== null && maxPageSize > 1"
+          v-model="page"
+          :length="maxPageSize"
         >
-          {{ tpjl.task.status }}
-        </li>
-      </ul>
-    </v-list-item>
-  </v-list>
+        </v-pagination>
+      </template>
+      <div v-else class="ma-8 text-h6 text-center">No tuning job yet</div>
+    </template>
+    <div v-else class="ma-8 text-h5 text-center">loading...</div>
+  </div>
 </template>
 <script lang="ts">
 import Vue, { PropType } from "vue";
-import { components, paths } from "@/api/schema";
+import { paths, components } from "@/api/schema";
+import { computeMaxPage } from "@/utils/pagination";
+import { getWithRefreshToken } from "@/utils";
+import { AuthModule } from "@/store/auth";
+import qs from "qs";
 
-type TrainingDataType = components["schemas"]["TrainingDataDetail"];
-type ParameterTuningJobSetType = TrainingDataType["parametertuningjob_set"];
+const tuningJobListURL = "/api/parameter_tuning_job/";
+type APIResultType =
+  paths["/api/parameter_tuning_job/"]["get"]["responses"]["200"]["content"]["application/json"];
+type TuningJobArray = APIResultType["results"];
+type taskType = components["schemas"]["TaskResult"];
+type possibleStatus = components["schemas"]["StatusEnum"];
+
+function statusCodeSetToString(statuses: possibleStatus[]): string {
+  if (statuses.length === 0) return "Unknown";
+  for (let s of statuses) {
+    if (s === "FAILURE") {
+      return "Failure";
+    }
+  }
+  for (let s of statuses) {
+    if (s === "STARTED") {
+      return "In Progress";
+    }
+  }
+  for (let s of statuses) {
+    if (s === "REVOKED") {
+      return "Revoked";
+    }
+  }
+  let allSuccess = true;
+  for (let s of statuses) {
+    if (s !== "SUCCESS") {
+      allSuccess = false;
+    }
+  }
+  if (allSuccess) {
+    return "COMPLETE";
+  }
+  return "Unknown";
+}
+
+type Data = {
+  page: number;
+  tuningJobs: TuningJobArray | null;
+  totalCount: number | null | undefined;
+};
+
+const pageSize = 5;
 
 export default Vue.extend({
   props: {
-    parameterTuningJobList: {
-      type: Array as PropType<ParameterTuningJobSetType>,
-      required: true,
+    externalCondition: {
+      type: Object as PropType<Record<string, string>>,
+      default: Object,
+    },
+  },
+  data(): Data {
+    return {
+      page: 1,
+      tuningJobs: null,
+      totalCount: null,
+    };
+  },
+  methods: {
+    prettyStatus(sCodes: { task: taskType }[]): string {
+      return statusCodeSetToString(
+        sCodes.map((f) => f.task.status || "RECEIVED")
+      );
+    },
+    async fetchData(): Promise<void> {
+      let queryString = qs.stringify({
+        page_size: pageSize,
+        page: this.page,
+        ...this.externalCondition,
+      });
+      const result = await getWithRefreshToken<APIResultType>(
+        AuthModule,
+        `${tuningJobListURL}?${queryString}`
+      );
+      if (result === null) {
+        AuthModule.logout();
+        throw "logout";
+      }
+      this.totalCount = result.count || 0;
+      this.tuningJobs = result.results || [];
+    },
+  },
+  computed: {
+    maxPageSize(): number | null {
+      return computeMaxPage(
+        this.totalCount === undefined ? null : this.totalCount,
+        pageSize
+      );
+    },
+  },
+  watch: {
+    async page(): Promise<void> {
+      await this.fetchData();
+    },
+    externalCondition: {
+      deep: true,
+      async handler(): Promise<void> {
+        this.page = 1;
+        await this.fetchData();
+      },
     },
   },
   async mounted() {
-    console.log(this.parameterTuningJobList);
+    this.fetchData();
   },
 });
 </script>

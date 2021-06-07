@@ -6,7 +6,12 @@
         <div>
           <v-radio-group class="mr-6" v-model="how">
             <v-radio :value="1" label="Use Default Values"> </v-radio>
-            <v-radio :value="2" label="Use Preset Config"> </v-radio>
+            <v-radio
+              :disabled="existingConfigs.length == 0"
+              :value="2"
+              label="Use Preset Config"
+            >
+            </v-radio>
             <v-radio :value="3" label="Manually Define"> </v-radio>
           </v-radio-group>
         </div>

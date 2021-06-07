@@ -1,6 +1,6 @@
 <template>
   <v-row class="fill-height">
-    <v-col cols="3" v-if="project !== null">
+    <v-col cols="2" v-if="project !== null">
       <v-list nav>
         <v-list-item>
           <v-list-item-icon>
@@ -23,6 +23,16 @@
             <v-icon> mdi-folder</v-icon>
           </v-list-item-icon>
           <v-list-item-title> Data </v-list-item-title>
+        </v-list-item>
+        <v-list-item
+          :to="{ name: 'tuning-job-list', params: { projectId } }"
+          link
+          :ripple="false"
+        >
+          <v-list-item-icon>
+            <v-icon> mdi-tune</v-icon>
+          </v-list-item-icon>
+          <v-list-item-title> Tuning </v-list-item-title>
         </v-list-item>
       </v-list>
     </v-col>

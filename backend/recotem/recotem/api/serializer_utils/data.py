@@ -34,21 +34,3 @@ class TrainingDataSerializer(serializers.ModelSerializer):
             obj.delete()
             raise e
         return obj
-
-
-from .tuning_job import ParameterTuningJobListSerializer
-
-
-class TrainingDataDetailSerializer(TrainingDataSerializer):
-    parametertuningjob_set = ParameterTuningJobListSerializer(many=True)
-
-    class Meta:
-        model = TrainingData
-        fields = [
-            "id",
-            "upload_path",
-            "ins_datetime",
-            "basename",
-            "filesize",
-            "parametertuningjob_set",
-        ]

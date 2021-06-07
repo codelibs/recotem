@@ -33,6 +33,23 @@ const routes: Array<RouteConfig> = [
             component: () => import("../views/project/Dashboard.vue"),
           },
           {
+            path: "tuning_job/",
+            component: () => import("../views/project/Data.vue"),
+            children: [
+              {
+                path: ":parameterTuningJobId/",
+                name: "tuning-job-detail",
+                component: () =>
+                  import("../views/project/tuningjobs/TuningJobTop.vue"),
+              },
+              {
+                path: "",
+                name: "tuning-job-list",
+                component: () => import("../views/project/tuningjobs/List.vue"),
+              },
+            ],
+          },
+          {
             path: "data/",
             component: () => import("../views/project/Data.vue"),
             children: [

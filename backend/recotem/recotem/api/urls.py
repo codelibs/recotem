@@ -32,13 +32,8 @@ router.register(r"trained_model", TrainedModelViewset, basename="trained_model")
 router.register(r"task_log", TaskLogViewSet, basename="task_log")
 
 
-from recotem.api.view_utils.tuning_job import (
-    TrainingDataDetailViewset,
-    TuningJobSummaryViewset,
-)
+from recotem.api.view_utils.tuning_job import TuningJobSummaryViewset
 
 router.register(
     "tuning_log_summary", TuningJobSummaryViewset, basename="tuning-log-summary"
 )
-
-router.register("data_detail", TrainingDataDetailViewset, basename="data-detail")

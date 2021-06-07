@@ -1,6 +1,6 @@
 <template>
   <div v-if="dataBasicInfo !== null">
-    <v-row>
+    <v-row class="pb-2">
       <v-col cols="8">
         <div class="text-h5">
           Data {{ dataBasicInfo.basename }}

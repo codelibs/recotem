@@ -38,7 +38,9 @@
                   >Upload</v-btn
                 >
                 <v-col cols="12" v-else>
-                  <div class="text-subtitle-1 text-center">Uploading..</div>
+                  <div class="text-subtitle-1 text-center">
+                    Uploading.. {{ uploadProgress }}%
+                  </div>
                   <v-progress-linear
                     :value="uploadProgress"
                     :active="uploadProgress !== null"
@@ -59,10 +61,10 @@
         </v-card>
       </v-dialog>
     </div>
-    <v-container v-if="trainingData !== undefined">
+
+    <v-container v-if="trainingData !== undefined && trainingData.length > 0">
       <v-list>
         <v-divider></v-divider>
-
         <template v-for="(td, i) in trainingData">
           <v-list-item
             :key="i"
@@ -100,15 +102,7 @@
       </v-list>
       <v-pagination v-model="pageNumber" :length="maxPageSize"> </v-pagination>
     </v-container>
-    <div v-else class="text-center">No data yet.</div>
-    <v-dialog v-model="deleteDialog">
-      <v-card v-if="deleteTargetId !== null">
-        <v-container>
-          Delete {{ deleteTargetId.basename }} ?
-          <v-btn color="danger"> Delete </v-btn>
-        </v-container>
-      </v-card>
-    </v-dialog>
+    <div v-else class="text-center pt-12 text-h6">No data yet.</div>
   </div>
 </template>
 
@@ -119,6 +113,7 @@ import { components, paths } from "@/api/schema";
 import { getWithRefreshToken, postWithRefreshToken } from "@/utils";
 import { refreshToken } from "@/utils/request";
 import { prettyFileSize } from "@/utils/conversion";
+import { computeMaxPage } from "@/utils/pagination";
 
 import { AuthModule } from "@/store/auth";
 import { AxiosError, AxiosRequestConfig } from "axios";
@@ -136,7 +131,7 @@ type responseType =
   paths["/api/training_data/"]["get"]["responses"]["200"]["content"]["application/json"];
 type responseContent = responseType["results"];
 
-const pageSize = 2;
+const pageSize = 10;
 
 type Data = {
   trainingData: responseContent;
@@ -168,14 +163,7 @@ export default Vue.extend({
   },
   computed: {
     maxPageSize(): number | null {
-      if (this.totalSize == null) {
-        return null;
-      }
-      let result = Math.floor(this.totalSize / pageSize);
-      if (this.totalSize % pageSize) {
-        result++;
-      }
-      return result;
+      return computeMaxPage(this.totalSize, pageSize);
     },
     projectId(): number | null {
       try {
@@ -199,7 +187,7 @@ export default Vue.extend({
       this.deleteTargetId = td;
     },
     async upload(): Promise<void> {
-      refreshToken(AuthModule);
+      await refreshToken(AuthModule);
       if (this.uploadFile === null) return;
       if (this.projectId === null) return;
       const data = new FormData();
@@ -228,6 +216,7 @@ export default Vue.extend({
         this.uploadProgress = null;
         return undefined;
       });
+      console.log(result);
       if (result) {
         this.uploadDialog = false;
         this.uploadProgress = null;

@@ -4,9 +4,6 @@
  */
 
 export interface paths {
-  "/api/data_detail/{id}/": {
-    get: operations["data_detail_retrieve"];
-  };
   "/api/evaluation_config/": {
     get: operations["evaluation_config_list"];
     post: operations["evaluation_config_create"];
@@ -125,6 +122,12 @@ export interface components {
       upd_datetime: string;
       project: number;
     };
+    PaginatedParameterTuningJobList: {
+      count?: number;
+      next?: string | null;
+      previous?: string | null;
+      results?: components["schemas"]["ParameterTuningJob"][];
+    };
     PaginatedTrainingDataList: {
       count?: number;
       next?: string | null;
@@ -133,6 +136,7 @@ export interface components {
     };
     ParameterTuningJob: {
       id: number;
+      taskandparameterjoblink_set: components["schemas"]["TaskAndParameterJobLink"][];
       name?: string | null;
       n_tasks_parallel?: number;
       n_trials?: number;
@@ -149,13 +153,6 @@ export interface components {
       evaluation: number;
       best_config?: number | null;
       tuned_model?: number | null;
-    };
-    ParameterTuningJobList: {
-      id: number;
-      taskandparameterjoblink_set: components["schemas"]["TaskAndParameterJobLink"][];
-      ins_datetime: string;
-      name?: string | null;
-      data: number;
     };
     PatchedEvaluationConfig: {
       id?: number;
@@ -174,6 +171,7 @@ export interface components {
     };
     PatchedParameterTuningJob: {
       id?: number;
+      taskandparameterjoblink_set?: components["schemas"]["TaskAndParameterJobLink"][];
       name?: string | null;
       n_tasks_parallel?: number;
       n_trials?: number;
@@ -315,14 +313,6 @@ export interface components {
       basename: string;
       filesize: number | null;
     };
-    TrainingDataDetail: {
-      id: number;
-      upload_path: string;
-      ins_datetime: string;
-      basename: string;
-      filesize: number | null;
-      parametertuningjob_set: components["schemas"]["ParameterTuningJobList"][];
-    };
     TrainingDataForSummary: {
       id: number;
       n_parameter_tuning_jobs: number;
@@ -340,21 +330,6 @@ export interface components {
 }
 
 export interface operations {
-  data_detail_retrieve: {
-    parameters: {
-      path: {
-        /** A unique integer value identifying this training data. */
-        id: number;
-      };
-    };
-    responses: {
-      200: {
-        content: {
-          "application/json": components["schemas"]["TrainingDataDetail"];
-        };
-      };
-    };
-  };
   evaluation_config_list: {
     parameters: {
       query: {
@@ -571,14 +546,19 @@ export interface operations {
   parameter_tuning_job_list: {
     parameters: {
       query: {
+        data?: number;
         data__project?: number;
         id?: number;
+        /** A page number within the paginated result set. */
+        page?: number;
+        /** Number of results to return per page. */
+        page_size?: number;
       };
     };
     responses: {
       200: {
         content: {
-          "application/json": components["schemas"]["ParameterTuningJob"][];
+          "application/json": components["schemas"]["PaginatedParameterTuningJobList"];
         };
       };
     };
@@ -1173,7 +1153,7 @@ export interface operations {
     responses: {
       200: {
         content: {
-          "application/json": components["schemas"]["ParameterTuningJobList"][];
+          "application/json": components["schemas"]["ParameterTuningJob"][];
         };
       };
     };

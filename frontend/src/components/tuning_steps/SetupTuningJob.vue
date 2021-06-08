@@ -109,7 +109,6 @@ export type ResultType = Omit<
   | "split"
   | "evaluation"
   | "ins_datetime"
-  | "upd_datetime"
   | "tuned_model"
   | "best_config"
   | "irspack_version"

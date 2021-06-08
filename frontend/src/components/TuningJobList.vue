@@ -27,7 +27,14 @@
                 </v-row>
               </v-list-item-content>
               <v-list-item-action>
-                <v-btn icon v-if="typeof td.tuned_model == 'number'">
+                <v-btn
+                  icon
+                  v-if="typeof td.tuned_model == 'number'"
+                  :to="{
+                    name: 'trained-model-detail',
+                    params: { trainedModelId: td.tuned_model },
+                  }"
+                >
                   <v-icon color="green"> mdi-calculator </v-icon>
                 </v-btn>
               </v-list-item-action>
@@ -95,9 +102,14 @@ type Data = {
   page: number;
   tuningJobs: TuningJobArray | null;
   totalCount: number | null | undefined;
+  pollingStop: boolean;
 };
 
 const pageSize = 5;
+
+function sleep(msec: number) {
+  return new Promise((resolve: any) => setTimeout(resolve, msec));
+}
 
 export default Vue.extend({
   props: {
@@ -111,9 +123,22 @@ export default Vue.extend({
       page: 1,
       tuningJobs: null,
       totalCount: null,
+      pollingStop: false,
     };
   },
+  beforeDestroy() {
+    this.pollingStop = true;
+  },
   methods: {
+    async polling(): Promise<void> {
+      for (;;) {
+        await sleep(2000);
+        await this.fetchData();
+        if (this.pollingStop) {
+          break;
+        }
+      }
+    },
     prettyStatus(sCodes: { task: taskType }[]): string {
       return statusCodeSetToString(
         sCodes.map((f) => f.task.status || "RECEIVED")
@@ -125,6 +150,7 @@ export default Vue.extend({
         page: this.page,
         ...this.externalCondition,
       });
+      console.log(queryString);
       const result = await getWithRefreshToken<APIResultType>(
         AuthModule,
         `${tuningJobListURL}?${queryString}`
@@ -158,7 +184,8 @@ export default Vue.extend({
     },
   },
   async mounted() {
-    this.fetchData();
+    await this.fetchData();
+    await this.polling();
   },
 });
 </script>

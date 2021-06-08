@@ -26,7 +26,21 @@ class UserSerializer(serializers.ModelSerializer):
 class TrainedModelSerializer(serializers.ModelSerializer):
     class Meta:
         model = TrainedModel
-        fields = "__all__"
+        fields = [
+            "id",
+            "configuration",
+            "data_loc",
+            "model_path",
+            "irspack_version",
+            "ins_datetime",
+            "basename",
+            "filesize",
+        ]
+        read_only_fields = [
+            "ins_datetime",
+            "basename",
+            "filesize",
+        ]
 
     def create(self, validated_data):
         obj: TrainedModel = TrainedModel.objects.create(**validated_data)

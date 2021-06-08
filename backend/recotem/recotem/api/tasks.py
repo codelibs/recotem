@@ -133,6 +133,7 @@ def train_recommender_func(
 @app.task(bind=True)
 def task_train_recommender(self, model_id: int) -> None:
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
+    self.update_state(state="STARTED", meta=[])
     train_recommender_func(task_result, model_id)
 
 
@@ -164,7 +165,7 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
     recommender_class_name = get_optimizer_class(
         optimizer_name
     ).recommender_class.__name__
-    config_name = f"{job.name if job.name is not None else job.id}_search_result"
+    config_name = f"Tuning Result of job {job.id}"
     config = ModelConfiguration.objects.create(
         name=config_name,
         project=project,
@@ -191,12 +192,14 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
 @app.task(bind=True)
 def task_create_best_config(self, parameter_tuning_job_id: int, *args) -> int:
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
+    self.update_state(state="STARTED", meta=[])
     return create_best_config_fun(task_result, parameter_tuning_job_id)
 
 
 @app.task(bind=True)
 def task_create_best_config_train_rec(self, parameter_tuning_job_id: int, *args) -> int:
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
+    self.update_state(state="STARTED", meta=[])
     config_id = create_best_config_fun(task_result, parameter_tuning_job_id)
     job: ParameterTuningJob = ParameterTuningJob.objects.get(id=parameter_tuning_job_id)
     config: ModelConfiguration = ModelConfiguration.objects.get(id=config_id)
@@ -274,7 +277,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
     if job.random_seed is None:
         random_seed = random.randint(0, 2 ** 16)
     else:
-        random_seed = job.random_seed
+        random_seed: int = job.random_seed
     autopilot(
         X_tv_train,
         evaluator,
@@ -282,7 +285,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         memory_budget=job.memory_budget,
         timeout_overall=job.timeout_overall,
         timeout_singlestep=job.timeout_singlestep,
-        random_seed=random_seed,
+        random_seed=random_seed + index,
         callback=callback,
         storage=optuna_storage,
         study_name=study_name,

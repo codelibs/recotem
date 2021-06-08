@@ -34,6 +34,12 @@
           </v-list-item-icon>
           <v-list-item-title> Tuning </v-list-item-title>
         </v-list-item>
+        <v-list-item link :ripple="false">
+          <v-list-item-icon>
+            <v-icon> mdi-calculator</v-icon>
+          </v-list-item-icon>
+          <v-list-item-title> Models </v-list-item-title>
+        </v-list-item>
       </v-list>
     </v-col>
     <v-divider vertical></v-divider>

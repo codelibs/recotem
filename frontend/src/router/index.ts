@@ -33,6 +33,17 @@ const routes: Array<RouteConfig> = [
             component: () => import("../views/project/Dashboard.vue"),
           },
           {
+            path: "trained_model/",
+            component: () => import("../views/project/Data.vue"),
+            children: [
+              {
+                path: ":trainedModelId/",
+                name: "trained-model-detail",
+                component: () => import("../views/project/models/ModelTop.vue"),
+              },
+            ],
+          },
+          {
             path: "tuning_job/",
             component: () => import("../views/project/Data.vue"),
             children: [

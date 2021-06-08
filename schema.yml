@@ -1593,6 +1593,10 @@ components:
           type: string
           nullable: true
           maxLength: 256
+        configuration:
+          type: integer
+        data_loc:
+          type: integer
         model_path:
           type: string
           nullable: true
@@ -1608,10 +1612,14 @@ components:
           type: string
           format: date-time
           readOnly: true
-        configuration:
+        basename:
+          type: string
+          nullable: true
+          readOnly: true
+        filesize:
           type: integer
-        data_loc:
-          type: integer
+          nullable: true
+          readOnly: true
     PatchedTrainingData:
       type: object
       properties:
@@ -1849,6 +1857,10 @@ components:
           type: string
           nullable: true
           maxLength: 256
+        configuration:
+          type: integer
+        data_loc:
+          type: integer
         model_path:
           type: string
           nullable: true
@@ -1864,13 +1876,19 @@ components:
           type: string
           format: date-time
           readOnly: true
-        configuration:
+        basename:
+          type: string
+          nullable: true
+          readOnly: true
+        filesize:
           type: integer
-        data_loc:
-          type: integer
+          nullable: true
+          readOnly: true
       required:
+      - basename
       - configuration
       - data_loc
+      - filesize
       - id
       - ins_datetime
       - upd_datetime

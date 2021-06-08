@@ -1,4 +1,7 @@
+from django.urls import include, path
+from numpy.core.fromnumeric import round_
 from rest_framework.routers import DefaultRouter
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from recotem.api.views import (
     EvaluationConfigViewSet,
@@ -37,3 +40,9 @@ from recotem.api.view_utils.tuning_job import TuningJobSummaryViewset
 router.register(
     "tuning_log_summary", TuningJobSummaryViewset, basename="tuning-log-summary"
 )
+
+urlpatterns = [
+    path("token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path("", include(router.urls)),
+]

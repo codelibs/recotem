@@ -1,6 +1,8 @@
 <template>
   <div>
-    <v-row> <v-col cols="4"> </v-col> </v-row>
+    <div class="text-h6 text-center pa-8">
+      [Todo] Dashboard view to be drawn
+    </div>
   </div>
 </template>
 <script lang="ts">

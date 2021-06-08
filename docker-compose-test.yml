@@ -13,7 +13,7 @@ services:
       args:
         - RECOTEM_TESTING=true
     volumes:
-      - test-data-location:/app
+      - test-data-location:/app/data/
     ports:
       - "8000:80"
     environment:
@@ -29,6 +29,7 @@ services:
         coverage xml
         rm -rf data/training_data
         rm -rf data/models
+      '
 volumes:
   test-data-location:
     driver: local

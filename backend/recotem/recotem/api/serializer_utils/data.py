@@ -15,13 +15,11 @@ class TrainingDataSerializer(serializers.ModelSerializer):
             "project",
             "upload_path",
             "ins_datetime",
-            "upd_datetime",
             "basename",
             "filesize",
         ]
         read_only_fields = [
             "ins_datetime",
-            "upd_datetime",
             "basename",
             "filesize",
         ]

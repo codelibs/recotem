@@ -1,6 +1,8 @@
 <template>
   <div class="mt-1">
-    <div style="text-align: right">
+    <div class="d-flex align-center">
+      <div class="text-h6 pl-4">Uploaded files</div>
+      <div class="flex-grow-1"></div>
       <v-dialog v-model="uploadDialog" max-width="800">
         <template v-slot:activator="{ on, attrs }">
           <v-btn

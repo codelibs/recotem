@@ -97,10 +97,7 @@ extend("projectNameExists", {
 });
 
 type Project = components["schemas"]["Project"];
-type ProjectData = Omit<
-  Omit<Omit<Project, "ins_datetime">, "upd_datetime">,
-  "id"
->;
+type ProjectData = Omit<Project, "ins_datetime" | "id">;
 type Data = {
   project: ProjectData;
 };

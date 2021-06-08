@@ -211,12 +211,14 @@ export interface components {
     PatchedTrainedModel: {
       id?: number;
       name?: string | null;
+      configuration?: number;
+      data_loc?: number;
       model_path?: string | null;
       irspack_version?: string | null;
       ins_datetime?: string;
       upd_datetime?: string;
-      configuration?: number;
-      data_loc?: number;
+      basename?: string | null;
+      filesize?: number | null;
     };
     PatchedTrainingData: {
       id?: number;
@@ -297,12 +299,14 @@ export interface components {
     TrainedModel: {
       id: number;
       name?: string | null;
+      configuration: number;
+      data_loc: number;
       model_path?: string | null;
       irspack_version?: string | null;
       ins_datetime: string;
       upd_datetime: string;
-      configuration: number;
-      data_loc: number;
+      basename: string | null;
+      filesize: number | null;
     };
     TrainingData: {
       id: number;

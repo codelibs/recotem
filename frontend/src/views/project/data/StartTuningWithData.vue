@@ -96,7 +96,7 @@ type TuningJobResponse =
 
 type TuningJobRequestBody = Omit<
   paths["/api/parameter_tuning_job/"]["post"]["requestBody"]["content"]["application/json"],
-  "id" | "ins_datetime" | "upd_datetime" | "taskandparameterjoblink_set"
+  "id" | "ins_datetime" | "taskandparameterjoblink_set"
 >;
 type Data = {
   step: number;
@@ -167,10 +167,14 @@ export default Vue.extend({
         TuningJobResponse
       >(AuthModule, tuningJobURL, jobPostBody);
       console.log("created job:", createdJob);
-      this.$router.push({
-        name: "tuning-job-detail",
-        params: { parameterTuningJobId: createdJob.id },
-      });
+      if (createdJob !== null) {
+        this.$router.push({
+          name: "tuning-job-detail",
+          params: { parameterTuningJobId: `${createdJob.id}` },
+        });
+      } else {
+        alert("failed to start the job");
+      }
     },
   },
   components: {

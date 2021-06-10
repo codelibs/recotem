@@ -184,7 +184,7 @@ class ParameterTuningJob(models.Model):
 
 class TaskAndParameterJobLink(models.Model):
     job = models.ForeignKey(
-        ParameterTuningJob, on_delete=models.CASCADE, related_name="task_link"
+        ParameterTuningJob, on_delete=models.CASCADE, related_name="task_links"
     )
     task = models.OneToOneField(
         TaskResult, on_delete=models.CASCADE, related_name="tuning_job_link"
@@ -194,7 +194,7 @@ class TaskAndParameterJobLink(models.Model):
 
 class TaskAndTrainedModelLink(models.Model):
     model = models.ForeignKey(
-        TrainedModel, on_delete=models.CASCADE, related_name="task_link"
+        TrainedModel, on_delete=models.CASCADE, related_name="task_links"
     )
     task = models.OneToOneField(
         TaskResult, on_delete=models.CASCADE, related_name="model_link"

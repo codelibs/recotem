@@ -55,13 +55,8 @@ MIDDLEWARE_CLASSES = ("whitenoise.middleware.WhiteNoiseMiddleware",)
 
 RECOTEM_API_AUTH = [
     "rest_framework_simplejwt.authentication.JWTAuthentication",
+    "rest_framework.authentication.SessionAuthentication",
 ]
-
-
-if env("RECOTEM_TESTING", cast=bool, default=False):
-    RECOTEM_API_AUTH.append(
-        "rest_framework.authentication.SessionAuthentication",
-    )
 
 
 REST_FRAMEWORK = {

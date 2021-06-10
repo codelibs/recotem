@@ -119,7 +119,6 @@ export interface components {
       recommender_class_name: string;
       parameters_json: string;
       ins_datetime: string;
-      upd_datetime: string;
       project: number;
     };
     PaginatedParameterTuningJobList: {
@@ -136,8 +135,9 @@ export interface components {
     };
     ParameterTuningJob: {
       id: number;
-      taskandparameterjoblink_set: components["schemas"]["TaskAndParameterJobLink"][];
-      name?: string | null;
+      data: number;
+      split: number;
+      evaluation: number;
       n_tasks_parallel?: number;
       n_trials?: number;
       memory_budget?: number;
@@ -146,13 +146,10 @@ export interface components {
       random_seed?: number | null;
       irspack_version?: string | null;
       train_after_tuning?: boolean;
-      ins_datetime: string;
-      upd_datetime: string;
-      data: number;
-      split?: number | null;
-      evaluation: number;
-      best_config?: number | null;
       tuned_model?: number | null;
+      best_config?: number | null;
+      ins_datetime: string;
+      task_links: components["schemas"]["TaskAndParameterJobLink"][];
     };
     PatchedEvaluationConfig: {
       id?: number;
@@ -166,13 +163,13 @@ export interface components {
       recommender_class_name?: string;
       parameters_json?: string;
       ins_datetime?: string;
-      upd_datetime?: string;
       project?: number;
     };
     PatchedParameterTuningJob: {
       id?: number;
-      taskandparameterjoblink_set?: components["schemas"]["TaskAndParameterJobLink"][];
-      name?: string | null;
+      data?: number;
+      split?: number;
+      evaluation?: number;
       n_tasks_parallel?: number;
       n_trials?: number;
       memory_budget?: number;
@@ -181,13 +178,10 @@ export interface components {
       random_seed?: number | null;
       irspack_version?: string | null;
       train_after_tuning?: boolean;
-      ins_datetime?: string;
-      upd_datetime?: string;
-      data?: number;
-      split?: number | null;
-      evaluation?: number;
-      best_config?: number | null;
       tuned_model?: number | null;
+      best_config?: number | null;
+      ins_datetime?: string;
+      task_links?: components["schemas"]["TaskAndParameterJobLink"][];
     };
     PatchedProject: {
       id?: number;
@@ -196,7 +190,6 @@ export interface components {
       item_column?: string;
       time_column?: string | null;
       ins_datetime?: string;
-      upd_datetime?: string;
     };
     PatchedSplitConfig: {
       id?: number;
@@ -210,13 +203,11 @@ export interface components {
     };
     PatchedTrainedModel: {
       id?: number;
-      name?: string | null;
       configuration?: number;
       data_loc?: number;
       model_path?: string | null;
       irspack_version?: string | null;
       ins_datetime?: string;
-      upd_datetime?: string;
       basename?: string | null;
       filesize?: number | null;
     };
@@ -225,7 +216,6 @@ export interface components {
       project?: number;
       upload_path?: string;
       ins_datetime?: string;
-      upd_datetime?: string;
       basename?: string;
       filesize?: number | null;
     };
@@ -236,7 +226,6 @@ export interface components {
       item_column: string;
       time_column?: string | null;
       ins_datetime: string;
-      upd_datetime: string;
     };
     ProjectSummary: {
       id: number;
@@ -298,13 +287,11 @@ export interface components {
     };
     TrainedModel: {
       id: number;
-      name?: string | null;
       configuration: number;
       data_loc: number;
       model_path?: string | null;
       irspack_version?: string | null;
       ins_datetime: string;
-      upd_datetime: string;
       basename: string | null;
       filesize: number | null;
     };
@@ -313,7 +300,6 @@ export interface components {
       project: number;
       upload_path: string;
       ins_datetime: string;
-      upd_datetime: string;
       basename: string;
       filesize: number | null;
     };
@@ -877,8 +863,8 @@ export interface operations {
     parameters: {
       query: {
         id?: number;
-        task__taskandparameterjoblink__job?: number;
-        task__taskandtrainedmodellink__model?: number;
+        task__model_link__model?: number;
+        task__tuning_job_link__job?: number;
       };
     };
     responses: {

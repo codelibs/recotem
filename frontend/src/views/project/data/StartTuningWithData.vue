@@ -96,7 +96,7 @@ type TuningJobResponse =
 
 type TuningJobRequestBody = Omit<
   paths["/api/parameter_tuning_job/"]["post"]["requestBody"]["content"]["application/json"],
-  "id" | "ins_datetime" | "taskandparameterjoblink_set"
+  "id" | "ins_datetime" | "task_links"
 >;
 type Data = {
   step: number;

@@ -1,5 +1,3 @@
-from typing import Union
-
 from rest_framework import viewsets
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
@@ -89,6 +87,6 @@ class TaskLogViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = TaskLogSerializer
     filterset_fields = [
         "id",
-        "task__taskandparameterjoblink__job",
-        "task__taskandtrainedmodellink__model",
+        "task__tuning_job_link__job",
+        "task__model_link__model",
     ]

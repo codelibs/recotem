@@ -112,7 +112,7 @@ export type ResultType = Omit<
   | "tuned_model"
   | "best_config"
   | "irspack_version"
-  | "taskandparameterjoblink_set"
+  | "task_links"
 >;
 
 type createConfigArg = {

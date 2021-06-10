@@ -22,7 +22,7 @@
                     </v-list-item-subtitle>
                   </v-col>
                   <v-col cols="2">
-                    {{ prettyStatus(td.taskandparameterjoblink_set) }}
+                    {{ prettyStatus(td.task_links) }}
                   </v-col>
                 </v-row>
               </v-list-item-content>
@@ -155,6 +155,7 @@ export default Vue.extend({
         AuthModule,
         `${tuningJobListURL}?${queryString}`
       );
+      console.log(result);
       if (result === null) {
         AuthModule.logout();
         throw "logout";

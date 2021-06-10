@@ -4,7 +4,7 @@
       <v-col cols="8">
         <div class="text-h5">Tuning Job {{ dataBasicInfo.id }}</div>
         <div class="text-subtitle-1">
-          Stasus: {{ dataBasicInfo.taskandparameterjoblink_set }}
+          Stasus: {{ dataBasicInfo.task_links }}
         </div>
       </v-col>
     </v-row>

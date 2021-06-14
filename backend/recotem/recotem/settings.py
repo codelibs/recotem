@@ -138,11 +138,18 @@ USE_TZ = True
 
 # Data & Trained Model storage
 
-_DEFAULT_FILE_STORAGE = env("DEFAULT_FILE_STORAGE", default="")
-if _DEFAULT_FILE_STORAGE:
-    DEFAULT_FILE_STORAGE = _DEFAULT_FILE_STORAGE
-else:
-    MEDIA_ROOT = BASE_DIR / "data"
+_STORAGE_TYPE = env("RECOTEM_STORAGE_TYPE", default="")
+if not _STORAGE_TYPE:
+    pass
+elif _STORAGE_TYPE == "S3":
+    DEFAULT_FILE_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"
+    AWS_ACCESS_KEY_ID = env("AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY = env("AWS_SECRET_ACCESS_KEY")
+    AWS_STORAGE_BUCKET_NAME = env("AWS_STORAGE_BUCKET_NAME")
+
+    AWS_LOCATION = env("AWS_LOCATION", default="")
+    AWS_S3_ENDPOINT_URL = env("AWS_S3_ENDPOINT_URL", default=None)
+
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/3.2/howto/static-files/

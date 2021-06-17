@@ -1,10 +1,5 @@
-from typing import Type
-
 import pytest
-from django.test import Client
 from irspack.dataset import MovieLens100KDataManager
-
-from recotem.api.models import TrainingData, User
 
 # If we don't import them here, # test will now run
 # as the tasks are not registered.

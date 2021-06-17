@@ -4,11 +4,12 @@ from tempfile import NamedTemporaryFile
 
 import pandas as pd
 import pytest
+from django.contrib.auth import get_user_model
 from django.test import Client
 from django.urls import reverse
 from pandas import testing as pd_testing
 
-from recotem.api.models import TrainingData, User
+from recotem.api.models import TrainingData
 
 I_O_functions: typing.List[
     typing.Tuple[
@@ -56,7 +57,7 @@ I_O_functions: typing.List[
 
 
 def login_client(client: Client) -> None:
-    user, _ = User.objects.get_or_create(username="admin", password="admin")
+    user, _ = get_user_model().objects.get_or_create(username="admin", password="admin")
     client.force_login(user)
 
 

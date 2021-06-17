@@ -1,38 +1,37 @@
 import { Auth } from "@/store/auth";
 import Axios, { AxiosPromise, AxiosError, AxiosRequestConfig } from "axios";
 import { baseURL } from "@/env";
-import { components } from "@/api/schema";
+import { paths } from "@/api/schema";
+import Router from "vue-router";
 
-type TokenRefresh = components["schemas"]["TokenRefresh"];
+const refreshURL = `${baseURL}/api/auth/token/refresh/`;
+type RefreshResult =
+  paths["/api/auth/token/refresh/"]["post"]["responses"]["200"]["content"]["application/json"];
 
+const logoutUrl = "/api/auth/logout/";
+type logoutResponse =
+  paths["/api/auth/logout/"]["post"]["responses"]["200"]["content"]["application/json"];
+
+const axiosCSRFConfg = {
+  xsrfCookieName: "csrftoken",
+  xsrfHeaderName: "X-CSRFTOKEN",
+};
 export const authHeader = (token: string): Record<string, string> => ({
   Authorization: `Bearer ${token}`,
 });
 
 export async function refreshToken(module: Auth): Promise<void> {
   module.setToken(null);
-  try {
-    const refresh_token = module.refresh;
-    if (refresh_token !== null) {
-      const refreshed = await Axios.post<TokenRefresh>(
-        `${baseURL}/token/refresh/`,
-        {
-          refresh: refresh_token,
-        }
-      ).catch(() => {
-        return null;
-      });
-
-      if (refreshed === null) {
-        module.setRefresh(null);
-      } else {
-        module.setToken(refreshed.data.access);
-      }
-    } else {
-      module.setRefresh(null);
-    }
-  } catch (err) {
-    module.setRefresh(null);
+  const refreshed = await Axios.post<RefreshResult>(
+    refreshURL,
+    {},
+    { ...axiosCSRFConfg }
+  ).catch(() => {
+    return null;
+  });
+  if (refreshed !== null) {
+    console.log("Refreshed token");
+    module.setToken(refreshed.data.access);
   }
 }
 
@@ -41,18 +40,9 @@ export async function checkLogin(module: Auth): Promise<boolean> {
     return true;
   }
 
-  let refresh_token = module.refresh;
-  if (!refresh_token) {
-    refresh_token = localStorage.getItem("refresh");
-    module.setRefresh(refresh_token);
-  }
-
-  if (!refresh_token) {
-    return false;
-  }
   await refreshToken(module);
 
-  if (module.refresh === null) {
+  if (module.token === null) {
     return false;
   } else {
     await module.getUserName();
@@ -86,8 +76,10 @@ async function axiosMethodWithRetry<ArgType, ReturnType>(
     ...copiedConfig.headers,
     ...authHeader(module.token),
   };
+  copiedConfig.xsrfCookieName = "csrftoken";
+  copiedConfig.xsrfHeaderName = "X-CSRFTOKEN";
 
-  const result = await method(path, arg, copiedConfig).catch(
+  const result = await method(`${baseURL}${path}`, arg, copiedConfig).catch(
     async (error: AxiosError) => {
       if (error.response?.status === 401) {
         console.log("Try refreshing token...");
@@ -99,7 +91,7 @@ async function axiosMethodWithRetry<ArgType, ReturnType>(
           ...copiedConfig.headers,
           ...authHeader(module.token),
         };
-        const result = await method(path, arg, copiedConfig);
+        const result = await method(`${baseURL}${path}`, arg, copiedConfig);
         return result;
       } else {
         throw error;
@@ -184,4 +176,18 @@ export async function deleteWithRefreshToken<Return>(
     undefined,
     config
   );
+}
+
+export async function logout(module: Auth, router: Router): Promise<void> {
+  if (module.token === null) {
+    await refreshToken(module);
+  }
+  const logoutResult = await postWithRefreshToken<
+    Record<string, never>,
+    logoutResponse
+  >(module, logoutUrl, {});
+  if (logoutResult !== null) {
+    console.log(logoutResult.detail);
+  }
+  router.push({ name: "login" });
 }

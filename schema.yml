@@ -3,6 +3,310 @@ info:
   title: ''
   version: 0.0.0
 paths:
+  /api/auth/login/:
+    post:
+      operationId: auth_login_create
+      description: |-
+        Check the credentials and return the REST Token
+        if the credentials are valid and authenticated.
+        Calls Django Auth login method to register User ID
+        in Django session framework
+
+        Accept the following POST parameters: username, password
+        Return the REST Framework Token Object's key.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Login'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Login'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Login'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JWT'
+          description: ''
+  /api/auth/logout/:
+    post:
+      operationId: auth_logout_create
+      description: |-
+        Calls Django logout method and delete the Token object
+        assigned to the current User object.
+
+        Accepts/Returns nothing.
+      tags:
+      - auth
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestAuthDetail'
+          description: ''
+  /api/auth/password/change/:
+    post:
+      operationId: auth_password_change_create
+      description: |-
+        Calls Django Auth SetPasswordForm save method.
+
+        Accepts the following POST parameters: new_password1, new_password2
+        Returns the success/fail message.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChange'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordChange'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordChange'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestAuthDetail'
+          description: ''
+  /api/auth/password/reset/:
+    post:
+      operationId: auth_password_reset_create
+      description: |-
+        Calls Django Auth PasswordResetForm save method.
+
+        Accepts the following POST parameters: email
+        Returns the success/fail message.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordReset'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordReset'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordReset'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestAuthDetail'
+          description: ''
+  /api/auth/password/reset/confirm/:
+    post:
+      operationId: auth_password_reset_confirm_create
+      description: |-
+        Password reset e-mail link is confirmed, therefore
+        this resets the user's password.
+
+        Accepts the following POST parameters: token, uid,
+            new_password1, new_password2
+        Returns the success/fail message.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirm'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirm'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirm'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestAuthDetail'
+          description: ''
+  /api/auth/token/refresh/:
+    post:
+      operationId: auth_token_refresh_create
+      description: |-
+        Takes a refresh type JSON web token and returns an access type JSON web
+        token if the refresh token is valid.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenRefresh'
+          description: ''
+  /api/auth/token/verify/:
+    post:
+      operationId: auth_token_verify_create
+      description: |-
+        Takes a token and indicates if it is valid.  This view provides no
+        information about a token's fitness for a particular use.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenVerify'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenVerify'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenVerify'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenVerify'
+          description: ''
+  /api/auth/user/:
+    get:
+      operationId: auth_user_retrieve
+      description: |-
+        Reads and updates UserModel fields
+        Accepts GET, PUT, PATCH methods.
+
+        Default accepted fields: username, first_name, last_name
+        Default display fields: pk, username, email, first_name, last_name
+        Read-only fields: pk, email
+
+        Returns UserModel fields.
+      tags:
+      - auth
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDetails'
+          description: ''
+    put:
+      operationId: auth_user_update
+      description: |-
+        Reads and updates UserModel fields
+        Accepts GET, PUT, PATCH methods.
+
+        Default accepted fields: username, first_name, last_name
+        Default display fields: pk, username, email, first_name, last_name
+        Read-only fields: pk, email
+
+        Returns UserModel fields.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserDetails'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/UserDetails'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/UserDetails'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDetails'
+          description: ''
+    patch:
+      operationId: auth_user_partial_update
+      description: |-
+        Reads and updates UserModel fields
+        Accepts GET, PUT, PATCH methods.
+
+        Default accepted fields: username, first_name, last_name
+        Default display fields: pk, username, email, first_name, last_name
+        Read-only fields: pk, email
+
+        Returns UserModel fields.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedUserDetails'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedUserDetails'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedUserDetails'
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDetails'
+          description: ''
   /api/evaluation_config/:
     get:
       operationId: evaluation_config_list
@@ -19,7 +323,7 @@ paths:
       tags:
       - evaluation_config
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -47,7 +351,7 @@ paths:
             schema:
               $ref: '#/components/schemas/EvaluationConfig'
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '201':
@@ -70,7 +374,7 @@ paths:
       tags:
       - evaluation_config
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -103,7 +407,7 @@ paths:
             schema:
               $ref: '#/components/schemas/EvaluationConfig'
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -136,7 +440,7 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedEvaluationConfig'
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -158,29 +462,11 @@ paths:
       tags:
       - evaluation_config
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '204':
           description: No response body
-  /api/getme/:
-    get:
-      operationId: getme_list
-      description: ''
-      tags:
-      - getme
-      security:
-      - jwtAuth: []
-      - cookieAuth: []
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/User'
-          description: ''
   /api/model_configuration/:
     get:
       operationId: model_configuration_list
@@ -197,7 +483,7 @@ paths:
       tags:
       - model_configuration
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -226,7 +512,7 @@ paths:
               $ref: '#/components/schemas/ModelConfiguration'
         required: true
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '201':
@@ -249,7 +535,7 @@ paths:
       tags:
       - model_configuration
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -283,7 +569,7 @@ paths:
               $ref: '#/components/schemas/ModelConfiguration'
         required: true
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -316,7 +602,7 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedModelConfiguration'
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -338,7 +624,7 @@ paths:
       tags:
       - model_configuration
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '204':
@@ -375,7 +661,7 @@ paths:
       tags:
       - parameter_tuning_job
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -402,7 +688,7 @@ paths:
               $ref: '#/components/schemas/ParameterTuningJob'
         required: true
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '201':
@@ -425,7 +711,7 @@ paths:
       tags:
       - parameter_tuning_job
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -459,7 +745,7 @@ paths:
               $ref: '#/components/schemas/ParameterTuningJob'
         required: true
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -492,7 +778,7 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedParameterTuningJob'
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -514,7 +800,7 @@ paths:
       tags:
       - parameter_tuning_job
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '204':
@@ -535,7 +821,7 @@ paths:
       tags:
       - project
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -564,7 +850,7 @@ paths:
               $ref: '#/components/schemas/Project'
         required: true
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '201':
@@ -587,7 +873,7 @@ paths:
       tags:
       - project
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -621,7 +907,7 @@ paths:
               $ref: '#/components/schemas/Project'
         required: true
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -654,7 +940,7 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedProject'
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -676,7 +962,7 @@ paths:
       tags:
       - project
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '204':
@@ -695,7 +981,7 @@ paths:
       tags:
       - project_summary
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -720,7 +1006,7 @@ paths:
       tags:
       - split_config
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -748,7 +1034,7 @@ paths:
             schema:
               $ref: '#/components/schemas/SplitConfig'
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '201':
@@ -771,7 +1057,7 @@ paths:
       tags:
       - split_config
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -804,7 +1090,7 @@ paths:
             schema:
               $ref: '#/components/schemas/SplitConfig'
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -837,7 +1123,7 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedSplitConfig'
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -859,7 +1145,7 @@ paths:
       tags:
       - split_config
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '204':
@@ -884,7 +1170,7 @@ paths:
       tags:
       - task_log
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -909,7 +1195,7 @@ paths:
       tags:
       - task_log
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -917,60 +1203,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TaskLog'
-          description: ''
-  /api/token/:
-    post:
-      operationId: token_create
-      description: |-
-        Takes a set of user credentials and returns an access and refresh JSON web
-        token pair to prove the authentication of those credentials.
-      tags:
-      - token
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/TokenObtainPair'
-          application/x-www-form-urlencoded:
-            schema:
-              $ref: '#/components/schemas/TokenObtainPair'
-          multipart/form-data:
-            schema:
-              $ref: '#/components/schemas/TokenObtainPair'
-        required: true
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TokenObtainPair'
-          description: ''
-  /api/token/refresh/:
-    post:
-      operationId: token_refresh_create
-      description: |-
-        Takes a refresh type JSON web token and returns an access type JSON web
-        token if the refresh token is valid.
-      tags:
-      - token
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/TokenRefresh'
-          application/x-www-form-urlencoded:
-            schema:
-              $ref: '#/components/schemas/TokenRefresh'
-          multipart/form-data:
-            schema:
-              $ref: '#/components/schemas/TokenRefresh'
-        required: true
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TokenRefresh'
           description: ''
   /api/trained_model/:
     get:
@@ -992,7 +1224,7 @@ paths:
       tags:
       - trained_model
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -1021,7 +1253,7 @@ paths:
               $ref: '#/components/schemas/TrainedModel'
         required: true
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '201':
@@ -1044,7 +1276,7 @@ paths:
       tags:
       - trained_model
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -1078,7 +1310,7 @@ paths:
               $ref: '#/components/schemas/TrainedModel'
         required: true
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -1111,7 +1343,7 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedTrainedModel'
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -1133,7 +1365,7 @@ paths:
       tags:
       - trained_model
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '204':
@@ -1166,7 +1398,7 @@ paths:
       tags:
       - training_data
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -1193,7 +1425,7 @@ paths:
               $ref: '#/components/schemas/TrainingData'
         required: true
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '201':
@@ -1216,7 +1448,7 @@ paths:
       tags:
       - training_data
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -1250,7 +1482,7 @@ paths:
               $ref: '#/components/schemas/TrainingData'
         required: true
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -1283,7 +1515,7 @@ paths:
             schema:
               $ref: '#/components/schemas/PatchedTrainingData'
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -1305,7 +1537,7 @@ paths:
       tags:
       - training_data
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '204':
@@ -1317,7 +1549,7 @@ paths:
       tags:
       - tuning_log_summary
       security:
-      - jwtAuth: []
+      - tokenAuth: []
       - cookieAuth: []
       responses:
         '200':
@@ -1346,6 +1578,32 @@ components:
           $ref: '#/components/schemas/TargetMetricEnum'
       required:
       - id
+    JWT:
+      type: object
+      description: Serializer for JWT authentication.
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        user:
+          $ref: '#/components/schemas/UserDetails'
+      required:
+      - access_token
+      - refresh_token
+      - user
+    Login:
+      type: object
+      properties:
+        username:
+          type: string
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+      required:
+      - password
     ModelConfiguration:
       type: object
       properties:
@@ -1460,6 +1718,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/TaskAndParameterJobLink'
+          readOnly: true
       required:
       - data
       - evaluation
@@ -1467,6 +1726,46 @@ components:
       - ins_datetime
       - split
       - task_links
+    PasswordChange:
+      type: object
+      properties:
+        new_password1:
+          type: string
+          maxLength: 128
+        new_password2:
+          type: string
+          maxLength: 128
+      required:
+      - new_password1
+      - new_password2
+    PasswordReset:
+      type: object
+      description: Serializer for requesting a password reset e-mail.
+      properties:
+        email:
+          type: string
+          format: email
+      required:
+      - email
+    PasswordResetConfirm:
+      type: object
+      description: Serializer for confirming a password reset attempt.
+      properties:
+        new_password1:
+          type: string
+          maxLength: 128
+        new_password2:
+          type: string
+          maxLength: 128
+        uid:
+          type: string
+        token:
+          type: string
+      required:
+      - new_password1
+      - new_password2
+      - token
+      - uid
     PatchedEvaluationConfig:
       type: object
       properties:
@@ -1549,6 +1848,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/TaskAndParameterJobLink'
+          readOnly: true
     PatchedProject:
       type: object
       properties:
@@ -1647,6 +1947,31 @@ components:
           type: integer
           nullable: true
           readOnly: true
+    PatchedUserDetails:
+      type: object
+      description: User model w/o password
+      properties:
+        pk:
+          type: integer
+          readOnly: true
+          title: ID
+        username:
+          type: string
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        email:
+          type: string
+          format: email
+          readOnly: true
+          title: Email address
+        first_name:
+          type: string
+          maxLength: 150
+        last_name:
+          type: string
+          maxLength: 150
     Project:
       type: object
       properties:
@@ -1708,6 +2033,14 @@ components:
       - name
       - trainingdata_set
       - user_column
+    RestAuthDetail:
+      type: object
+      properties:
+        detail:
+          type: string
+          readOnly: true
+      required:
+      - detail
     SchemeEnum:
       enum:
       - RG
@@ -1812,26 +2145,6 @@ components:
       - date_created
       - date_done
       - task_id
-    TokenObtainPair:
-      type: object
-      properties:
-        username:
-          type: string
-          writeOnly: true
-        password:
-          type: string
-          writeOnly: true
-        access:
-          type: string
-          readOnly: true
-        refresh:
-          type: string
-          readOnly: true
-      required:
-      - access
-      - password
-      - refresh
-      - username
     TokenRefresh:
       type: object
       properties:
@@ -1844,6 +2157,13 @@ components:
       required:
       - access
       - refresh
+    TokenVerify:
+      type: object
+      properties:
+        token:
+          type: string
+      required:
+      - token
     TrainedModel:
       type: object
       properties:
@@ -1922,32 +2242,42 @@ components:
       - id
       - n_parameter_tuning_jobs
       - n_trained_models
-    User:
+    UserDetails:
       type: object
+      description: User model w/o password
       properties:
+        pk:
+          type: integer
+          readOnly: true
+          title: ID
         username:
           type: string
           description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
             only.
           pattern: ^[\w.@+-]+$
           maxLength: 150
-        is_staff:
-          type: boolean
-          title: Staff status
-          description: Designates whether the user can log into this admin site.
-        is_superuser:
-          type: boolean
-          title: Superuser status
-          description: Designates that this user has all permissions without explicitly
-            assigning them.
+        email:
+          type: string
+          format: email
+          readOnly: true
+          title: Email address
+        first_name:
+          type: string
+          maxLength: 150
+        last_name:
+          type: string
+          maxLength: 150
       required:
+      - email
+      - pk
       - username
   securitySchemes:
     cookieAuth:
       type: apiKey
       in: cookie
       name: Session
-    jwtAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: Bearer
+    tokenAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Token-based authentication with required prefix "Token"

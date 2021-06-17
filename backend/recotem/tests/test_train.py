@@ -65,7 +65,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         evaluation_config_url, dict(cutoff=10, target_metric="map")
     ).json()["id"]
 
-    job_id = client.post(
+    job_response = client.post(
         parameter_tuning_job_url,
         dict(
             data=data_id,
@@ -76,7 +76,8 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
             memory_budget=1,
             timeout_singlestep=5,
         ),
-    ).json()["id"]
+    ).json()
+    job_id = job_response["id"]
 
     best_config: Optional[ModelConfiguration] = None
     for _ in range(100):

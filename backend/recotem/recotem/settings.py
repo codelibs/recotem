@@ -1,5 +1,6 @@
 from datetime import timedelta
 from pathlib import Path
+from re import X
 from typing import List
 
 import environ
@@ -31,6 +32,9 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "rest_framework",
+    "rest_framework.authtoken",
+    "corsheaders",
+    "dj_rest_auth",
     "django_filters",
     "django_extensions",
     "whitenoise.runserver_nostatic",
@@ -44,6 +48,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -53,17 +58,16 @@ MIDDLEWARE = [
 ]
 MIDDLEWARE_CLASSES = ("whitenoise.middleware.WhiteNoiseMiddleware",)
 
-RECOTEM_API_AUTH = [
-    "rest_framework_simplejwt.authentication.JWTAuthentication",
-    "rest_framework.authentication.SessionAuthentication",
-]
-
 
 REST_FRAMEWORK = {
-    # "DEFAULT_AUTHENTICATION_CLASSES": [
-    #    "rest_framework.authentication.BasicAuthentication",
-    # ],
-    "DEFAULT_AUTHENTICATION_CLASSES": RECOTEM_API_AUTH,
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.TokenAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
+        "dj_rest_auth.jwt_auth.JWTCookieAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
     "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
     "UPLOADED_FILES_USE_URL": False,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
@@ -181,9 +185,15 @@ CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "default"
 CELERY_TASK_SERIALIZER = "json"
 
-# JWT
-SIMPLE_JWT = dict(
-    ACCESS_TOKEN_LIFETIME=timedelta(
-        seconds=env("JWT_ACCESS_TOKEN_LIFETIME_IN_SECONDS", cast=float, default=1000)
-    )
-)
+CORS_ALLOWED_ORIGINS = [
+    x for x in env("CORS_ALLOWED_ORIIGNS", default="").split(",") if x
+]
+
+REST_SESSION_LOGIN = True
+REST_USE_JWT = True
+JWT_AUTH_REFRESH_COOKIE = "refresh-token"
+JWT_AUTH_COOKIE_USE_CSRF = True
+
+SIMPLE_JWT = {
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+}

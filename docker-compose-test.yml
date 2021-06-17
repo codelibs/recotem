@@ -20,9 +20,11 @@ services:
       - DJANGO_SETTINGS_MODULE=recotem.settings
       - CELERY_BROKER_URL=amqp://guest@queue:5672
       - RECOTEM_TESTING=true
+    stdin_open: true # docker run -i
+    tty: true # docker run -t
     command: >
       sh -c '
-        if ! pytest -s --cov=./recotem/ --cov-report=html ; then
+        if ! pytest --pdb -s --cov=./recotem/ --cov-report=html ; then
           echo "test failed"
           exit 1;
         fi

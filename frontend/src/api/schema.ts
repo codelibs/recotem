@@ -4,6 +4,105 @@
  */
 
 export interface paths {
+  "/api/auth/login/": {
+    /**
+     * Check the credentials and return the REST Token
+     * if the credentials are valid and authenticated.
+     * Calls Django Auth login method to register User ID
+     * in Django session framework
+     *
+     * Accept the following POST parameters: username, password
+     * Return the REST Framework Token Object's key.
+     */
+    post: operations["auth_login_create"];
+  };
+  "/api/auth/logout/": {
+    /**
+     * Calls Django logout method and delete the Token object
+     * assigned to the current User object.
+     *
+     * Accepts/Returns nothing.
+     */
+    post: operations["auth_logout_create"];
+  };
+  "/api/auth/password/change/": {
+    /**
+     * Calls Django Auth SetPasswordForm save method.
+     *
+     * Accepts the following POST parameters: new_password1, new_password2
+     * Returns the success/fail message.
+     */
+    post: operations["auth_password_change_create"];
+  };
+  "/api/auth/password/reset/": {
+    /**
+     * Calls Django Auth PasswordResetForm save method.
+     *
+     * Accepts the following POST parameters: email
+     * Returns the success/fail message.
+     */
+    post: operations["auth_password_reset_create"];
+  };
+  "/api/auth/password/reset/confirm/": {
+    /**
+     * Password reset e-mail link is confirmed, therefore
+     * this resets the user's password.
+     *
+     * Accepts the following POST parameters: token, uid,
+     *     new_password1, new_password2
+     * Returns the success/fail message.
+     */
+    post: operations["auth_password_reset_confirm_create"];
+  };
+  "/api/auth/token/refresh/": {
+    /**
+     * Takes a refresh type JSON web token and returns an access type JSON web
+     * token if the refresh token is valid.
+     */
+    post: operations["auth_token_refresh_create"];
+  };
+  "/api/auth/token/verify/": {
+    /**
+     * Takes a token and indicates if it is valid.  This view provides no
+     * information about a token's fitness for a particular use.
+     */
+    post: operations["auth_token_verify_create"];
+  };
+  "/api/auth/user/": {
+    /**
+     * Reads and updates UserModel fields
+     * Accepts GET, PUT, PATCH methods.
+     *
+     * Default accepted fields: username, first_name, last_name
+     * Default display fields: pk, username, email, first_name, last_name
+     * Read-only fields: pk, email
+     *
+     * Returns UserModel fields.
+     */
+    get: operations["auth_user_retrieve"];
+    /**
+     * Reads and updates UserModel fields
+     * Accepts GET, PUT, PATCH methods.
+     *
+     * Default accepted fields: username, first_name, last_name
+     * Default display fields: pk, username, email, first_name, last_name
+     * Read-only fields: pk, email
+     *
+     * Returns UserModel fields.
+     */
+    put: operations["auth_user_update"];
+    /**
+     * Reads and updates UserModel fields
+     * Accepts GET, PUT, PATCH methods.
+     *
+     * Default accepted fields: username, first_name, last_name
+     * Default display fields: pk, username, email, first_name, last_name
+     * Read-only fields: pk, email
+     *
+     * Returns UserModel fields.
+     */
+    patch: operations["auth_user_partial_update"];
+  };
   "/api/evaluation_config/": {
     get: operations["evaluation_config_list"];
     post: operations["evaluation_config_create"];
@@ -13,9 +112,6 @@ export interface paths {
     put: operations["evaluation_config_update"];
     delete: operations["evaluation_config_destroy"];
     patch: operations["evaluation_config_partial_update"];
-  };
-  "/api/getme/": {
-    get: operations["getme_list"];
   };
   "/api/model_configuration/": {
     get: operations["model_configuration_list"];
@@ -66,20 +162,6 @@ export interface paths {
   "/api/task_log/{id}/": {
     get: operations["task_log_retrieve"];
   };
-  "/api/token/": {
-    /**
-     * Takes a set of user credentials and returns an access and refresh JSON web
-     * token pair to prove the authentication of those credentials.
-     */
-    post: operations["token_create"];
-  };
-  "/api/token/refresh/": {
-    /**
-     * Takes a refresh type JSON web token and returns an access type JSON web
-     * token if the refresh token is valid.
-     */
-    post: operations["token_refresh_create"];
-  };
   "/api/trained_model/": {
     get: operations["trained_model_list"];
     post: operations["trained_model_create"];
@@ -112,6 +194,17 @@ export interface components {
       name?: string | null;
       cutoff?: number;
       target_metric?: components["schemas"]["TargetMetricEnum"];
+    };
+    /** Serializer for JWT authentication. */
+    JWT: {
+      access_token: string;
+      refresh_token: string;
+      user: components["schemas"]["UserDetails"];
+    };
+    Login: {
+      username?: string;
+      email?: string;
+      password: string;
     };
     ModelConfiguration: {
       id: number;
@@ -150,6 +243,21 @@ export interface components {
       best_config?: number | null;
       ins_datetime: string;
       task_links: components["schemas"]["TaskAndParameterJobLink"][];
+    };
+    PasswordChange: {
+      new_password1: string;
+      new_password2: string;
+    };
+    /** Serializer for requesting a password reset e-mail. */
+    PasswordReset: {
+      email: string;
+    };
+    /** Serializer for confirming a password reset attempt. */
+    PasswordResetConfirm: {
+      new_password1: string;
+      new_password2: string;
+      uid: string;
+      token: string;
     };
     PatchedEvaluationConfig: {
       id?: number;
@@ -219,6 +327,15 @@ export interface components {
       basename?: string;
       filesize?: number | null;
     };
+    /** User model w/o password */
+    PatchedUserDetails: {
+      pk?: number;
+      /** Required. 150 characters or fewer. Letters, digits and @/./+/-/_ only. */
+      username?: string;
+      email?: string;
+      first_name?: string;
+      last_name?: string;
+    };
     Project: {
       id: number;
       name: string;
@@ -235,6 +352,9 @@ export interface components {
       time_column?: string | null;
       ins_datetime: string;
       trainingdata_set: components["schemas"]["TrainingDataForSummary"][];
+    };
+    RestAuthDetail: {
+      detail: string;
     };
     SchemeEnum: "RG" | "TG" | "TU";
     SplitConfig: {
@@ -275,15 +395,12 @@ export interface components {
       /** Datetime field when the task was completed in UTC */
       date_done: string;
     };
-    TokenObtainPair: {
-      username: string;
-      password: string;
-      access: string;
-      refresh: string;
-    };
     TokenRefresh: {
       access: string;
       refresh: string;
+    };
+    TokenVerify: {
+      token: string;
     };
     TrainedModel: {
       id: number;
@@ -308,18 +425,238 @@ export interface components {
       n_parameter_tuning_jobs: number;
       n_trained_models: number;
     };
-    User: {
+    /** User model w/o password */
+    UserDetails: {
+      pk: number;
       /** Required. 150 characters or fewer. Letters, digits and @/./+/-/_ only. */
       username: string;
-      /** Designates whether the user can log into this admin site. */
-      is_staff?: boolean;
-      /** Designates that this user has all permissions without explicitly assigning them. */
-      is_superuser?: boolean;
+      email: string;
+      first_name?: string;
+      last_name?: string;
     };
   };
 }
 
 export interface operations {
+  /**
+   * Check the credentials and return the REST Token
+   * if the credentials are valid and authenticated.
+   * Calls Django Auth login method to register User ID
+   * in Django session framework
+   *
+   * Accept the following POST parameters: username, password
+   * Return the REST Framework Token Object's key.
+   */
+  auth_login_create: {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["JWT"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["Login"];
+        "application/x-www-form-urlencoded": components["schemas"]["Login"];
+        "multipart/form-data": components["schemas"]["Login"];
+      };
+    };
+  };
+  /**
+   * Calls Django logout method and delete the Token object
+   * assigned to the current User object.
+   *
+   * Accepts/Returns nothing.
+   */
+  auth_logout_create: {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["RestAuthDetail"];
+        };
+      };
+    };
+  };
+  /**
+   * Calls Django Auth SetPasswordForm save method.
+   *
+   * Accepts the following POST parameters: new_password1, new_password2
+   * Returns the success/fail message.
+   */
+  auth_password_change_create: {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["RestAuthDetail"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PasswordChange"];
+        "application/x-www-form-urlencoded": components["schemas"]["PasswordChange"];
+        "multipart/form-data": components["schemas"]["PasswordChange"];
+      };
+    };
+  };
+  /**
+   * Calls Django Auth PasswordResetForm save method.
+   *
+   * Accepts the following POST parameters: email
+   * Returns the success/fail message.
+   */
+  auth_password_reset_create: {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["RestAuthDetail"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PasswordReset"];
+        "application/x-www-form-urlencoded": components["schemas"]["PasswordReset"];
+        "multipart/form-data": components["schemas"]["PasswordReset"];
+      };
+    };
+  };
+  /**
+   * Password reset e-mail link is confirmed, therefore
+   * this resets the user's password.
+   *
+   * Accepts the following POST parameters: token, uid,
+   *     new_password1, new_password2
+   * Returns the success/fail message.
+   */
+  auth_password_reset_confirm_create: {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["RestAuthDetail"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PasswordResetConfirm"];
+        "application/x-www-form-urlencoded": components["schemas"]["PasswordResetConfirm"];
+        "multipart/form-data": components["schemas"]["PasswordResetConfirm"];
+      };
+    };
+  };
+  /**
+   * Takes a refresh type JSON web token and returns an access type JSON web
+   * token if the refresh token is valid.
+   */
+  auth_token_refresh_create: {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["TokenRefresh"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["TokenRefresh"];
+        "application/x-www-form-urlencoded": components["schemas"]["TokenRefresh"];
+        "multipart/form-data": components["schemas"]["TokenRefresh"];
+      };
+    };
+  };
+  /**
+   * Takes a token and indicates if it is valid.  This view provides no
+   * information about a token's fitness for a particular use.
+   */
+  auth_token_verify_create: {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["TokenVerify"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["TokenVerify"];
+        "application/x-www-form-urlencoded": components["schemas"]["TokenVerify"];
+        "multipart/form-data": components["schemas"]["TokenVerify"];
+      };
+    };
+  };
+  /**
+   * Reads and updates UserModel fields
+   * Accepts GET, PUT, PATCH methods.
+   *
+   * Default accepted fields: username, first_name, last_name
+   * Default display fields: pk, username, email, first_name, last_name
+   * Read-only fields: pk, email
+   *
+   * Returns UserModel fields.
+   */
+  auth_user_retrieve: {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["UserDetails"];
+        };
+      };
+    };
+  };
+  /**
+   * Reads and updates UserModel fields
+   * Accepts GET, PUT, PATCH methods.
+   *
+   * Default accepted fields: username, first_name, last_name
+   * Default display fields: pk, username, email, first_name, last_name
+   * Read-only fields: pk, email
+   *
+   * Returns UserModel fields.
+   */
+  auth_user_update: {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["UserDetails"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["UserDetails"];
+        "application/x-www-form-urlencoded": components["schemas"]["UserDetails"];
+        "multipart/form-data": components["schemas"]["UserDetails"];
+      };
+    };
+  };
+  /**
+   * Reads and updates UserModel fields
+   * Accepts GET, PUT, PATCH methods.
+   *
+   * Default accepted fields: username, first_name, last_name
+   * Default display fields: pk, username, email, first_name, last_name
+   * Read-only fields: pk, email
+   *
+   * Returns UserModel fields.
+   */
+  auth_user_partial_update: {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["UserDetails"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PatchedUserDetails"];
+        "application/x-www-form-urlencoded": components["schemas"]["PatchedUserDetails"];
+        "multipart/form-data": components["schemas"]["PatchedUserDetails"];
+      };
+    };
+  };
   evaluation_config_list: {
     parameters: {
       query: {
@@ -419,15 +756,6 @@ export interface operations {
         "application/json": components["schemas"]["PatchedEvaluationConfig"];
         "application/x-www-form-urlencoded": components["schemas"]["PatchedEvaluationConfig"];
         "multipart/form-data": components["schemas"]["PatchedEvaluationConfig"];
-      };
-    };
-  };
-  getme_list: {
-    responses: {
-      200: {
-        content: {
-          "application/json": components["schemas"]["User"][];
-        };
       };
     };
   };
@@ -887,46 +1215,6 @@ export interface operations {
         content: {
           "application/json": components["schemas"]["TaskLog"];
         };
-      };
-    };
-  };
-  /**
-   * Takes a set of user credentials and returns an access and refresh JSON web
-   * token pair to prove the authentication of those credentials.
-   */
-  token_create: {
-    responses: {
-      200: {
-        content: {
-          "application/json": components["schemas"]["TokenObtainPair"];
-        };
-      };
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["TokenObtainPair"];
-        "application/x-www-form-urlencoded": components["schemas"]["TokenObtainPair"];
-        "multipart/form-data": components["schemas"]["TokenObtainPair"];
-      };
-    };
-  };
-  /**
-   * Takes a refresh type JSON web token and returns an access type JSON web
-   * token if the refresh token is valid.
-   */
-  token_refresh_create: {
-    responses: {
-      200: {
-        content: {
-          "application/json": components["schemas"]["TokenRefresh"];
-        };
-      };
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["TokenRefresh"];
-        "application/x-www-form-urlencoded": components["schemas"]["TokenRefresh"];
-        "multipart/form-data": components["schemas"]["TokenRefresh"];
       };
     };
   };

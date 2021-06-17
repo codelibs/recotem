@@ -10,15 +10,15 @@ import axios, { AxiosError } from "axios";
 import { baseURL } from "@/env";
 import { paths } from "@/api/schema";
 
-const tokenObtainUrl = "/api/token/";
+const tokenObtainUrl = "/api/auth/login/";
 type tokenRequest =
-  paths["/api/token/"]["post"]["requestBody"]["content"]["application/json"];
+  paths["/api/auth/login/"]["post"]["requestBody"]["content"]["application/json"];
 type tokenReturn =
-  paths["/api/token/"]["post"]["responses"]["200"]["content"]["application/json"];
+  paths["/api/auth/login/"]["post"]["responses"]["200"]["content"]["application/json"];
 
-interface refreshTokenResult {
-  access: string;
-}
+const getMeUrl = "/api/auth/user/";
+type getMeResponse =
+  paths["/api/auth/user/"]["get"]["responses"]["200"]["content"]["application/json"];
 
 @Module({
   dynamic: true,
@@ -62,7 +62,10 @@ export class Auth extends VuexModule {
     } as tokenRequest;
 
     const response = await axios
-      .post<tokenReturn>(tokenObtainUrl, p)
+      .post<tokenReturn>(tokenObtainUrl, p, {
+        xsrfCookieName: "csrftoken",
+        xsrfHeaderName: "X-CSRFTOKEN",
+      })
       .catch((error: AxiosError) => {
         const detail = error.response?.data?.detail;
         if (typeof detail === "string") {
@@ -71,9 +74,7 @@ export class Auth extends VuexModule {
         return null;
       });
     if (response !== null) {
-      this.setToken(response.data.access);
-      this.setRefresh(response.data.refresh);
-      localStorage.setItem("refresh", response.data.refresh);
+      this.setToken(response.data.access_token);
       await this.getUserName();
     } else {
       this.setToken(null);
@@ -85,7 +86,7 @@ export class Auth extends VuexModule {
   async getUserName() {
     const token = this.token as string | null;
     const result = await axios
-      .get<{ username: string }[]>(`${baseURL}/getme/`, {
+      .get<getMeResponse>(`${baseURL}${getMeUrl}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       .catch((error: AxiosError) => {
@@ -93,15 +94,8 @@ export class Auth extends VuexModule {
       });
 
     if (result !== null) {
-      this.setUsername(result.data[0].username);
+      this.setUsername(result.data.username);
     }
-  }
-
-  @Action
-  async logout() {
-    this.setToken(null);
-    this.setRefresh(null);
-    localStorage.removeItem("refresh");
   }
 }
 

@@ -1,5 +1,6 @@
 from typing import Any
 
+from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from recotem.api.models import (
@@ -8,7 +9,6 @@ from recotem.api.models import (
     SplitConfig,
     TaskLog,
     TrainedModel,
-    User,
 )
 from recotem.api.serializer_utils import (
     ParameterTuningJobSerializer,
@@ -19,7 +19,7 @@ from recotem.api.serializer_utils import (
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
-        model = User
+        model = get_user_model()
         fields = ["username", "is_staff", "is_superuser"]
 
 

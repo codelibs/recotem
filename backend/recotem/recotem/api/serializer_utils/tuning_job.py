@@ -13,7 +13,7 @@ class TaskAndParameterJobLinkSerializer(serializers.ModelSerializer):
 
 
 class ParameterTuningJobSerializer(serializers.ModelSerializer):
-    task_links = TaskAndParameterJobLinkSerializer(many=True)
+    task_links = TaskAndParameterJobLinkSerializer(many=True, read_only=True)
 
     class Meta:
         model = ParameterTuningJob
@@ -35,6 +35,7 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
             "ins_datetime",
             "task_links",
         ]
+        read_only_fields = ["ins_datetime", "task_links"]
 
     def create(self, validated_data):
         obj: ParameterTuningJob = ParameterTuningJob.objects.create(**validated_data)

@@ -68,7 +68,7 @@
 <script lang="ts">
 import Vue from "vue";
 import { AuthModule } from "@/store/auth";
-import { postWithRefreshToken } from "@/utils/request";
+import { postWithRefreshToken, logout } from "@/utils/request";
 
 import SplitConfigForm, {
   ResultType as SplitConfigResultType,
@@ -134,7 +134,7 @@ export default Vue.extend({
         >(AuthModule, splitConfigURL, this.splitConfig);
         console.log("created split config:", createdSplitConfig);
         if (createdSplitConfig === null) {
-          await AuthModule.logout();
+          await logout(AuthModule, this.$router);
           throw "Log out";
         }
         splitConfigId = createdSplitConfig.id;
@@ -149,7 +149,7 @@ export default Vue.extend({
         >(AuthModule, evaluationConfigURL, this.evaluationConfig);
         console.log("created split config:", createdEvaluationConfig);
         if (createdEvaluationConfig === null) {
-          await AuthModule.logout();
+          await logout(AuthModule, this.$router);
           throw "Log out";
         }
         evaluationConfigId = createdEvaluationConfig.id;

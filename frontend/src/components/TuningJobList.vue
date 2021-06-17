@@ -60,6 +60,7 @@ import { paths, components } from "@/api/schema";
 import { computeMaxPage } from "@/utils/pagination";
 import { getWithRefreshToken } from "@/utils";
 import { AuthModule } from "@/store/auth";
+import { logout } from "@/utils/request";
 import qs from "qs";
 
 const tuningJobListURL = "/api/parameter_tuning_job/";
@@ -157,7 +158,7 @@ export default Vue.extend({
       );
       console.log(result);
       if (result === null) {
-        AuthModule.logout();
+        await logout(AuthModule, this.$router);
         throw "logout";
       }
       this.totalCount = result.count || 0;

@@ -4,14 +4,22 @@ from pathlib import Path, PurePath
 from typing import Optional
 
 import pandas as pd
-from django.contrib.auth.models import User
+from django.conf import settings
 from django.db import models
+from django.dispatch import receiver
 from django.utils.crypto import get_random_string
 from django.utils.translation import gettext_lazy as _
 from django_celery_results.models import TaskResult
+from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import ValidationError
 
 from recotem.api.utils import read_dataframe
+
+
+@receiver(models.signals.post_save, sender=settings.AUTH_USER_MODEL)
+def create_auth_token(sender, instance=None, created=False, **kwargs):
+    if created:
+        Token.objects.create(user=instance)
 
 
 class Project(models.Model):

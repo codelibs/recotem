@@ -27,6 +27,7 @@
 <script lang="ts">
 import Vue from "vue";
 import { AuthModule } from "@/store/auth";
+import { logout } from "@/utils/request";
 export default Vue.extend({
   computed: {
     username(): string | null {
@@ -40,8 +41,7 @@ export default Vue.extend({
   },
   methods: {
     async logout(): Promise<void> {
-      await AuthModule.logout();
-      this.$router.push({ name: "login" });
+      await logout(AuthModule, this.$router);
     },
   },
 });

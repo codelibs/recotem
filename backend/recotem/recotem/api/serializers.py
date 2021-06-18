@@ -30,7 +30,7 @@ class TrainedModelSerializer(serializers.ModelSerializer):
             "id",
             "configuration",
             "data_loc",
-            "model_path",
+            "file",
             "irspack_version",
             "ins_datetime",
             "basename",

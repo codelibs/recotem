@@ -1907,7 +1907,7 @@ components:
           type: integer
         data_loc:
           type: integer
-        model_path:
+        file:
           type: string
           nullable: true
         irspack_version:
@@ -1924,7 +1924,6 @@ components:
           readOnly: true
         filesize:
           type: integer
-          nullable: true
           readOnly: true
     PatchedTrainingData:
       type: object
@@ -1934,18 +1933,19 @@ components:
           readOnly: true
         project:
           type: integer
-        upload_path:
+        file:
           type: string
+          nullable: true
         ins_datetime:
           type: string
           format: date-time
           readOnly: true
         basename:
           type: string
+          nullable: true
           readOnly: true
         filesize:
           type: integer
-          nullable: true
           readOnly: true
     PatchedUserDetails:
       type: object
@@ -2174,7 +2174,7 @@ components:
           type: integer
         data_loc:
           type: integer
-        model_path:
+        file:
           type: string
           nullable: true
         irspack_version:
@@ -2191,7 +2191,6 @@ components:
           readOnly: true
         filesize:
           type: integer
-          nullable: true
           readOnly: true
       required:
       - basename
@@ -2208,18 +2207,19 @@ components:
           readOnly: true
         project:
           type: integer
-        upload_path:
+        file:
           type: string
+          nullable: true
         ins_datetime:
           type: string
           format: date-time
           readOnly: true
         basename:
           type: string
+          nullable: true
           readOnly: true
         filesize:
           type: integer
-          nullable: true
           readOnly: true
       required:
       - basename
@@ -2227,7 +2227,6 @@ components:
       - id
       - ins_datetime
       - project
-      - upload_path
     TrainingDataForSummary:
       type: object
       properties:

@@ -13,7 +13,7 @@ class TrainingDataSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "project",
-            "upload_path",
+            "file",
             "ins_datetime",
             "basename",
             "filesize",

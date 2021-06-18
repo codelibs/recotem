@@ -313,19 +313,19 @@ export interface components {
       id?: number;
       configuration?: number;
       data_loc?: number;
-      model_path?: string | null;
+      file?: string | null;
       irspack_version?: string | null;
       ins_datetime?: string;
       basename?: string | null;
-      filesize?: number | null;
+      filesize?: number;
     };
     PatchedTrainingData: {
       id?: number;
       project?: number;
-      upload_path?: string;
+      file?: string | null;
       ins_datetime?: string;
-      basename?: string;
-      filesize?: number | null;
+      basename?: string | null;
+      filesize?: number;
     };
     /** User model w/o password */
     PatchedUserDetails: {
@@ -406,19 +406,19 @@ export interface components {
       id: number;
       configuration: number;
       data_loc: number;
-      model_path?: string | null;
+      file?: string | null;
       irspack_version?: string | null;
       ins_datetime: string;
       basename: string | null;
-      filesize: number | null;
+      filesize: number;
     };
     TrainingData: {
       id: number;
       project: number;
-      upload_path: string;
+      file?: string | null;
       ins_datetime: string;
-      basename: string;
-      filesize: number | null;
+      basename: string | null;
+      filesize: number;
     };
     TrainingDataForSummary: {
       id: number;

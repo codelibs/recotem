@@ -7,7 +7,7 @@
           <span class="text-subtitle-1"> (id: {{ dataBasicInfo.id }}) </span>
         </div>
         <div class="text-subtitle-1">
-          Saved as {{ dataBasicInfo.upload_path }}
+          Saved as {{ dataBasicInfo.file }}
           <span v-if="dataBasicInfo.filesize !== null">
             , {{ prettyFileSize }}
           </span>

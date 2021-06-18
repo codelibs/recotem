@@ -1,19 +1,17 @@
-import re
-from functools import partial
-from pathlib import Path, PurePath
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 from django.conf import settings
 from django.db import models
 from django.dispatch import receiver
-from django.utils.crypto import get_random_string
 from django.utils.translation import gettext_lazy as _
 from django_celery_results.models import TaskResult
 from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import ValidationError
 
-from recotem.api.utils import read_dataframe
+from ..utils import read_dataframe
+from .base_file_model import BaseFileModel
 
 
 @receiver(models.signals.post_save, sender=settings.AUTH_USER_MODEL)
@@ -30,28 +28,13 @@ class Project(models.Model):
     ins_datetime = models.DateTimeField(auto_now_add=True)
 
 
-def upload_to(save_directory, instance, filename: str):
-    filename_as_path = PurePath(filename)
-    suffixes = filename_as_path.suffixes
-    while filename_as_path.suffix:
-        filename_as_path = filename_as_path.with_suffix("")
-    random_string = get_random_string(length=7)
-    res = f"{save_directory}/{filename_as_path.name}_{random_string}{''.join(suffixes)}"
-    return res
-
-
-trainingdata_upload_to = partial(upload_to, "training_data")
-remove_rand = re.compile("_.{7}$")
-
-
-class TrainingData(models.Model):
+class TrainingData(BaseFileModel):
     project = models.ForeignKey(Project, on_delete=models.CASCADE)
-    upload_path = models.FileField(upload_to=trainingdata_upload_to, null=False)
     ins_datetime = models.DateTimeField(auto_now_add=True)
 
     def validate_return_df(self) -> pd.DataFrame:
-        pathname = Path(self.upload_path.name)
-        df = read_dataframe(pathname, self.upload_path)
+        pathname = Path(self.file.name)
+        df = read_dataframe(pathname, self.file)
         user_column: str = self.project.user_column
         item_column: str = self.project.item_column
         time_column: Optional[str] = self.project.time_column
@@ -78,18 +61,17 @@ class TrainingData(models.Model):
             )
         return df
 
-    def basename(self) -> str:
-        path = PurePath(self.upload_path.name)
-        suffixes = path.suffixes
-        while path.suffixes:
-            path = path.with_suffix("")
-        return remove_rand.sub("", path.name) + ("".join(suffixes))
 
-    def filesize(self) -> Optional[int]:
-        try:
-            return self.upload_path.size
-        except:
-            return None
+@receiver(models.signals.post_save, sender=TrainingData)
+def save_file_size(
+    sender, instance: Optional[TrainingData] = None, created: bool = False, **kwargs
+) -> None:
+    if not created:
+        return
+    if not bool(instance.file):
+        raise ValidationError(detail="file is required.")
+    instance.filesize = instance.file.size
+    instance.save()
 
 
 class SplitConfig(models.Model):
@@ -135,28 +117,11 @@ class ModelConfiguration(models.Model):
     ins_datetime = models.DateTimeField(auto_now_add=True)
 
 
-class TrainedModel(models.Model):
+class TrainedModel(BaseFileModel):
     configuration = models.ForeignKey(ModelConfiguration, on_delete=models.CASCADE)
     data_loc = models.ForeignKey(TrainingData, on_delete=models.CASCADE)
-    model_path = models.FileField(upload_to="models/", null=True)
     irspack_version = models.CharField(max_length=16, null=True)
     ins_datetime = models.DateTimeField(auto_now_add=True)
-
-    def basename(self) -> Optional[str]:
-        if self.model_path is None:
-            return None
-        if self.model_path.name is None:
-            return None
-        path = PurePath(self.model_path.name)
-        while path.suffixes:
-            path = path.with_suffix("")
-        return path.stem
-
-    def filesize(self) -> Optional[int]:
-        try:
-            return self.model_path.size
-        except:
-            return None
 
 
 class ParameterTuningJob(models.Model):

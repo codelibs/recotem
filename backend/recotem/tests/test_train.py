@@ -51,9 +51,9 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
     pkl_gzip_file.close()
     pkl_file.seek(0)
 
-    data_id = client.post(
-        data_url, dict(project=project_id, upload_path=pkl_file)
-    ).json()["id"]
+    data_id = client.post(data_url, dict(project=project_id, file=pkl_file)).json()[
+        "id"
+    ]
 
     assert client.post(split_config_url, dict(heldout_ratio=1.1)).status_code == 400
     assert client.post(split_config_url, dict(test_user_ratio=-0.1)).status_code == 400
@@ -99,14 +99,14 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
     train_model_path: Optional[IO] = None
     for _ in range(100):
         model = TrainedModel.objects.get(id=model_id)
-        train_model_path = model.model_path
+        train_model_path = model.file
         if train_model_path.name:
             assert model.irspack_version is not None
             break
         sleep(1.0)
     assert train_model_path is not None
     model = TrainedModel.objects.get(id=model_id)
-    result = pickle.load(model.model_path)
+    result = pickle.load(model.file)
     assert "id_mapped_recommender" in result
     assert "irspack_version" in result
 
@@ -134,7 +134,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         sleep(1.0)
     assert model_after_tuning_job is not None
 
-    result = pickle.load(model_after_tuning_job.model_path)
+    result = pickle.load(model_after_tuning_job.file)
     assert "id_mapped_recommender" in result
     assert "irspack_version" in result
     assert result["recotem_trained_model_id"] == model_after_tuning_job.id

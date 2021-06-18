@@ -119,7 +119,7 @@ def train_recommender_func(
         )
         temp_fs.seek(0)
         file_ = default_storage.save(f"models/model-{model.id}.pkl", temp_fs)
-        model.model_path = file_
+        model.file = file_
         model.save()
 
     if parameter_tuning_job_id is not None:
@@ -228,7 +228,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
     project: Project = data.project
     split: SplitConfig = job.split
     evaluation: EvaluationConfig = job.evaluation
-    df: pd.DataFrame = read_dataframe(Path(data.upload_path.name), data.upload_path)
+    df: pd.DataFrame = read_dataframe(Path(data.file.name), data.file)
     user_column = project.user_column
     item_column = project.item_column
 

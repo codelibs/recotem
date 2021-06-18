@@ -81,10 +81,17 @@ def test_invalid_compression(client: Client, ml100k: pd.DataFrame):
 
     resp = client.post(
         data_url,
-        dict(project=failing_project_id_item, upload_path=unk_compression_file),
+        dict(project=failing_project_id_item, file=unk_compression_file),
     )
     assert resp.status_code == 400
     assert resp.json()[0] == "Only .gzip or .gz compression are supported."
+
+    resp = client.post(
+        data_url,
+        dict(project=failing_project_id_item),
+    )
+    assert resp.status_code == 400
+    assert resp.json()[0] == "file is required."
 
 
 @pytest.mark.django_db
@@ -105,7 +112,7 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
     no_ext_file.seek(0)
 
     resp = client.post(
-        data_url, dict(project=failing_project_id_item, upload_path=no_ext_file)
+        data_url, dict(project=failing_project_id_item, file=no_ext_file)
     )
     assert resp.status_code == 400
     assert resp.json()[0] == "Suffix like .csv or .json.gzip or pickle.gz required."
@@ -115,7 +122,7 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
     unknown_ext_file.seek(0)
 
     resp = client.post(
-        data_url, dict(project=failing_project_id_item, upload_path=unknown_ext_file)
+        data_url, dict(project=failing_project_id_item, file=unknown_ext_file)
     )
     assert resp.status_code == 400
 
@@ -126,7 +133,7 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
     ml100k.to_csv(toomany_prefix_file, index=False)
     toomany_prefix_file.seek(0)
     resp = client.post(
-        data_url, dict(project=failing_project_id_item, upload_path=toomany_prefix_file)
+        data_url, dict(project=failing_project_id_item, file=toomany_prefix_file)
     )
     assert resp.status_code == 400
 
@@ -136,7 +143,7 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
     wrong_ext_file_gzip.close()
     wrong_ext_file.seek(0)
     resp = client.post(
-        data_url, dict(project=failing_project_id_item, upload_path=wrong_ext_file)
+        data_url, dict(project=failing_project_id_item, file=wrong_ext_file)
     )
     assert resp.status_code == 400
     assert resp.json()[0].startswith("Failed to parse")
@@ -158,9 +165,7 @@ def test_data_post(client: Client, ml100k: pd.DataFrame):
     ml100k.to_csv(csv_file, index=False)
     csv_file.seek(0)
 
-    resp = client.post(
-        data_url, dict(project=failing_project_id_item, upload_path=csv_file)
-    )
+    resp = client.post(data_url, dict(project=failing_project_id_item, file=csv_file))
     assert resp.status_code == 400
 
     resp_failing_project_creation_invalid_user = client.post(
@@ -170,9 +175,7 @@ def test_data_post(client: Client, ml100k: pd.DataFrame):
     failing_project_id_user = resp_failing_project_creation_invalid_user.json()["id"]
 
     csv_file.seek(0)
-    resp = client.post(
-        data_url, dict(project=failing_project_id_user, upload_path=csv_file)
-    )
+    resp = client.post(data_url, dict(project=failing_project_id_user, file=csv_file))
     assert resp.status_code == 400
 
     resp_successfull_project_creation = client.post(
@@ -195,7 +198,7 @@ def test_data_post(client: Client, ml100k: pd.DataFrame):
 
     resp_no_timestamp = client.post(
         data_url,
-        dict(project=successfull_project_id, upload_path=csv_file_with_invalid_time),
+        dict(project=successfull_project_id, file=csv_file_with_invalid_time),
     )
     assert resp_no_timestamp.status_code == 400
     assert (
@@ -203,12 +206,10 @@ def test_data_post(client: Client, ml100k: pd.DataFrame):
         == 'Column "timestamp" not found in the upload file.'
     )
 
-    resp = client.post(
-        data_url, dict(project=successfull_project_id, upload_path=csv_file)
-    )
+    resp = client.post(data_url, dict(project=successfull_project_id, file=csv_file))
     assert resp.status_code == 201
     data_created: TrainingData = TrainingData.objects.get(id=resp.json()["id"])
-    df_uploaded = pd.read_csv(data_created.upload_path, parse_dates=["timestamp"])
+    df_uploaded = pd.read_csv(data_created.file, parse_dates=["timestamp"])
     pd_testing.assert_frame_equal(df_uploaded, ml100k)
 
 
@@ -239,18 +240,18 @@ def test_data_post_with_pkl_compression(
     pkl_gzip_file.close()
     dump_file.seek(0)
 
-    response = client.post(data_url, dict(project=project_id, upload_path=dump_file))
+    response = client.post(data_url, dict(project=project_id, file=dump_file))
     assert response.status_code == 201
     data_id = response.json()["id"]
 
     dump_file.seek(0)
-    response2 = client.post(data_url, dict(project=project_id, upload_path=dump_file))
+    response2 = client.post(data_url, dict(project=project_id, file=dump_file))
     assert response2.status_code == 201
 
     dump_file.close()
 
     data_created: TrainingData = TrainingData.objects.get(id=data_id)
-    df_uploaded = load_function(gzip.open(data_created.upload_path))
+    df_uploaded = load_function(gzip.open(data_created.file))
     pd_testing.assert_frame_equal(df_uploaded, ml100k)
 
 
@@ -282,6 +283,6 @@ def test_datetime(
     pkl_gzip_file.close()
     pkl_file.seek(0)
 
-    response = client.post(data_url, dict(project=project_id, upload_path=pkl_file))
+    response = client.post(data_url, dict(project=project_id, file=pkl_file))
     assert response.status_code == 400
     assert 'Could not interpret "timestamp" as datetime.' == response.json()[0]

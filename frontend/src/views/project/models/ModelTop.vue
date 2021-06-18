@@ -3,7 +3,7 @@
     <div class="d-flex align-end">
       <div class="text-h5">Model {{ modelBasicInfo.id }}</div>
       <div class="text-subtitle-2 pl-8" v-if="modelBasicInfo.basename !== null">
-        Saved as {{ modelBasicInfo.model_path }}
+        Saved as {{ modelBasicInfo.file }}
         <span v-if="modelBasicInfo.filesize !== null">
           , {{ prettyFileSize }}
         </span>

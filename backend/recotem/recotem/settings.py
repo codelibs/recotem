@@ -37,7 +37,6 @@ INSTALLED_APPS = [
     "dj_rest_auth",
     "django_filters",
     "django_extensions",
-    "whitenoise.runserver_nostatic",
     "django.contrib.staticfiles",
     "recotem.api",
     "django_celery_results",
@@ -54,9 +53,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",
 ]
-MIDDLEWARE_CLASSES = ("whitenoise.middleware.WhiteNoiseMiddleware",)
 
 
 REST_FRAMEWORK = {
@@ -158,7 +155,7 @@ elif _STORAGE_TYPE == "S3":
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/3.2/howto/static-files/
 
-STATIC_URL = "/static/"
+STATIC_URL = "/api/static/"
 STATIC_ROOT = BASE_DIR / "dist" / "static"
 
 STATICFILES_DIRS: List[Path] = []
@@ -167,8 +164,6 @@ STATICFILES_DIRS: List[Path] = []
 ##########
 # STATIC #
 ##########
-
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 
 # Default primary key field type

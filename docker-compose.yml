@@ -1,9 +1,16 @@
 version: "3.7"
 services:
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+    env_file:
+      - envs/dev.env
+    volumes:
+      - data-location:/data/
+    command: server /data
   queue:
     image: rabbitmq:3
-    ports:
-      - "5672:5672"
   db:
     image: postgres:12
     volumes:
@@ -21,8 +28,7 @@ services:
       dockerfile: backend.dockerfile
     volumes:
       - data-location:/app/data
-    ports:
-      - "8000:80"
+      - static-files:/app/dist/static
     env_file:
       - envs/production.env
   celery_worker:
@@ -35,8 +41,21 @@ services:
       - data-location:/app/data
     env_file:
       - envs/production.env
+  proxy:
+    depends_on:
+      - backend
+      - frontend
+    build:
+      context: .
+      dockerfile: proxy.dockerfile
+    volumes:
+      - static-files:/app/dist/static
+    ports:
+      - "8000:80"
 volumes:
   data-location:
     driver: local
   db-data:
+    driver: local
+  static-files:
     driver: local

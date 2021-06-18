@@ -11,8 +11,6 @@ services:
     command: server /data
   queue:
     image: rabbitmq:3
-    ports:
-      - "5672:5672"
   db:
     image: postgres:12
     volumes:
@@ -21,7 +19,6 @@ services:
       - envs/dev.env
     environment:
       - PGDATA=/var/lib/postgresql/data/pgdata
-  #command: postgres -c log_destination=stderr -c log_statement=all -c log_connections=on -c log_disconnections=on
   backend:
     depends_on:
       - db
@@ -32,8 +29,6 @@ services:
         - RECOTEM_DEV=true
     volumes:
       - ./backend/recotem:/app
-    ports:
-      - "8000:80"
     env_file:
       - envs/dev.env
   celery_worker:
@@ -48,6 +43,14 @@ services:
       - ./backend/recotem/recotem:/app/recotem
     env_file:
       - envs/dev.env
+  frontend:
+    depends_on:
+      - db
+      - backend
+      - queue
+    build:
+      context: ./frontend
+      dockerfile: frontend.dockerfile
 volumes:
   data-location:
     driver: local

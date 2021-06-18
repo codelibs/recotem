@@ -11,4 +11,9 @@ if !  python manage.py create_superuser; then
 echo "failed to initialize an admin user."
 exit 1;
 fi
+
+if !  python manage.py collectstatic --noinput; then
+echo "failed to collectstatic."
+exit 1;
+fi
 python manage.py runserver 0.0.0.0:80

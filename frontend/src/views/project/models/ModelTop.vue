@@ -49,7 +49,6 @@ import { prettyFileSize } from "@/utils/conversion";
 const retrieveURL = "/api/trained_model/";
 type responses = paths["/api/trained_model/{id}/"]["get"]["responses"];
 type respose200 = responses["200"]["content"]["application/json"];
-type download = paths["/api/training_data/{id}/download_file/"];
 
 type Data = {
   modelBasicInfo: respose200 | null;
@@ -89,7 +88,7 @@ export default Vue.extend({
       )
         return;
       this.downloading = true;
-      const URL = `${baseURL}/api/training_data/${this.trainedModelId}/download_file/`;
+      const URL = `${baseURL}/api/trained_model/${this.trainedModelId}/download_file/`;
       await downloadWithRefreshToken(
         AuthModule,
         URL,

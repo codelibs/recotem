@@ -21,7 +21,8 @@ from recotem.api.serializers import (
     TrainedModelSerializer,
     TrainingDataSerializer,
 )
-from recotem.api.view_utils.project import ProjectSummaryViewSet, ProjectViewSet
+
+from .project import ProjectSummaryViewSet, ProjectViewSet
 
 
 class TrainedModelViewset(viewsets.ModelViewSet):

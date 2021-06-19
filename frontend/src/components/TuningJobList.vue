@@ -22,7 +22,7 @@
                     </v-list-item-subtitle>
                   </v-col>
                   <v-col cols="2">
-                    {{ prettyStatus(td.task_links) }}
+                    <TuningJobStatus :tasks="td.task_links" />
                   </v-col>
                 </v-row>
               </v-list-item-content>
@@ -61,43 +61,13 @@ import { computeMaxPage } from "@/utils/pagination";
 import { getWithRefreshToken } from "@/utils";
 import { AuthModule } from "@/store/auth";
 import { logout } from "@/utils/request";
+import TuningJobStatus from "@/components/TuningJobStatus.vue";
 import qs from "qs";
 
 const tuningJobListURL = "/api/parameter_tuning_job/";
 type APIResultType =
   paths["/api/parameter_tuning_job/"]["get"]["responses"]["200"]["content"]["application/json"];
 type TuningJobArray = APIResultType["results"];
-type taskType = components["schemas"]["TaskResult"];
-type possibleStatus = components["schemas"]["StatusEnum"];
-
-function statusCodeSetToString(statuses: possibleStatus[]): string {
-  if (statuses.length === 0) return "Unknown";
-  for (let s of statuses) {
-    if (s === "FAILURE") {
-      return "Failure";
-    }
-  }
-  for (let s of statuses) {
-    if (s === "STARTED") {
-      return "In Progress";
-    }
-  }
-  for (let s of statuses) {
-    if (s === "REVOKED") {
-      return "Revoked";
-    }
-  }
-  let allSuccess = true;
-  for (let s of statuses) {
-    if (s !== "SUCCESS") {
-      allSuccess = false;
-    }
-  }
-  if (allSuccess) {
-    return "COMPLETE";
-  }
-  return "Unknown";
-}
 
 type Data = {
   page: number;
@@ -139,11 +109,6 @@ export default Vue.extend({
           break;
         }
       }
-    },
-    prettyStatus(sCodes: { task: taskType }[]): string {
-      return statusCodeSetToString(
-        sCodes.map((f) => f.task.status || "RECEIVED")
-      );
     },
     async fetchData(): Promise<void> {
       let queryString = qs.stringify({
@@ -188,6 +153,9 @@ export default Vue.extend({
   async mounted() {
     await this.fetchData();
     await this.polling();
+  },
+  components: {
+    TuningJobStatus,
   },
 });
 </script>

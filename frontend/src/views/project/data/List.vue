@@ -194,7 +194,7 @@ export default Vue.extend({
       if (this.projectId === null) return;
       const data = new FormData();
       data.append("project", `${this.projectId}`);
-      data.append("upload_path", this.uploadFile);
+      data.append("file", this.uploadFile);
 
       this.uploadProgress = 0;
 

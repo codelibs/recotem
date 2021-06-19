@@ -18,7 +18,7 @@
     <v-container>
       <v-tabs-items v-model="tab">
         <v-tab-item>
-          <v-list>
+          <v-list v-if="projects.length > 0">
             <template v-for="(project, i) in projects">
               <v-list-item
                 :key="i"
@@ -37,6 +37,7 @@
               </v-divider>
             </template>
           </v-list>
+          <div v-else class="pa-8 text-h6 text-center">No projects yet.</div>
         </v-tab-item>
         <v-tab-item>
           <ProjectCreation />

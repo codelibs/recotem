@@ -141,7 +141,7 @@ USE_TZ = True
 
 _STORAGE_TYPE = env("RECOTEM_STORAGE_TYPE", default="")
 if not _STORAGE_TYPE:
-    pass
+    MEDIA_ROOT = BASE_DIR / "data"
 elif _STORAGE_TYPE == "S3":
     DEFAULT_FILE_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"
     AWS_ACCESS_KEY_ID = env("AWS_ACCESS_KEY_ID")
@@ -180,9 +180,6 @@ CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "default"
 CELERY_TASK_SERIALIZER = "json"
 
-CORS_ALLOWED_ORIGINS = [
-    x for x in env("CORS_ALLOWED_ORIIGNS", default="").split(",") if x
-]
 
 REST_SESSION_LOGIN = True
 REST_USE_JWT = True

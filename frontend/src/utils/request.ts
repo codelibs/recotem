@@ -3,6 +3,7 @@ import Axios, { AxiosPromise, AxiosError, AxiosRequestConfig } from "axios";
 import { baseURL } from "@/env";
 import { paths } from "@/api/schema";
 import Router from "vue-router";
+import fileDownload from "js-file-download";
 
 const refreshURL = `${baseURL}/api/auth/token/refresh/`;
 type RefreshResult =
@@ -120,6 +121,33 @@ export async function getWithRefreshToken<Return>(
     undefined,
     config
   );
+}
+
+export async function downloadWithRefreshToken(
+  module: Auth,
+  path: string,
+  saveName: string
+): Promise<boolean> {
+  const response = await axiosMethodWithRetry<undefined, Blob>(
+    async (
+      path: string,
+      _: undefined,
+      config_: AxiosRequestConfig | undefined
+    ) => Axios.get<any>(path, config_),
+    module,
+    path,
+    undefined,
+    { responseType: "blob" }
+  ).catch((error) => {
+    console.log(error);
+    return null;
+  });
+  if (response === null) {
+    alert(`Failed to download`);
+    return false;
+  }
+  fileDownload(response, saveName);
+  return true;
 }
 
 export async function postWithRefreshToken<Payload, Return>(

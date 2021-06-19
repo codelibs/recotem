@@ -118,7 +118,7 @@ def train_recommender_func(
             temp_fs,
         )
         temp_fs.seek(0)
-        file_ = default_storage.save(f"models/model-{model.id}.pkl", temp_fs)
+        file_ = default_storage.save(f"trained_models/model-{model.id}.pkl", temp_fs)
         model.file = file_
         model.save()
 

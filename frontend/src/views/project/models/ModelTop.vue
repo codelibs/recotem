@@ -10,10 +10,20 @@
       </div>
       <div class="flex-grow-1"></div>
       <div>
-        <v-btn color="info">
-          <v-icon> mdi-download </v-icon>
-          <span class="pa-1"></span>
-          Download
+        <v-btn
+          :color="downloading ? '' : 'info'"
+          @click="handleDownload"
+          :disabled="downloading"
+        >
+          <template v-if="!downloading">
+            <v-icon> mdi-download </v-icon>
+            <span class="pa-1"></span>
+            Download
+          </template>
+          <template v-else>
+            <v-progress-circular indeterminate :size="10" />
+            <span class="text-subtitle pl-4"> Downloading...</span>
+          </template>
         </v-btn>
       </div>
     </div>
@@ -25,9 +35,13 @@
 
 <script lang="ts">
 import Vue from "vue";
+import { baseURL } from "@/env";
 import { paths } from "@/api/schema";
 import { AuthModule } from "@/store/auth";
-import { getWithRefreshToken } from "@/utils";
+import {
+  getWithRefreshToken,
+  downloadWithRefreshToken,
+} from "@/utils/request.ts";
 import { prettyFileSize } from "@/utils/conversion";
 
 //import TuningJobList from "@/components/TuningJobList.vue";
@@ -35,14 +49,17 @@ import { prettyFileSize } from "@/utils/conversion";
 const retrieveURL = "/api/trained_model/";
 type responses = paths["/api/trained_model/{id}/"]["get"]["responses"];
 type respose200 = responses["200"]["content"]["application/json"];
+type download = paths["/api/training_data/{id}/download_file/"];
 
 type Data = {
   modelBasicInfo: respose200 | null;
+  downloading: boolean;
 };
 export default Vue.extend({
   data(): Data {
     return {
       modelBasicInfo: null,
+      downloading: false,
     };
   },
   async mounted() {
@@ -63,6 +80,22 @@ export default Vue.extend({
       if (result === null) return;
       console.log(result);
       this.modelBasicInfo = result;
+    },
+    async handleDownload(): Promise<void> {
+      if (
+        this.trainedModelId === null ||
+        this.modelBasicInfo === null ||
+        this.modelBasicInfo.basename === null
+      )
+        return;
+      this.downloading = true;
+      const URL = `${baseURL}/api/training_data/${this.trainedModelId}/download_file/`;
+      await downloadWithRefreshToken(
+        AuthModule,
+        URL,
+        this.modelBasicInfo.basename
+      );
+      this.downloading = false;
     },
   },
   computed: {

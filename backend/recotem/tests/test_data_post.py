@@ -208,9 +208,28 @@ def test_data_post(client: Client, ml100k: pd.DataFrame):
 
     resp = client.post(data_url, dict(project=successfull_project_id, file=csv_file))
     assert resp.status_code == 201
-    data_created: TrainingData = TrainingData.objects.get(id=resp.json()["id"])
-    df_uploaded = pd.read_csv(data_created.file, parse_dates=["timestamp"])
-    pd_testing.assert_frame_equal(df_uploaded, ml100k)
+    created_data_id: int = resp.json()["id"]
+
+    download_response = client.get(
+        data_url + f"{created_data_id}/download_file/", stream=True
+    )
+    with NamedTemporaryFile() as temp_ofs:
+        for chunk in download_response.streaming_content:
+            temp_ofs.write(chunk)
+        temp_ofs.seek(0)
+        df_uploaded = pd.read_csv(temp_ofs, parse_dates=["timestamp"])
+        pd_testing.assert_frame_equal(df_uploaded, ml100k)
+
+    resp = client.delete(data_url + f"{created_data_id}/unlink_file/")
+    assert resp.status_code == 200
+
+    download_response_after_deletion = client.get(
+        data_url + f"{created_data_id}/download_file/", stream=True
+    )
+    assert download_response_after_deletion.status_code == 404
+
+    data_after_deletion: TrainingData = TrainingData.objects.get(id=created_data_id)
+    assert not bool(data_after_deletion.file)
 
 
 @pytest.mark.django_db

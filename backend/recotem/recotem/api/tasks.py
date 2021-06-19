@@ -122,6 +122,9 @@ def train_recommender_func(
         model.file = file_
         model.save()
 
+    model.filesize = model.file.size
+    model.save()
+
     if parameter_tuning_job_id is not None:
         job: ParameterTuningJob = ParameterTuningJob.objects.get(
             id=parameter_tuning_job_id

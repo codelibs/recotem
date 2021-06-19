@@ -182,6 +182,12 @@ export interface paths {
     delete: operations["training_data_destroy"];
     patch: operations["training_data_partial_update"];
   };
+  "/api/training_data/{id}/download_file/": {
+    get: operations["training_data_download_file_retrieve"];
+  };
+  "/api/training_data/{id}/unlink_file/": {
+    delete: operations["training_data_unlink_file_destroy"];
+  };
   "/api/tuning_log_summary/": {
     get: operations["tuning_log_summary_list"];
   };
@@ -1425,6 +1431,33 @@ export interface operations {
         "application/x-www-form-urlencoded": components["schemas"]["PatchedTrainingData"];
         "multipart/form-data": components["schemas"]["PatchedTrainingData"];
       };
+    };
+  };
+  training_data_download_file_retrieve: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this training data. */
+        id: number;
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["TrainingData"];
+        };
+      };
+    };
+  };
+  training_data_unlink_file_destroy: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this training data. */
+        id: number;
+      };
+    };
+    responses: {
+      /** No response body */
+      204: never;
     };
   };
   tuning_log_summary_list: {

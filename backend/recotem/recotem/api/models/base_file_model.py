@@ -30,7 +30,7 @@ class BaseFileModel(models.Model):
         abstract = True
 
     def delete_file(self) -> None:
-        self.file.unlink()
+        self.file.delete()
         self.filesize = None
         self.save()
 

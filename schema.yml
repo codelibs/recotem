@@ -1542,6 +1542,48 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/training_data/{id}/download_file/:
+    get:
+      operationId: training_data_download_file_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this training data.
+        required: true
+      tags:
+      - training_data
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrainingData'
+          description: ''
+  /api/training_data/{id}/unlink_file/:
+    delete:
+      operationId: training_data_unlink_file_destroy
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this training data.
+        required: true
+      tags:
+      - training_data
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '204':
+          description: No response body
   /api/tuning_log_summary/:
     get:
       operationId: tuning_log_summary_list

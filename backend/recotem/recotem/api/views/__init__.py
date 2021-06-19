@@ -22,17 +22,11 @@ from recotem.api.serializers import (
     TrainingDataSerializer,
 )
 
+from .filemixin import FileDownloadRemoveMixin
 from .project import ProjectSummaryViewSet, ProjectViewSet
 
 
-class TrainedModelViewset(viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
-    queryset = TrainedModel.objects.all()
-    serializer_class = TrainedModelSerializer
-    filterset_fields = ["id", "data_loc", "data_loc__project"]
-
-
-class TrainingDataViewset(viewsets.ModelViewSet):
+class TrainingDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     permission_classes = [IsAuthenticated]
 
     queryset = TrainingData.objects.all().order_by("-ins_datetime")
@@ -42,6 +36,13 @@ class TrainingDataViewset(viewsets.ModelViewSet):
     class pagination_class(PageNumberPagination):
         page_size = 10
         page_size_query_param = "page_size"
+
+
+class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
+    permission_classes = [IsAuthenticated]
+    queryset = TrainedModel.objects.all().order_by("-ins_datetime")
+    serializer_class = TrainedModelSerializer
+    filterset_fields = ["id", "data_loc", "data_loc__project"]
 
 
 class ModelConfigurationViewset(viewsets.ModelViewSet):

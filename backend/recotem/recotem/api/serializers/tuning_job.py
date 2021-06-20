@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from recotem.api.models import ParameterTuningJob, TaskAndParameterJobLink
-from recotem.api.serializer_utils.task import TaskResultSerializer
+from recotem.api.serializers.task import TaskResultSerializer
 
 
 class TaskAndParameterJobLinkSerializer(serializers.ModelSerializer):

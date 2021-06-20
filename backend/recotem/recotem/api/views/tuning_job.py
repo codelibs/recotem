@@ -1,7 +1,7 @@
 from rest_framework import mixins, permissions, viewsets
 
 from recotem.api.models import ParameterTuningJob, TrainingData
-from recotem.api.serializer_utils import ParameterTuningJobSerializer
+from recotem.api.serializers import ParameterTuningJobSerializer
 
 
 class TuningJobSummaryViewset(mixins.ListModelMixin, viewsets.GenericViewSet):

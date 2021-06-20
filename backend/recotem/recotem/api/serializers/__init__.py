@@ -10,11 +10,10 @@ from recotem.api.models import (
     TaskLog,
     TrainedModel,
 )
-from recotem.api.serializer_utils import (
-    ParameterTuningJobSerializer,
-    ProjectSerializer,
-    TrainingDataSerializer,
-)
+
+from .data import TrainingDataSerializer
+from .project import ProjectSerializer, ProjectSummarySerializer
+from .tuning_job import ParameterTuningJobSerializer
 
 
 class UserSerializer(serializers.ModelSerializer):

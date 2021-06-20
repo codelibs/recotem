@@ -62,6 +62,22 @@ class TrainingData(BaseFileModel):
         return df
 
 
+class ItemMetaData(BaseFileModel):
+    project = models.ForeignKey(Project, on_delete=models.CASCADE)
+    ins_datetime = models.DateTimeField(auto_now_add=True)
+    valid_columns_list_json = models.TextField(null=True)
+
+    def validate_return_df(self) -> pd.DataFrame:
+        pathname = Path(self.file.name)
+        df = read_dataframe(pathname, self.file)
+        item_column: str = self.project.item_column
+        if item_column not in df:
+            raise ValidationError(
+                f'Column "{item_column}" not found in the upload file.'
+            )
+        return df
+
+
 @receiver(models.signals.post_save, sender=TrainingData)
 def save_file_size(
     sender, instance: Optional[TrainingData] = None, created: bool = False, **kwargs

@@ -5,6 +5,7 @@ from rest_framework.views import APIView
 
 from recotem.api.models import (
     EvaluationConfig,
+    ItemMetaData,
     ModelConfiguration,
     ParameterTuningJob,
     SplitConfig,
@@ -21,6 +22,7 @@ from recotem.api.serializers import (
     TrainedModelSerializer,
     TrainingDataSerializer,
 )
+from recotem.api.serializers.data import ItemMetaDataSerializer
 
 from .filemixin import FileDownloadRemoveMixin
 from .project import ProjectSummaryViewSet, ProjectViewSet
@@ -31,6 +33,18 @@ class TrainingDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
 
     queryset = TrainingData.objects.all().order_by("-ins_datetime")
     serializer_class = TrainingDataSerializer
+    filterset_fields = ["id", "project"]
+
+    class pagination_class(PageNumberPagination):
+        page_size = 10
+        page_size_query_param = "page_size"
+
+
+class ItemMetaDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
+    permission_classes = [IsAuthenticated]
+
+    queryset = ItemMetaData.objects.all().order_by("-ins_datetime")
+    serializer_class = ItemMetaDataSerializer
     filterset_fields = ["id", "project"]
 
     class pagination_class(PageNumberPagination):

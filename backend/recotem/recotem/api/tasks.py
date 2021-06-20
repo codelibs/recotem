@@ -101,14 +101,16 @@ def train_recommender_func(
     item_column = project.item_column
     recommender_class = get_recommender_class(model_config.recommender_class_name)
 
-    X, uid, iid = df_to_sparse(data.validate_return_df(), user_column, item_column)
+    X, uids, iids = df_to_sparse(data.validate_return_df(), user_column, item_column)
+    uids = [str(uid) for uid in uids]
+    iids = [str(iid) for iid in iids]
 
     model.irspack_version = irspack_version
 
     param = json.loads(model_config.parameters_json)
     rec = recommender_class(X, **param).learn()
     with tempfile.TemporaryFile() as temp_fs:
-        mapped_rec = IDMappedRecommender(rec, uid, iid)
+        mapped_rec = IDMappedRecommender(rec, uids, iids)
         pickle.dump(
             dict(
                 id_mapped_recommender=mapped_rec,

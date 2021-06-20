@@ -1,4 +1,5 @@
 import gzip
+import json
 import typing
 from tempfile import NamedTemporaryFile
 
@@ -305,3 +306,40 @@ def test_datetime(
     response = client.post(data_url, dict(project=project_id, file=pkl_file))
     assert response.status_code == 400
     assert 'Could not interpret "timestamp" as datetime.' == response.json()[0]
+
+
+@pytest.mark.django_db
+def test_metadata_post(
+    client: Client,
+    ml100k_item: pd.DataFrame,
+):
+    login_client(client)
+
+    project_url = reverse("project-list")
+    data_url = reverse("item_meta_data-list")
+    project_resp = client.post(
+        project_url,
+        dict(
+            name=f"ml_project_metadata_upload",
+            user_column="userId",
+            item_column="movieId",
+        ),
+    )
+
+    project_id = project_resp.json()["id"]
+    json_file = NamedTemporaryFile(suffix=f".json.gz")
+    json_gzip_file = gzip.open(json_file, mode="wb")
+    ml100k_dummy_ts = ml100k_item.copy()
+    ml100k_dummy_ts.to_json(json_gzip_file)
+    json_gzip_file.close()
+    json_file.seek(0)
+
+    response = client.post(data_url, dict(project=project_id, file=json_file))
+    assert response.status_code == 201
+    j = response.json()
+    columns = json.loads(j["valid_columns_list_json"])
+    assert "title" in columns
+    assert "release_date" in columns
+    assert "video_release_date" in columns
+    assert "URL" in columns
+    assert "movieId" not in columns

@@ -75,6 +75,7 @@ class ItemMetaData(BaseFileModel):
             raise ValidationError(
                 f'Column "{item_column}" not found in the upload file.'
             )
+        df[item_column] = [str(id) for id in df[item_column]]
         return df
 
 

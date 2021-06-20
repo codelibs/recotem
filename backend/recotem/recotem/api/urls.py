@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 
 from recotem.api.views import (
     EvaluationConfigViewSet,
+    ItemMetaDataViewset,
     ModelConfigurationViewset,
     ParameterTuningJobViewSet,
     ProjectSummaryViewSet,
@@ -17,6 +18,7 @@ router = DefaultRouter()
 router.register(r"project", ProjectViewSet, basename="project")
 router.register(r"project_summary", ProjectSummaryViewSet, basename="project_summary")
 router.register(r"training_data", TrainingDataViewset, basename="training_data")
+router.register(r"item_meta_data", ItemMetaDataViewset, basename="item_meta_data")
 router.register(r"split_config", SplitConfigViewSet, basename="split_config")
 router.register(
     r"evaluation_config", EvaluationConfigViewSet, basename="evaluation_config"

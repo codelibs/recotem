@@ -29,6 +29,16 @@
     </div>
     <div>
       <div class="text-center text-h6 pa-8">[Todo] model preview...</div>
+      <div>
+        <div class="text-center pb-4 pt-2">
+          <v-btn @click="fetchRawSample" :disabled="downloading">
+            Get Sample Rec
+          </v-btn>
+        </div>
+        <div v-if="rawRecommendationSample !== null">
+          {{ rawRecommendationSample }}
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -36,7 +46,7 @@
 <script lang="ts">
 import Vue from "vue";
 import { baseURL } from "@/env";
-import { paths } from "@/api/schema";
+import { paths, components } from "@/api/schema";
 import { AuthModule } from "@/store/auth";
 import {
   getWithRefreshToken,
@@ -47,18 +57,26 @@ import { prettyFileSize } from "@/utils/conversion";
 //import TuningJobList from "@/components/TuningJobList.vue";
 
 const retrieveURL = "/api/trained_model/";
+
 type responses = paths["/api/trained_model/{id}/"]["get"]["responses"];
 type respose200 = responses["200"]["content"]["application/json"];
+
+type RawRecommendationSample =
+  paths["/api/trained_model/{id}/sample_recommendation_raw/"]["get"]["responses"]["200"]["content"]["application/json"];
 
 type Data = {
   modelBasicInfo: respose200 | null;
   downloading: boolean;
+  rawRecommendationSample: RawRecommendationSample | null;
+  previewRequesting: boolean;
 };
 export default Vue.extend({
   data(): Data {
     return {
       modelBasicInfo: null,
       downloading: false,
+      rawRecommendationSample: null,
+      previewRequesting: false,
     };
   },
   async mounted() {
@@ -70,6 +88,17 @@ export default Vue.extend({
     },
   },
   methods: {
+    async fetchRawSample(): Promise<void> {
+      if (this.trainedModelId === null) return;
+      this.previewRequesting = true;
+      const url = `/api/trained_model/${this.trainedModelId}/sample_recommendation_raw/`;
+      let result = await getWithRefreshToken<RawRecommendationSample>(
+        AuthModule,
+        url
+      );
+      this.rawRecommendationSample = result;
+      this.previewRequesting = false;
+    },
     async fetchTrainingData(): Promise<void> {
       if (this.trainedModelId === null) return;
       let result = await getWithRefreshToken<respose200>(

@@ -1,5 +1,4 @@
 from django.http.response import StreamingHttpResponse
-from drf_spectacular.utils import extend_schema
 from rest_framework.decorators import action
 from rest_framework.response import Response
 

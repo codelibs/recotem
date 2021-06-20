@@ -337,9 +337,11 @@ def test_metadata_post(
     response = client.post(data_url, dict(project=project_id, file=json_file))
     assert response.status_code == 201
     j = response.json()
+    assert j["filesize"] is not None
     columns = json.loads(j["valid_columns_list_json"])
     assert "title" in columns
     assert "release_date" in columns
     assert "video_release_date" in columns
     assert "URL" in columns
     assert "movieId" not in columns
+    json_file.close()

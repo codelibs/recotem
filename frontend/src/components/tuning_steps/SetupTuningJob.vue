@@ -85,7 +85,7 @@
           </ValidationProvider>
           <v-checkbox
             v-model="customConfig.train_after_tuning"
-            label="Traine a model using the full data using the tuned configuration."
+            label="Train a model using the full data using the tuned configuration."
           ></v-checkbox>
         </v-container>
       </div>

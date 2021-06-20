@@ -113,6 +113,22 @@ export interface paths {
     delete: operations["evaluation_config_destroy"];
     patch: operations["evaluation_config_partial_update"];
   };
+  "/api/item_meta_data/": {
+    get: operations["item_meta_data_list"];
+    post: operations["item_meta_data_create"];
+  };
+  "/api/item_meta_data/{id}/": {
+    get: operations["item_meta_data_retrieve"];
+    put: operations["item_meta_data_update"];
+    delete: operations["item_meta_data_destroy"];
+    patch: operations["item_meta_data_partial_update"];
+  };
+  "/api/item_meta_data/{id}/download_file/": {
+    get: operations["item_meta_data_download_file_retrieve"];
+  };
+  "/api/item_meta_data/{id}/unlink_file/": {
+    delete: operations["item_meta_data_unlink_file_destroy"];
+  };
   "/api/model_configuration/": {
     get: operations["model_configuration_list"];
     post: operations["model_configuration_create"];
@@ -172,6 +188,15 @@ export interface paths {
     delete: operations["trained_model_destroy"];
     patch: operations["trained_model_partial_update"];
   };
+  "/api/trained_model/{id}/download_file/": {
+    get: operations["trained_model_download_file_retrieve"];
+  };
+  "/api/trained_model/{id}/sample_recommendation_raw/": {
+    get: operations["trained_model_sample_recommendation_raw_retrieve"];
+  };
+  "/api/trained_model/{id}/unlink_file/": {
+    delete: operations["trained_model_unlink_file_destroy"];
+  };
   "/api/training_data/": {
     get: operations["training_data_list"];
     post: operations["training_data_create"];
@@ -201,6 +226,19 @@ export interface components {
       cutoff?: number;
       target_metric?: components["schemas"]["TargetMetricEnum"];
     };
+    IDAndScore: {
+      item_id: string;
+      score: number;
+    };
+    ItemMetaData: {
+      id: number;
+      project: number;
+      file?: string | null;
+      valid_columns_list_json: string;
+      ins_datetime: string;
+      basename: string | null;
+      filesize: number;
+    };
     /** Serializer for JWT authentication. */
     JWT: {
       access_token: string;
@@ -219,6 +257,12 @@ export interface components {
       parameters_json: string;
       ins_datetime: string;
       project: number;
+    };
+    PaginatedItemMetaDataList: {
+      count?: number;
+      next?: string | null;
+      previous?: string | null;
+      results?: components["schemas"]["ItemMetaData"][];
     };
     PaginatedParameterTuningJobList: {
       count?: number;
@@ -270,6 +314,15 @@ export interface components {
       name?: string | null;
       cutoff?: number;
       target_metric?: components["schemas"]["TargetMetricEnum"];
+    };
+    PatchedItemMetaData: {
+      id?: number;
+      project?: number;
+      file?: string | null;
+      valid_columns_list_json?: string;
+      ins_datetime?: string;
+      basename?: string | null;
+      filesize?: number;
     };
     PatchedModelConfiguration: {
       id?: number;
@@ -358,6 +411,11 @@ export interface components {
       time_column?: string | null;
       ins_datetime: string;
       trainingdata_set: components["schemas"]["TrainingDataForSummary"][];
+    };
+    RawRecommendation: {
+      user_id: string;
+      user_profile: string[];
+      recommendations: components["schemas"]["IDAndScore"][];
     };
     RestAuthDetail: {
       detail: string;
@@ -763,6 +821,139 @@ export interface operations {
         "application/x-www-form-urlencoded": components["schemas"]["PatchedEvaluationConfig"];
         "multipart/form-data": components["schemas"]["PatchedEvaluationConfig"];
       };
+    };
+  };
+  item_meta_data_list: {
+    parameters: {
+      query: {
+        id?: number;
+        /** A page number within the paginated result set. */
+        page?: number;
+        /** Number of results to return per page. */
+        page_size?: number;
+        project?: number;
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["PaginatedItemMetaDataList"];
+        };
+      };
+    };
+  };
+  item_meta_data_create: {
+    responses: {
+      201: {
+        content: {
+          "application/json": components["schemas"]["ItemMetaData"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ItemMetaData"];
+        "application/x-www-form-urlencoded": components["schemas"]["ItemMetaData"];
+        "multipart/form-data": components["schemas"]["ItemMetaData"];
+      };
+    };
+  };
+  item_meta_data_retrieve: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this item meta data. */
+        id: number;
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["ItemMetaData"];
+        };
+      };
+    };
+  };
+  item_meta_data_update: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this item meta data. */
+        id: number;
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["ItemMetaData"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ItemMetaData"];
+        "application/x-www-form-urlencoded": components["schemas"]["ItemMetaData"];
+        "multipart/form-data": components["schemas"]["ItemMetaData"];
+      };
+    };
+  };
+  item_meta_data_destroy: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this item meta data. */
+        id: number;
+      };
+    };
+    responses: {
+      /** No response body */
+      204: never;
+    };
+  };
+  item_meta_data_partial_update: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this item meta data. */
+        id: number;
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["ItemMetaData"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PatchedItemMetaData"];
+        "application/x-www-form-urlencoded": components["schemas"]["PatchedItemMetaData"];
+        "multipart/form-data": components["schemas"]["PatchedItemMetaData"];
+      };
+    };
+  };
+  item_meta_data_download_file_retrieve: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this item meta data. */
+        id: number;
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["ItemMetaData"];
+        };
+      };
+    };
+  };
+  item_meta_data_unlink_file_destroy: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this item meta data. */
+        id: number;
+      };
+    };
+    responses: {
+      /** No response body */
+      204: never;
     };
   };
   model_configuration_list: {
@@ -1325,6 +1516,48 @@ export interface operations {
         "application/x-www-form-urlencoded": components["schemas"]["PatchedTrainedModel"];
         "multipart/form-data": components["schemas"]["PatchedTrainedModel"];
       };
+    };
+  };
+  trained_model_download_file_retrieve: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this trained model. */
+        id: number;
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["TrainedModel"];
+        };
+      };
+    };
+  };
+  trained_model_sample_recommendation_raw_retrieve: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this trained model. */
+        id: number;
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["RawRecommendation"];
+        };
+      };
+    };
+  };
+  trained_model_unlink_file_destroy: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this trained model. */
+        id: number;
+      };
+    };
+    responses: {
+      /** No response body */
+      204: never;
     };
   };
   training_data_list: {

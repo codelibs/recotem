@@ -467,6 +467,220 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/item_meta_data/:
+    get:
+      operationId: item_meta_data_list
+      description: ''
+      parameters:
+      - in: query
+        name: id
+        schema:
+          type: integer
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      - in: query
+        name: project
+        schema:
+          type: integer
+      tags:
+      - item_meta_data
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedItemMetaDataList'
+          description: ''
+    post:
+      operationId: item_meta_data_create
+      description: ''
+      tags:
+      - item_meta_data
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ItemMetaData'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ItemMetaData'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ItemMetaData'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ItemMetaData'
+          description: ''
+  /api/item_meta_data/{id}/:
+    get:
+      operationId: item_meta_data_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this item meta data.
+        required: true
+      tags:
+      - item_meta_data
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ItemMetaData'
+          description: ''
+    put:
+      operationId: item_meta_data_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this item meta data.
+        required: true
+      tags:
+      - item_meta_data
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ItemMetaData'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ItemMetaData'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ItemMetaData'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ItemMetaData'
+          description: ''
+    patch:
+      operationId: item_meta_data_partial_update
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this item meta data.
+        required: true
+      tags:
+      - item_meta_data
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedItemMetaData'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedItemMetaData'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedItemMetaData'
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ItemMetaData'
+          description: ''
+    delete:
+      operationId: item_meta_data_destroy
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this item meta data.
+        required: true
+      tags:
+      - item_meta_data
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/item_meta_data/{id}/download_file/:
+    get:
+      operationId: item_meta_data_download_file_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this item meta data.
+        required: true
+      tags:
+      - item_meta_data
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ItemMetaData'
+          description: ''
+  /api/item_meta_data/{id}/unlink_file/:
+    delete:
+      operationId: item_meta_data_unlink_file_destroy
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this item meta data.
+        required: true
+      tags:
+      - item_meta_data
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '204':
+          description: No response body
   /api/model_configuration/:
     get:
       operationId: model_configuration_list
@@ -1370,6 +1584,71 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/trained_model/{id}/download_file/:
+    get:
+      operationId: trained_model_download_file_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this trained model.
+        required: true
+      tags:
+      - trained_model
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrainedModel'
+          description: ''
+  /api/trained_model/{id}/sample_recommendation_raw/:
+    get:
+      operationId: trained_model_sample_recommendation_raw_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this trained model.
+        required: true
+      tags:
+      - trained_model
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RawRecommendation'
+          description: ''
+  /api/trained_model/{id}/unlink_file/:
+    delete:
+      operationId: trained_model_unlink_file_destroy
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this trained model.
+        required: true
+      tags:
+      - trained_model
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '204':
+          description: No response body
   /api/training_data/:
     get:
       operationId: training_data_list
@@ -1620,6 +1899,49 @@ components:
           $ref: '#/components/schemas/TargetMetricEnum'
       required:
       - id
+    IDAndScore:
+      type: object
+      properties:
+        item_id:
+          type: string
+        score:
+          type: number
+          format: float
+      required:
+      - item_id
+      - score
+    ItemMetaData:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        project:
+          type: integer
+        file:
+          type: string
+          nullable: true
+        valid_columns_list_json:
+          type: string
+          readOnly: true
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        basename:
+          type: string
+          nullable: true
+          readOnly: true
+        filesize:
+          type: integer
+          readOnly: true
+      required:
+      - basename
+      - filesize
+      - id
+      - ins_datetime
+      - project
+      - valid_columns_list_json
     JWT:
       type: object
       description: Serializer for JWT authentication.
@@ -1673,6 +1995,26 @@ components:
       - parameters_json
       - project
       - recommender_class_name
+    PaginatedItemMetaDataList:
+      type: object
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ItemMetaData'
     PaginatedParameterTuningJobList:
       type: object
       properties:
@@ -1822,6 +2164,31 @@ components:
           type: integer
         target_metric:
           $ref: '#/components/schemas/TargetMetricEnum'
+    PatchedItemMetaData:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        project:
+          type: integer
+        file:
+          type: string
+          nullable: true
+        valid_columns_list_json:
+          type: string
+          readOnly: true
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
+        basename:
+          type: string
+          nullable: true
+          readOnly: true
+        filesize:
+          type: integer
+          readOnly: true
     PatchedModelConfiguration:
       type: object
       properties:
@@ -2075,6 +2442,23 @@ components:
       - name
       - trainingdata_set
       - user_column
+    RawRecommendation:
+      type: object
+      properties:
+        user_id:
+          type: string
+        user_profile:
+          type: array
+          items:
+            type: string
+        recommendations:
+          type: array
+          items:
+            $ref: '#/components/schemas/IDAndScore'
+      required:
+      - recommendations
+      - user_id
+      - user_profile
     RestAuthDetail:
       type: object
       properties:

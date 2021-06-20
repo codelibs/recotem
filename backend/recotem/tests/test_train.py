@@ -141,3 +141,21 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         result = pickle.load(temp_ofs)
         assert "id_mapped_recommender" in result
         assert "irspack_version" in result
+
+    uid_set = {str(uid) for uid in ml100k["userId"]}
+    iid_set = {str(iid) for iid in ml100k["movieId"]}
+    recommendation_response = client.get(
+        f"{model_url}{tuned_model_id}/sample_recommendation_raw/"
+    )
+    assert recommendation_response.status_code == 200
+    sample_recommendation = recommendation_response.json()
+    sample_user_id = sample_recommendation["user_id"]
+    assert sample_user_id in uid_set
+
+    profile = sample_recommendation["user_profile"]
+    for iid in profile:
+        assert iid in iid_set
+
+    recommendations = sample_recommendation["recommendations"]
+    for rec in recommendations:
+        assert rec["item_id"] in iid_set

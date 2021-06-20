@@ -25,6 +25,7 @@ from recotem.api.serializers import (
 from recotem.api.serializers.data import ItemMetaDataSerializer
 
 from .filemixin import FileDownloadRemoveMixin
+from .model import TrainedModelViewset
 from .project import ProjectSummaryViewSet, ProjectViewSet
 
 
@@ -50,13 +51,6 @@ class ItemMetaDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     class pagination_class(PageNumberPagination):
         page_size = 10
         page_size_query_param = "page_size"
-
-
-class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
-    permission_classes = [IsAuthenticated]
-    queryset = TrainedModel.objects.all().order_by("-ins_datetime")
-    serializer_class = TrainedModelSerializer
-    filterset_fields = ["id", "data_loc", "data_loc__project"]
 
 
 class ModelConfigurationViewset(viewsets.ModelViewSet):

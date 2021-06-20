@@ -69,5 +69,6 @@ class ItemMetaDataSerializer(serializers.ModelSerializer):
             except:
                 continue
         obj.valid_columns_list_json = json.dumps(valid_column_names)
+        obj.filesize = obj.file.size
         obj.save()
         return obj

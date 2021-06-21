@@ -1,3 +1,8 @@
+<style>
+table.param-table th {
+  min-width: 300px;
+}
+</style>
 <template>
   <div v-if="modelBasicInfo !== null">
     <div class="d-flex align-end">
@@ -27,18 +32,56 @@
         </v-btn>
       </div>
     </div>
-    <div>
-      <div class="text-center text-h6 pa-8">[Todo] model preview...</div>
-      <div>
-        <div class="text-center pb-4 pt-2">
-          <v-btn @click="fetchRawSample" :disabled="downloading">
-            Get Sample Rec
-          </v-btn>
-        </div>
-        <div v-if="rawRecommendationSample !== null">
-          {{ rawRecommendationSample }}
-        </div>
-      </div>
+    <div class="mt-8">
+      <v-expansion-panels v-model="panel" multiple>
+        <v-expansion-panel>
+          <v-expansion-panel-header>
+            <div>
+              <div>
+                Model Configuration
+                <span v-if="configuration !== null" class="text-caption ml-2">
+                  (id: {{ configuration.id }})</span
+                >
+              </div>
+            </div>
+          </v-expansion-panel-header>
+          <v-expansion-panel-content>
+            <div v-if="configuration !== null">
+              <div class="text-h5 pb-1">
+                {{ configuration.recommender_class_name }}
+              </div>
+              <v-divider></v-divider>
+              <div class="pt-1" v-if="modelParameters !== null">
+                <table class="param-table">
+                  <tbody>
+                    <tr v-for="(param, i) in modelParameters" :key="i">
+                      <th>{{ param.key }}</th>
+                      <td></td>
+                      {{
+                        param.val
+                      }}
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </v-expansion-panel-content>
+        </v-expansion-panel>
+
+        <v-expansion-panel>
+          <v-expansion-panel-header>Preview results</v-expansion-panel-header>
+          <v-expansion-panel-content>
+            <div class="text-center pb-4 pt-2">
+              <v-btn @click="fetchRawSample" :disabled="downloading">
+                Get Sample Rec
+              </v-btn>
+            </div>
+            <div v-if="rawRecommendationSample !== null">
+              {{ rawRecommendationSample }}
+            </div>
+          </v-expansion-panel-content>
+        </v-expansion-panel>
+      </v-expansion-panels>
     </div>
   </div>
 </template>
@@ -61,30 +104,38 @@ const retrieveURL = "/api/trained_model/";
 type responses = paths["/api/trained_model/{id}/"]["get"]["responses"];
 type respose200 = responses["200"]["content"]["application/json"];
 
+const modelConfigURL = "/api/model_configuration/";
+type ModelConfigResponse =
+  paths["/api/model_configuration/{id}/"]["get"]["responses"]["200"]["content"]["application/json"];
+
 type RawRecommendationSample =
   paths["/api/trained_model/{id}/sample_recommendation_raw/"]["get"]["responses"]["200"]["content"]["application/json"];
 
 type Data = {
   modelBasicInfo: respose200 | null;
+  configuration: ModelConfigResponse | null;
   downloading: boolean;
   rawRecommendationSample: RawRecommendationSample | null;
   previewRequesting: boolean;
+  panel: number[];
 };
 export default Vue.extend({
   data(): Data {
     return {
       modelBasicInfo: null,
+      configuration: null,
       downloading: false,
       rawRecommendationSample: null,
       previewRequesting: false,
+      panel: [0],
     };
   },
   async mounted() {
-    await this.fetchTrainingData();
+    await this.fetchInfo();
   },
   watch: {
     async projectId() {
-      await this.fetchTrainingData();
+      await this.fetchInfo();
     },
   },
   methods: {
@@ -99,15 +150,20 @@ export default Vue.extend({
       this.rawRecommendationSample = result;
       this.previewRequesting = false;
     },
-    async fetchTrainingData(): Promise<void> {
+    async fetchInfo(): Promise<void> {
       if (this.trainedModelId === null) return;
       let result = await getWithRefreshToken<respose200>(
         AuthModule,
         `${retrieveURL}/${this.trainedModelId}`
       );
       if (result === null) return;
-      console.log(result);
       this.modelBasicInfo = result;
+      let config = await getWithRefreshToken<ModelConfigResponse>(
+        AuthModule,
+        `${modelConfigURL}/${result.configuration}`
+      );
+      if (result === null) return;
+      this.configuration = config;
     },
     async handleDownload(): Promise<void> {
       if (
@@ -136,6 +192,16 @@ export default Vue.extend({
     },
     prettyFileSize(): string {
       return prettyFileSize(this.modelBasicInfo?.filesize || null);
+    },
+    modelParameters(): { key: string; val: number | string | null }[] | null {
+      if (this.configuration === null) return null;
+      const configRecord: Record<string, number | string | null> = JSON.parse(
+        this.configuration.parameters_json
+      );
+      let m = Object.keys(configRecord);
+      return m.map((key) => {
+        return { key, val: configRecord[key] };
+      });
     },
   },
 });

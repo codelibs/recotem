@@ -32,7 +32,11 @@ from .project import ProjectSummaryViewSet, ProjectViewSet
 class TrainingDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     permission_classes = [IsAuthenticated]
 
-    queryset = TrainingData.objects.all().order_by("-ins_datetime")
+    queryset = (
+        TrainingData.objects.all()
+        .filter(filesize__isnull=False)
+        .order_by("-ins_datetime")
+    )
     serializer_class = TrainingDataSerializer
     filterset_fields = ["id", "project"]
 
@@ -44,7 +48,11 @@ class TrainingDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
 class ItemMetaDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     permission_classes = [IsAuthenticated]
 
-    queryset = ItemMetaData.objects.all().order_by("-ins_datetime")
+    queryset = (
+        ItemMetaData.objects.all()
+        .filter(filesize__isnull=False)
+        .order_by("-ins_datetime")
+    )
     serializer_class = ItemMetaDataSerializer
     filterset_fields = ["id", "project"]
 

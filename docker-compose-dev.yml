@@ -38,14 +38,6 @@ services:
       - data-location:/app/data
     env_file:
       - envs/dev.env
-  frontend:
-    depends_on:
-      - db
-      - backend
-      - queue
-    build:
-      context: ./frontend
-      dockerfile: frontend.dockerfile
 volumes:
   data-location:
     driver: local

@@ -8,6 +8,7 @@ from drf_spectacular.utils import extend_schema
 from irspack import IDMappedRecommender
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
@@ -65,6 +66,10 @@ class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     queryset = TrainedModel.objects.all().order_by("-ins_datetime")
     serializer_class = TrainedModelSerializer
     filterset_fields = ["id", "data_loc", "data_loc__project"]
+
+    class pagination_class(PageNumberPagination):
+        page_size = 10
+        page_size_query_param = "page_size"
 
     @extend_schema(responses={200: RawRecommendationSerializer})
     @action(detail=True, methods=["get"])

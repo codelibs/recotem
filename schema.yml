@@ -1435,6 +1435,18 @@ paths:
         name: id
         schema:
           type: integer
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
       tags:
       - trained_model
       security:
@@ -1445,9 +1457,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/TrainedModel'
+                $ref: '#/components/schemas/PaginatedTrainedModelList'
           description: ''
     post:
       operationId: trained_model_create
@@ -1891,24 +1901,6 @@ paths:
       responses:
         '204':
           description: No response body
-  /api/tuning_log_summary/:
-    get:
-      operationId: tuning_log_summary_list
-      description: ''
-      tags:
-      - tuning_log_summary
-      security:
-      - tokenAuth: []
-      - cookieAuth: []
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ParameterTuningJob'
-          description: ''
 components:
   schemas:
     EvaluationConfig:
@@ -2063,6 +2055,26 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ParameterTuningJob'
+    PaginatedTrainedModelList:
+      type: object
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrainedModel'
     PaginatedTrainingDataList:
       type: object
       properties:
@@ -2362,6 +2374,11 @@ components:
         filesize:
           type: integer
           readOnly: true
+        task_links:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskAndTrainedModelLink'
+          readOnly: true
     PatchedTrainingData:
       type: object
       properties:
@@ -2566,6 +2583,13 @@ components:
           $ref: '#/components/schemas/TaskResult'
       required:
       - task
+    TaskAndTrainedModelLink:
+      type: object
+      properties:
+        task:
+          $ref: '#/components/schemas/TaskResult'
+      required:
+      - task
     TaskLog:
       type: object
       properties:
@@ -2659,6 +2683,11 @@ components:
         filesize:
           type: integer
           readOnly: true
+        task_links:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskAndTrainedModelLink'
+          readOnly: true
       required:
       - basename
       - configuration
@@ -2666,6 +2695,7 @@ components:
       - filesize
       - id
       - ins_datetime
+      - task_links
     TrainingData:
       type: object
       properties:

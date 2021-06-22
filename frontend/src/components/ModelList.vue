@@ -7,8 +7,8 @@
             <v-list-item
               :key="i"
               :to="{
-                name: 'tuning-job-detail',
-                params: { parameterTuningJobId: td.id },
+                name: 'trained-model-detail',
+                params: { trainedModelId: td.id },
               }"
             >
               <v-list-item-content>
@@ -22,22 +22,10 @@
                     </v-list-item-subtitle>
                   </v-col>
                   <v-col cols="2">
-                    <TuningJobStatus :tasks="td.task_links" />
+                    <JobStatus :tasks="td.task_links" />
                   </v-col>
                 </v-row>
               </v-list-item-content>
-              <v-list-item-action>
-                <v-btn
-                  icon
-                  v-if="typeof td.tuned_model == 'number'"
-                  :to="{
-                    name: 'trained-model-detail',
-                    params: { trainedModelId: td.tuned_model },
-                  }"
-                >
-                  <v-icon color="green"> mdi-calculator </v-icon>
-                </v-btn>
-              </v-list-item-action>
             </v-list-item>
             <v-divider :key="i + 0.5"></v-divider>
           </template>
@@ -61,17 +49,17 @@ import { computeMaxPage } from "@/utils/pagination";
 import { getWithRefreshToken } from "@/utils";
 import { AuthModule } from "@/store/auth";
 import { logout } from "@/utils/request";
-import TuningJobStatus from "@/components/TuningJobStatus.vue";
+import JobStatus from "@/components/TuningJobStatus.vue";
 import qs from "qs";
 
-const tuningJobListURL = "/api/trained_model/";
+const trainedModelListURL = "/api/trained_model/";
 type APIResultType =
   paths["/api/trained_model/"]["get"]["responses"]["200"]["content"]["application/json"];
-type TuningJobArray = APIResultType["results"];
+type TrainedModelArray = APIResultType["results"];
 
 type Data = {
   page: number;
-  models: TuningJobArray | null;
+  models: TrainedModelArray | null;
   totalCount: number | null | undefined;
   pollingStop: boolean;
 };
@@ -118,7 +106,7 @@ export default Vue.extend({
       });
       const result = await getWithRefreshToken<APIResultType>(
         AuthModule,
-        `${tuningJobListURL}?${queryString}`
+        `${trainedModelListURL}?${queryString}`
       );
       console.log(result);
       if (result === null) {
@@ -154,7 +142,7 @@ export default Vue.extend({
     await this.polling();
   },
   components: {
-    TuningJobStatus,
+    JobStatus,
   },
 });
 </script>

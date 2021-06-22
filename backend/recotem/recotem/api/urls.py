@@ -33,12 +33,6 @@ router.register(r"trained_model", TrainedModelViewset, basename="trained_model")
 router.register(r"task_log", TaskLogViewSet, basename="task_log")
 
 
-from recotem.api.views.tuning_job import TuningJobSummaryViewset
-
-router.register(
-    "tuning_log_summary", TuningJobSummaryViewset, basename="tuning-log-summary"
-)
-
 urlpatterns = [
     path("", include(router.urls)),
     path("auth/", include("dj_rest_auth.urls")),

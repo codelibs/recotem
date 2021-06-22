@@ -216,9 +216,6 @@ export interface paths {
   "/api/training_data/{id}/unlink_file/": {
     delete: operations["training_data_unlink_file_destroy"];
   };
-  "/api/tuning_log_summary/": {
-    get: operations["tuning_log_summary_list"];
-  };
 }
 
 export interface components {
@@ -272,6 +269,12 @@ export interface components {
       next?: string | null;
       previous?: string | null;
       results?: components["schemas"]["ParameterTuningJob"][];
+    };
+    PaginatedTrainedModelList: {
+      count?: number;
+      next?: string | null;
+      previous?: string | null;
+      results?: components["schemas"]["TrainedModel"][];
     };
     PaginatedTrainingDataList: {
       count?: number;
@@ -380,6 +383,7 @@ export interface components {
       ins_datetime?: string;
       basename?: string | null;
       filesize?: number;
+      task_links?: components["schemas"]["TaskAndTrainedModelLink"][];
     };
     PatchedTrainingData: {
       id?: number;
@@ -451,6 +455,9 @@ export interface components {
     TaskAndParameterJobLink: {
       task: components["schemas"]["TaskResult"];
     };
+    TaskAndTrainedModelLink: {
+      task: components["schemas"]["TaskResult"];
+    };
     TaskLog: {
       id: number;
       contents?: string;
@@ -483,6 +490,7 @@ export interface components {
       ins_datetime: string;
       basename: string | null;
       filesize: number;
+      task_links: components["schemas"]["TaskAndTrainedModelLink"][];
     };
     TrainingData: {
       id: number;
@@ -1429,12 +1437,16 @@ export interface operations {
         data_loc?: number;
         data_loc__project?: number;
         id?: number;
+        /** A page number within the paginated result set. */
+        page?: number;
+        /** Number of results to return per page. */
+        page_size?: number;
       };
     };
     responses: {
       200: {
         content: {
-          "application/json": components["schemas"]["TrainedModel"][];
+          "application/json": components["schemas"]["PaginatedTrainedModelList"];
         };
       };
     };
@@ -1715,15 +1727,6 @@ export interface operations {
     responses: {
       /** No response body */
       204: never;
-    };
-  };
-  tuning_log_summary_list: {
-    responses: {
-      200: {
-        content: {
-          "application/json": components["schemas"]["ParameterTuningJob"][];
-        };
-      };
     };
   };
 }

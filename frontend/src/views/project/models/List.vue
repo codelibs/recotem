@@ -6,13 +6,14 @@
     </div>
     <v-divider></v-divider>
     <div class="pl-4 pr-4 pt-0 mt-0">
-      <tuning-job-list
+      <ModelList
         v-if="projectId !== null"
         :externalCondition="{ project: projectId }"
-      ></tuning-job-list>
+      />
     </div>
   </div>
 </template>
+
 <script lang="ts">
 import Vue from "vue";
 import ModelList from "@/components/ModelList.vue";

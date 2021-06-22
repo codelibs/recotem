@@ -86,7 +86,7 @@ class EvaluationConfigViewSet(viewsets.ModelViewSet):
 class ParameterTuningJobViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
-    queryset = ParameterTuningJob.objects.all()
+    queryset = ParameterTuningJob.objects.all().order_by("-ins_datetime")
     serializer_class = ParameterTuningJobSerializer
     filterset_fields = ["id", "data__project", "data"]
 

@@ -34,7 +34,7 @@
           </v-list-item-icon>
           <v-list-item-title> Tuning </v-list-item-title>
         </v-list-item>
-        <v-list-item link :ripple="false">
+        <v-list-item link :ripple="false" :to="{ name: 'trained-model-list' }">
           <v-list-item-icon>
             <v-icon> mdi-calculator</v-icon>
           </v-list-item-icon>

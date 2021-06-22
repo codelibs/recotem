@@ -191,6 +191,9 @@ export interface paths {
   "/api/trained_model/{id}/download_file/": {
     get: operations["trained_model_download_file_retrieve"];
   };
+  "/api/trained_model/{id}/sample_recommendation_metadata/{metadata_id}/": {
+    get: operations["trained_model_sample_recommendation_metadata_retrieve"];
+  };
   "/api/trained_model/{id}/sample_recommendation_raw/": {
     get: operations["trained_model_sample_recommendation_raw_retrieve"];
   };
@@ -416,6 +419,11 @@ export interface components {
       user_id: string;
       user_profile: string[];
       recommendations: components["schemas"]["IDAndScore"][];
+    };
+    RecommendationWithMetaData: {
+      user_id: string;
+      user_profile: string;
+      recommendations: string;
     };
     RestAuthDetail: {
       detail: string;
@@ -1529,6 +1537,22 @@ export interface operations {
       200: {
         content: {
           "application/json": components["schemas"]["TrainedModel"];
+        };
+      };
+    };
+  };
+  trained_model_sample_recommendation_metadata_retrieve: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this trained model. */
+        id: number;
+        metadata_id: string;
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["RecommendationWithMetaData"];
         };
       };
     };

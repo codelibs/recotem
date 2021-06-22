@@ -71,13 +71,76 @@ table.param-table th {
         <v-expansion-panel>
           <v-expansion-panel-header>Preview results</v-expansion-panel-header>
           <v-expansion-panel-content>
-            <div class="text-center pb-4 pt-2">
-              <v-btn @click="fetchRawSample" :disabled="downloading">
-                Get Sample Rec
+            <div class="d-flex align-center pa-0">
+              <v-btn @click="fetchSample" :disabled="downloading">
+                <v-icon>mdi-refresh</v-icon> Sample
               </v-btn>
+              <div class="flex-grow-1"></div>
+              <div>
+                <v-select
+                  label="Item meta-data to view"
+                  v-if="itemMetaDataList"
+                  :items="itemMetaDataList"
+                  item-value="id"
+                  v-model="itemMetaDataId"
+                >
+                  <template v-slot:selection="{ item }">
+                    <div>
+                      <span class="mr-2"> {{ item.basename }} </span>
+                      <span class="text-subtitle-2">(id: {{ item.id }}) </span>
+                    </div>
+                  </template>
+                  <!-- 選択一覧 -->
+                  <template v-slot:item="{ item }">
+                    <span class="mr-2"> {{ item.basename }} </span>
+                    <span class="text-subtitle-2">(id: {{ item.id }}) </span>
+                  </template>
+                </v-select>
+              </div>
             </div>
-            <div v-if="rawRecommendationSample !== null">
+            <div
+              v-if="rawRecommendationSample !== null && !previewWithMetaData"
+            >
               {{ rawRecommendationSample }}
+            </div>
+            <div
+              v-if="
+                previewWithMetaData && metadataRecommendationSample !== null
+              "
+            >
+              <div>
+                <v-autocomplete
+                  label="Columns to show"
+                  multiple
+                  chips
+                  :items="itemMetaDataColumns"
+                  v-model="shownColumns"
+                ></v-autocomplete>
+              </div>
+              <v-data-table
+                dense
+                :items="metadataRecommendationSample.profile"
+                :headers="profileMetaHeader"
+              >
+                <template v-slot:top>
+                  <div class="text-h6">
+                    Interaction log for user
+                    {{ metadataRecommendationSample.userId }}:
+                  </div>
+                </template>
+              </v-data-table>
+              <v-data-table
+                dense
+                :items="metadataRecommendationSample.recommendation"
+                :headers="recommendationMetaHeader"
+              >
+                <template v-slot:top>
+                  <div class="text-h6">
+                    Recommended items for
+                    {{ metadataRecommendationSample.userId }}:
+                  </div>
+                </template>
+              </v-data-table>
             </div>
           </v-expansion-panel-content>
         </v-expansion-panel>
@@ -88,6 +151,7 @@ table.param-table th {
 
 <script lang="ts">
 import Vue from "vue";
+import qs from "qs";
 import { baseURL } from "@/env";
 import { paths, components } from "@/api/schema";
 import { AuthModule } from "@/store/auth";
@@ -111,13 +175,38 @@ type ModelConfigResponse =
 type RawRecommendationSample =
   paths["/api/trained_model/{id}/sample_recommendation_raw/"]["get"]["responses"]["200"]["content"]["application/json"];
 
+const itemMetaDataListURL = "/api/item_meta_data/";
+type ItemMetaDataListResponse =
+  paths["/api/item_meta_data/"]["get"]["responses"]["200"]["content"]["application/json"];
+type ItemMetaDataList = ItemMetaDataListResponse["results"];
+type ItemMetaData = components["schemas"]["ItemMetaData"];
+
+const recommendationURL =
+  "/api/trained_model/{id}/sample_recommendation_metadata/{metadata_id}/";
+type RecommendationWithItemMetaDataSample =
+  paths["/api/trained_model/{id}/sample_recommendation_metadata/{metadata_id}/"]["get"]["responses"]["200"]["content"]["application/json"];
+
+type ProjectInfo =
+  paths["/api/project/{id}/"]["get"]["responses"]["200"]["content"]["application/json"];
+
+type MetadataRecommendationSample = {
+  userId: any;
+  profile: any[];
+  recommendation: any[];
+};
 type Data = {
   modelBasicInfo: respose200 | null;
   configuration: ModelConfigResponse | null;
   downloading: boolean;
+  previewWithMetaData: boolean;
   rawRecommendationSample: RawRecommendationSample | null;
+  metadataRecommendationSample: MetadataRecommendationSample | null;
   previewRequesting: boolean;
   panel: number[];
+  itemMetaDataList: ItemMetaDataList;
+  itemMetaDataId: number | null;
+  shownColumns: string[];
+  projectInfo: ProjectInfo | null;
 };
 export default Vue.extend({
   data(): Data {
@@ -126,8 +215,14 @@ export default Vue.extend({
       configuration: null,
       downloading: false,
       rawRecommendationSample: null,
+      previewWithMetaData: false,
+      metadataRecommendationSample: null,
       previewRequesting: false,
-      panel: [0],
+      panel: [1],
+      itemMetaDataList: undefined,
+      itemMetaDataId: null,
+      shownColumns: [],
+      projectInfo: null,
     };
   },
   async mounted() {
@@ -137,33 +232,96 @@ export default Vue.extend({
     async projectId() {
       await this.fetchInfo();
     },
+    itemMetaDataColumns(nv: string[] | null) {
+      if (nv === null) return;
+      this.shownColumns = nv.slice(0, Math.min(nv.length, 3));
+    },
   },
   methods: {
-    async fetchRawSample(): Promise<void> {
+    async fetchSample(): Promise<void> {
       if (this.trainedModelId === null) return;
+
       this.previewRequesting = true;
-      const url = `/api/trained_model/${this.trainedModelId}/sample_recommendation_raw/`;
-      let result = await getWithRefreshToken<RawRecommendationSample>(
-        AuthModule,
-        url
-      );
-      this.rawRecommendationSample = result;
-      this.previewRequesting = false;
+      if (this.itemMetaDataId === null) {
+        const url = `/api/trained_model/${this.trainedModelId}/sample_recommendation_raw/`;
+        let result = await getWithRefreshToken<RawRecommendationSample>(
+          AuthModule,
+          url
+        );
+        this.rawRecommendationSample = result;
+        this.previewRequesting = false;
+      } else {
+        const url = `/api/trained_model/${this.trainedModelId}/sample_recommendation_metadata/${this.itemMetaDataId}/`;
+        let result =
+          await getWithRefreshToken<RecommendationWithItemMetaDataSample>(
+            AuthModule,
+            url
+          );
+        if (result === null) return;
+        this.metadataRecommendationSample = {
+          profile: JSON.parse(result.user_profile),
+          userId: result.user_id,
+          recommendation: JSON.parse(result.recommendations),
+        };
+        this.previewWithMetaData = true;
+      }
     },
     async fetchInfo(): Promise<void> {
       if (this.trainedModelId === null) return;
+
       let result = await getWithRefreshToken<respose200>(
         AuthModule,
         `${retrieveURL}/${this.trainedModelId}`
       );
-      if (result === null) return;
+      if (result === null) {
+        alert(`Failed to fetch ${retrieveURL}/${this.trainedModelId}`);
+        return;
+      }
       this.modelBasicInfo = result;
       let config = await getWithRefreshToken<ModelConfigResponse>(
         AuthModule,
         `${modelConfigURL}/${result.configuration}`
       );
-      if (result === null) return;
+      if (config === null) {
+        alert(`Failed to fetch ${modelConfigURL}/${result.configuration}`);
+        return;
+      }
+
       this.configuration = config;
+
+      let metaDataList: ItemMetaData[] = [];
+      for (let page = 1; ; page++) {
+        let fetchURL =
+          itemMetaDataListURL +
+          `?${qs.stringify({ page_size: 10, project: config.project, page })}`;
+        let itemMetaDataListResponse =
+          await getWithRefreshToken<ItemMetaDataListResponse>(
+            AuthModule,
+            fetchURL
+          );
+        console.log(itemMetaDataListResponse);
+        if (itemMetaDataListResponse === null) {
+          break;
+        }
+
+        if (itemMetaDataListResponse.results === undefined) {
+          continue;
+        } else {
+          metaDataList = metaDataList.concat(itemMetaDataListResponse.results);
+        }
+
+        if (!itemMetaDataListResponse.next) {
+          break;
+        }
+      }
+
+      this.itemMetaDataList = metaDataList;
+
+      let project = await getWithRefreshToken<ProjectInfo>(
+        AuthModule,
+        `/api/project/${config.project}/`
+      );
+      this.projectInfo = project;
     },
     async handleDownload(): Promise<void> {
       if (
@@ -189,6 +347,57 @@ export default Vue.extend({
       } catch {
         return null;
       }
+    },
+    selectedItemMetaData(): ItemMetaData | undefined {
+      if (this.itemMetaDataId === null) return undefined;
+      if (this.itemMetaDataList === undefined) return undefined;
+      return this.itemMetaDataList.find((v) => v.id === this.itemMetaDataId);
+    },
+    profileMetaHeader():
+      | { text: string; value: string; sortable: boolean }[]
+      | null {
+      if (this.shownColumns === null) return null;
+      if (this.projectInfo === null) return null;
+      let c = [
+        {
+          text: this.projectInfo.item_column,
+          value: this.projectInfo.item_column,
+          sortable: true,
+        },
+      ];
+      return c.concat(
+        this.shownColumns.map((v) => {
+          return { text: v, value: v, sortable: true };
+        })
+      );
+    },
+    recommendationMetaHeader():
+      | { text: string; value: string; sortable: boolean }[]
+      | null {
+      if (this.shownColumns === null) return null;
+      if (this.projectInfo === null) return null;
+
+      let c = [
+        {
+          text: this.projectInfo.item_column,
+          value: this.projectInfo.item_column,
+          sortable: false,
+        },
+        {
+          text: "score",
+          value: "score",
+          sortable: true,
+        },
+      ];
+      return c.concat(
+        this.shownColumns.map((v) => {
+          return { text: v, value: v, sortable: false };
+        })
+      );
+    },
+    itemMetaDataColumns(): string[] | undefined {
+      if (this.selectedItemMetaData === undefined) return undefined;
+      return JSON.parse(this.selectedItemMetaData.valid_columns_list_json);
     },
     prettyFileSize(): string {
       return prettyFileSize(this.modelBasicInfo?.filesize || null);

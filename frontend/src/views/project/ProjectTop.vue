@@ -43,7 +43,7 @@
       </v-list>
     </v-col>
     <v-divider vertical></v-divider>
-    <v-col>
+    <v-col cols="10">
       <v-container>
         <router-view></router-view>
       </v-container>

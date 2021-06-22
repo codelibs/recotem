@@ -95,6 +95,7 @@ async function axiosMethodWithRetry<ArgType, ReturnType>(
         const result = await method(`${baseURL}${path}`, arg, copiedConfig);
         return result;
       } else {
+        console.log(error);
         throw error;
       }
     }

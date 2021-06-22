@@ -8,45 +8,12 @@ from recotem.api.models import (
     ModelConfiguration,
     SplitConfig,
     TaskLog,
-    TrainedModel,
 )
 
 from .data import TrainingDataSerializer
 from .project import ProjectSerializer, ProjectSummarySerializer
+from .trained_model import TrainedModelSerializer
 from .tuning_job import ParameterTuningJobSerializer
-
-
-class UserSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = get_user_model()
-        fields = ["username", "is_staff", "is_superuser"]
-
-
-class TrainedModelSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = TrainedModel
-        fields = [
-            "id",
-            "configuration",
-            "data_loc",
-            "file",
-            "irspack_version",
-            "ins_datetime",
-            "basename",
-            "filesize",
-        ]
-        read_only_fields = [
-            "ins_datetime",
-            "basename",
-            "filesize",
-        ]
-
-    def create(self, validated_data):
-        obj: TrainedModel = TrainedModel.objects.create(**validated_data)
-        from recotem.api.tasks import task_train_recommender
-
-        task_train_recommender.delay(obj.id)
-        return obj
 
 
 class SplitConfigSerializer(serializers.ModelSerializer):
@@ -83,3 +50,15 @@ class ModelConfigurationSerializer(serializers.ModelSerializer):
     class Meta:
         model = ModelConfiguration
         fields = "__all__"
+
+
+__all__ = (
+    "TrainingDataSerializer",
+    "ProjectSerializer",
+    "ProjectSummarySerializer" "ParameterTuningJobSerializer",
+    "TrainedModelSerializer",
+    "SplitConfigSerializer",
+    "EvaluationConfigSerializer",
+    "TaskLogSerializer",
+    "ModelConfigurationSerializer",
+)

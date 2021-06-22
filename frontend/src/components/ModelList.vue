@@ -1,9 +1,9 @@
 <template>
   <div>
-    <template v-if="tuningJobs !== null">
-      <template v-if="tuningJobs !== undefined && tuningJobs.length > 0">
+    <template v-if="models !== null">
+      <template v-if="models !== undefined && models.length > 0">
         <v-list class="pt-0">
-          <template v-for="(td, i) in tuningJobs">
+          <template v-for="(td, i) in models">
             <v-list-item
               :key="i"
               :to="{
@@ -64,14 +64,14 @@ import { logout } from "@/utils/request";
 import TuningJobStatus from "@/components/TuningJobStatus.vue";
 import qs from "qs";
 
-const tuningJobListURL = "/api/parameter_tuning_job/";
+const tuningJobListURL = "/api/trained_model/";
 type APIResultType =
-  paths["/api/parameter_tuning_job/"]["get"]["responses"]["200"]["content"]["application/json"];
+  paths["/api/trained_model/"]["get"]["responses"]["200"]["content"]["application/json"];
 type TuningJobArray = APIResultType["results"];
 
 type Data = {
   page: number;
-  tuningJobs: TuningJobArray | null;
+  models: TuningJobArray | null;
   totalCount: number | null | undefined;
   pollingStop: boolean;
 };
@@ -92,7 +92,7 @@ export default Vue.extend({
   data(): Data {
     return {
       page: 1,
-      tuningJobs: null,
+      models: null,
       totalCount: null,
       pollingStop: false,
     };
@@ -126,7 +126,7 @@ export default Vue.extend({
         throw "logout";
       }
       this.totalCount = result.count || 0;
-      this.tuningJobs = result.results || [];
+      this.models = result.results || [];
     },
   },
   computed: {

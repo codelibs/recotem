@@ -7,14 +7,14 @@ from recotem.api.models.base_file_model import BaseFileModel
 
 class FileDownloadRemoveMixin:
     @action(detail=True, methods=["delete"])
-    def unlink_file(self, request, pk=None):
-        obj: BaseFileModel = self.queryset.get(pk=pk)
+    def unlink_file(self, request, pk: int):
+        obj: BaseFileModel = self.serializer_class.Meta.model.objects.get(pk=int(pk))
         obj.delete_file()
         return Response(self.get_serializer(obj, many=False).data)
 
     @action(detail=True, methods=["get"])
-    def download_file(self, request, pk=None):
-        obj: BaseFileModel = self.queryset.get(pk=pk)
+    def download_file(self, request, pk: int):
+        obj: BaseFileModel = self.serializer_class.Meta.model.objects.get(pk=int(pk))
         if not obj.file:
             return Response(status=404, data=dict(detail=["file deleted."]))
         response = StreamingHttpResponse(

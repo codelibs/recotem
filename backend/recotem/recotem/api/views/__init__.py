@@ -10,7 +10,6 @@ from recotem.api.models import (
     ParameterTuningJob,
     SplitConfig,
     TaskLog,
-    TrainedModel,
     TrainingData,
 )
 from recotem.api.serializers import (
@@ -19,7 +18,6 @@ from recotem.api.serializers import (
     ParameterTuningJobSerializer,
     SplitConfigSerializer,
     TaskLogSerializer,
-    TrainedModelSerializer,
     TrainingDataSerializer,
 )
 from recotem.api.serializers.data import ItemMetaDataSerializer
@@ -57,7 +55,7 @@ class ItemMetaDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     filterset_fields = ["id", "project"]
 
     class pagination_class(PageNumberPagination):
-        page_size = 10
+        page_size = 5
         page_size_query_param = "page_size"
 
 

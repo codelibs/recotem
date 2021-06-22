@@ -1607,6 +1607,34 @@ paths:
               schema:
                 $ref: '#/components/schemas/TrainedModel'
           description: ''
+  /api/trained_model/{id}/sample_recommendation_metadata/{metadata_id}/:
+    get:
+      operationId: trained_model_sample_recommendation_metadata_retrieve
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this trained model.
+        required: true
+      - in: path
+        name: metadata_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - trained_model
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecommendationWithMetaData'
+          description: ''
   /api/trained_model/{id}/sample_recommendation_raw/:
     get:
       operationId: trained_model_sample_recommendation_raw_retrieve
@@ -2455,6 +2483,19 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/IDAndScore'
+      required:
+      - recommendations
+      - user_id
+      - user_profile
+    RecommendationWithMetaData:
+      type: object
+      properties:
+        user_id:
+          type: string
+        user_profile:
+          type: string
+        recommendations:
+          type: string
       required:
       - recommendations
       - user_id

@@ -1,14 +1,5 @@
 version: "3.7"
 services:
-  minio:
-    image: minio/minio:latest
-    ports:
-      - "9000:9000"
-    env_file:
-      - envs/dev.env
-    volumes:
-      - data-location:/data/
-    command: server /data
   queue:
     image: rabbitmq:3
   db:
@@ -39,6 +30,12 @@ services:
       dockerfile: celery.dockerfile
     volumes:
       - data-location:/app/data
+    env_file:
+      - envs/production.env
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: frontend.dockerfile
     env_file:
       - envs/production.env
   proxy:

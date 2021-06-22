@@ -19,6 +19,7 @@ table.param-table th {
           :color="downloading ? '' : 'info'"
           @click="handleDownload"
           :disabled="downloading"
+          v-if="modelBasicInfo.filesize !== null"
         >
           <template v-if="!downloading">
             <v-icon> mdi-download </v-icon>
@@ -68,7 +69,7 @@ table.param-table th {
           </v-expansion-panel-content>
         </v-expansion-panel>
 
-        <v-expansion-panel>
+        <v-expansion-panel v-if="modelBasicInfo.filesize !== null">
           <v-expansion-panel-header>Preview results</v-expansion-panel-header>
           <v-expansion-panel-content>
             <div class="d-flex align-center pa-0">
@@ -218,7 +219,7 @@ export default Vue.extend({
       previewWithMetaData: false,
       metadataRecommendationSample: null,
       previewRequesting: false,
-      panel: [1],
+      panel: [],
       itemMetaDataList: undefined,
       itemMetaDataId: null,
       shownColumns: [],

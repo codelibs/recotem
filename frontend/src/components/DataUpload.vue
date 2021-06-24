@@ -1,8 +1,8 @@
 <template>
   <v-dialog v-model="uploadDialog" max-width="800">
     <template v-slot:activator="{ on, attrs }">
-      <v-btn class="mr-4" color="green" dark v-on="on" v-bind="attrs">
-        <v-icon> mdi-upload</v-icon> Upload new data
+      <v-btn class="mr-4" :color="color" dark v-on="on" v-bind="attrs">
+        <v-icon> mdi-upload</v-icon> Upload
       </v-btn>
     </template>
     <v-card>
@@ -89,6 +89,10 @@ export default Vue.extend({
     fileLabel: {
       type: String as PropType<string>,
       required: true,
+    },
+    color: {
+      type: String as PropType<string>,
+      default: "green",
     },
   },
   data(): Data {

@@ -1,3 +1,4 @@
+from django_filters import rest_framework as filters
 from rest_framework import viewsets
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
@@ -67,20 +68,38 @@ class ModelConfigurationViewset(viewsets.ModelViewSet):
     filterset_fields = ["id", "project"]
 
 
+class SplitConfigFilter(filters.FilterSet):
+    unnamed = filters.BooleanFilter(field_name="name", lookup_expr="isnull")
+
+    class Meta:
+        model = SplitConfig
+        fields = ["name", "id", "unnamed"]
+
+
 class SplitConfigViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
-    queryset = SplitConfig.objects.all().filter(name__isnull=False)
+    queryset = SplitConfig.objects.all()
     serializer_class = SplitConfigSerializer
-    filterset_fields = ["id", "name"]
+    filter_backends = (filters.DjangoFilterBackend,)
+    filterset_class = SplitConfigFilter
+
+
+class EvaluationConfigFilter(filters.FilterSet):
+    unnamed = filters.BooleanFilter(field_name="name", lookup_expr="isnull")
+
+    class Meta:
+        model = EvaluationConfig
+        fields = ["name", "id", "unnamed"]
 
 
 class EvaluationConfigViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
-    queryset = EvaluationConfig.objects.all().filter(name__isnull=False)
+    queryset = EvaluationConfig.objects.all().filter()
     serializer_class = EvaluationConfigSerializer
-    filterset_fields = ["id", "name"]
+    filter_backends = (filters.DjangoFilterBackend,)
+    filterset_class = EvaluationConfigFilter
 
 
 class ParameterTuningJobViewSet(viewsets.ModelViewSet):
@@ -95,13 +114,27 @@ class ParameterTuningJobViewSet(viewsets.ModelViewSet):
         page_size_query_param = "page_size"
 
 
+import django_filters
+
+
+class TaskLogFilter(filters.FilterSet):
+    id_gt = filters.NumberFilter(field_name="id", lookup_expr="gt")
+    tuning_job_id = filters.NumberFilter(field_name="task__tuning_job_link__job")
+    model_id = filters.NumberFilter(field_name="task__model_link__model")
+
+    class Meta:
+        model = TaskLog
+        fields = [
+            "id",
+            "tuning_job_id",
+            "model_id",
+            "id_gt",
+        ]
+
+
 class TaskLogViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
 
     queryset = TaskLog.objects.all()
     serializer_class = TaskLogSerializer
-    filterset_fields = [
-        "id",
-        "task__tuning_job_link__job",
-        "task__model_link__model",
-    ]
+    filterset_class = TaskLogFilter

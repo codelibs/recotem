@@ -222,7 +222,7 @@ export default Vue.extend({
     async fetchExistingSplitConfigs(): Promise<void> {
       const results = await getWithRefreshToken<ExistingConfigs>(
         AuthModule,
-        existingConfigsUrl
+        `${existingConfigsUrl}?${qs.stringify({ unnamed: false })}`
       );
       if (results !== null) {
         this.existingConfigs = results;

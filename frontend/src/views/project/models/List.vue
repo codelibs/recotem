@@ -8,7 +8,7 @@
     <div class="pl-4 pr-4 pt-0 mt-0">
       <ModelList
         v-if="projectId !== null"
-        :externalCondition="{ project: projectId }"
+        :externalCondition="{ data_loc__project: projectId }"
       />
     </div>
   </div>

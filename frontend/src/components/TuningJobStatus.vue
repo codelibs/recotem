@@ -38,8 +38,40 @@ export default Vue.extend({
       type: Array as PropType<{ task: TaskType }[]>,
       required: true,
     },
+    value: {
+      type: Boolean as PropType<boolean>,
+      default: false,
+    },
+  },
+  watch: {
+    complete(nv: boolean): void {
+      console.log(nv);
+      this.$emit("input", nv);
+    },
+  },
+  async mounted(): Promise<void> {
+    let complete = this.complete;
+    this.$emit("input", complete);
   },
   computed: {
+    complete(): boolean {
+      switch (this.statusCodeSetToString) {
+        case "Starting":
+          return false;
+        case "Failure":
+          return true;
+        case "InProgress":
+          return false;
+        case "Revoked":
+          return true;
+        case "Complete":
+          return true;
+        case "Unknown":
+          return true;
+        default:
+          return true;
+      }
+    },
     statusCodeSetToString(): IconTypes {
       if (this.tasks.length === 0) return "Starting";
       for (let s of this.tasks) {

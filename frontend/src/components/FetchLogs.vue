@@ -1,8 +1,16 @@
 <style scoped>
+.refresh-divider {
+  border-bottom: 1px solid blanchedalmond;
+  margin-top: 6px;
+}
 .log-text-background {
   background-color: #424242;
   color: blanchedalmond;
   padding: 20px;
+  padding-bottom: 5px;
+  overflow-y: scroll;
+  height: 300px;
+  overflow-x: hidden;
 }
 .single-record {
   display: flex;
@@ -43,11 +51,10 @@ type LogResultType =
 type Data = {
   logs: LogResultType;
   pollingStop: boolean;
+  shownLogIdMax: number;
+  shownLogIdMin: number;
+  minId: number;
 };
-
-function sleep(msec: number) {
-  return new Promise((resolve: any) => setTimeout(resolve, msec));
-}
 
 export default Vue.extend({
   props: {
@@ -64,6 +71,9 @@ export default Vue.extend({
     return {
       logs: [],
       pollingStop: false,
+      shownLogIdMax: parseFloat("infinity"),
+      shownLogIdMin: 0,
+      minId: parseFloat("infinity"),
     };
   },
   beforeDestroy() {
@@ -75,7 +85,7 @@ export default Vue.extend({
     },
     async polling(): Promise<void> {
       for (;;) {
-        await sleep(1000);
+        await new Promise((resolve: any) => setTimeout(resolve, 5000));
         await this.fetchData();
         if (this.complete) {
           break;
@@ -94,7 +104,6 @@ export default Vue.extend({
         AuthModule,
         `${logListURL}?${queryString}`
       );
-      console.log(result);
       if (result === null) {
         return;
       }
@@ -106,6 +115,11 @@ export default Vue.extend({
     maxID(): number {
       if (this.logs.length === 0) return 0;
       return this.logs[this.logs.length - 1].id;
+    },
+    shownLogs(): LogResultType {
+      return this.logs.filter(
+        (v) => v.id >= this.shownLogIdMin && v.id <= this.shownLogIdMax
+      );
     },
   },
   watch: {},

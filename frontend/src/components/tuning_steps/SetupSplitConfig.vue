@@ -74,7 +74,7 @@
               ></v-text-field>
             </ValidationProvider>
             <ValidationProvider
-              name="test_user_ratio"
+              name="test_heldout_ratio"
               rules="max_value:1.0|min_value:0.0"
               v-slot="{ errors }"
             >
@@ -86,8 +86,8 @@
               ></v-text-field>
             </ValidationProvider>
             <ValidationProvider
-              name="heldout-interactions"
-              rules="min_value:0.0"
+              name="heldout_interactions"
+              rules="min_value:0.0|is_integral"
               v-slot="{ errors }"
             >
               <v-text-field

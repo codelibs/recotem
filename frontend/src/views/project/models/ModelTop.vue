@@ -40,32 +40,14 @@ table.param-table th {
             <div>
               <div>
                 Model Configuration
-                <span v-if="configuration !== null" class="text-caption ml-2">
-                  (id: {{ configuration.id }})</span
+                <span class="text-caption ml-2">
+                  (id: {{ modelBasicInfo.configuration }})</span
                 >
               </div>
             </div>
           </v-expansion-panel-header>
           <v-expansion-panel-content>
-            <div v-if="configuration !== null">
-              <div class="text-h5 pb-1">
-                {{ configuration.recommender_class_name }}
-              </div>
-              <v-divider></v-divider>
-              <div class="pt-1" v-if="modelParameters !== null">
-                <table class="param-table">
-                  <tbody>
-                    <tr v-for="(param, i) in modelParameters" :key="i">
-                      <th>{{ param.key }}</th>
-                      <td></td>
-                      {{
-                        param.val
-                      }}
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <ModelConfigView :modelConfigId="modelBasicInfo.configuration" />
           </v-expansion-panel-content>
         </v-expansion-panel>
 
@@ -161,17 +143,12 @@ import {
   downloadWithRefreshToken,
 } from "@/utils/request.ts";
 import { prettyFileSize } from "@/utils/conversion";
-
-//import TuningJobList from "@/components/TuningJobList.vue";
+import ModelConfigView from "@/components/ModelConfigView.vue";
 
 const retrieveURL = "/api/trained_model/";
 
 type responses = paths["/api/trained_model/{id}/"]["get"]["responses"];
 type respose200 = responses["200"]["content"]["application/json"];
-
-const modelConfigURL = "/api/model_configuration/";
-type ModelConfigResponse =
-  paths["/api/model_configuration/{id}/"]["get"]["responses"]["200"]["content"]["application/json"];
 
 type RawRecommendationSample =
   paths["/api/trained_model/{id}/sample_recommendation_raw/"]["get"]["responses"]["200"]["content"]["application/json"];
@@ -197,7 +174,6 @@ type MetadataRecommendationSample = {
 };
 type Data = {
   modelBasicInfo: respose200 | null;
-  configuration: ModelConfigResponse | null;
   downloading: boolean;
   previewWithMetaData: boolean;
   rawRecommendationSample: RawRecommendationSample | null;
@@ -207,13 +183,11 @@ type Data = {
   itemMetaDataList: ItemMetaDataList;
   itemMetaDataId: number | null;
   shownColumns: string[];
-  projectInfo: ProjectInfo | null;
 };
 export default Vue.extend({
   data(): Data {
     return {
       modelBasicInfo: null,
-      configuration: null,
       downloading: false,
       rawRecommendationSample: null,
       previewWithMetaData: false,
@@ -223,16 +197,12 @@ export default Vue.extend({
       itemMetaDataList: undefined,
       itemMetaDataId: null,
       shownColumns: [],
-      projectInfo: null,
     };
   },
   async mounted() {
     await this.fetchInfo();
   },
   watch: {
-    async projectId() {
-      await this.fetchInfo();
-    },
     itemMetaDataColumns(nv: string[] | null) {
       if (nv === null) return;
       this.shownColumns = nv.slice(0, Math.min(nv.length, 3));
@@ -279,22 +249,16 @@ export default Vue.extend({
         return;
       }
       this.modelBasicInfo = result;
-      let config = await getWithRefreshToken<ModelConfigResponse>(
-        AuthModule,
-        `${modelConfigURL}/${result.configuration}`
-      );
-      if (config === null) {
-        alert(`Failed to fetch ${modelConfigURL}/${result.configuration}`);
-        return;
-      }
-
-      this.configuration = config;
 
       let metaDataList: ItemMetaData[] = [];
       for (let page = 1; ; page++) {
         let fetchURL =
           itemMetaDataListURL +
-          `?${qs.stringify({ page_size: 10, project: config.project, page })}`;
+          `?${qs.stringify({
+            page_size: 10,
+            project: this.projectInfo?.id,
+            page,
+          })}`;
         let itemMetaDataListResponse =
           await getWithRefreshToken<ItemMetaDataListResponse>(
             AuthModule,
@@ -317,12 +281,6 @@ export default Vue.extend({
       }
 
       this.itemMetaDataList = metaDataList;
-
-      let project = await getWithRefreshToken<ProjectInfo>(
-        AuthModule,
-        `/api/project/${config.project}/`
-      );
-      this.projectInfo = project;
     },
     async handleDownload(): Promise<void> {
       if (
@@ -342,6 +300,9 @@ export default Vue.extend({
     },
   },
   computed: {
+    projectInfo() {
+      return AuthModule.currentProjectDetail;
+    },
     trainedModelId(): number | null {
       try {
         return parseInt(this.$route.params.trainedModelId);
@@ -403,16 +364,9 @@ export default Vue.extend({
     prettyFileSize(): string {
       return prettyFileSize(this.modelBasicInfo?.filesize || null);
     },
-    modelParameters(): { key: string; val: number | string | null }[] | null {
-      if (this.configuration === null) return null;
-      const configRecord: Record<string, number | string | null> = JSON.parse(
-        this.configuration.parameters_json
-      );
-      let m = Object.keys(configRecord);
-      return m.map((key) => {
-        return { key, val: configRecord[key] };
-      });
-    },
+  },
+  components: {
+    ModelConfigView,
   },
 });
 </script>

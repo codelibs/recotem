@@ -87,12 +87,19 @@ export default Vue.extend({
       });
       if (project === null) {
         this.$router.push({ name: "project-list" });
+      } else {
+        AuthModule.setProjectDetail(project);
       }
       this.project = project;
     },
+    async loadProject() {
+      const projectId = parseInt(this.$route.params.projectId);
+      AuthModule.setProjectId(projectId);
+      await this.fetchProjectDetail(projectId);
+    },
   },
   async mounted() {
-    await this.fetchProjectDetail(parseInt(this.$route.params.projectId));
+    await this.loadProject();
   },
 });
 </script>

@@ -51,15 +51,6 @@ table.config tr {
                   </v-btn>
                 </td>
               </tr>
-              <tr v-if="tuningJobBasicInfo.tuned_model !== null">
-                <th>Traied Model</th>
-                <td>model-{{ tuningJobBasicInfo.tuned_model }}</td>
-                <td>
-                  <v-btn icon color="green"
-                    ><v-icon>mdi-calculator</v-icon></v-btn
-                  >
-                </td>
-              </tr>
               <tr>
                 <th>Trials</th>
                 <td>{{ tuningJobBasicInfo.n_trials }}</td>
@@ -114,6 +105,35 @@ table.config tr {
           />
         </v-expansion-panel-content>
       </v-expansion-panel>
+      <v-expansion-panel
+        v-if="jobComplete && typeof tuningJobBasicInfo.best_config === 'number'"
+      >
+        <v-expansion-panel-header> Results </v-expansion-panel-header>
+        <v-expansion-panel-content>
+          <table class="config">
+            <tbody>
+              <tr v-if="tuningJobBasicInfo.tuned_model !== null">
+                <th>Trained Model</th>
+                <td>
+                  model-{{ tuningJobBasicInfo.tuned_model }}
+                  <v-btn
+                    icon
+                    color="green"
+                    :to="{
+                      name: 'trained-model-detail',
+                      params: {
+                        trainedModelId: tuningJobBasicInfo.tuned_model,
+                      },
+                    }"
+                    ><v-icon>mdi-calculator</v-icon></v-btn
+                  >
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <ModelConfigView :modelConfigId="tuningJobBasicInfo.best_config" />
+        </v-expansion-panel-content>
+      </v-expansion-panel>
       <v-expansion-panel>
         <v-expansion-panel-header> Logs </v-expansion-panel-header>
         <v-expansion-panel-content>
@@ -136,6 +156,7 @@ import TuningJobStatus from "@/components/TuningJobStatus.vue";
 import SplitConfigView from "@/components/SplitConfigView.vue";
 import EvaluationConfigView from "@/components/EvaluationConfigView.vue";
 import LogView from "@/components/FetchLogs.vue";
+import ModelConfigView from "@/components/ModelConfigView.vue";
 
 const retrieveURL = "/api/parameter_tuning_job";
 type JobDetailType =
@@ -160,6 +181,7 @@ type Data = {
   panel: number[];
   splitConfigDetail: SplitConfigDetail | null;
   evaluationConfigDetail: EvaluationConfigDetail | null;
+  pollingStop: boolean;
 };
 export default Vue.extend({
   data(): Data {
@@ -170,6 +192,7 @@ export default Vue.extend({
       panel: [0],
       splitConfigDetail: null,
       evaluationConfigDetail: null,
+      pollingStop: false,
     };
   },
   async mounted(): Promise<void> {
@@ -193,7 +216,12 @@ export default Vue.extend({
         `${evaluationConfigInfoURL}/${this.tuningJobBasicInfo.evaluation}`
       );
     this.evaluationConfigDetail = evaluationConfigDetail;
+    await this.polling();
   },
+  beforeDestroy() {
+    this.pollingStop = true;
+  },
+
   watch: {
     async projectId() {
       await this.fetchTuningJobDetail();
@@ -204,6 +232,19 @@ export default Vue.extend({
       if (value === null || value === undefined) return "-";
       else return `${value}`;
     },
+    async polling(): Promise<void> {
+      for (;;) {
+        await new Promise((resolve: any) => setTimeout(resolve, 5000));
+        await this.fetchTuningJobDetail();
+        if (this.pollingStop) {
+          break;
+        }
+        if (this.jobComplete) {
+          break;
+        }
+      }
+    },
+
     async fetchTuningJobDetail(): Promise<void> {
       if (this.parameterTuningJobId === null) return;
       let result = await getWithRefreshToken<JobDetailType>(
@@ -231,6 +272,7 @@ export default Vue.extend({
     SplitConfigView,
     EvaluationConfigView,
     LogView,
+    ModelConfigView,
   },
 });
 </script>

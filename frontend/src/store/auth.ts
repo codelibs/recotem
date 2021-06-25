@@ -8,7 +8,7 @@ import {
 import store from "@/store";
 import axios, { AxiosError } from "axios";
 import { baseURL } from "@/env";
-import { paths } from "@/api/schema";
+import { paths, components } from "@/api/schema";
 
 const tokenObtainUrl = "/api/auth/login/";
 type tokenRequest =
@@ -20,6 +20,8 @@ const getMeUrl = "/api/auth/user/";
 type getMeResponse =
   paths["/api/auth/user/"]["get"]["responses"]["200"]["content"]["application/json"];
 
+type Project = components["schemas"]["Project"];
+
 @Module({
   dynamic: true,
   store,
@@ -30,10 +32,22 @@ export class Auth extends VuexModule {
   refresh: string | null = null;
   loginErrorMessages: string[] = [];
   username: string | null = null;
+  currentProjectId: number | null = null;
+  currentProjectDetail: Project | null = null;
 
   @Mutation
   setToken(token: string | null) {
     this.token = token;
+  }
+
+  @Mutation
+  setProjectId(id: number) {
+    this.currentProjectId = id;
+  }
+
+  @Mutation
+  setProjectDetail(project: Project) {
+    this.currentProjectDetail = project;
   }
 
   @Mutation

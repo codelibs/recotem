@@ -3,6 +3,11 @@
     <div class="d-flex mb-2">
       <div class="pl-4 text-h6">Tuning Jobs</div>
       <div class="flex-grow-1"></div>
+      <div>
+        <v-btn :to="{ name: 'start-tuning' }" color="primary">
+          <v-icon>mdi-tune</v-icon> Start new job</v-btn
+        >
+      </div>
     </div>
     <v-divider></v-divider>
     <div class="pl-4 pr-4 pt-0 mt-0">

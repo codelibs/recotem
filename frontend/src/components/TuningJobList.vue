@@ -1,66 +1,61 @@
+<style lang="css" scoped>
+.row-pointer >>> tbody tr :hover {
+  cursor: pointer;
+}
+</style>
+
 <template>
-  <div>
-    <template v-if="tuningJobs !== null">
-      <template v-if="tuningJobs !== undefined && tuningJobs.length > 0">
-        <v-list class="pt-0">
-          <template v-for="(td, i) in tuningJobs">
-            <v-list-item
-              :key="i"
-              :to="{
-                name: 'tuning-job-detail',
-                params: { parameterTuningJobId: td.id },
-              }"
-            >
-              <v-list-item-content>
-                <v-row>
-                  <v-col cols="2">
-                    <v-list-item-title> id: {{ td.id }} </v-list-item-title>
-                  </v-col>
-                  <v-col cols="6">
-                    <v-list-item-subtitle>
-                      {{ td.ins_datetime }}
-                    </v-list-item-subtitle>
-                  </v-col>
-                  <v-col cols="2">
-                    <TuningJobStatus :tasks="td.task_links" />
-                  </v-col>
-                </v-row>
-              </v-list-item-content>
-              <v-list-item-action>
-                <v-btn
-                  icon
-                  v-if="typeof td.tuned_model == 'number'"
-                  :to="{
-                    name: 'trained-model-detail',
-                    params: { trainedModelId: td.tuned_model },
-                  }"
-                >
-                  <v-icon color="green"> mdi-calculator </v-icon>
-                </v-btn>
-              </v-list-item-action>
-            </v-list-item>
-            <v-divider :key="i + 0.5"></v-divider>
-          </template>
-        </v-list>
-        <v-pagination
-          v-if="maxPageSize !== null && maxPageSize > 1"
-          v-model="page"
-          :length="maxPageSize"
-        >
-        </v-pagination>
+  <div v-if="tuningJobs !== null && tuningJobs !== undefined">
+    <v-data-table
+      class="row-pointer"
+      :options.sync="options"
+      :items="tuningJobs"
+      @click:row="
+        (item) =>
+          $router.push({
+            name: 'tuning-job-detail',
+            params: { parameterTuningJobId: item.id },
+          })
+      "
+      :headers="headers"
+      :server-items-length="totalCount"
+    >
+      <template v-slot:[`item.id`]="{ value }">
+        <td>{{ value }}</td>
       </template>
-      <div v-else class="ma-8 text-h6 text-center">No tuning job yet</div>
-    </template>
-    <div v-else class="ma-8 text-h5 text-center">loading...</div>
+      <template v-slot:[`item.ins_datetime`]="{ value }">
+        <td>{{ prettifyDate(value) }}</td>
+      </template>
+      <template v-slot:[`item.task_links`]="{ value }">
+        <td>
+          <TuningJobStatus :tasks="value" />
+        </td>
+      </template>
+      <template v-slot:[`item.trained_model`]="{ item }">
+        <td>
+          <v-btn
+            icon
+            v-if="typeof item.tuned_model == 'number'"
+            :to="{
+              name: 'trained-model-detail',
+              params: { trainedModelId: item.tuned_model },
+            }"
+          >
+            <v-icon color="green"> mdi-calculator </v-icon>
+          </v-btn>
+        </td>
+      </template>
+    </v-data-table>
   </div>
 </template>
 <script lang="ts">
 import Vue, { PropType } from "vue";
 import { paths, components } from "@/api/schema";
 import { computeMaxPage } from "@/utils/pagination";
-import { getWithRefreshToken } from "@/utils";
+import { DataTableOptions, DataTableHeader } from "@/utils/table";
+import { logout, getWithRefreshToken } from "@/utils/request";
+import { prettifyDate } from "@/utils/date";
 import { AuthModule } from "@/store/auth";
-import { logout } from "@/utils/request";
 import TuningJobStatus from "@/components/TuningJobStatus.vue";
 import qs from "qs";
 
@@ -74,6 +69,8 @@ type Data = {
   tuningJobs: TuningJobArray | null;
   totalCount: number | null | undefined;
   pollingStop: boolean;
+  options: DataTableOptions;
+  headers: DataTableHeader[];
 };
 
 const pageSize = 5;
@@ -95,12 +92,25 @@ export default Vue.extend({
       tuningJobs: null,
       totalCount: null,
       pollingStop: false,
+      options: {
+        page: 1,
+        itemsPerPage: 5,
+      },
+      headers: [
+        { text: "id", value: "id", sortable: false },
+        { text: "Started on", value: "ins_datetime", sortable: false },
+        { text: "Status", value: "task_links", sortable: false },
+        { text: "Trained model", value: "trained_model", sortable: false },
+      ],
     };
   },
   beforeDestroy() {
     this.pollingStop = true;
   },
   methods: {
+    prettifyDate(x: string) {
+      return prettifyDate(x);
+    },
     async polling(): Promise<void> {
       for (;;) {
         await sleep(2000);
@@ -112,15 +122,14 @@ export default Vue.extend({
     },
     async fetchData(): Promise<void> {
       let queryString = qs.stringify({
-        page_size: pageSize,
-        page: this.page,
+        page_size: this.options.itemsPerPage,
+        page: this.options.page,
         ...this.externalCondition,
       });
       const result = await getWithRefreshToken<APIResultType>(
         AuthModule,
         `${tuningJobListURL}?${queryString}`
       );
-      console.log(result);
       if (result === null) {
         await logout(AuthModule, this.$router);
         throw "logout";
@@ -129,17 +138,12 @@ export default Vue.extend({
       this.tuningJobs = result.results || [];
     },
   },
-  computed: {
-    maxPageSize(): number | null {
-      return computeMaxPage(
-        this.totalCount === undefined ? null : this.totalCount,
-        pageSize
-      );
-    },
-  },
   watch: {
-    async page(): Promise<void> {
-      await this.fetchData();
+    options: {
+      deep: true,
+      async handler(): Promise<void> {
+        await this.fetchData();
+      },
     },
     externalCondition: {
       deep: true,

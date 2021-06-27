@@ -68,8 +68,9 @@
   </div>
 </template>
 <script lang="ts">
-import Vue from "vue";
-import { AuthModule } from "@/store/auth";
+import Vue, { PropType } from "vue";
+import Router from "vue-router";
+import { AuthModule, Auth } from "@/store/auth";
 import { postWithRefreshToken, logout } from "@/utils/request";
 
 import SplitConfigForm, {
@@ -88,10 +89,45 @@ const splitConfigURL = "/api/split_config/";
 type SplitConfigResponse =
   paths["/api/split_config/"]["post"]["responses"]["201"]["content"]["application/json"];
 
+export async function createSplitConfigIfNeeded(
+  auth: Auth,
+  splitConfig: SplitConfigResultType
+): Promise<number> {
+  if (typeof splitConfig === "number") {
+    return splitConfig;
+  } else {
+    const createdSplitConfig = await postWithRefreshToken<
+      SplitConfigResultType,
+      SplitConfigResponse
+    >(auth, splitConfigURL, splitConfig);
+    if (createdSplitConfig === null) {
+      throw "Log out";
+    }
+    return createdSplitConfig.id;
+  }
+}
+
 const evaluationConfigURL = "/api/evaluation_config/";
 type EvaluationConfigResponse =
   paths["/api/evaluation_config/"]["post"]["responses"]["201"]["content"]["application/json"];
-
+export async function createEvaluationConfigIfNeeded(
+  auth: Auth,
+  evaluationConfig: EvaluationConfigResultType
+): Promise<number> {
+  let evaluationConfigId: number;
+  if (typeof evaluationConfig === "number") {
+    return evaluationConfig;
+  } else {
+    const createdEvaluationConfig = await postWithRefreshToken<
+      EvaluationConfigResultType,
+      EvaluationConfigResponse
+    >(auth, evaluationConfigURL, evaluationConfig);
+    if (createdEvaluationConfig === null) {
+      throw "Log out";
+    }
+    return createdEvaluationConfig.id;
+  }
+}
 const tuningJobURL = "/api/parameter_tuning_job/";
 type TuningJobResponse =
   paths["/api/parameter_tuning_job/"]["post"]["responses"]["201"]["content"]["application/json"];
@@ -100,6 +136,36 @@ type TuningJobRequestBody = Omit<
   paths["/api/parameter_tuning_job/"]["post"]["requestBody"]["content"]["application/json"],
   "id" | "ins_datetime" | "task_links"
 >;
+
+export async function createParameterTuningJob(
+  auth: Auth,
+  router: Router,
+  data: number,
+  split: number,
+  evaluation: number,
+  jobConfig: JobConfigResultType
+): Promise<void> {
+  const jobPostBody: TuningJobRequestBody = {
+    data,
+    split,
+    evaluation,
+    ...jobConfig,
+  };
+
+  const createdJob = await postWithRefreshToken<
+    TuningJobRequestBody,
+    TuningJobResponse
+  >(auth, tuningJobURL, jobPostBody);
+  if (createdJob !== null) {
+    router.push({
+      name: "tuning-job-detail",
+      params: { parameterTuningJobId: `${createdJob.id}` },
+    });
+  } else {
+    alert("failed to start the job");
+  }
+}
+
 type Data = {
   step: number;
   splitConfig: SplitConfigResultType;
@@ -126,57 +192,22 @@ export default Vue.extend({
         throw "Invalid state.";
       }
 
-      let splitConfigId: number;
-      if (typeof this.splitConfig === "number") {
-        splitConfigId = this.splitConfig;
-      } else {
-        const createdSplitConfig = await postWithRefreshToken<
-          SplitConfigResultType,
-          SplitConfigResponse
-        >(AuthModule, splitConfigURL, this.splitConfig);
-        console.log("created split config:", createdSplitConfig);
-        if (createdSplitConfig === null) {
-          await logout(AuthModule, this.$router);
-          throw "Log out";
-        }
-        splitConfigId = createdSplitConfig.id;
-      }
-      let evaluationConfigId: number;
-      if (typeof this.evaluationConfig === "number") {
-        evaluationConfigId = this.evaluationConfig;
-      } else {
-        const createdEvaluationConfig = await postWithRefreshToken<
-          EvaluationConfigResultType,
-          EvaluationConfigResponse
-        >(AuthModule, evaluationConfigURL, this.evaluationConfig);
-        console.log("created split config:", createdEvaluationConfig);
-        if (createdEvaluationConfig === null) {
-          await logout(AuthModule, this.$router);
-          throw "Log out";
-        }
-        evaluationConfigId = createdEvaluationConfig.id;
-      }
-
-      const jobPostBody: TuningJobRequestBody = {
-        data: this.dataId,
-        split: splitConfigId,
-        evaluation: evaluationConfigId,
-        ...this.jobConfig,
-      };
-
-      const createdJob = await postWithRefreshToken<
-        TuningJobRequestBody,
-        TuningJobResponse
-      >(AuthModule, tuningJobURL, jobPostBody);
-      console.log("created job:", createdJob);
-      if (createdJob !== null) {
-        this.$router.push({
-          name: "tuning-job-detail",
-          params: { parameterTuningJobId: `${createdJob.id}` },
-        });
-      } else {
-        alert("failed to start the job");
-      }
+      let splitConfigId = await createSplitConfigIfNeeded(
+        AuthModule,
+        this.splitConfig
+      );
+      let evaluationConfigId = await createEvaluationConfigIfNeeded(
+        AuthModule,
+        this.evaluationConfig
+      );
+      await createParameterTuningJob(
+        AuthModule,
+        this.$router,
+        this.dataId,
+        splitConfigId,
+        evaluationConfigId,
+        this.jobConfig
+      );
     },
   },
   components: {

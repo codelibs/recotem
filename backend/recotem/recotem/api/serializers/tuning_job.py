@@ -31,6 +31,7 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
             "tried_algorithms_json",
             "irspack_version",
             "train_after_tuning",
+            "best_score",
             "tuned_model",
             "best_config",
             "ins_datetime",

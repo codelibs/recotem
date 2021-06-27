@@ -7,6 +7,9 @@ table.config tr {
   padding: 5px;
   height: 32px;
 }
+pre-wrap {
+  white-space: pre-wrap !important;
+}
 </style>
 <template>
   <div v-if="tuningJobBasicInfo !== null" class="pa-4">
@@ -129,6 +132,10 @@ table.config tr {
                   >
                 </td>
               </tr>
+              <tr v-if="tuningJobBasicInfo.best_score">
+                <th>Best score</th>
+                <td>{{ tuningJobBasicInfo.best_score }}</td>
+              </tr>
             </tbody>
           </table>
           <ModelConfigView :modelConfigId="tuningJobBasicInfo.best_config" />
@@ -137,6 +144,17 @@ table.config tr {
       <v-expansion-panel>
         <v-expansion-panel-header> Logs </v-expansion-panel-header>
         <v-expansion-panel-content>
+          <div>
+            <v-alert
+              v-for="(msg, i) in errors"
+              :key="i"
+              class="text-caption"
+              type="error"
+            >
+              <div class="pre-wrap">{{ msg }}</div></v-alert
+            >
+          </div>
+
           <LogView
             :condition="{ tuning_job_id: tuningJobBasicInfo.id }"
             :complete="jobComplete"
@@ -197,6 +215,7 @@ export default Vue.extend({
   },
   async mounted(): Promise<void> {
     if (this.parameterTuningJobId == null) return;
+    if (this.parameterTuningJobId !== this.parameterTuningJobId) return;
     await this.fetchTuningJobDetail();
     if (this.tuningJobBasicInfo === null) return;
     let result = await getWithRefreshToken<DataDetail>(
@@ -259,6 +278,17 @@ export default Vue.extend({
     },
   },
   computed: {
+    errors(): string[] {
+      if (this.tuningJobBasicInfo === null) return [];
+      let result: string[] = [];
+      const tracebacks = this.tuningJobBasicInfo.task_links.map(
+        (x) => x.task.traceback
+      );
+      for (let s of tracebacks) {
+        if (s) result.push(s);
+      }
+      return result;
+    },
     parameterTuningJobId(): number | null {
       try {
         return parseInt(this.$route.params.parameterTuningJobId);

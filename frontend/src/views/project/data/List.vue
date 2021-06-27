@@ -7,6 +7,7 @@
     <v-card>
       <v-data-table
         :items="itemMetaData"
+        :server-items-length="itemMetaTotalSize"
         :headers="itemMetaDataHeaders"
         :options.sync="options"
       >
@@ -40,13 +41,14 @@ import qs from "qs";
 import { paths } from "@/api/schema";
 import { getWithRefreshToken } from "@/utils";
 import { prettyFileSize } from "@/utils/conversion";
+import { prettifyDate } from "@/utils/date";
+import { DataTableOptions, DataTableHeader } from "@/utils/table";
 
 import { AuthModule } from "@/store/auth";
 import { AxiosError } from "axios";
 
 import DataUpload from "@/components/DataUpload.vue";
 import TrainingDataList from "@/components/TrainingDataList.vue";
-import { prettifyDate } from "@/utils/date";
 
 const itemMetaDataListURL = "/api/item_meta_data/";
 type itemMetaResponseType =
@@ -59,8 +61,8 @@ type Data = {
   itemMetaData: itemMetaResponseContent;
   itemMetaTotalSize: number | null;
   itemMetaDataUploadDialogue: boolean;
-  itemMetaDataHeaders: { text: string; value: string; sortable: boolean }[];
-  options: { page: number; itemsPerPage: number };
+  itemMetaDataHeaders: DataTableHeader[];
+  options: DataTableOptions;
   loading: false;
 };
 

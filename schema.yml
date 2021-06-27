@@ -2094,6 +2094,10 @@ components:
           maxLength: 16
         train_after_tuning:
           type: boolean
+        best_score:
+          type: number
+          format: float
+          nullable: true
         tuned_model:
           type: integer
           nullable: true
@@ -2252,6 +2256,10 @@ components:
           maxLength: 16
         train_after_tuning:
           type: boolean
+        best_score:
+          type: number
+          format: float
+          nullable: true
         tuned_model:
           type: integer
           nullable: true
@@ -2601,6 +2609,10 @@ components:
           readOnly: true
           title: Completed DateTime
           description: Datetime field when the task was completed in UTC
+        traceback:
+          type: string
+          nullable: true
+          description: Text of the traceback if the task generated one
       required:
       - date_created
       - date_done

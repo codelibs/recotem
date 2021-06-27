@@ -305,6 +305,7 @@ export interface components {
       tried_algorithms_json?: string | null;
       irspack_version?: string | null;
       train_after_tuning?: boolean;
+      best_score?: number | null;
       tuned_model?: number | null;
       best_config?: number | null;
       ins_datetime: string;
@@ -362,6 +363,7 @@ export interface components {
       tried_algorithms_json?: string | null;
       irspack_version?: string | null;
       train_after_tuning?: boolean;
+      best_score?: number | null;
       tuned_model?: number | null;
       best_config?: number | null;
       ins_datetime?: string;
@@ -484,6 +486,8 @@ export interface components {
       date_created: string;
       /** Datetime field when the task was completed in UTC */
       date_done: string;
+      /** Text of the traceback if the task generated one */
+      traceback?: string | null;
     };
     TokenRefresh: {
       access: string;

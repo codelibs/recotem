@@ -18,7 +18,7 @@ from django_celery_results.models import TaskResult
 from irspack import Evaluator, IDMappedRecommender, InteractionMatrix
 from irspack import __version__ as irspack_version
 from irspack import autopilot, get_optimizer_class, split_dataframe_partial_user_holdout
-from irspack.optimizers.autopilot import TaskBackend, search_one
+from irspack.optimizers.autopilot import DEFAULT_SEARCHNAMES, TaskBackend, search_one
 from irspack.parameter_tuning import Suggestion
 from irspack.parameter_tuning.parameter_range import is_valid_param_name
 from irspack.recommenders.base import get_recommender_class
@@ -144,6 +144,7 @@ def task_train_recommender(self, model_id: int) -> None:
 
 def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
     job: ParameterTuningJob = ParameterTuningJob.objects.get(id=parameter_tuning_job_id)
+    evaluation: EvaluationConfig = job.evaluation
 
     TaskAndParameterJobLink.objects.create(job=job, task=task_result)
 
@@ -180,6 +181,7 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
 
     job.best_config = config
     job.irspack_version = irspack_version
+    job.best_score = -best_trial.value
     job.save()
 
     TaskLog.objects.create(
@@ -188,7 +190,7 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
     )
     TaskLog.objects.create(
         task=task_result,
-        contents=f"""Found best configuration: {recommender_class_name} / {best_params}.""",
+        contents=f"""Found best configuration: {recommender_class_name} / {best_params} with {evaluation.target_metric}@{evaluation.cutoff} = {-best_trial.value}""",
     )
 
     return config.id
@@ -234,12 +236,15 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
     split: SplitConfig = job.split
     evaluation: EvaluationConfig = job.evaluation
     df: pd.DataFrame = read_dataframe(Path(data.file.name), data.file)
+    tried_algorithms: List[str] = DEFAULT_SEARCHNAMES
+    if job.tried_algorithms_json is not None:
+        tried_algorithms: List[str] = json.loads(job.tried_algorithms_json)
     user_column = project.user_column
     item_column = project.item_column
 
     TaskLog.objects.create(
         task=task_result,
-        contents=f"""Start job {parameter_tuning_job_id}.""",
+        contents=f"""Start job {parameter_tuning_job_id} / worker {index}.""",
     )
 
     dataset, _ = split_dataframe_partial_user_holdout(
@@ -295,6 +300,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         storage=optuna_storage,
         study_name=study_name,
         task_resource_provider=BilliardBackend,
+        algorithms=tried_algorithms,
     )
 
 

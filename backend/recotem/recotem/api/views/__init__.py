@@ -1,6 +1,7 @@
 from django_filters import rest_framework as filters
 from rest_framework import viewsets
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
@@ -38,6 +39,7 @@ class TrainingDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     )
     serializer_class = TrainingDataSerializer
     filterset_fields = ["id", "project"]
+    parser_classes = [MultiPartParser]
 
     class pagination_class(PageNumberPagination):
         page_size = 10
@@ -54,6 +56,7 @@ class ItemMetaDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     )
     serializer_class = ItemMetaDataSerializer
     filterset_fields = ["id", "project"]
+    parser_classes = [MultiPartParser]
 
     class pagination_class(PageNumberPagination):
         page_size = 5
@@ -112,9 +115,6 @@ class ParameterTuningJobViewSet(viewsets.ModelViewSet):
     class pagination_class(PageNumberPagination):
         page_size = 10
         page_size_query_param = "page_size"
-
-
-import django_filters
 
 
 class TaskLogFilter(filters.FilterSet):

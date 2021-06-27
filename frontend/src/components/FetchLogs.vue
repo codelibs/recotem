@@ -40,9 +40,9 @@
 import Vue, { PropType } from "vue";
 import { paths } from "@/api/schema";
 import { getWithRefreshToken } from "@/utils";
+import { prettifyDate } from "@/utils/date";
 import { AuthModule } from "@/store/auth";
 import qs from "qs";
-import moment from "moment";
 
 const logListURL = "/api/task_log/";
 type LogResultType =
@@ -81,7 +81,7 @@ export default Vue.extend({
   },
   methods: {
     prettifyDate(x: string): string {
-      return moment(x).format("Y-MM-DDTH:m:s");
+      return prettifyDate(x);
     },
     async polling(): Promise<void> {
       for (;;) {

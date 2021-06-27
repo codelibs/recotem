@@ -1,4 +1,9 @@
 from django.urls import include, path
+from drf_spectacular.views import (
+    SpectacularAPIView,
+    SpectacularRedocView,
+    SpectacularSwaggerView,
+)
 from rest_framework.routers import DefaultRouter
 
 from recotem.api.views import (
@@ -36,4 +41,13 @@ router.register(r"task_log", TaskLogViewSet, basename="task_log")
 urlpatterns = [
     path("", include(router.urls)),
     path("auth/", include("dj_rest_auth.urls")),
+    path("schema/", SpectacularAPIView.as_view(), name="schema"),
+    path(
+        "schema/swagger-ui/",
+        SpectacularSwaggerView.as_view(url_name="schema"),
+        name="swagger-ui",
+    ),
+    path(
+        "schema/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"
+    ),
 ]

@@ -162,6 +162,15 @@ export interface paths {
   "/api/project_summary/{id}/": {
     get: operations["project_summary_retrieve"];
   };
+  "/api/schema/": {
+    /**
+     * OpenApi3 schema for this API. Format can be selected via content negotiation.
+     *
+     * - YAML: application/vnd.oai.openapi
+     * - JSON: application/vnd.oai.openapi+json
+     */
+    get: operations["schema_retrieve"];
+  };
   "/api/split_config/": {
     get: operations["split_config_list"];
     post: operations["split_config_create"];
@@ -293,6 +302,7 @@ export interface components {
       timeout_overall?: number | null;
       timeout_singlestep?: number | null;
       random_seed?: number | null;
+      tried_algorithms_json?: string | null;
       irspack_version?: string | null;
       train_after_tuning?: boolean;
       tuned_model?: number | null;
@@ -349,6 +359,7 @@ export interface components {
       timeout_overall?: number | null;
       timeout_singlestep?: number | null;
       random_seed?: number | null;
+      tried_algorithms_json?: string | null;
       irspack_version?: string | null;
       train_after_tuning?: boolean;
       tuned_model?: number | null;
@@ -538,8 +549,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["Login"];
-        "application/x-www-form-urlencoded": components["schemas"]["Login"];
-        "multipart/form-data": components["schemas"]["Login"];
       };
     };
   };
@@ -575,8 +584,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PasswordChange"];
-        "application/x-www-form-urlencoded": components["schemas"]["PasswordChange"];
-        "multipart/form-data": components["schemas"]["PasswordChange"];
       };
     };
   };
@@ -597,8 +604,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PasswordReset"];
-        "application/x-www-form-urlencoded": components["schemas"]["PasswordReset"];
-        "multipart/form-data": components["schemas"]["PasswordReset"];
       };
     };
   };
@@ -621,8 +626,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PasswordResetConfirm"];
-        "application/x-www-form-urlencoded": components["schemas"]["PasswordResetConfirm"];
-        "multipart/form-data": components["schemas"]["PasswordResetConfirm"];
       };
     };
   };
@@ -641,8 +644,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["TokenRefresh"];
-        "application/x-www-form-urlencoded": components["schemas"]["TokenRefresh"];
-        "multipart/form-data": components["schemas"]["TokenRefresh"];
       };
     };
   };
@@ -661,8 +662,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["TokenVerify"];
-        "application/x-www-form-urlencoded": components["schemas"]["TokenVerify"];
-        "multipart/form-data": components["schemas"]["TokenVerify"];
       };
     };
   };
@@ -706,8 +705,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["UserDetails"];
-        "application/x-www-form-urlencoded": components["schemas"]["UserDetails"];
-        "multipart/form-data": components["schemas"]["UserDetails"];
       };
     };
   };
@@ -732,8 +729,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedUserDetails"];
-        "application/x-www-form-urlencoded": components["schemas"]["PatchedUserDetails"];
-        "multipart/form-data": components["schemas"]["PatchedUserDetails"];
       };
     };
   };
@@ -742,6 +737,7 @@ export interface operations {
       query: {
         id?: number;
         name?: string;
+        unnamed?: boolean;
       };
     };
     responses: {
@@ -763,8 +759,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["EvaluationConfig"];
-        "application/x-www-form-urlencoded": components["schemas"]["EvaluationConfig"];
-        "multipart/form-data": components["schemas"]["EvaluationConfig"];
       };
     };
   };
@@ -800,8 +794,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["EvaluationConfig"];
-        "application/x-www-form-urlencoded": components["schemas"]["EvaluationConfig"];
-        "multipart/form-data": components["schemas"]["EvaluationConfig"];
       };
     };
   };
@@ -834,8 +826,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedEvaluationConfig"];
-        "application/x-www-form-urlencoded": components["schemas"]["PatchedEvaluationConfig"];
-        "multipart/form-data": components["schemas"]["PatchedEvaluationConfig"];
       };
     };
   };
@@ -868,8 +858,6 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["ItemMetaData"];
-        "application/x-www-form-urlencoded": components["schemas"]["ItemMetaData"];
         "multipart/form-data": components["schemas"]["ItemMetaData"];
       };
     };
@@ -905,8 +893,6 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["ItemMetaData"];
-        "application/x-www-form-urlencoded": components["schemas"]["ItemMetaData"];
         "multipart/form-data": components["schemas"]["ItemMetaData"];
       };
     };
@@ -939,8 +925,6 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["PatchedItemMetaData"];
-        "application/x-www-form-urlencoded": components["schemas"]["PatchedItemMetaData"];
         "multipart/form-data": components["schemas"]["PatchedItemMetaData"];
       };
     };
@@ -998,8 +982,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["ModelConfiguration"];
-        "application/x-www-form-urlencoded": components["schemas"]["ModelConfiguration"];
-        "multipart/form-data": components["schemas"]["ModelConfiguration"];
       };
     };
   };
@@ -1035,8 +1017,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["ModelConfiguration"];
-        "application/x-www-form-urlencoded": components["schemas"]["ModelConfiguration"];
-        "multipart/form-data": components["schemas"]["ModelConfiguration"];
       };
     };
   };
@@ -1069,8 +1049,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedModelConfiguration"];
-        "application/x-www-form-urlencoded": components["schemas"]["PatchedModelConfiguration"];
-        "multipart/form-data": components["schemas"]["PatchedModelConfiguration"];
       };
     };
   };
@@ -1105,8 +1083,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["ParameterTuningJob"];
-        "application/x-www-form-urlencoded": components["schemas"]["ParameterTuningJob"];
-        "multipart/form-data": components["schemas"]["ParameterTuningJob"];
       };
     };
   };
@@ -1142,8 +1118,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["ParameterTuningJob"];
-        "application/x-www-form-urlencoded": components["schemas"]["ParameterTuningJob"];
-        "multipart/form-data": components["schemas"]["ParameterTuningJob"];
       };
     };
   };
@@ -1176,8 +1150,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedParameterTuningJob"];
-        "application/x-www-form-urlencoded": components["schemas"]["PatchedParameterTuningJob"];
-        "multipart/form-data": components["schemas"]["PatchedParameterTuningJob"];
       };
     };
   };
@@ -1207,8 +1179,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["Project"];
-        "application/x-www-form-urlencoded": components["schemas"]["Project"];
-        "multipart/form-data": components["schemas"]["Project"];
       };
     };
   };
@@ -1244,8 +1214,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["Project"];
-        "application/x-www-form-urlencoded": components["schemas"]["Project"];
-        "multipart/form-data": components["schemas"]["Project"];
       };
     };
   };
@@ -1278,8 +1246,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedProject"];
-        "application/x-www-form-urlencoded": components["schemas"]["PatchedProject"];
-        "multipart/form-data": components["schemas"]["PatchedProject"];
       };
     };
   };
@@ -1298,11 +1264,132 @@ export interface operations {
       };
     };
   };
+  /**
+   * OpenApi3 schema for this API. Format can be selected via content negotiation.
+   *
+   * - YAML: application/vnd.oai.openapi
+   * - JSON: application/vnd.oai.openapi+json
+   */
+  schema_retrieve: {
+    parameters: {
+      query: {
+        format?: "json" | "yaml";
+        lang?:
+          | "af"
+          | "ar"
+          | "ar-dz"
+          | "ast"
+          | "az"
+          | "be"
+          | "bg"
+          | "bn"
+          | "br"
+          | "bs"
+          | "ca"
+          | "cs"
+          | "cy"
+          | "da"
+          | "de"
+          | "dsb"
+          | "el"
+          | "en"
+          | "en-au"
+          | "en-gb"
+          | "eo"
+          | "es"
+          | "es-ar"
+          | "es-co"
+          | "es-mx"
+          | "es-ni"
+          | "es-ve"
+          | "et"
+          | "eu"
+          | "fa"
+          | "fi"
+          | "fr"
+          | "fy"
+          | "ga"
+          | "gd"
+          | "gl"
+          | "he"
+          | "hi"
+          | "hr"
+          | "hsb"
+          | "hu"
+          | "hy"
+          | "ia"
+          | "id"
+          | "ig"
+          | "io"
+          | "is"
+          | "it"
+          | "ja"
+          | "ka"
+          | "kab"
+          | "kk"
+          | "km"
+          | "kn"
+          | "ko"
+          | "ky"
+          | "lb"
+          | "lt"
+          | "lv"
+          | "mk"
+          | "ml"
+          | "mn"
+          | "mr"
+          | "my"
+          | "nb"
+          | "ne"
+          | "nl"
+          | "nn"
+          | "os"
+          | "pa"
+          | "pl"
+          | "pt"
+          | "pt-br"
+          | "ro"
+          | "ru"
+          | "sk"
+          | "sl"
+          | "sq"
+          | "sr"
+          | "sr-latn"
+          | "sv"
+          | "sw"
+          | "ta"
+          | "te"
+          | "tg"
+          | "th"
+          | "tk"
+          | "tr"
+          | "tt"
+          | "udm"
+          | "uk"
+          | "ur"
+          | "uz"
+          | "vi"
+          | "zh-hans"
+          | "zh-hant";
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/vnd.oai.openapi": { [key: string]: any };
+          "application/yaml": { [key: string]: any };
+          "application/vnd.oai.openapi+json": { [key: string]: any };
+          "application/json": { [key: string]: any };
+        };
+      };
+    };
+  };
   split_config_list: {
     parameters: {
       query: {
         id?: number;
         name?: string;
+        unnamed?: boolean;
       };
     };
     responses: {
@@ -1324,8 +1411,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["SplitConfig"];
-        "application/x-www-form-urlencoded": components["schemas"]["SplitConfig"];
-        "multipart/form-data": components["schemas"]["SplitConfig"];
       };
     };
   };
@@ -1361,8 +1446,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["SplitConfig"];
-        "application/x-www-form-urlencoded": components["schemas"]["SplitConfig"];
-        "multipart/form-data": components["schemas"]["SplitConfig"];
       };
     };
   };
@@ -1395,8 +1478,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedSplitConfig"];
-        "application/x-www-form-urlencoded": components["schemas"]["PatchedSplitConfig"];
-        "multipart/form-data": components["schemas"]["PatchedSplitConfig"];
       };
     };
   };
@@ -1404,8 +1485,9 @@ export interface operations {
     parameters: {
       query: {
         id?: number;
-        task__model_link__model?: number;
-        task__tuning_job_link__job?: number;
+        id_gt?: number;
+        model_id?: number;
+        tuning_job_id?: number;
       };
     };
     responses: {
@@ -1462,8 +1544,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["TrainedModel"];
-        "application/x-www-form-urlencoded": components["schemas"]["TrainedModel"];
-        "multipart/form-data": components["schemas"]["TrainedModel"];
       };
     };
   };
@@ -1499,8 +1579,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["TrainedModel"];
-        "application/x-www-form-urlencoded": components["schemas"]["TrainedModel"];
-        "multipart/form-data": components["schemas"]["TrainedModel"];
       };
     };
   };
@@ -1533,8 +1611,6 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedTrainedModel"];
-        "application/x-www-form-urlencoded": components["schemas"]["PatchedTrainedModel"];
-        "multipart/form-data": components["schemas"]["PatchedTrainedModel"];
       };
     };
   };
@@ -1625,8 +1701,6 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["TrainingData"];
-        "application/x-www-form-urlencoded": components["schemas"]["TrainingData"];
         "multipart/form-data": components["schemas"]["TrainingData"];
       };
     };
@@ -1662,8 +1736,6 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["TrainingData"];
-        "application/x-www-form-urlencoded": components["schemas"]["TrainingData"];
         "multipart/form-data": components["schemas"]["TrainingData"];
       };
     };
@@ -1696,8 +1768,6 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["PatchedTrainingData"];
-        "application/x-www-form-urlencoded": components["schemas"]["PatchedTrainingData"];
         "multipart/form-data": components["schemas"]["PatchedTrainingData"];
       };
     };

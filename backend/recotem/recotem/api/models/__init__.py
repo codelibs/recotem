@@ -152,6 +152,7 @@ class ParameterTuningJob(models.Model):
     timeout_overall = models.IntegerField(null=True)
     timeout_singlestep = models.IntegerField(null=True)
     random_seed = models.IntegerField(null=True)
+    tried_algorithms_json = models.TextField(null=True)
 
     irspack_version = models.CharField(max_length=16, null=True)
 
@@ -165,6 +166,7 @@ class ParameterTuningJob(models.Model):
         on_delete=models.SET_NULL,
         related_name="tuning_job",
     )
+    best_score = models.FloatField(null=True)
 
     ins_datetime = models.DateTimeField(auto_now_add=True)
 

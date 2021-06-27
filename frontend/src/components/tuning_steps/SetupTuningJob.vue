@@ -83,6 +83,13 @@
               :error-messages="errors"
             ></v-text-field>
           </ValidationProvider>
+          <v-select
+            multiple
+            chip
+            v-model="customConfig.tried_algorithms"
+            :items="algoChoices"
+          >
+          </v-select>
           <v-checkbox
             v-model="customConfig.train_after_tuning"
             label="Train a model using the full data using the tuned configuration."
@@ -124,12 +131,24 @@ type createConfigArg = {
   timeout_singlestep: number | string;
   random_seed: number | string;
   train_after_tuning: boolean;
+  tried_algorithms: string[];
 };
 
 type Data = {
   customConfig: createConfigArg;
+  algoChoices: string[];
   how: number;
 };
+const algoChoices = [
+  "DenseSLIM",
+  "SLIM",
+  "IALS",
+  "AsymmetricCosineKNN",
+  "RP3beta",
+  "AsymmetricCosineUserKNN",
+  "TopPop",
+  "TruncatedSVD",
+];
 
 extend("max_value", max_value);
 extend("min_value", min_value);
@@ -146,6 +165,7 @@ export default Vue.extend({
   data(): Data {
     return {
       how: 1,
+      algoChoices,
       customConfig: {
         name: "",
         n_trials: 40,
@@ -155,6 +175,13 @@ export default Vue.extend({
         timeout_singlestep: "",
         random_seed: "",
         train_after_tuning: true,
+        tried_algorithms: [
+          "DenseSLIM",
+          "SLIM",
+          "IALS",
+          "AsymmetricCosineKNN",
+          "RP3beta",
+        ],
       },
     };
   },
@@ -193,6 +220,9 @@ export default Vue.extend({
           this.customConfig.random_seed
         );
         result.train_after_tuning = this.customConfig.train_after_tuning;
+        result.tried_algorithms_json = JSON.stringify(
+          this.customConfig.tried_algorithms
+        );
       }
       return result;
     },

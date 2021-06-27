@@ -28,6 +28,7 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
             "timeout_overall",
             "timeout_singlestep",
             "random_seed",
+            "tried_algorithms_json",
             "irspack_version",
             "train_after_tuning",
             "tuned_model",

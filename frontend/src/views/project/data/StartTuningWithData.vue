@@ -1,5 +1,7 @@
 <template>
   <div>
+    <div>Setup tuning job:</div>
+
     <v-stepper v-model="step">
       <v-stepper-header>
         <v-stepper-step step="1"> Split </v-stepper-step>

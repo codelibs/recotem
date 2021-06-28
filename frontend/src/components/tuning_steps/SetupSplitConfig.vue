@@ -19,34 +19,33 @@
 
         <div class="flex-grow-1">
           <v-container v-if="how == 2" fluid class="pt-0">
-            <v-list>
-              <v-list-item class="pa-0">
-                <v-list-item-content class="pa-0">
-                  <v-list-item-subtitle>
-                    Select preset configurations
-                  </v-list-item-subtitle>
-                </v-list-item-content>
-              </v-list-item>
-              <v-divider></v-divider>
-              <template v-for="(config, i) in existingConfigs">
-                <v-list-item
-                  :key="i"
-                  @click="handlePresetConfigClick(config.id)"
-                  :input-value="id === config.id"
-                >
-                  <v-list-item-content>
-                    <v-list-item-title>
-                      {{ config.name }}
-                    </v-list-item-title>
-                    <v-list-item-subtitle>
-                      id: {{ config.id }}
-                    </v-list-item-subtitle>
-                  </v-list-item-content>
-                  id: {{ config.id }}
-                </v-list-item>
-                <v-divider :key="i + 0.5"></v-divider>
+            <v-data-table
+              :headers="[
+                { text: 'id', value: 'id', sortable: false },
+                { text: 'name', value: 'name', sortable: false },
+                { text: 'created at', value: 'ins_datetime', sortable: false },
+              ]"
+              :items="existingConfigs"
+              single-select
+              single-expand
+              show-expand
+              dense
+              show-select
+              v-model="selectedConfigs"
+              class="pa-4"
+            >
+              <template v-slot:top>
+                <div class="text-caption">Preset configurations:</div>
               </template>
-            </v-list>
+              <template v-slot:[`item.ins_datetime`]="{ value }">
+                <td>{{ prettifyDate(value) }}</td>
+              </template>
+              <template v-slot:expanded-item="{ headers, item }">
+                <td :colspan="headers.length" class="pa-4">
+                  <SplitConfigView :splitConfigDetail="item" />
+                </td>
+              </template>
+            </v-data-table>
           </v-container>
           <v-container v-if="how == 3" class="pl-8">
             <ValidationProvider
@@ -127,7 +126,7 @@
       </div>
       <slot
         v-bind:isValid="
-          (how == 3 && valid) || how == 1 || (how == 2 && id !== null)
+          (how == 3 && valid) || how == 1 || (how == 2 && selectedId !== null)
         "
       >
       </slot>
@@ -142,7 +141,9 @@ import { AuthModule } from "@/store/auth";
 import { getWithRefreshToken } from "@/utils";
 import { is_integral, max_value, min_value } from "@/utils/rules";
 import { numberInputValueToNumberOrNull } from "@/utils/conversion";
+import { prettifyDate } from "@/utils/date";
 import { paths } from "@/api/schema";
+import SplitConfigView from "@/components/SplitConfigView.vue";
 import qs from "qs";
 
 type ExistingConfigs =
@@ -151,17 +152,9 @@ const existingConfigsUrl = "/api/split_config/";
 
 type createConfigArg = Omit<
   paths["/api/split_config/"]["post"]["requestBody"]["content"]["application/json"],
-  "id"
+  "id" | "ins_datetime"
 >;
 
-type Data = {
-  how: number;
-  customConfig: createConfigArg;
-  id: number | null;
-  saveName: string;
-  existingConfigs: ExistingConfigs;
-  formValid: boolean;
-};
 export type ResultType = createConfigArg | number | null;
 
 extend("max_value", max_value);
@@ -180,7 +173,14 @@ extend("splitConfigNameExists", {
     return `A preset with this name already exists.`;
   },
 });
-
+type Data = {
+  how: number;
+  customConfig: createConfigArg;
+  saveName: string;
+  existingConfigs: ExistingConfigs;
+  selectedConfigs: ExistingConfigs;
+  formValid: boolean;
+};
 export default Vue.extend({
   props: {
     value: {
@@ -191,7 +191,7 @@ export default Vue.extend({
   data(): Data {
     return {
       how: 1,
-      id: null,
+      selectedConfigs: [],
       customConfig: {
         scheme: "RG",
         heldout_ratio: 0.1,
@@ -206,18 +206,8 @@ export default Vue.extend({
     };
   },
   methods: {
-    handlePresetConfigClick(id: number): void {
-      if (this.id === null) {
-        this.id = id;
-        return;
-      }
-      // id values already set
-      if (this.id === id) {
-        // unselect
-        this.id = null;
-        return;
-      }
-      this.id = id;
+    prettifyDate(value: string): string {
+      return prettifyDate(value);
     },
     async fetchExistingSplitConfigs(): Promise<void> {
       const results = await getWithRefreshToken<ExistingConfigs>(
@@ -242,12 +232,16 @@ export default Vue.extend({
     },
   },
   computed: {
+    selectedId(): number | null {
+      if (this.selectedConfigs.length === 0) return null;
+      return this.selectedConfigs[0].id;
+    },
     result(): ResultType {
       let result: createConfigArg = new Object();
       if (this.how === 1) {
         return result;
       } else if (this.how === 2) {
-        return this.id;
+        return this.selectedId;
       } else {
         Object.assign(result, this.customConfig);
         if (this.saveName) {
@@ -275,6 +269,7 @@ export default Vue.extend({
   components: {
     ValidationObserver,
     ValidationProvider,
+    SplitConfigView,
   },
 });
 </script>

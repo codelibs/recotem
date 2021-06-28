@@ -610,6 +610,18 @@ paths:
         name: id
         schema:
           type: integer
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
       - in: query
         name: project
         schema:
@@ -624,9 +636,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ModelConfiguration'
+                $ref: '#/components/schemas/PaginatedModelConfigurationList'
           description: ''
     post:
       operationId: model_configuration_create
@@ -1872,6 +1882,10 @@ components:
         id:
           type: integer
           readOnly: true
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
         name:
           type: string
           nullable: true
@@ -1882,6 +1896,7 @@ components:
           $ref: '#/components/schemas/TargetMetricEnum'
       required:
       - id
+      - ins_datetime
     IDAndScore:
       type: object
       properties:
@@ -1957,10 +1972,15 @@ components:
         id:
           type: integer
           readOnly: true
+        tuning_job:
+          type: integer
+          readOnly: true
         name:
           type: string
           nullable: true
           maxLength: 256
+        project:
+          type: integer
         recommender_class_name:
           type: string
           maxLength: 128
@@ -1970,14 +1990,13 @@ components:
           type: string
           format: date-time
           readOnly: true
-        project:
-          type: integer
       required:
       - id
       - ins_datetime
       - parameters_json
       - project
       - recommender_class_name
+      - tuning_job
     PaginatedItemMetaDataList:
       type: object
       properties:
@@ -1998,6 +2017,26 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ItemMetaData'
+    PaginatedModelConfigurationList:
+      type: object
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelConfiguration'
     PaginatedParameterTuningJobList:
       type: object
       properties:
@@ -2166,6 +2205,10 @@ components:
         id:
           type: integer
           readOnly: true
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
         name:
           type: string
           nullable: true
@@ -2205,10 +2248,15 @@ components:
         id:
           type: integer
           readOnly: true
+        tuning_job:
+          type: integer
+          readOnly: true
         name:
           type: string
           nullable: true
           maxLength: 256
+        project:
+          type: integer
         recommender_class_name:
           type: string
           maxLength: 128
@@ -2218,8 +2266,6 @@ components:
           type: string
           format: date-time
           readOnly: true
-        project:
-          type: integer
     PatchedParameterTuningJob:
       type: object
       properties:
@@ -2281,6 +2327,10 @@ components:
         id:
           type: integer
           readOnly: true
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
         name:
           type: string
         user_column:
@@ -2293,15 +2343,15 @@ components:
           type: string
           nullable: true
           maxLength: 256
-        ins_datetime:
-          type: string
-          format: date-time
-          readOnly: true
     PatchedSplitConfig:
       type: object
       properties:
         id:
           type: integer
+          readOnly: true
+        ins_datetime:
+          type: string
+          format: date-time
           readOnly: true
         name:
           type: string
@@ -2409,6 +2459,10 @@ components:
         id:
           type: integer
           readOnly: true
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
         name:
           type: string
         user_column:
@@ -2421,10 +2475,6 @@ components:
           type: string
           nullable: true
           maxLength: 256
-        ins_datetime:
-          type: string
-          format: date-time
-          readOnly: true
       required:
       - id
       - ins_datetime
@@ -2514,6 +2564,10 @@ components:
         id:
           type: integer
           readOnly: true
+        ins_datetime:
+          type: string
+          format: date-time
+          readOnly: true
         name:
           type: string
           nullable: true
@@ -2536,6 +2590,7 @@ components:
           type: integer
       required:
       - id
+      - ins_datetime
     StatusEnum:
       enum:
       - FAILURE
@@ -2573,12 +2628,12 @@ components:
         id:
           type: integer
           readOnly: true
-        contents:
-          type: string
         ins_datetime:
           type: string
           format: date-time
           readOnly: true
+        contents:
+          type: string
         task:
           type: integer
       required:

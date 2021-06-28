@@ -1,35 +1,40 @@
-<style lang="css" scoped>
-.row-pointer >>> tbody tr :hover {
-  cursor: pointer;
-}
-</style>
-
 <template>
   <div>
     <v-data-table
-      v-if="projectId !== null && models !== null"
+      v-if="models !== null"
       :items="models"
       disable-sort
+      :dense="isSelection"
+      :single-select="isSelection"
+      :show-select="isSelection"
+      :single-expand="isSelection"
+      show-expand
       :headers="headers"
       :server-items-length="totalCount"
       :options.sync="options"
-      @click:row="
-        (item) =>
-          $router.push({
-            name: 'trained-model-detail',
-            params: { trainedModelId: item.id },
-          })
-      "
-      class="row-pointer"
     >
-      <template v-slot:[`item.filesize`]="{ value }">
-        {{ prettyFileSize(value) }}
-      </template>
       <template v-slot:[`item.ins_datetime`]="{ value }">
         <span class="text-caption">{{ prettifyDate(value) }} </span>
       </template>
-      <template v-slot:[`item.task_links`]="{ value }">
-        <JobStatus :tasks="value" />
+      <template v-slot:[`item.name`]="{ item, value }">
+        <span v-if="item.tuning_job !== null">
+          <v-btn
+            icon
+            :to="{
+              name: 'tuning-job-detail',
+              params: { parameterTuningJobId: item.tuning_job },
+            }"
+          >
+            <v-icon>mdi-tune</v-icon>
+          </v-btn>
+          Result of tuning job {{ item.tuning_job }}
+        </span>
+        <span v-else> {{ value }}</span>
+      </template>
+      <template v-slot:expanded-item="{ headers, item }">
+        <td :colspan="headers.length" class="pa-4">
+          <ModelConfigView :modelConfigId="item.id" />
+        </td>
       </template>
     </v-data-table>
   </div>
@@ -37,66 +42,66 @@
 <script lang="ts">
 import Vue, { PropType } from "vue";
 import { paths, components } from "@/api/schema";
-import { computeMaxPage } from "@/utils/pagination";
 import { getWithRefreshToken } from "@/utils";
 import { AuthModule } from "@/store/auth";
 import { logout } from "@/utils/request";
 import { prettyFileSize } from "@/utils/conversion";
 import { prettifyDate } from "@/utils/date";
 
-import JobStatus from "@/components/TuningJobStatus.vue";
 import { DataTableHeader, DataTableOptions } from "@/utils/table";
+import ModelConfigView from "@/components/ModelConfigView.vue";
 
 import qs from "qs";
 
-const trainedModelListURL = "/api/trained_model/";
+const trainedModelListURL = "/api/model_configuration/";
 type APIResultType =
-  paths["/api/trained_model/"]["get"]["responses"]["200"]["content"]["application/json"];
-type TrainedModelArray = APIResultType["results"];
+  paths["/api/model_configuration/"]["get"]["responses"]["200"]["content"]["application/json"];
+type ModelConfigurationArray = APIResultType["results"];
 
 type Data = {
   headers: DataTableHeader[];
-  models: TrainedModelArray | null;
+  models: ModelConfigurationArray | null;
   totalCount: number | null | undefined;
-  pollingStop: boolean;
   options: DataTableOptions;
   loading: boolean;
 };
 
-const pageSize = 5;
-
-function sleep(msec: number) {
-  return new Promise((resolve: any) => setTimeout(resolve, msec));
-}
-
 export default Vue.extend({
   props: {
+    value: {
+      type: Number as PropType<number | null>,
+      default: null,
+    },
     externalCondition: {
       type: Object as PropType<Record<string, string>>,
       default: Object,
     },
+    isSelection: {
+      type: Boolean as PropType<boolean>,
+      default: true,
+    },
   },
   data(): Data {
+    const headers = [
+      { text: "id", value: "id", sortable: false },
+      { text: "Created", value: "ins_datetime", sortable: false },
+      {
+        text: "Recommender Class",
+        value: "recommender_class_name",
+        sortable: false,
+      },
+      { text: "", value: "name", sortable: false },
+    ];
     return {
       models: null,
       totalCount: null,
-      pollingStop: false,
-      headers: [
-        { text: "id", value: "id", sortable: false },
-        { text: "Filename", value: "basename", sortable: false },
-        { text: "File size", value: "filesize", sortable: false },
-        { text: "Created", value: "ins_datetime", sortable: false },
-        { text: "Status", value: "task_links", sortable: false },
-      ],
+      headers,
       options: {
         page: 1,
         itemsPerPage: 5,
       },
       loading: false,
     };
-  },
-  beforeDestroy() {
-    this.pollingStop = true;
   },
   methods: {
     prettyFileSize(value: number | null) {
@@ -105,22 +110,12 @@ export default Vue.extend({
     prettifyDate(x: string) {
       return prettifyDate(x);
     },
-
-    async polling(): Promise<void> {
-      for (;;) {
-        await sleep(2000);
-        await this.fetchData();
-        if (this.pollingStop) {
-          break;
-        }
-      }
-    },
     async fetchData(): Promise<void> {
       let queryString = qs.stringify({
         page_size: this.options.itemsPerPage,
         page: this.options.page,
         ...this.externalCondition,
-        data_loc__project: this.projectId,
+        project: this.projectId,
       });
       this.loading = true;
       const result = await getWithRefreshToken<APIResultType>(
@@ -140,12 +135,6 @@ export default Vue.extend({
     projectId(): number | null {
       return AuthModule.currentProjectId;
     },
-    maxPageSize(): number | null {
-      return computeMaxPage(
-        this.totalCount === undefined ? null : this.totalCount,
-        pageSize
-      );
-    },
   },
   watch: {
     options: {
@@ -164,10 +153,7 @@ export default Vue.extend({
   },
   async mounted() {
     await this.fetchData();
-    await this.polling();
   },
-  components: {
-    JobStatus,
-  },
+  components: { ModelConfigView },
 });
 </script>

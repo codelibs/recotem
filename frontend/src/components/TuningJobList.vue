@@ -94,7 +94,7 @@ export default Vue.extend({
       pollingStop: false,
       options: {
         page: 1,
-        itemsPerPage: 5,
+        itemsPerPage: 10,
       },
       headers: [
         { text: "id", value: "id", sortable: false },

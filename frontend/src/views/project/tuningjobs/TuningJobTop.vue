@@ -214,8 +214,6 @@ export default Vue.extend({
     };
   },
   async mounted(): Promise<void> {
-    if (this.parameterTuningJobId == null) return;
-    if (this.parameterTuningJobId !== this.parameterTuningJobId) return;
     await this.fetchTuningJobDetail();
     if (this.tuningJobBasicInfo === null) return;
     let result = await getWithRefreshToken<DataDetail>(
@@ -265,7 +263,9 @@ export default Vue.extend({
     },
 
     async fetchTuningJobDetail(): Promise<void> {
-      if (this.parameterTuningJobId === null) return;
+      if (this.parameterTuningJobId == null) return;
+      if (isNaN(this.parameterTuningJobId)) return;
+
       let result = await getWithRefreshToken<JobDetailType>(
         AuthModule,
         `${retrieveURL}/${this.parameterTuningJobId}`

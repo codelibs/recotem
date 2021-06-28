@@ -66,9 +66,13 @@ class ItemMetaDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
 class ModelConfigurationViewset(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
-    queryset = ModelConfiguration.objects.all()
+    queryset = ModelConfiguration.objects.all().order_by("-id")
     serializer_class = ModelConfigurationSerializer
     filterset_fields = ["id", "project"]
+
+    class pagination_class(PageNumberPagination):
+        page_size = 10
+        page_size_query_param = "page_size"
 
 
 class SplitConfigFilter(filters.FilterSet):

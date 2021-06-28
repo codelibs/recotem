@@ -49,7 +49,16 @@ class TaskLogSerializer(serializers.ModelSerializer):
 class ModelConfigurationSerializer(serializers.ModelSerializer):
     class Meta:
         model = ModelConfiguration
-        fields = "__all__"
+        fields = [
+            "id",
+            "tuning_job",
+            "name",
+            "project",
+            "recommender_class_name",
+            "parameters_json",
+            "ins_datetime",
+        ]
+        read_only_fields = ["tuning_job", "ins_datetime"]
 
 
 __all__ = (

@@ -20,17 +20,22 @@ def create_auth_token(sender, instance=None, created=False, **kwargs):
         Token.objects.create(user=instance)
 
 
-class Project(models.Model):
+class ModelWithInsDatetime(models.Model):
+    ins_datetime = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        abstract = True
+
+
+class Project(ModelWithInsDatetime):
     name = models.TextField(unique=True)
     user_column = models.CharField(max_length=256)
     item_column = models.CharField(max_length=256)
     time_column = models.CharField(max_length=256, blank=False, null=True)
-    ins_datetime = models.DateTimeField(auto_now_add=True)
 
 
-class TrainingData(BaseFileModel):
+class TrainingData(ModelWithInsDatetime, BaseFileModel):
     project = models.ForeignKey(Project, on_delete=models.CASCADE)
-    ins_datetime = models.DateTimeField(auto_now_add=True)
 
     def validate_return_df(self) -> pd.DataFrame:
         pathname = Path(self.file.name)
@@ -62,9 +67,8 @@ class TrainingData(BaseFileModel):
         return df
 
 
-class ItemMetaData(BaseFileModel):
+class ItemMetaData(ModelWithInsDatetime, BaseFileModel):
     project = models.ForeignKey(Project, on_delete=models.CASCADE)
-    ins_datetime = models.DateTimeField(auto_now_add=True)
     valid_columns_list_json = models.TextField(null=True)
 
     def validate_return_df(self) -> pd.DataFrame:
@@ -91,7 +95,7 @@ def save_file_size(
     instance.save()
 
 
-class SplitConfig(models.Model):
+class SplitConfig(ModelWithInsDatetime):
     name = models.CharField(max_length=256, null=True)
 
     class SplitScheme(models.TextChoices):
@@ -111,7 +115,7 @@ class SplitConfig(models.Model):
     random_seed = models.IntegerField(default=42)
 
 
-class EvaluationConfig(models.Model):
+class EvaluationConfig(ModelWithInsDatetime):
     name = models.CharField(max_length=256, null=True)
     cutoff = models.IntegerField(default=20)
 
@@ -126,22 +130,20 @@ class EvaluationConfig(models.Model):
     )
 
 
-class ModelConfiguration(models.Model):
+class ModelConfiguration(ModelWithInsDatetime):
     name = models.CharField(max_length=256, null=True, unique=True)
     project = models.ForeignKey(Project, on_delete=models.CASCADE)
     recommender_class_name = models.CharField(max_length=128)
     parameters_json = models.TextField()
-    ins_datetime = models.DateTimeField(auto_now_add=True)
 
 
-class TrainedModel(BaseFileModel):
+class TrainedModel(ModelWithInsDatetime, BaseFileModel):
     configuration = models.ForeignKey(ModelConfiguration, on_delete=models.CASCADE)
     data_loc = models.ForeignKey(TrainingData, on_delete=models.CASCADE)
     irspack_version = models.CharField(max_length=16, null=True)
-    ins_datetime = models.DateTimeField(auto_now_add=True)
 
 
-class ParameterTuningJob(models.Model):
+class ParameterTuningJob(ModelWithInsDatetime):
     data = models.ForeignKey(TrainingData, on_delete=models.CASCADE)
     split = models.ForeignKey(SplitConfig, on_delete=models.CASCADE)
     evaluation = models.ForeignKey(EvaluationConfig, on_delete=models.CASCADE)
@@ -168,33 +170,28 @@ class ParameterTuningJob(models.Model):
     )
     best_score = models.FloatField(null=True)
 
-    ins_datetime = models.DateTimeField(auto_now_add=True)
-
     def study_name(self):
         return f"job-{self.id}-{self.ins_datetime}"
 
 
-class TaskAndParameterJobLink(models.Model):
+class TaskAndParameterJobLink(ModelWithInsDatetime):
     job = models.ForeignKey(
         ParameterTuningJob, on_delete=models.CASCADE, related_name="task_links"
     )
     task = models.OneToOneField(
         TaskResult, on_delete=models.CASCADE, related_name="tuning_job_link"
     )
-    ins_datetime = models.DateTimeField(auto_now_add=True)
 
 
-class TaskAndTrainedModelLink(models.Model):
+class TaskAndTrainedModelLink(ModelWithInsDatetime):
     model = models.ForeignKey(
         TrainedModel, on_delete=models.CASCADE, related_name="task_links"
     )
     task = models.OneToOneField(
         TaskResult, on_delete=models.CASCADE, related_name="model_link"
     )
-    ins_datetime = models.DateTimeField(auto_now_add=True)
 
 
-class TaskLog(models.Model):
+class TaskLog(ModelWithInsDatetime):
     task = models.ForeignKey(TaskResult, on_delete=models.CASCADE)
     contents = models.TextField(blank=True)
-    ins_datetime = models.DateTimeField(auto_now_add=True)

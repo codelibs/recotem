@@ -85,7 +85,7 @@
           </ValidationProvider>
           <v-select
             multiple
-            chip
+            chips
             v-model="customConfig.tried_algorithms"
             :items="algoChoices"
           >

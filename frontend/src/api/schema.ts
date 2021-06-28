@@ -231,6 +231,7 @@ export interface components {
   schemas: {
     EvaluationConfig: {
       id: number;
+      ins_datetime: string;
       name?: string | null;
       cutoff?: number;
       target_metric?: components["schemas"]["TargetMetricEnum"];
@@ -261,17 +262,24 @@ export interface components {
     };
     ModelConfiguration: {
       id: number;
+      tuning_job: number;
       name?: string | null;
+      project: number;
       recommender_class_name: string;
       parameters_json: string;
       ins_datetime: string;
-      project: number;
     };
     PaginatedItemMetaDataList: {
       count?: number;
       next?: string | null;
       previous?: string | null;
       results?: components["schemas"]["ItemMetaData"][];
+    };
+    PaginatedModelConfigurationList: {
+      count?: number;
+      next?: string | null;
+      previous?: string | null;
+      results?: components["schemas"]["ModelConfiguration"][];
     };
     PaginatedParameterTuningJobList: {
       count?: number;
@@ -328,6 +336,7 @@ export interface components {
     };
     PatchedEvaluationConfig: {
       id?: number;
+      ins_datetime?: string;
       name?: string | null;
       cutoff?: number;
       target_metric?: components["schemas"]["TargetMetricEnum"];
@@ -343,11 +352,12 @@ export interface components {
     };
     PatchedModelConfiguration: {
       id?: number;
+      tuning_job?: number;
       name?: string | null;
+      project?: number;
       recommender_class_name?: string;
       parameters_json?: string;
       ins_datetime?: string;
-      project?: number;
     };
     PatchedParameterTuningJob: {
       id?: number;
@@ -371,14 +381,15 @@ export interface components {
     };
     PatchedProject: {
       id?: number;
+      ins_datetime?: string;
       name?: string;
       user_column?: string;
       item_column?: string;
       time_column?: string | null;
-      ins_datetime?: string;
     };
     PatchedSplitConfig: {
       id?: number;
+      ins_datetime?: string;
       name?: string | null;
       scheme?: components["schemas"]["SchemeEnum"];
       heldout_ratio?: number;
@@ -417,11 +428,11 @@ export interface components {
     };
     Project: {
       id: number;
+      ins_datetime: string;
       name: string;
       user_column: string;
       item_column: string;
       time_column?: string | null;
-      ins_datetime: string;
     };
     ProjectSummary: {
       id: number;
@@ -448,6 +459,7 @@ export interface components {
     SchemeEnum: "RG" | "TG" | "TU";
     SplitConfig: {
       id: number;
+      ins_datetime: string;
       name?: string | null;
       scheme?: components["schemas"]["SchemeEnum"];
       heldout_ratio?: number;
@@ -473,8 +485,8 @@ export interface components {
     };
     TaskLog: {
       id: number;
-      contents?: string;
       ins_datetime: string;
+      contents?: string;
       task: number;
     };
     TaskResult: {
@@ -964,13 +976,17 @@ export interface operations {
     parameters: {
       query: {
         id?: number;
+        /** A page number within the paginated result set. */
+        page?: number;
+        /** Number of results to return per page. */
+        page_size?: number;
         project?: number;
       };
     };
     responses: {
       200: {
         content: {
-          "application/json": components["schemas"]["ModelConfiguration"][];
+          "application/json": components["schemas"]["PaginatedModelConfigurationList"];
         };
       };
     };

@@ -43,6 +43,7 @@ export class Auth extends VuexModule {
   @Mutation
   setProjectId(id: number) {
     this.currentProjectId = id;
+    window.localStorage.setItem("projectId", `${id}`);
   }
 
   @Mutation

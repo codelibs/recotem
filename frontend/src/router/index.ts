@@ -11,7 +11,16 @@ const routes: Array<RouteConfig> = [
     children: [
       {
         path: "",
-        redirect: { name: "project-list" },
+        redirect: () => {
+          const projectId = parseInt(
+            window.localStorage.getItem("projectId") || ""
+          );
+          if (projectId === projectId) {
+            return { name: "project", params: { projectId: `${projectId}` } };
+          } else {
+            return { name: "project-list" };
+          }
+        },
       },
       {
         path: "login/",

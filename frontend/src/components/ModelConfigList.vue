@@ -1,6 +1,7 @@
 <template>
   <div>
     <v-data-table
+      v-model="selected"
       v-if="models !== null"
       :items="models"
       disable-sort
@@ -57,10 +58,12 @@ const trainedModelListURL = "/api/model_configuration/";
 type APIResultType =
   paths["/api/model_configuration/"]["get"]["responses"]["200"]["content"]["application/json"];
 type ModelConfigurationArray = APIResultType["results"];
+type ModelConfiguration = components["schemas"]["ModelConfiguration"];
 
 type Data = {
   headers: DataTableHeader[];
   models: ModelConfigurationArray | null;
+  selected: ModelConfiguration[];
   totalCount: number | null | undefined;
   options: DataTableOptions;
   loading: boolean;
@@ -100,6 +103,7 @@ export default Vue.extend({
         page: 1,
         itemsPerPage: 5,
       },
+      selected: [],
       loading: false,
     };
   },
@@ -137,6 +141,13 @@ export default Vue.extend({
     },
   },
   watch: {
+    selected(nv: ModelConfiguration[]) {
+      if (nv.length === 0) {
+        this.$emit("input", null);
+      } else {
+        this.$emit("input", nv[0].id);
+      }
+    },
     options: {
       deep: true,
       async handler(): Promise<void> {

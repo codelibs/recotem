@@ -7,13 +7,21 @@ table.param-table th {
   <div v-if="modelBasicInfo !== null">
     <div class="d-flex align-end">
       <div class="text-h5">Model {{ modelBasicInfo.id }}</div>
-      <div class="text-subtitle-2 pl-8" v-if="modelBasicInfo.basename !== null">
+      <div
+        class="text-subtitle-2 pl-8"
+        v-if="modelBasicInfo.basename !== null && jobComplete"
+      >
         Saved as {{ modelBasicInfo.file }}
         <span v-if="modelBasicInfo.filesize !== null">
           , {{ prettyFileSize }}
         </span>
       </div>
       <div class="flex-grow-1"></div>
+      <TuningJobStatus
+        v-model="jobComplete"
+        :tasks="modelBasicInfo.task_links"
+        class="mr-8"
+      />
       <div>
         <v-btn
           :color="downloading ? '' : 'info'"
@@ -144,6 +152,7 @@ import {
 } from "@/utils/request.ts";
 import { prettyFileSize } from "@/utils/conversion";
 import ModelConfigView from "@/components/ModelConfigView.vue";
+import TuningJobStatus from "@/components/TuningJobStatus.vue";
 
 const retrieveURL = "/api/trained_model/";
 
@@ -175,6 +184,8 @@ type MetadataRecommendationSample = {
 type Data = {
   modelBasicInfo: respose200 | null;
   downloading: boolean;
+  jobComplete: boolean;
+  pollingStop: boolean;
   previewWithMetaData: boolean;
   rawRecommendationSample: RawRecommendationSample | null;
   metadataRecommendationSample: MetadataRecommendationSample | null;
@@ -189,6 +200,8 @@ export default Vue.extend({
     return {
       modelBasicInfo: null,
       downloading: false,
+      jobComplete: false,
+      pollingStop: false,
       rawRecommendationSample: null,
       previewWithMetaData: false,
       metadataRecommendationSample: null,
@@ -201,7 +214,13 @@ export default Vue.extend({
   },
   async mounted() {
     await this.fetchInfo();
+    await this.fetchItemMetaDataList();
+    await this.polling();
   },
+  beforeDestroy() {
+    this.pollingStop = true;
+  },
+
   watch: {
     itemMetaDataColumns(nv: string[] | null) {
       if (nv === null) return;
@@ -237,19 +256,19 @@ export default Vue.extend({
         this.previewWithMetaData = true;
       }
     },
-    async fetchInfo(): Promise<void> {
-      if (this.trainedModelId === null) return;
-
-      let result = await getWithRefreshToken<respose200>(
-        AuthModule,
-        `${retrieveURL}/${this.trainedModelId}`
-      );
-      if (result === null) {
-        alert(`Failed to fetch ${retrieveURL}/${this.trainedModelId}`);
-        return;
+    async polling(): Promise<void> {
+      for (;;) {
+        await new Promise((resolve: any) => setTimeout(resolve, 5000));
+        await this.fetchInfo();
+        if (this.pollingStop) {
+          break;
+        }
+        if (this.jobComplete) {
+          break;
+        }
       }
-      this.modelBasicInfo = result;
-
+    },
+    async fetchItemMetaDataList(): Promise<void> {
       let metaDataList: ItemMetaData[] = [];
       for (let page = 1; ; page++) {
         let fetchURL =
@@ -281,6 +300,19 @@ export default Vue.extend({
       }
 
       this.itemMetaDataList = metaDataList;
+    },
+    async fetchInfo(): Promise<void> {
+      if (this.trainedModelId === null) return;
+
+      let result = await getWithRefreshToken<respose200>(
+        AuthModule,
+        `${retrieveURL}/${this.trainedModelId}`
+      );
+      if (result === null) {
+        alert(`Failed to fetch ${retrieveURL}/${this.trainedModelId}`);
+        return;
+      }
+      this.modelBasicInfo = result;
     },
     async handleDownload(): Promise<void> {
       if (
@@ -367,6 +399,7 @@ export default Vue.extend({
   },
   components: {
     ModelConfigView,
+    TuningJobStatus,
   },
 });
 </script>

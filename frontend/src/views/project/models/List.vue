@@ -6,7 +6,7 @@
           <div class="pl-4 text-h6">Trained Models</div>
           <div class="flex-grow-1"></div>
           <div>
-            <v-btn color="primary">
+            <v-btn color="primary" :to="{ name: 'start-training' }">
               <v-icon>mdi-calculator</v-icon> Train New model</v-btn
             >
           </div>

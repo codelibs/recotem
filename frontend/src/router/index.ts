@@ -55,6 +55,12 @@ const routes: Array<RouteConfig> = [
                 name: "trained-model-list",
                 component: () => import("../views/project/models/List.vue"),
               },
+              {
+                path: "start_training",
+                name: "start-training",
+                component: () =>
+                  import("../views/project/models/StartTraining.vue"),
+              },
             ],
           },
           {

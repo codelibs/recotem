@@ -435,13 +435,10 @@ export interface components {
       time_column?: string | null;
     };
     ProjectSummary: {
-      id: number;
-      name: string;
-      user_column: string;
-      item_column: string;
-      time_column?: string | null;
+      n_data: number;
+      n_complete_jobs: number;
+      n_models: number;
       ins_datetime: string;
-      trainingdata_set: components["schemas"]["TrainingDataForSummary"][];
     };
     RawRecommendation: {
       user_id: string;
@@ -526,11 +523,6 @@ export interface components {
       ins_datetime: string;
       basename: string | null;
       filesize: number;
-    };
-    TrainingDataForSummary: {
-      id: number;
-      n_parameter_tuning_jobs: number;
-      n_trained_models: number;
     };
     /** User model w/o password */
     UserDetails: {

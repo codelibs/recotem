@@ -52,6 +52,7 @@
 </template>
 <script lang="ts">
 import Vue from "vue";
+import { Route, NavigationGuardNext } from "vue-router";
 import { components } from "@/api/schema";
 import { getWithRefreshToken } from "@/utils";
 import { AuthModule } from "@/store/auth";
@@ -75,7 +76,8 @@ export default Vue.extend({
     },
   },
   methods: {
-    async fetchProjectDetail(projectId: number) {
+    async fetchProjectDetail() {
+      const projectId = AuthModule.currentProjectId;
       const project = await getWithRefreshToken<Project>(
         AuthModule,
         ProjectListUrl + `/${projectId}`
@@ -93,13 +95,16 @@ export default Vue.extend({
       this.project = project;
     },
     async loadProject() {
-      const projectId = parseInt(this.$route.params.projectId);
-      AuthModule.setProjectId(projectId);
-      await this.fetchProjectDetail(projectId);
+      await this.fetchProjectDetail();
     },
   },
   async mounted() {
     await this.loadProject();
+  },
+  beforeRouteEnter(to, from, next) {
+    const projectId = parseInt(to.params.projectId);
+    AuthModule.setProjectId(projectId);
+    next();
   },
 });
 </script>

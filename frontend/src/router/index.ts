@@ -42,24 +42,30 @@ const routes: Array<RouteConfig> = [
             component: () => import("../views/project/Dashboard.vue"),
           },
           {
-            path: "trained_model/",
+            path: "data/",
             component: () => import("../views/project/Data.vue"),
             children: [
               {
-                path: ":trainedModelId/",
-                name: "trained-model-detail",
-                component: () => import("../views/project/models/ModelTop.vue"),
+                path: ":dataId/",
+                component: () => import("../views/project/data/DataTop.vue"),
+                children: [
+                  {
+                    path: "",
+                    name: "data-detail",
+                    component: () => import("../views/project/data/Detail.vue"),
+                  },
+                  {
+                    path: "start_tuning_with",
+                    name: "start-tuning-with-data",
+                    component: () =>
+                      import("../views/project/data/StartTuningWithData.vue"),
+                  },
+                ],
               },
               {
                 path: "",
-                name: "trained-model-list",
-                component: () => import("../views/project/models/List.vue"),
-              },
-              {
-                path: "start_training",
-                name: "start-training",
-                component: () =>
-                  import("../views/project/models/StartTraining.vue"),
+                name: "data-list",
+                component: () => import("../views/project/data/List.vue"),
               },
             ],
           },
@@ -87,30 +93,24 @@ const routes: Array<RouteConfig> = [
             ],
           },
           {
-            path: "data/",
+            path: "trained_model/",
             component: () => import("../views/project/Data.vue"),
             children: [
               {
-                path: ":dataId/",
-                component: () => import("../views/project/data/DataTop.vue"),
-                children: [
-                  {
-                    path: "",
-                    name: "data-detail",
-                    component: () => import("../views/project/data/Detail.vue"),
-                  },
-                  {
-                    path: "start_tuning_with",
-                    name: "start-tuning-with-data",
-                    component: () =>
-                      import("../views/project/data/StartTuningWithData.vue"),
-                  },
-                ],
+                path: ":trainedModelId/",
+                name: "trained-model-detail",
+                component: () => import("../views/project/models/ModelTop.vue"),
               },
               {
                 path: "",
-                name: "data-list",
-                component: () => import("../views/project/data/List.vue"),
+                name: "trained-model-list",
+                component: () => import("../views/project/models/List.vue"),
+              },
+              {
+                path: "start_training",
+                name: "start-training",
+                component: () =>
+                  import("../views/project/models/StartTraining.vue"),
               },
             ],
           },

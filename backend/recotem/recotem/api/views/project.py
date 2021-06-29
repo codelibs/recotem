@@ -9,9 +9,3 @@ class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()
     serializer_class = ProjectSerializer
     filterset_fields = ["id", "name"]
-
-
-class ProjectSummaryViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
-    permission_classes = [permissions.IsAuthenticated]
-    queryset = Project.objects.all()
-    serializer_class = ProjectSummarySerializer

@@ -20,17 +20,8 @@ class TrainingDataForSummarySerializer(serializers.ModelSerializer):
         fields = ["id", "n_parameter_tuning_jobs", "n_trained_models"]
 
 
-class ProjectSummarySerializer(serializers.ModelSerializer):
-    trainingdata_set = TrainingDataForSummarySerializer(many=True)
-
-    class Meta:
-        model = Project
-        fields = [
-            "id",
-            "name",
-            "user_column",
-            "item_column",
-            "time_column",
-            "ins_datetime",
-            "trainingdata_set",
-        ]
+class ProjectSummarySerializer(serializers.Serializer):
+    n_data = serializers.IntegerField()
+    n_complete_jobs = serializers.IntegerField()
+    n_models = serializers.IntegerField()
+    ins_datetime = serializers.DateTimeField()

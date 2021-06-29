@@ -143,6 +143,8 @@ table.param-table th {
 <script lang="ts">
 import Vue from "vue";
 import qs from "qs";
+import "vue-json-pretty/lib/styles.css";
+
 import { baseURL } from "@/env";
 import { paths, components } from "@/api/schema";
 import { AuthModule } from "@/store/auth";

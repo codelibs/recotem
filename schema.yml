@@ -2484,36 +2484,20 @@ components:
     ProjectSummary:
       type: object
       properties:
-        id:
+        n_data:
           type: integer
-          readOnly: true
-        name:
-          type: string
-        user_column:
-          type: string
-          maxLength: 256
-        item_column:
-          type: string
-          maxLength: 256
-        time_column:
-          type: string
-          nullable: true
-          maxLength: 256
+        n_complete_jobs:
+          type: integer
+        n_models:
+          type: integer
         ins_datetime:
           type: string
           format: date-time
-          readOnly: true
-        trainingdata_set:
-          type: array
-          items:
-            $ref: '#/components/schemas/TrainingDataForSummary'
       required:
-      - id
       - ins_datetime
-      - item_column
-      - name
-      - trainingdata_set
-      - user_column
+      - n_complete_jobs
+      - n_data
+      - n_models
     RawRecommendation:
       type: object
       properties:
@@ -2760,20 +2744,6 @@ components:
       - id
       - ins_datetime
       - project
-    TrainingDataForSummary:
-      type: object
-      properties:
-        id:
-          type: integer
-          readOnly: true
-        n_parameter_tuning_jobs:
-          type: integer
-        n_trained_models:
-          type: integer
-      required:
-      - id
-      - n_parameter_tuning_jobs
-      - n_trained_models
     UserDetails:
       type: object
       description: User model w/o password

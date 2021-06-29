@@ -1,8 +1,11 @@
+from typing import Optional
+
 from django_filters import rest_framework as filters
-from rest_framework import viewsets
+from rest_framework import serializers, viewsets
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from recotem.api.models import (
@@ -10,8 +13,10 @@ from recotem.api.models import (
     ItemMetaData,
     ModelConfiguration,
     ParameterTuningJob,
+    Project,
     SplitConfig,
     TaskLog,
+    TrainedModel,
     TrainingData,
 )
 from recotem.api.serializers import (
@@ -26,7 +31,7 @@ from recotem.api.serializers.data import ItemMetaDataSerializer
 
 from .filemixin import FileDownloadRemoveMixin
 from .model import TrainedModelViewset
-from .project import ProjectSummaryViewSet, ProjectViewSet
+from .project import ProjectViewSet
 
 
 class TrainingDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
@@ -142,3 +147,29 @@ class TaskLogViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = TaskLog.objects.all()
     serializer_class = TaskLogSerializer
     filterset_class = TaskLogFilter
+
+
+from recotem.api.serializers.project import ProjectSummarySerializer
+
+
+class ProjectSummaryView(APIView):
+    def get(self, request, pk: int, format: Optional[str] = None):
+        project_obj: Project = Project.objects.get(pk=pk)
+        n_data = TrainingData.objects.filter(
+            project=project_obj, filesize__isnull=False
+        ).count()
+        n_complete_jobs = ModelConfiguration.objects.filter(
+            project=project_obj, tuning_job__isnull=False
+        ).count()
+        n_models = TrainedModel.objects.filter(
+            data_loc__project=project_obj, filesize__isnull=False
+        ).count()
+        serializer = ProjectSummarySerializer(
+            dict(
+                n_data=n_data,
+                n_complete_jobs=n_complete_jobs,
+                n_models=n_models,
+                ins_datetime=project_obj.ins_datetime,
+            )
+        )
+        return Response(serializer.data)

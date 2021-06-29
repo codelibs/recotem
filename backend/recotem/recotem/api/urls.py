@@ -11,7 +11,7 @@ from recotem.api.views import (
     ItemMetaDataViewset,
     ModelConfigurationViewset,
     ParameterTuningJobViewSet,
-    ProjectSummaryViewSet,
+    ProjectSummaryView,
     ProjectViewSet,
     SplitConfigViewSet,
     TaskLogViewSet,
@@ -21,7 +21,6 @@ from recotem.api.views import (
 
 router = DefaultRouter()
 router.register(r"project", ProjectViewSet, basename="project")
-router.register(r"project_summary", ProjectSummaryViewSet, basename="project_summary")
 router.register(r"training_data", TrainingDataViewset, basename="training_data")
 router.register(r"item_meta_data", ItemMetaDataViewset, basename="item_meta_data")
 router.register(r"split_config", SplitConfigViewSet, basename="split_config")
@@ -40,6 +39,7 @@ router.register(r"task_log", TaskLogViewSet, basename="task_log")
 
 urlpatterns = [
     path("", include(router.urls)),
+    path("project_summary/<int:pk>/", ProjectSummaryView.as_view()),
     path("auth/", include("dj_rest_auth.urls")),
     path("schema/", SpectacularAPIView.as_view(), name="schema"),
     path(

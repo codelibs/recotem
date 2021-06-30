@@ -10456,11 +10456,6 @@ vue-jest@^3.0.5:
     tsconfig "^7.0.0"
     vue-template-es2015-compiler "^1.6.0"
 
-vue-json-pretty@^1.8.0:
-  version "1.8.0"
-  resolved "https://registry.yarnpkg.com/vue-json-pretty/-/vue-json-pretty-1.8.0.tgz#de60ae70b4fcecc757567ba230a53afb46488f4a"
-  integrity sha512-0qyGHLBdQFIwVP04kjcEA7zmQ78w7hptjSz3zAZ/crIerLuHd/EXnBQzEJGz+eQHG7k3pJrZlEqVmhTDS70BoA==
-
 "vue-loader-v16@npm:vue-loader@^16.1.0":
   version "16.2.0"
   resolved "https://registry.yarnpkg.com/vue-loader/-/vue-loader-16.2.0.tgz#046a53308dd47e58efe20ddec1edec027ce3b46e"

@@ -16,12 +16,12 @@
             <v-toolbar-title>Item Meta Data</v-toolbar-title>
             <v-spacer></v-spacer>
 
-            <data-upload
+            <DataUpload
               v-model="itemMetaDataUploadDialogue"
               :projectId="projectId"
               postURL="/api/item_meta_data/"
               fileLabel="An item meta-data file."
-            ></data-upload>
+            ></DataUpload>
           </v-toolbar>
         </template>
         <template v-slot:[`item.filesize`]="{ value }">

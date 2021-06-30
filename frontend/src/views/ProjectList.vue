@@ -73,6 +73,7 @@ export default Vue.extend({
   },
   async mounted() {
     await this.getProjects();
+    AuthModule.resetProject();
   },
   methods: {
     async getProjects() {

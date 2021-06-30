@@ -23,13 +23,14 @@
       <v-toolbar flat>
         <v-toolbar-title>Training Data</v-toolbar-title>
         <v-spacer></v-spacer>
-        <data-upload
+        <DataUpload
           v-if="!isSelection"
           v-model="trainingDataUploadDialogue"
           :projectId="projectId"
           postURL="/api/training_data/"
           fileLabel="A training data file."
-        ></data-upload>
+          :caption="uploadCaption"
+        ></DataUpload>
       </v-toolbar>
     </template>
     <template v-slot:[`item.filesize`]="{ value }">
@@ -120,6 +121,15 @@ export default Vue.extend({
     };
   },
   computed: {
+    uploadCaption(): string | null {
+      if (AuthModule.currentProjectDetail === null) return null;
+      let result = `Columns "${AuthModule.currentProjectDetail.user_column}" | "${AuthModule.currentProjectDetail.item_column}"`;
+      if (AuthModule.currentProjectDetail.time_column) {
+        result = `${result} | "${AuthModule.currentProjectDetail.time_column}"`;
+      }
+      result = `${result} are required.`;
+      return result;
+    },
     projectId(): number | null {
       return AuthModule.currentProjectId;
     },

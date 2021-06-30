@@ -1,4 +1,4 @@
-import { Auth } from "@/store/auth";
+import { Auth, AuthModule } from "@/store/auth";
 import Axios, { AxiosPromise, AxiosError, AxiosRequestConfig } from "axios";
 import { baseURL } from "@/env";
 import { paths } from "@/api/schema";
@@ -95,6 +95,13 @@ async function axiosMethodWithRetry<ArgType, ReturnType>(
         const result = await method(`${baseURL}${path}`, arg, copiedConfig);
         return result;
       } else {
+        if ( (error.response !== undefined)){
+          AuthModule.addErrors(
+            `Request to ${baseURL}${path} resulted in response ${error.response.status}
+             ${JSON.stringify(error.response.data)}`);
+        } else {
+          AuthModule.addErrors(`${error}`);
+        }
         console.log(error);
         throw error;
       }
@@ -211,12 +218,10 @@ export async function logout(module: Auth, router: Router): Promise<void> {
   if (module.token === null) {
     await refreshToken(module);
   }
-  const logoutResult = await postWithRefreshToken<
-    Record<string, never>,
+  const logoutResult = await Axios.post<
     logoutResponse
-  >(module, logoutUrl, {});
-  if (logoutResult !== null) {
-    console.log(logoutResult.detail);
-  }
+  >(logoutUrl, {}, axiosCSRFConfg);
+  console.log(logoutResult.data.detail);
+  AuthModule.setToken(null)
   router.push({ name: "login" });
 }

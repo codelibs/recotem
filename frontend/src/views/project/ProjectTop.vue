@@ -1,58 +1,12 @@
 <template>
-  <v-row class="fill-height">
-    <v-col cols="2" v-if="project !== null">
-      <v-list nav>
-        <v-list-item>
-          <v-list-item-icon>
-            <v-btn icon dark color="primary" :to="{ name: 'project' }">
-              <v-icon> mdi-home</v-icon>
-            </v-btn>
-          </v-list-item-icon>
-          <v-list-item-title>
-            <span class="text-caption"> Project </span><br />
-            {{ project.name }}
-          </v-list-item-title>
-        </v-list-item>
-        <v-divider></v-divider>
-        <v-list-item
-          :to="{ name: 'data-list', params: { projectId } }"
-          link
-          :ripple="false"
-        >
-          <v-list-item-icon>
-            <v-icon> mdi-folder</v-icon>
-          </v-list-item-icon>
-          <v-list-item-title> Data </v-list-item-title>
-        </v-list-item>
-        <v-list-item
-          :to="{ name: 'tuning-job-list', params: { projectId } }"
-          link
-          :ripple="false"
-        >
-          <v-list-item-icon>
-            <v-icon> mdi-tune</v-icon>
-          </v-list-item-icon>
-          <v-list-item-title> Tuning </v-list-item-title>
-        </v-list-item>
-        <v-list-item link :ripple="false" :to="{ name: 'trained-model-list' }">
-          <v-list-item-icon>
-            <v-icon> mdi-calculator</v-icon>
-          </v-list-item-icon>
-          <v-list-item-title> Models </v-list-item-title>
-        </v-list-item>
-      </v-list>
-    </v-col>
-    <v-divider vertical></v-divider>
-    <v-col cols="10">
-      <v-container>
-        <router-view></router-view>
-      </v-container>
-    </v-col>
-  </v-row>
+  <v-col cols="12">
+    <v-container>
+      <router-view></router-view>
+    </v-container>
+  </v-col>
 </template>
 <script lang="ts">
 import Vue from "vue";
-import { Route, NavigationGuardNext } from "vue-router";
 import { components } from "@/api/schema";
 import { getWithRefreshToken } from "@/utils";
 import { AuthModule } from "@/store/auth";

@@ -15,7 +15,9 @@
 </style>
 <template>
   <div>
-    <template v-if="projectDetail !== null && projectSummary !== null">
+    <template
+      v-if="projectDetail !== null && projectSummary !== null && hasAnyItem"
+    >
       <div class="pa-4 d-flex align-end">
         <div class="text-h4 text-left pa">
           Project "{{ projectDetail.name }}"
@@ -59,12 +61,16 @@
           </v-card>
         </v-col>
       </v-row>
-      <div class="mt-8">
-        <v-btn color="primary" block>
+    </template>
+    <template v-else>
+      <v-container class="pa-8 text-center text-h5"> No data yet. </v-container>
+      <div class="text-center">
+        <v-btn color="primary" :to="{ name: 'first-tuning' }">
           <v-icon>mdi-tune</v-icon> Start upload -> tuning</v-btn
         >
       </div>
     </template>
+    <div class="mt-8"></div>
   </div>
 </template>
 <script lang="ts">
@@ -99,6 +105,16 @@ export default Vue.extend({
     await this.fetchProjectSummary();
   },
   computed: {
+    hasAnyItem(): boolean {
+      if (this.projectSummary === null) return false;
+
+      return (
+        this.projectSummary.n_data +
+          this.projectSummary.n_complete_jobs +
+          this.projectSummary.n_models >
+        0
+      );
+    },
     projectId(): number | null {
       return AuthModule.currentProjectId;
     },

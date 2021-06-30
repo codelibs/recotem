@@ -1,5 +1,5 @@
 <template>
-  <v-menu v-if="username !== null">
+  <v-menu v-if="username !== null" bottom>
     <template v-slot:activator="{ on }">
       <v-btn icon v-on="on" class="mr-1">
         <v-avatar color="brown" size="32">
@@ -8,16 +8,42 @@
       </v-btn>
     </template>
     <v-card>
-      <v-list>
+      <v-list nav>
         <v-list-item>
           <v-list-item-content class="justify-center">
-            <v-list-item-title class="text-center">
+            <v-container fluid class="text-center">
+              <v-btn icon dark small>
+                <v-avatar color="brown" size="32">
+                  <span class="white--text title">{{ userInitial }}</span>
+                </v-avatar>
+              </v-btn>
+            </v-container>
+            <div class="text-center">
               {{ username }}
-            </v-list-item-title>
+            </div>
           </v-list-item-content>
         </v-list-item>
-        <v-list-item>
-          <v-btn @click="logout" depressed rounded text> logout </v-btn>
+        <v-divider />
+        <v-list-item class="justify-center" link href="/api/schema/redoc/">
+          <v-list-item-title>
+            <v-icon>mdi-api</v-icon>
+            api schema
+          </v-list-item-title>
+        </v-list-item>
+        <v-list-item class="justify-center" link href="/api/admin">
+          <v-list-item-title>
+            <v-icon>mdi-language-python</v-icon> django admin
+          </v-list-item-title>
+        </v-list-item>
+        <v-list-item class="justify-center" link :href="docURL">
+          <v-list-item-title>
+            <v-icon>mdi-help</v-icon> help
+          </v-list-item-title>
+        </v-list-item>
+        <v-list-item @click="logout">
+          <v-list-item-title>
+            <v-icon> mdi-logout</v-icon> logout
+          </v-list-item-title>
         </v-list-item>
       </v-list>
     </v-card>
@@ -37,6 +63,12 @@ export default Vue.extend({
       if (this.username === null) return null;
       if (this.username.length === 0) return null;
       return this.username.slice(0, 1);
+    },
+    docURL(): string | null {
+      if (this.$route.name === null || this.$route.name === undefined) {
+        return null;
+      }
+      return `${AuthModule.docURLBase}/${this.$route.name}`;
     },
   },
   methods: {

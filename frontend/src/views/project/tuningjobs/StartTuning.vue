@@ -3,7 +3,9 @@
     <div>Setup tuning job:</div>
     <v-stepper v-model="step">
       <v-stepper-header>
-        <v-stepper-step step="1"> Data </v-stepper-step>
+        <v-stepper-step step="1">
+          {{ upload ? "Upload" : "Data" }}
+        </v-stepper-step>
         <v-divider></v-divider>
         <v-stepper-step step="2"> Split </v-stepper-step>
         <v-divider></v-divider>
@@ -12,15 +14,25 @@
         <v-stepper-step step="4"> Job Configuration </v-stepper-step>
       </v-stepper-header>
       <v-stepper-content step="1" class="pt-2">
-        <TrainingDataList isSelection v-model="dataId" />
-        <v-row>
-          <v-col cols="6" />
-          <v-col cols="6">
-            <v-btn :disabled="dataId === null" @click="step = 2" color="info">
-              Continue <v-icon> mdi-arrow-right</v-icon>
-            </v-btn>
-          </v-col>
-        </v-row>
+        <div v-if="upload">
+          <FileUpload
+            fileLabel="A training data file."
+            v-model="uploadDataId"
+            postURL="/api/training_data/"
+          >
+          </FileUpload>
+        </div>
+        <template v-else>
+          <TrainingDataList isSelection v-model="dataId" />
+          <v-row>
+            <v-col cols="6" />
+            <v-col cols="6">
+              <v-btn :disabled="dataId === null" @click="step = 2" color="info">
+                Continue <v-icon> mdi-arrow-right</v-icon>
+              </v-btn>
+            </v-col>
+          </v-row>
+        </template>
       </v-stepper-content>
 
       <v-stepper-content step="2" class="pt-2">
@@ -89,7 +101,7 @@
 </template>
 
 <script lang="ts">
-import Vue from "vue";
+import Vue, { PropType } from "vue";
 import { AuthModule } from "@/store/auth";
 import {
   createSplitConfigIfNeeded,
@@ -109,19 +121,28 @@ import JobConfigForm, {
 } from "@/components/tuning_steps/SetupTuningJob.vue";
 
 import TrainingDataList from "@/components/TrainingDataList.vue";
+import FileUpload from "@/components/FileUpload.vue";
 
 type Data = {
   step: number;
   dataId: number | null;
+  uploadDataId: number | null;
   splitConfig: SplitConfigResultType;
   evaluationConfig: EvaluationConfigResultType;
   jobConfig: JobConfigResultType;
 };
 export default Vue.extend({
+  props: {
+    upload: {
+      type: Boolean as PropType<boolean>,
+      default: false,
+    },
+  },
   data(): Data {
     return {
       step: 1,
       dataId: null,
+      uploadDataId: null,
       splitConfig: {},
       evaluationConfig: {},
       jobConfig: {},
@@ -130,7 +151,7 @@ export default Vue.extend({
   methods: {
     async createJob(): Promise<void> {
       if (
-        this.dataId === null ||
+        this.postDataId === null ||
         this.splitConfig === null ||
         this.evaluationConfig === null
       ) {
@@ -148,11 +169,18 @@ export default Vue.extend({
       await createParameterTuningJob(
         AuthModule,
         this.$router,
-        this.dataId,
+        this.postDataId,
         splitConfigId,
         evaluationConfigId,
         this.jobConfig
       );
+    },
+  },
+  watch: {
+    uploadDataId(nv: number | null) {
+      if (nv !== null) {
+        this.step = 2;
+      }
     },
   },
   components: {
@@ -160,7 +188,16 @@ export default Vue.extend({
     EvaluationConfigForm,
     JobConfigForm,
     TrainingDataList,
+    FileUpload,
   },
-  computed: {},
+  computed: {
+    postDataId(): number | null {
+      if (this.upload) {
+        return this.uploadDataId;
+      } else {
+        return this.dataId;
+      }
+    },
+  },
 });
 </script>

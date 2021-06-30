@@ -1,3 +1,4 @@
+from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import (
     SpectacularAPIView,
@@ -39,6 +40,7 @@ router.register(r"task_log", TaskLogViewSet, basename="task_log")
 
 urlpatterns = [
     path("", include(router.urls)),
+    path("admin/", admin.site.urls),
     path("project_summary/<int:pk>/", ProjectSummaryView.as_view()),
     path("auth/", include("dj_rest_auth.urls")),
     path("schema/", SpectacularAPIView.as_view(), name="schema"),

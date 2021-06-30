@@ -7,7 +7,7 @@ import {
 } from "vuex-module-decorators";
 import store from "@/store";
 import axios, { AxiosError } from "axios";
-import { baseURL } from "@/env";
+import { baseURL, recotemVersion, docURLBase } from "@/env";
 import { paths, components } from "@/api/schema";
 
 const tokenObtainUrl = "/api/auth/login/";
@@ -29,15 +29,27 @@ type Project = components["schemas"]["Project"];
 })
 export class Auth extends VuexModule {
   token: string | null = null;
-  refresh: string | null = null;
   loginErrorMessages: string[] = [];
   username: string | null = null;
   currentProjectId: number | null = null;
   currentProjectDetail: Project | null = null;
+  recotemVersion: string = recotemVersion;
+  docURLBase: string = docURLBase;
+  errors: string[] = [];
 
   @Mutation
   setToken(token: string | null) {
     this.token = token;
+  }
+
+  @Mutation
+  addErrors(arg : string) {
+    this.errors.push(arg)
+  }
+
+  @Mutation
+  resetErrors(){
+    this.errors.splice(0, this.errors.length)
   }
 
   @Mutation
@@ -52,14 +64,18 @@ export class Auth extends VuexModule {
   }
 
   @Mutation
+  resetProject() {
+    this.currentProjectId = null;
+    this.currentProjectDetail = null;
+    window.localStorage.removeItem("projectId");
+
+  }
+
+  @Mutation
   setLoginErrorMessage(vals: string[]) {
     this.loginErrorMessages = vals;
   }
 
-  @Mutation
-  setRefresh(refresh: string | null) {
-    this.refresh = refresh;
-  }
 
   @Mutation
   setUsername(username: string | null) {
@@ -93,7 +109,6 @@ export class Auth extends VuexModule {
       await this.getUserName();
     } else {
       this.setToken(null);
-      this.setRefresh(null);
     }
   }
 

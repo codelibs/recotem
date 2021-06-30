@@ -100,7 +100,9 @@ export default Vue.extend({
   computed: {
     dataId(): number | null {
       try {
-        return parseInt(this.$route.params.dataId);
+        const result = parseInt(this.$route.params.dataId);
+        if (isNaN(result)) return null;
+        else return result;
       } catch {
         return null;
       }

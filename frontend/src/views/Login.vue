@@ -82,6 +82,10 @@ export default Vue.extend({
     ValidationProvider,
     ValidationObserver,
   },
+  mounted() {
+    AuthModule.resetProject();
+    AuthModule.resetErrors();
+  },
   computed: {
     errorMessages() {
       return AuthModule.loginErrorMessages;

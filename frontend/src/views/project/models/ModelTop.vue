@@ -2,6 +2,12 @@
 table.param-table th {
   min-width: 300px;
 }
+.pre-wrap {
+  padding: 10px;
+  margin: 30px;
+  background-color: #424242;
+  color: blanchedalmond;
+}
 </style>
 <template>
   <div v-if="modelBasicInfo !== null">
@@ -81,7 +87,6 @@ table.param-table th {
                       <span class="text-subtitle-2">(id: {{ item.id }}) </span>
                     </div>
                   </template>
-                  <!-- 選択一覧 -->
                   <template v-slot:item="{ item }">
                     <span class="mr-2"> {{ item.basename }} </span>
                     <span class="text-subtitle-2">(id: {{ item.id }}) </span>
@@ -91,8 +96,9 @@ table.param-table th {
             </div>
             <div
               v-if="rawRecommendationSample !== null && !previewWithMetaData"
+              class="pre-wrap"
             >
-              {{ rawRecommendationSample }}
+              {{ JSON.stringify(rawRecommendationSample, null) }}
             </div>
             <div
               v-if="
@@ -143,7 +149,6 @@ table.param-table th {
 <script lang="ts">
 import Vue from "vue";
 import qs from "qs";
-import "vue-json-pretty/lib/styles.css";
 
 import { baseURL } from "@/env";
 import { paths, components } from "@/api/schema";
@@ -304,7 +309,7 @@ export default Vue.extend({
       this.itemMetaDataList = metaDataList;
     },
     async fetchInfo(): Promise<void> {
-      if (this.trainedModelId === null) return;
+      if (this.trainedModelId === null || isNaN(this.trainedModelId)) return;
 
       let result = await getWithRefreshToken<respose200>(
         AuthModule,

@@ -15,7 +15,7 @@ const routes: Array<RouteConfig> = [
           const projectId = parseInt(
             window.localStorage.getItem("projectId") || ""
           );
-          if (projectId === projectId) {
+          if (!isNaN(projectId)) {
             return { name: "project", params: { projectId: `${projectId}` } };
           } else {
             return { name: "project-list" };
@@ -40,6 +40,13 @@ const routes: Array<RouteConfig> = [
             path: "/",
             name: "project",
             component: () => import("../views/project/Dashboard.vue"),
+          },
+          {
+            path: "/first-tuning",
+            name: "first-tuning",
+            component: () =>
+              import("../views/project/tuningjobs/StartTuning.vue"),
+            props:{upload: true}
           },
           {
             path: "data/",
@@ -97,11 +104,6 @@ const routes: Array<RouteConfig> = [
             component: () => import("../views/project/Data.vue"),
             children: [
               {
-                path: ":trainedModelId/",
-                name: "trained-model-detail",
-                component: () => import("../views/project/models/ModelTop.vue"),
-              },
-              {
                 path: "",
                 name: "trained-model-list",
                 component: () => import("../views/project/models/List.vue"),
@@ -111,6 +113,11 @@ const routes: Array<RouteConfig> = [
                 name: "start-training",
                 component: () =>
                   import("../views/project/models/StartTraining.vue"),
+              },
+              {
+                path: ":trainedModelId/",
+                name: "trained-model-detail",
+                component: () => import("../views/project/models/ModelTop.vue"),
               },
             ],
           },

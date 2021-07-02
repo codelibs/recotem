@@ -68,7 +68,12 @@ export default Vue.extend({
       if (this.$route.name === null || this.$route.name === undefined) {
         return null;
       }
-      return `${AuthModule.docURLBase}/${this.$route.name}`;
+
+      if (navigator.language === "ja") {
+        return `${AuthModule.docURLBase}/ja/${AuthModule.recotemVersion}/user/${this.$route.name}.html`;
+      } else {
+        return `${AuthModule.docURLBase}/${AuthModule.recotemVersion}/user/${this.$route.name}.html`;
+      }
     },
   },
   methods: {

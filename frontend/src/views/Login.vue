@@ -84,7 +84,6 @@ export default Vue.extend({
   },
   mounted() {
     AuthModule.resetProject();
-    AuthModule.resetErrors();
   },
   computed: {
     errorMessages() {

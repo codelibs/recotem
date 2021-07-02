@@ -43,16 +43,6 @@ export class Auth extends VuexModule {
   }
 
   @Mutation
-  addErrors(arg : string) {
-    this.errors.push(arg)
-  }
-
-  @Mutation
-  resetErrors(){
-    this.errors.splice(0, this.errors.length)
-  }
-
-  @Mutation
   setProjectId(id: number) {
     this.currentProjectId = id;
     window.localStorage.setItem("projectId", `${id}`);
@@ -68,14 +58,12 @@ export class Auth extends VuexModule {
     this.currentProjectId = null;
     this.currentProjectDetail = null;
     window.localStorage.removeItem("projectId");
-
   }
 
   @Mutation
   setLoginErrorMessage(vals: string[]) {
     this.loginErrorMessages = vals;
   }
-
 
   @Mutation
   setUsername(username: string | null) {

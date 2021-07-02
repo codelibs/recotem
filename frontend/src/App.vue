@@ -82,14 +82,6 @@
     <v-main>
       <router-view />
     </v-main>
-    <v-footer v-if="errors.length > 0" app class="text-center">
-      <template v-for="(em, i) in errors">
-        <v-alert :key="i" type="error">
-          {{ em }}
-          <v-icon>mdi-dismiss</v-icon>
-        </v-alert>
-      </template>
-    </v-footer>
   </v-app>
 </template>
 <script lang="ts">

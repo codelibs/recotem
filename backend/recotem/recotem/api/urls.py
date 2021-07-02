@@ -5,6 +5,7 @@ from drf_spectacular.views import (
     SpectacularRedocView,
     SpectacularSwaggerView,
 )
+from rest_framework.authtoken.views import obtain_auth_token
 from rest_framework.routers import DefaultRouter
 
 from recotem.api.views import (
@@ -40,6 +41,7 @@ router.register(r"task_log", TaskLogViewSet, basename="task_log")
 
 urlpatterns = [
     path("", include(router.urls)),
+    path("token/", obtain_auth_token),
     path("admin/", admin.site.urls),
     path("project_summary/<int:pk>/", ProjectSummaryView.as_view()),
     path("auth/", include("dj_rest_auth.urls")),

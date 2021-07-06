@@ -116,7 +116,6 @@ export default Vue.extend({
         FormData,
         RecordCreationResponse
       >(AuthModule, this.postURL, data, config).catch((error: AxiosError) => {
-        console.log(error);
         const errorDetail: undefined | string | string[] = error.response?.data;
         if (errorDetail !== undefined) {
           if (typeof errorDetail === "string") {
@@ -125,11 +124,9 @@ export default Vue.extend({
             this.uploadErrorMessages = errorDetail;
           }
         }
-        console.log(this.uploadErrorMessages);
         this.uploadProgress = null;
         return undefined;
       });
-      console.log(result);
       if (result !== null && result !== undefined) {
         this.uploadProgress = null;
         this.$emit("input", result.id);

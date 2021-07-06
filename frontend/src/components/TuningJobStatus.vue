@@ -6,7 +6,7 @@
         statusCodeSetToString === 'InProgress'
       "
     >
-      <v-progress-circular indeterminate :size="10" />
+      <v-progress-circular indeterminate :size="12" :width="2" />
       <span class="text-subtitle"> In Progress</span>
     </template>
     <template v-if="statusCodeSetToString === 'Failure'">

@@ -46,7 +46,7 @@ const routes: Array<RouteConfig> = [
             name: "first-tuning",
             component: () =>
               import("../views/project/tuningjobs/StartTuning.vue"),
-            props:{upload: true}
+            props: { upload: true },
           },
           {
             path: "data/",

@@ -2,6 +2,7 @@ import { Auth, AuthModule } from "@/store/auth";
 import Axios, { AxiosPromise, AxiosError, AxiosRequestConfig } from "axios";
 import { baseURL } from "@/env";
 import { paths } from "@/api/schema";
+import router from "@/router";
 import Router from "vue-router";
 import fileDownload from "js-file-download";
 
@@ -27,13 +28,12 @@ export async function refreshToken(module: Auth): Promise<void> {
     refreshURL,
     {},
     { ...axiosCSRFConfg }
-  ).catch(() => {
+  ).catch((exception) => {
+    console.log(exception);
     return null;
   });
-  if (refreshed !== null) {
-    console.log("Refreshed token");
-    module.setToken(refreshed.data.access);
-  }
+  if (refreshed === null) return;
+  module.setToken(refreshed.data.access);
 }
 
 export async function checkLogin(module: Auth): Promise<boolean> {
@@ -65,9 +65,13 @@ async function axiosMethodWithRetry<ArgType, ReturnType>(
   path: string,
   arg: ArgType,
   config: AxiosRequestConfig | undefined
-): Promise<ReturnType | null> {
+): Promise<ReturnType> {
   if (module.token === null) {
-    return null;
+    await refreshToken(module);
+    if (module.token === null) {
+      router.push({ name: "login" });
+      throw new Error("token is null after refresh.");
+    }
   }
   const copiedConfig = { ...config };
   if (copiedConfig.headers === undefined) {
@@ -86,7 +90,7 @@ async function axiosMethodWithRetry<ArgType, ReturnType>(
         console.log("Try refreshing token...");
         await refreshToken(module);
         if (module.token === null) {
-          return null;
+          throw new Error("token is null after refresh.");
         }
         copiedConfig.headers = {
           ...copiedConfig.headers,
@@ -105,14 +109,10 @@ async function axiosMethodWithRetry<ArgType, ReturnType>(
         } else {
           alert(`${error}`);
         }
-        console.log(error);
         throw error;
       }
     }
   );
-  if (result === null) {
-    return null;
-  }
   return result.data;
 }
 
@@ -120,7 +120,7 @@ export async function getWithRefreshToken<Return>(
   module: Auth,
   path: string,
   config: AxiosRequestConfig | undefined = undefined
-): Promise<Return | null> {
+): Promise<Return> {
   return axiosMethodWithRetry<undefined, Return>(
     async (
       path: string,
@@ -149,14 +149,7 @@ export async function downloadWithRefreshToken(
     path,
     undefined,
     { responseType: "blob" }
-  ).catch((error) => {
-    console.log(error);
-    return null;
-  });
-  if (response === null) {
-    alert(`Failed to download`);
-    return false;
-  }
+  );
   fileDownload(response, saveName);
   return true;
 }
@@ -166,7 +159,7 @@ export async function postWithRefreshToken<Payload, Return>(
   path: string,
   payload: Payload,
   config: AxiosRequestConfig | undefined = undefined
-) {
+): Promise<Return> {
   return axiosMethodWithRetry<Payload, Return>(
     async (
       path: string,
@@ -185,7 +178,7 @@ export async function putWithRefreshToken<Payload, Return>(
   path: string,
   payload: Payload,
   config: AxiosRequestConfig | undefined = undefined
-): Promise<Return | null> {
+): Promise<Return> {
   return axiosMethodWithRetry<Payload, Return>(
     async (
       path: string,
@@ -203,7 +196,7 @@ export async function deleteWithRefreshToken<Return>(
   module: Auth,
   path: string,
   config: AxiosRequestConfig | undefined
-): Promise<Return | null> {
+): Promise<Return> {
   return axiosMethodWithRetry<undefined, Return>(
     async (
       path: string,

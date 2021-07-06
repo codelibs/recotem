@@ -1,7 +1,7 @@
-process.env.VUE_APP_VERSION = require('./package.json').version
+process.env.VUE_APP_VERSION = require("./package.json").version;
 module.exports = {
   configureWebpack: {
-    devtool: 'source-map'
+    devtool: "source-map",
   },
   transpileDependencies: ["vuetify"],
   devServer: {
@@ -10,11 +10,11 @@ module.exports = {
     disableHostCheck: true,
     proxy: {
       "/api": {
-        target: "http://localhost:8000/"
-      }
+        target: "http://localhost:8000/",
+      },
     },
     historyApiFallback: {
-      index: 'index.html'
-    }
+      index: "index.html",
+    },
   },
 };

@@ -13,3 +13,7 @@ export {
   deleteWithRefreshToken,
   checkLogin,
 };
+
+export function sleep(msec: number): Promise<void> {
+  return new Promise((resolve: any) => setTimeout(resolve, msec));
+}

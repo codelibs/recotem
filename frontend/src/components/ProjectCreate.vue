@@ -5,7 +5,7 @@
         <v-form>
           <ValidationProvider
             rules="required|projectNameExists"
-            :debounce="500"
+            :debounce="300"
             name="project-name"
             v-slot="{ errors }"
           >
@@ -39,9 +39,9 @@
           >
             <v-text-field
               type="text"
-              name="Item column name"
+              name="item column name"
               v-model="project.item_column"
-              label="Item column name"
+              label="item column name"
               :error-messages="errors"
             >
             </v-text-field>
@@ -75,7 +75,6 @@ import { postWithRefreshToken, getWithRefreshToken } from "@/utils";
 import { AuthModule } from "@/store/auth";
 import { required } from "vee-validate/dist/rules";
 import { ValidationObserver, ValidationProvider, extend } from "vee-validate";
-import { AxiosError } from "axios";
 
 const ListProjectURL = "/api/project/";
 
@@ -85,14 +84,18 @@ extend("required", {
 });
 extend("projectNameExists", {
   async validate(value: string) {
-    const result = await getWithRefreshToken<Project[]>(
-      AuthModule,
-      ListProjectURL + `?${qs.stringify({ name: value })}`
-    );
-    if (result?.length === 0) {
-      return true;
+    try {
+      const result = await getWithRefreshToken<Project[]>(
+        AuthModule,
+        ListProjectURL + `?${qs.stringify({ name: value })}`
+      );
+      if (result?.length === 0) {
+        return true;
+      }
+      return `Project with this name already exists.`;
+    } catch {
+      return `failed to search name ${value}`;
     }
-    return `Project with this name already exists.`;
   },
 });
 
@@ -113,17 +116,11 @@ export default Vue.extend({
         AuthModule,
         ListProjectURL,
         this.project
-      ).catch((error: AxiosError) => {
-        console.log(error);
-        alert("Uncaught error");
-        return null;
+      );
+      this.$router.push({
+        name: "project",
+        params: { projectId: `${result.id}` },
       });
-      if (result !== null) {
-        this.$router.push({
-          name: "project",
-          params: { projectId: `${result.id}` },
-        });
-      }
     },
   },
   data(): Data {

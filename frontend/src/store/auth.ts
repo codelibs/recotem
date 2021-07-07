@@ -94,25 +94,8 @@ export class Auth extends VuexModule {
       });
     if (response !== null) {
       this.setToken(response.data.access_token);
-      await this.getUserName();
     } else {
       this.setToken(null);
-    }
-  }
-
-  @Action
-  async getUserName() {
-    const token = this.token as string | null;
-    const result = await axios
-      .get<getMeResponse>(`${baseURL}${getMeUrl}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      .catch((error: AxiosError) => {
-        return null;
-      });
-
-    if (result !== null) {
-      this.setUsername(result.data.username);
     }
   }
 }

@@ -1,5 +1,5 @@
 <template>
-  <v-menu v-if="username !== null" bottom>
+  <v-menu v-if="user !== null" bottom>
     <template v-slot:activator="{ on }">
       <v-btn icon v-on="on" class="mr-1">
         <v-avatar color="brown" size="32">
@@ -19,7 +19,7 @@
               </v-btn>
             </v-container>
             <div class="text-center">
-              {{ username }}
+              {{ user.username }}
             </div>
           </v-list-item-content>
         </v-list-item>
@@ -53,11 +53,25 @@
 <script lang="ts">
 import Vue from "vue";
 import { AuthModule } from "@/store/auth";
-import { logout } from "@/utils/request";
+import { logout, getWithRefreshToken } from "@/utils/request";
+import { paths } from "@/api/schema";
+type Result =
+  paths["/api/auth/user/"]["get"]["responses"]["200"]["content"]["application/json"];
+const getMeUrl = "/api/auth/user/";
 export default Vue.extend({
+  data(): { user: Result | null } {
+    return {
+      user: null,
+    };
+  },
+  async mounted() {
+    const result = await getWithRefreshToken<Result>(AuthModule, getMeUrl);
+    this.user = result;
+  },
   computed: {
     username(): string | null {
-      return AuthModule.username;
+      if (this.user === null) return null;
+      return this.user.username;
     },
     userInitial(): string | null {
       if (this.username === null) return null;

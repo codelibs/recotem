@@ -42,13 +42,7 @@ export async function checkLogin(module: Auth): Promise<boolean> {
   }
 
   await refreshToken(module);
-
-  if (module.token === null) {
-    return false;
-  } else {
-    await module.getUserName();
-    return true;
-  }
+  return !(module.token === null);
 }
 
 interface AxiosMethod<ArgType, ReturnType> {

@@ -16,7 +16,8 @@
                   <v-text-field
                     @keyup.enter="submit"
                     v-model="username"
-                    label="Username"
+                    label="username"
+                    name="username"
                     type="text"
                     :error-messages="errors"
                     required
@@ -32,6 +33,7 @@
                     v-model="password"
                     label="Password"
                     type="password"
+                    name="password"
                     :error-messages="errors"
                   ></v-text-field>
                 </ValidationProvider>

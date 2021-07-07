@@ -84,18 +84,14 @@ extend("required", {
 });
 extend("projectNameExists", {
   async validate(value: string) {
-    try {
-      const result = await getWithRefreshToken<Project[]>(
-        AuthModule,
-        ListProjectURL + `?${qs.stringify({ name: value })}`
-      );
-      if (result?.length === 0) {
-        return true;
-      }
-      return `Project with this name already exists.`;
-    } catch {
-      return `failed to search name ${value}`;
+    const result = await getWithRefreshToken<Project[]>(
+      AuthModule,
+      ListProjectURL + `?${qs.stringify({ name: value })}`
+    );
+    if (result?.length === 0) {
+      return true;
     }
+    return `Project with this name already exists.`;
   },
 });
 

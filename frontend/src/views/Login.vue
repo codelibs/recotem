@@ -45,6 +45,7 @@
                   color="primary"
                   :disabled="invalid"
                   @click.prevent="submit"
+                  name="login"
                   >Login</v-btn
                 >
               </v-row>
@@ -65,21 +66,35 @@
 
 <script lang="ts">
 import Vue from "vue";
+import { paths } from "@/api/schema.ts";
 import { AuthModule } from "@/store/auth";
 import { required } from "vee-validate/dist/rules";
 import { ValidationObserver, ValidationProvider, extend } from "vee-validate";
+import axios, { AxiosError } from "axios";
+import { baseURL } from "@/env";
+
+type tokenReturn =
+  paths["/api/auth/login/"]["post"]["responses"]["200"]["content"]["application/json"];
+const tokenObtainUrl = `${baseURL}/api/auth/login/`;
 
 extend("loginRequired", {
   ...required,
   message: "{_field_} required",
 });
 
+type Data = {
+  username: string;
+  password: string;
+  errorMessages: string[];
+};
 export default Vue.extend({
-  data: () => ({
-    username: "",
-    password: "",
-    error: "",
-  }),
+  data(): Data {
+    return {
+      username: "",
+      password: "",
+      errorMessages: [],
+    };
+  },
   components: {
     ValidationProvider,
     ValidationObserver,
@@ -87,19 +102,38 @@ export default Vue.extend({
   mounted() {
     AuthModule.resetProject();
   },
-  computed: {
-    errorMessages() {
-      return AuthModule.loginErrorMessages;
-    },
-  },
   methods: {
     async submit() {
-      await AuthModule.login({
+      const p = {
         username: this.username,
         password: this.password,
-      });
+        access: "",
+        refresh: "",
+      };
+
+      const response = await axios
+        .post<tokenReturn>(tokenObtainUrl, p, {
+          xsrfCookieName: "csrftoken",
+          xsrfHeaderName: "X-CSRFTOKEN",
+        })
+        .catch((error: AxiosError) => {
+          if (error.response?.status !== 400) {
+            alert(error);
+            throw new Error("login failed with other reason");
+          }
+          const errors: string[] = error.response?.data?.non_field_errors;
+          this.errorMessages.splice(0, this.errorMessages.length, ...errors);
+          this.username = "";
+          this.password = "";
+          return null;
+        });
+      if (response !== null) {
+        AuthModule.setToken(response.data.access_token);
+      } else {
+        AuthModule.setToken(null);
+      }
+
       if (AuthModule.token !== null) {
-        console.log(this.$route);
         let to = this.$route.query.redirect;
         if (typeof to === "string") {
           this.$router.push({ path: to });

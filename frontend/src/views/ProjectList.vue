@@ -3,12 +3,12 @@
     <v-toolbar flat>
       <v-tabs fixed-tabs v-model="tab">
         <v-tabs-slider></v-tabs-slider>
-        <v-tab>
+        <v-tab tab-project-list>
           <v-icon>mdi-view-list</v-icon>
           Projects
         </v-tab>
 
-        <v-tab>
+        <v-tab tab-project-create>
           <v-icon>mdi-plus-box</v-icon>
           <span> Create </span>
         </v-tab>

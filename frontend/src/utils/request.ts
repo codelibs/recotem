@@ -167,25 +167,6 @@ export async function postWithRefreshToken<Payload, Return>(
   );
 }
 
-export async function putWithRefreshToken<Payload, Return>(
-  module: Auth,
-  path: string,
-  payload: Payload,
-  config: AxiosRequestConfig | undefined = undefined
-): Promise<Return> {
-  return axiosMethodWithRetry<Payload, Return>(
-    async (
-      path: string,
-      payload: Payload,
-      config_: AxiosRequestConfig | undefined
-    ) => Axios.put<Return>(path, payload, config_),
-    module,
-    path,
-    payload,
-    config
-  );
-}
-
 export async function deleteWithRefreshToken<Return>(
   module: Auth,
   path: string,

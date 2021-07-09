@@ -1,7 +1,6 @@
 import {
   postWithRefreshToken,
   getWithRefreshToken,
-  putWithRefreshToken,
   deleteWithRefreshToken,
   checkLogin,
 } from "./request";
@@ -9,7 +8,6 @@ import {
 export {
   postWithRefreshToken,
   getWithRefreshToken,
-  putWithRefreshToken,
   deleteWithRefreshToken,
   checkLogin,
 };

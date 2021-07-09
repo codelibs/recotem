@@ -58,9 +58,6 @@ describe("checkLogin", () => {
     AuthModule.setToken(null);
     const mockNext = jest.fn();
     await guard(login, from, mockNext);
-    expect(mockNext).toHaveBeenCalledWith({
-      name: "login",
-      query: { redirect: login.fullPath },
-    });
+    expect(mockNext).toHaveBeenCalledWith();
   });
 });

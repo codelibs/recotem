@@ -42,7 +42,7 @@ const routes: Array<RouteConfig> = [
             component: () => import("../views/project/Dashboard.vue"),
           },
           {
-            path: "/first-tuning",
+            path: "first-tuning",
             name: "first-tuning",
             component: () =>
               import("../views/project/tuningjobs/StartTuning.vue"),

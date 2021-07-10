@@ -36,11 +36,9 @@
 </template>
 <script lang="ts">
 import Vue, { PropType } from "vue";
-import { paths, components } from "@/api/schema";
-import { computeMaxPage } from "@/utils/pagination";
+import { paths } from "@/api/schema";
 import { getWithRefreshToken } from "@/utils";
 import { AuthModule } from "@/store/auth";
-import { logout } from "@/utils/request";
 import { prettyFileSize } from "@/utils/conversion";
 import { prettifyDate } from "@/utils/date";
 
@@ -128,10 +126,6 @@ export default Vue.extend({
         `${trainedModelListURL}?${queryString}`
       );
       this.loading = false;
-      if (result === null) {
-        await logout(AuthModule, this.$router);
-        throw "logout";
-      }
       this.totalCount = result.count || 0;
       this.models = result.results || [];
     },
@@ -139,12 +133,6 @@ export default Vue.extend({
   computed: {
     projectId(): number | null {
       return AuthModule.currentProjectId;
-    },
-    maxPageSize(): number | null {
-      return computeMaxPage(
-        this.totalCount === undefined ? null : this.totalCount,
-        pageSize
-      );
     },
   },
   watch: {

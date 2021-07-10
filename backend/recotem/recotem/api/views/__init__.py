@@ -2,6 +2,7 @@ from typing import Optional
 
 from django_filters import rest_framework as filters
 from rest_framework import serializers, viewsets
+from rest_framework.exceptions import NotFound
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -154,7 +155,10 @@ from recotem.api.serializers.project import ProjectSummarySerializer
 
 class ProjectSummaryView(APIView):
     def get(self, request, pk: int, format: Optional[str] = None):
-        project_obj: Project = Project.objects.get(pk=pk)
+        try:
+            project_obj: Project = Project.objects.get(pk=pk)
+        except Project.DoesNotExist:
+            raise NotFound(detail=f"project {pk} not found.")
         n_data = TrainingData.objects.filter(
             project=project_obj, filesize__isnull=False
         ).count()

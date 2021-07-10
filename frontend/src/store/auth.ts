@@ -2,12 +2,10 @@ import {
   Module,
   VuexModule,
   getModule,
-  Action,
   Mutation,
 } from "vuex-module-decorators";
 import store from "@/store";
-import axios, { AxiosError } from "axios";
-import { baseURL, recotemVersion, docURLBase } from "@/env";
+import { recotemVersion, docURLBase } from "@/env";
 import { paths, components } from "@/api/schema";
 
 const tokenObtainUrl = "/api/auth/login/";
@@ -25,7 +23,6 @@ type Project = components["schemas"]["Project"];
 })
 export class Auth extends VuexModule {
   token: string | null = null;
-  username: string | null = null;
   currentProjectId: number | null = null;
   currentProjectDetail: Project | null = null;
   recotemVersion: string = recotemVersion;

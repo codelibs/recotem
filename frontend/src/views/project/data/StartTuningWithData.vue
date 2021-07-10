@@ -68,10 +68,10 @@
   </div>
 </template>
 <script lang="ts">
-import Vue, { PropType } from "vue";
+import Vue from "vue";
 import Router from "vue-router";
 import { AuthModule, Auth } from "@/store/auth";
-import { postWithRefreshToken, logout } from "@/utils/request";
+import { postWithRefreshToken } from "@/utils/request";
 
 import SplitConfigForm, {
   ResultType as SplitConfigResultType,

@@ -5,6 +5,7 @@ import { paths } from "@/api/schema";
 import router from "@/router";
 import Router from "vue-router";
 import fileDownload from "js-file-download";
+import { alertAxiosError } from "@/utils/exception";
 
 const refreshURL = `${baseURL}/api/auth/token/refresh/`;
 type RefreshResult =
@@ -58,12 +59,13 @@ async function axiosMethodWithRetry<ArgType, ReturnType>(
   module: Auth,
   path: string,
   arg: ArgType,
-  config: AxiosRequestConfig | undefined
+  config: AxiosRequestConfig | undefined,
+  alertError = true
 ): Promise<ReturnType> {
   if (module.token === null) {
     await refreshToken(module);
     if (module.token === null) {
-      router.push({ name: "login" });
+      await logout(module, router);
       throw new Error("token is null after refresh.");
     }
   }
@@ -93,15 +95,8 @@ async function axiosMethodWithRetry<ArgType, ReturnType>(
         const result = await method(`${baseURL}${path}`, arg, copiedConfig);
         return result;
       } else {
-        if (error.response !== undefined) {
-          alert(
-            `Request to ${baseURL}${path} resulted in response ${
-              error.response.status
-            }
-             ${JSON.stringify(error.response.data)}`
-          );
-        } else {
-          alert(`${error}`);
+        if (alertError) {
+          alertAxiosError(error);
         }
         throw error;
       }
@@ -152,7 +147,8 @@ export async function postWithRefreshToken<Payload, Return>(
   module: Auth,
   path: string,
   payload: Payload,
-  config: AxiosRequestConfig | undefined = undefined
+  config: AxiosRequestConfig | undefined = undefined,
+  alertError = true
 ): Promise<Return> {
   return axiosMethodWithRetry<Payload, Return>(
     async (
@@ -163,7 +159,8 @@ export async function postWithRefreshToken<Payload, Return>(
     module,
     path,
     payload,
-    config
+    config,
+    alertError
   );
 }
 

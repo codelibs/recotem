@@ -51,9 +51,8 @@
 <script lang="ts">
 import Vue, { PropType } from "vue";
 import { paths, components } from "@/api/schema";
-import { computeMaxPage } from "@/utils/pagination";
 import { DataTableOptions, DataTableHeader } from "@/utils/table";
-import { logout, getWithRefreshToken } from "@/utils/request";
+import { getWithRefreshToken } from "@/utils/request";
 import { prettifyDate } from "@/utils/date";
 import { AuthModule } from "@/store/auth";
 import TuningJobStatus from "@/components/TuningJobStatus.vue";
@@ -130,10 +129,6 @@ export default Vue.extend({
         AuthModule,
         `${tuningJobListURL}?${queryString}`
       );
-      if (result === null) {
-        await logout(AuthModule, this.$router);
-        throw "logout";
-      }
       this.totalCount = result.count || 0;
       this.tuningJobs = result.results || [];
     },

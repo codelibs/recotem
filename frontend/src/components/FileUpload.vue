@@ -12,9 +12,9 @@
         </ValidationProvider>
         <div></div>
       </v-form>
-
       <v-row justify="center" class="mb-4">
         <v-btn
+          upload-button
           color="primary"
           :disabled="invalid"
           @click="upload"
@@ -32,14 +32,6 @@
           ></v-progress-linear>
         </v-col>
       </v-row>
-
-      <v-alert
-        v-for="(message, i_m) in uploadErrorMessages"
-        type="error"
-        :key="i_m"
-      >
-        {{ message }}
-      </v-alert>
     </ValidationObserver>
   </v-container>
 </template>
@@ -60,7 +52,6 @@ extend("uploadFileRequired", {
 type Data = {
   uploadProgress: null | number;
   uploadFile: null | File;
-  uploadErrorMessages: string[];
 };
 interface RecordCreationResponse {
   id: number;
@@ -85,7 +76,6 @@ export default Vue.extend({
     return {
       uploadProgress: null,
       uploadFile: null,
-      uploadErrorMessages: [],
     };
   },
   watch: {
@@ -116,18 +106,17 @@ export default Vue.extend({
         FormData,
         RecordCreationResponse
       >(AuthModule, this.postURL, data, config).catch((error: AxiosError) => {
-        const errorDetail: undefined | string | string[] = error.response?.data;
-        if (errorDetail !== undefined) {
-          if (typeof errorDetail === "string") {
-            this.uploadErrorMessages = [errorDetail];
-          } else {
-            this.uploadErrorMessages = errorDetail;
-          }
+        if (error.response === undefined) {
+          throw error;
+        }
+        if (error.response.status !== 400) {
+          throw error;
         }
         this.uploadProgress = null;
-        return undefined;
+        this.uploadFile = null;
+        return null;
       });
-      if (result !== null && result !== undefined) {
+      if (result !== null) {
         this.uploadProgress = null;
         this.$emit("input", result.id);
       } else {

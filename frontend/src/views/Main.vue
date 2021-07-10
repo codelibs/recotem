@@ -29,7 +29,7 @@
           </div>
         </v-card-text>
         <v-card-actions>
-          <v-btn color="error" @click="ignoreError">Ignore</v-btn>
+          <v-btn ignore-error color="error" @click="ignoreError">Ignore</v-btn>
         </v-card-actions>
       </v-card>
     </v-overlay>

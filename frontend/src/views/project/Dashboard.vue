@@ -64,12 +64,13 @@
     </template>
     <template v-else>
       <v-container class="pa-8 text-center text-h5"> No data yet. </v-container>
-      <div class="text-center">
-        <v-btn color="primary" :to="{ name: 'first-tuning' }">
-          <v-icon>mdi-tune</v-icon> Start upload -> tuning</v-btn
-        >
-      </div>
     </template>
+    <div class="text-center">
+      <v-btn color="primary" :to="{ name: 'first-tuning' }">
+        <v-icon>mdi-tune</v-icon> Start upload -> tuning</v-btn
+      >
+    </div>
+
     <div class="mt-8"></div>
   </div>
 </template>

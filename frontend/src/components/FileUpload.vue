@@ -87,7 +87,8 @@ export default Vue.extend({
     async upload(): Promise<void> {
       await refreshToken(AuthModule);
       if (this.uploadFile === null) return;
-      if (AuthModule.currentProjectId === null) return;
+      if (AuthModule.currentProjectId === null)
+        throw new Error("project id must be set");
       const data = new FormData();
       data.append("project", `${AuthModule.currentProjectId}`);
       data.append("file", this.uploadFile);

@@ -1,13 +1,14 @@
 import flushPromises from "flush-promises";
 
 import { AuthModule } from "@/store/auth";
-import axios, { AxiosPromise, AxiosError } from "axios";
+import axios from "axios";
 import { mount, createLocalVue } from "@vue/test-utils";
 import { sleep } from "@/utils/index";
 import Vuetify from "vuetify";
 import VueRouter from "vue-router";
 import MockAdapter from "axios-mock-adapter";
 import FileUpload from "@/components/FileUpload.vue";
+import { MockFile } from "../../mockFile";
 
 const mock = new MockAdapter(axios);
 const createdDataId = 103;
@@ -20,18 +21,17 @@ mock.onPost("/api/auth/token/refresh/").reply(async () => {
     },
   ];
 });
-const uploadEndpoint = mock
-  .onPost("/api/file-upload/")
-  .reply(async (config) => {
-    const total = 1024; // mocked file size
-    for (const progress of [0, 0.5, 1]) {
-      await sleep(50);
-      if (config.onUploadProgress) {
-        config.onUploadProgress({ loaded: total * progress, total });
-      }
+
+mock.onPost("/api/file-upload/").reply(async (config) => {
+  const total = 1024; // mocked file size
+  for (const progress of [0, 0.5, 1]) {
+    await sleep(50);
+    if (config.onUploadProgress) {
+      config.onUploadProgress({ loaded: total * progress, total });
     }
-    return [200, { id: createdDataId }];
-  });
+  }
+  return [200, { id: createdDataId }];
+});
 
 describe("FileUpload.vue", () => {
   const localVue = createLocalVue();
@@ -48,7 +48,6 @@ describe("FileUpload.vue", () => {
   });
 
   it("normal response", async () => {
-    AuthModule.setProjectId(1);
     const wrapper = mount(FileUpload, {
       localVue,
       vuetify,
@@ -56,13 +55,18 @@ describe("FileUpload.vue", () => {
         postURL: "/api/file-upload/",
         fileLabel: "Upload dummy file",
       },
-      stubs: ["v-file-input", "v-progress-linear"],
+      stubs: ["v-progress-linear"],
     });
     await wrapper.setData({
       uploadProgress: null,
-      uploadFile: { size: 10, name: "dummyData.csv" },
+      uploadFile: MockFile("mockFileInput.csv", 1024, "application/csv"),
     });
-    wrapper.find("button[upload-button]").trigger("click");
+
+    AuthModule.setProjectId(1);
+    const uploadButton = wrapper.find("button[upload-button]");
+
+    uploadButton.trigger("click");
+    expect(wrapper.html()).toContain("mockFileInput.csv");
     await sleep(500);
 
     await flushPromises();

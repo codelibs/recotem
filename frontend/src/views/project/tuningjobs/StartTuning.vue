@@ -88,7 +88,7 @@
                 class="ml-2"
                 :disabled="!isValid"
                 @click="createJob"
-                color="info"
+                color="primary"
               >
                 <v-icon>mdi-tune</v-icon>Start The job
               </v-btn>

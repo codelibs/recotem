@@ -105,7 +105,6 @@ describe("ProjectList.vue", () => {
     btn.trigger("click");
     await flushPromises();
 
-    console.log(wrapper.text());
     expect(url).toBe("/api/project/");
 
     expect(wrapper.vm.$route.name).toBe("project");

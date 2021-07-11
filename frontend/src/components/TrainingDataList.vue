@@ -180,10 +180,7 @@ export default Vue.extend({
             page: this.options.page,
             page_size: this.options.itemsPerPage,
           })}`
-      ).catch((error: AxiosError) => {
-        console.log(error.response?.data);
-        return null;
-      });
+      );
       this.loading = false;
 
       if (trainingData?.results !== undefined) {

@@ -100,9 +100,6 @@ export async function createSplitConfigIfNeeded(
       SplitConfigResultType,
       SplitConfigResponse
     >(auth, splitConfigURL, splitConfig);
-    if (createdSplitConfig === null) {
-      throw "Log out";
-    }
     return createdSplitConfig.id;
   }
 }
@@ -122,9 +119,6 @@ export async function createEvaluationConfigIfNeeded(
       EvaluationConfigResultType,
       EvaluationConfigResponse
     >(auth, evaluationConfigURL, evaluationConfig);
-    if (createdEvaluationConfig === null) {
-      throw "Log out";
-    }
     return createdEvaluationConfig.id;
   }
 }
@@ -156,14 +150,10 @@ export async function createParameterTuningJob(
     TuningJobRequestBody,
     TuningJobResponse
   >(auth, tuningJobURL, jobPostBody);
-  if (createdJob !== null) {
-    router.push({
-      name: "tuning-job-detail",
-      params: { parameterTuningJobId: `${createdJob.id}` },
-    });
-  } else {
-    alert("failed to start the job");
-  }
+  router.push({
+    name: "tuning-job-detail",
+    params: { parameterTuningJobId: `${createdJob.id}` },
+  });
 }
 
 type Data = {

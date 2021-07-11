@@ -8,7 +8,6 @@ export async function guard(
   next: NavigationGuardNext<Vue>
 ) {
   const loggedIn = await checkLogin(AuthModule);
-  console.log("loggedIn", loggedIn);
   if (loggedIn) {
     next();
   } else {

@@ -189,4 +189,7 @@ JWT_AUTH_COOKIE_USE_CSRF = True
 
 SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+    "ACCESS_TOKEN_LIFETIME": timedelta(
+        seconds=int(env("ACCESS_TOKEN_LIFETIME", default=300))
+    ),
 }

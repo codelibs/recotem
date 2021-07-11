@@ -4,7 +4,7 @@
     <v-stepper v-model="step">
       <v-stepper-header>
         <v-stepper-step step="1">
-          {{ upload ? "Upload" : "Data" }}
+          {{ upload ? "Upload Data" : "Select Data" }}
         </v-stepper-step>
         <v-divider></v-divider>
         <v-stepper-step step="2"> Split </v-stepper-step>
@@ -150,6 +150,7 @@ export default Vue.extend({
   },
   methods: {
     async createJob(): Promise<void> {
+      /* istanbul ignore if */
       if (
         this.postDataId === null ||
         this.splitConfig === null ||

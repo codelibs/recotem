@@ -72,6 +72,7 @@ import { required } from "vee-validate/dist/rules";
 import { ValidationObserver, ValidationProvider, extend } from "vee-validate";
 import axios, { AxiosError } from "axios";
 import { baseURL } from "@/env";
+import { alertAxiosError } from "@/utils/exception";
 
 type tokenReturn =
   paths["/api/auth/login/"]["post"]["responses"]["200"]["content"]["application/json"];
@@ -118,8 +119,8 @@ export default Vue.extend({
         })
         .catch((error: AxiosError) => {
           if (error.response?.status !== 400) {
-            alert(error);
-            throw new Error("login failed with other reason");
+            alertAxiosError(error);
+            throw error;
           }
           const errors: string[] = error.response?.data?.non_field_errors;
           this.errorMessages.splice(0, this.errorMessages.length, ...errors);

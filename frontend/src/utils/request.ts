@@ -29,8 +29,10 @@ export async function refreshToken(module: Auth): Promise<void> {
     refreshURL,
     {},
     { ...axiosCSRFConfg }
-  ).catch((exception) => {
-    console.log(exception);
+  ).catch((exception: AxiosError) => {
+    if (exception.response?.status !== 401) {
+      alertAxiosError(exception);
+    }
     return null;
   });
   if (refreshed === null) return;

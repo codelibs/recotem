@@ -184,6 +184,12 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
     job.best_score = -best_trial.value
     job.save()
 
+    if best_trial.value == 0.0:
+        raise RuntimeError(
+            f"This settings resulted in {evaluation.target_metric} == 0.0.\n"
+            "This might be caused by too short timeout or too small validation set."
+        )
+
     TaskLog.objects.create(
         task=task_result,
         contents=f"""Job {parameter_tuning_job_id} complete.""",

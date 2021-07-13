@@ -4,8 +4,10 @@
       <div class="d-flex">
         <div>
           <v-radio-group class="mr-6" v-model="how">
-            <v-radio :value="1" label="Use Default Values"> </v-radio>
-            <v-radio :value="2" label="Manually Define"> </v-radio>
+            <v-radio :value="1" name="use-default" label="Use Default Values">
+            </v-radio>
+            <v-radio :value="2" name="manually-define" label="Manually Define">
+            </v-radio>
           </v-radio-group>
         </div>
         <v-divider vertical v-if="how !== 1"></v-divider>
@@ -18,6 +20,7 @@
             <v-text-field
               label="Number of trials"
               type="number"
+              name="n_trials"
               v-model.number="customConfig.n_trials"
               :error-messages="errors"
             ></v-text-field>
@@ -28,7 +31,8 @@
             v-slot="{ errors }"
           >
             <v-text-field
-              label=" Overall timeout"
+              name="timeout_overall"
+              label="Overall timeout"
               type="number"
               v-model.number="customConfig.timeout_overall"
               :error-messages="errors"
@@ -41,6 +45,7 @@
           >
             <v-text-field
               label="Single step timeout"
+              name="timeout_singlestep"
               type="number"
               v-model.number="customConfig.timeout_singlestep"
               :error-messages="errors"
@@ -53,6 +58,7 @@
           >
             <v-text-field
               label="Rough memory budget (in MB)."
+              name="memory_budget"
               type="number"
               v-model.number="customConfig.memory_budget"
               :error-messages="errors"
@@ -66,6 +72,7 @@
           >
             <v-text-field
               label="Number of Paralel tasks to be run."
+              name="n_tasks_parallel"
               type="number"
               v-model.number="customConfig.n_tasks_parallel"
               :error-messages="errors"
@@ -78,6 +85,7 @@
           >
             <v-text-field
               label="Random seed"
+              name="random_seed"
               type="number"
               v-model.number="customConfig.random_seed"
               :error-messages="errors"
@@ -109,7 +117,7 @@ import {
   validRatio,
   isNonnegativeInteger,
 } from "@/utils/rules";
-import { numberInputValueToNumberOrNull } from "@/utils/conversion";
+import { numberInputValueToNumberOrUndefined } from "@/utils/conversion";
 import { paths } from "@/api/schema";
 
 type openAPIArg =
@@ -206,22 +214,22 @@ export default Vue.extend({
     result(): ResultType {
       let result: ResultType = {};
       if (this.how == 2) {
-        result.n_tasks_parallel = numberInputValueToNumberOrNull(
+        result.n_tasks_parallel = numberInputValueToNumberOrUndefined(
           this.customConfig.n_tasks_parallel
         );
-        result.n_trials = numberInputValueToNumberOrNull(
+        result.n_trials = numberInputValueToNumberOrUndefined(
           this.customConfig.n_trials
         );
-        result.memory_budget = numberInputValueToNumberOrNull(
+        result.memory_budget = numberInputValueToNumberOrUndefined(
           this.customConfig.memory_budget
         );
-        result.timeout_overall = numberInputValueToNumberOrNull(
+        result.timeout_overall = numberInputValueToNumberOrUndefined(
           this.customConfig.timeout_overall
         );
-        result.timeout_singlestep = numberInputValueToNumberOrNull(
+        result.timeout_singlestep = numberInputValueToNumberOrUndefined(
           this.customConfig.timeout_singlestep
         );
-        result.random_seed = numberInputValueToNumberOrNull(
+        result.random_seed = numberInputValueToNumberOrUndefined(
           this.customConfig.random_seed
         );
         result.train_after_tuning = this.customConfig.train_after_tuning;

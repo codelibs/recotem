@@ -110,7 +110,8 @@ async function axiosMethodWithRetry<ArgType, ReturnType>(
 export async function getWithRefreshToken<Return>(
   module: Auth,
   path: string,
-  config: AxiosRequestConfig | undefined = undefined
+  config: AxiosRequestConfig | undefined = undefined,
+  alertError = true
 ): Promise<Return> {
   return axiosMethodWithRetry<undefined, Return>(
     async (
@@ -121,7 +122,8 @@ export async function getWithRefreshToken<Return>(
     module,
     path,
     undefined,
-    config
+    config,
+    alertError
   );
 }
 

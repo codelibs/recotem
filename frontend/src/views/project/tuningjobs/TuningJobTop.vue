@@ -29,16 +29,14 @@ pre-wrap {
         </v-expansion-panel-header>
         <v-expansion-panel-content>
           <table class="config pa-4">
-            <tbody v-if="dataDetail !== null">
+            <tbody>
               <tr>
                 <th>Data</th>
-                <td>
-                  <template v-if="dataDetail.filesize === null">
-                    <div class="text-caption">file deleted</div>
-                  </template>
-                  <template v-else>
-                    {{ dataDetail.basename }}
-                  </template>
+                <td v-if="dataDetail !== null">
+                  {{ dataDetail.basename }}
+                </td>
+                <td v-else>
+                  <div class="text-caption">deleted</div>
                 </td>
                 <td>
                   <v-btn
@@ -175,6 +173,7 @@ import SplitConfigView from "@/components/SplitConfigView.vue";
 import EvaluationConfigView from "@/components/EvaluationConfigView.vue";
 import LogView from "@/components/FetchLogs.vue";
 import ModelConfigView from "@/components/ModelConfigView.vue";
+import { AxiosError } from "axios";
 
 const retrieveURL = "/api/parameter_tuning_job";
 type JobDetailType =
@@ -216,11 +215,21 @@ export default Vue.extend({
   async mounted(): Promise<void> {
     await this.fetchTuningJobDetail();
     if (this.tuningJobBasicInfo === null) return;
-    let result = await getWithRefreshToken<DataDetail>(
-      AuthModule,
-      `${dataInfoURL}/${this.tuningJobBasicInfo.data}`
-    );
-    this.dataDetail = result;
+    try {
+      let result = await getWithRefreshToken<DataDetail>(
+        AuthModule,
+        `${dataInfoURL}/${this.tuningJobBasicInfo.data}`,
+        undefined,
+        false
+      );
+      this.dataDetail = result;
+    } catch (e) {
+      if (e.response?.status != 404) {
+        this.dataDetail = null;
+      } else {
+        throw e;
+      }
+    }
 
     const splitConfigDetal = await getWithRefreshToken<SplitConfigDetail>(
       AuthModule,
@@ -251,7 +260,7 @@ export default Vue.extend({
     },
     async polling(): Promise<void> {
       for (;;) {
-        await new Promise((resolve: any) => setTimeout(resolve, 5000));
+        await new Promise((resolve) => setTimeout(resolve, 5000));
         await this.fetchTuningJobDetail();
         if (this.pollingStop) {
           break;

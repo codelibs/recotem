@@ -4,7 +4,8 @@
       <div class="d-flex">
         <div>
           <v-radio-group class="mr-6" v-model="how">
-            <v-radio :value="1" label="Use Default Values"> </v-radio>
+            <v-radio :value="1" name="use-default" label="Use Default Values">
+            </v-radio>
             <v-radio
               name="use-preset"
               :disabled="existingConfigs.length == 0"
@@ -99,7 +100,7 @@ import { ValidationObserver, ValidationProvider, extend } from "vee-validate";
 import { AuthModule } from "@/store/auth";
 import { getWithRefreshToken } from "@/utils";
 import { isPositiveInteger } from "@/utils/rules";
-import { numberInputValueToNumberOrNull } from "@/utils/conversion";
+import { numberInputValueToNumberOrUndefined } from "@/utils/conversion";
 import { prettifyDate } from "@/utils/date";
 import EvaluationConfigView from "@/components/EvaluationConfigView.vue";
 
@@ -211,7 +212,7 @@ export default Vue.extend({
         if (this.saveName) {
           result.name = this.saveName;
         }
-        result["cutoff"] = numberInputValueToNumberOrNull(result.cutoff);
+        result["cutoff"] = numberInputValueToNumberOrUndefined(result.cutoff);
         return result;
       }
     },

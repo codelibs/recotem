@@ -14,7 +14,7 @@ export function prettyFileSize(x: number | null): string {
   return `${(x / 1073741824).toFixed(1)}GB`;
 }
 
-export function numberInputValueToNumberOrNull(
+export function numberInputValueToNumberOrUndefined(
   value: number | undefined | null | string
 ): number | undefined {
   if (typeof value === "number" || value === undefined) {

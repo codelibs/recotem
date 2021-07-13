@@ -154,7 +154,7 @@ import {
   isNonnegativeInteger,
   validRatio,
 } from "@/utils/rules";
-import { numberInputValueToNumberOrNull } from "@/utils/conversion";
+import { numberInputValueToNumberOrUndefined } from "@/utils/conversion";
 import { prettifyDate } from "@/utils/date";
 import { paths } from "@/api/schema";
 import SplitConfigView from "@/components/SplitConfigView.vue";
@@ -260,18 +260,18 @@ export default Vue.extend({
         if (this.saveName) {
           result.name = this.saveName;
         }
-        result["heldout_ratio"] = numberInputValueToNumberOrNull(
+        result["heldout_ratio"] = numberInputValueToNumberOrUndefined(
           result.heldout_ratio
         );
 
-        result["n_heldout"] = numberInputValueToNumberOrNull(result.n_heldout);
-        result["test_user_ratio"] = numberInputValueToNumberOrNull(
+        result["n_heldout"] = numberInputValueToNumberOrUndefined(result.n_heldout);
+        result["test_user_ratio"] = numberInputValueToNumberOrUndefined(
           result.test_user_ratio
         );
-        result["n_test_users"] = numberInputValueToNumberOrNull(
+        result["n_test_users"] = numberInputValueToNumberOrUndefined(
           result.n_test_users
         );
-        result["random_seed"] = numberInputValueToNumberOrNull(
+        result["random_seed"] = numberInputValueToNumberOrUndefined(
           result.random_seed
         );
         return result;

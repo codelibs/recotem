@@ -5,14 +5,17 @@
       <div class="d-flex">
         <div>
           <v-radio-group class="mr-6" v-model="how">
-            <v-radio :value="1" label="Use Default Values"> </v-radio>
+            <v-radio name="use-default" :value="1" label="Use Default Values">
+            </v-radio>
             <v-radio
+              name="use-preset"
               :disabled="existingConfigs.length == 0"
               :value="2"
               label="Use Preset Config"
             >
             </v-radio>
-            <v-radio :value="3" label="Manually Define"> </v-radio>
+            <v-radio name="manually-define" :value="3" label="Manually Define">
+            </v-radio>
           </v-radio-group>
         </div>
         <v-divider vertical v-if="how !== 1"></v-divider>
@@ -50,10 +53,11 @@
           <v-container v-if="how == 3" class="pl-8">
             <ValidationProvider
               name="test_user_ratio"
-              rules="max_value:1.0|min_value:0.0"
+              rules="validRatio"
               v-slot="{ errors }"
             >
               <v-text-field
+                name="test_user_ratio"
                 label="Ratio of test users."
                 type="number"
                 v-model.number="customConfig.test_user_ratio"
@@ -62,11 +66,12 @@
             </ValidationProvider>
             <ValidationProvider
               name="n_test_users"
-              rules="min_value:0|is_integral"
+              rules="isPositiveInteger"
               v-slot="{ errors }"
             >
               <v-text-field
-                label="(Optional) Number of test users."
+                name="n_test_users"
+                label="Number of test users."
                 type="number"
                 v-model.number="customConfig.n_test_users"
                 :error-messages="errors"
@@ -74,10 +79,11 @@
             </ValidationProvider>
             <ValidationProvider
               name="test_heldout_ratio"
-              rules="max_value:1.0|min_value:0.0"
+              rules="validRatio"
               v-slot="{ errors }"
             >
               <v-text-field
+                name="test_heldout_ratio"
                 label="Ratio of held-out interactions."
                 type="number"
                 v-model.number="customConfig.heldout_ratio"
@@ -86,11 +92,12 @@
             </ValidationProvider>
             <ValidationProvider
               name="heldout_interactions"
-              rules="min_value:0.0|is_integral"
+              rules="isPositiveInteger"
               v-slot="{ errors }"
             >
               <v-text-field
-                label="(Optional) Number of held-out interactions per user."
+                name="heldout_interactions"
+                label="Number of held-out interactions per user."
                 type="number"
                 v-model.number="customConfig.n_heldout"
                 :error-messages="errors"
@@ -98,11 +105,12 @@
             </ValidationProvider>
             <ValidationProvider
               name="random_seed"
-              rules="is_integral|min_value:0.0"
+              rules="isNonnegativeInteger"
               v-slot="{ errors }"
             >
               <v-text-field
-                label="(Optional) Random Seed."
+                name="random_seed"
+                label="Random Seed."
                 type="number"
                 v-model.number="customConfig.random_seed"
                 :error-messages="errors"
@@ -112,10 +120,11 @@
               name="savename"
               rules="splitConfigNameExists"
               v-slot="{ errors }"
-              :debounce="500"
+              :debounce="300"
             >
               <v-text-field
-                label="(Optional) Save this config with name"
+                label="Save this config with name"
+                name="savename"
                 v-model="saveName"
                 :error-messages="errors"
               >
@@ -139,7 +148,12 @@ import Vue, { PropType } from "vue";
 import { ValidationObserver, ValidationProvider, extend } from "vee-validate";
 import { AuthModule } from "@/store/auth";
 import { getWithRefreshToken } from "@/utils";
-import { is_integral, max_value, min_value } from "@/utils/rules";
+import {
+  isInteger,
+  isPositiveInteger,
+  isNonnegativeInteger,
+  validRatio,
+} from "@/utils/rules";
 import { numberInputValueToNumberOrNull } from "@/utils/conversion";
 import { prettifyDate } from "@/utils/date";
 import { paths } from "@/api/schema";
@@ -157,9 +171,10 @@ type createConfigArg = Omit<
 
 export type ResultType = createConfigArg | number | null;
 
-extend("max_value", max_value);
-extend("min_value", min_value);
-extend("is_integral", is_integral);
+extend("isPositiveInteger", isPositiveInteger);
+extend("isInteger", isInteger);
+extend("validRatio", validRatio);
+extend("isNonnegativeInteger", isNonnegativeInteger);
 
 extend("splitConfigNameExists", {
   async validate(value: string) {
@@ -214,9 +229,7 @@ export default Vue.extend({
         AuthModule,
         `${existingConfigsUrl}?${qs.stringify({ unnamed: false })}`
       );
-      if (results !== null) {
-        this.existingConfigs = results;
-      }
+      this.existingConfigs = results;
     },
   },
   async mounted() {

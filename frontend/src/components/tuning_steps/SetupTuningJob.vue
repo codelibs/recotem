@@ -12,7 +12,7 @@
         <v-container v-if="how == 2" class="ml-4 mt-0 pt-0">
           <ValidationProvider
             name="Number of trials"
-            rules="min_value_1:1|is_integral"
+            rules="isPositiveInteger"
             v-slot="{ errors }"
           >
             <v-text-field
@@ -24,11 +24,11 @@
           </ValidationProvider>
           <ValidationProvider
             name="Overall timeout"
-            rules="min_value_1:1|is_integral"
+            rules="isPositiveInteger"
             v-slot="{ errors }"
           >
             <v-text-field
-              label="(Optional) Overall timeout"
+              label=" Overall timeout"
               type="number"
               v-model.number="customConfig.timeout_overall"
               :error-messages="errors"
@@ -36,11 +36,11 @@
           </ValidationProvider>
           <ValidationProvider
             name="Single step timeout"
-            rules="min_value_1:1|is_integral"
+            rules="isPositiveInteger"
             v-slot="{ errors }"
           >
             <v-text-field
-              label="(Optional) Single step timeout"
+              label="Single step timeout"
               type="number"
               v-model.number="customConfig.timeout_singlestep"
               :error-messages="errors"
@@ -48,7 +48,7 @@
           </ValidationProvider>
           <ValidationProvider
             name="Memory budget"
-            rules="min_value_1:1|is_integral"
+            rules="isPositiveInteger"
             v-slot="{ errors }"
           >
             <v-text-field
@@ -61,7 +61,7 @@
 
           <ValidationProvider
             name="Parallel tasks running"
-            rules="min_value_1:1|is_integral"
+            rules="isPositiveInteger"
             v-slot="{ errors }"
           >
             <v-text-field
@@ -73,11 +73,11 @@
           </ValidationProvider>
           <ValidationProvider
             name="Random seed"
-            rules="min_value:0|is_integral"
+            rules="isNonnegativeInteger"
             v-slot="{ errors }"
           >
             <v-text-field
-              label="(Optional) Random seed"
+              label="Random seed"
               type="number"
               v-model.number="customConfig.random_seed"
               :error-messages="errors"
@@ -103,7 +103,12 @@
 <script lang="ts">
 import Vue, { PropType } from "vue";
 import { ValidationObserver, ValidationProvider, extend } from "vee-validate";
-import { is_integral, max_value, min_value, min_value_1 } from "@/utils/rules";
+import {
+  isInteger,
+  isPositiveInteger,
+  validRatio,
+  isNonnegativeInteger,
+} from "@/utils/rules";
 import { numberInputValueToNumberOrNull } from "@/utils/conversion";
 import { paths } from "@/api/schema";
 
@@ -150,10 +155,10 @@ const algoChoices = [
   "TruncatedSVD",
 ];
 
-extend("max_value", max_value);
-extend("min_value", min_value);
-extend("min_value_1", min_value_1);
-extend("is_integral", is_integral);
+extend("isInteger", isInteger);
+extend("isPositiveInteger", isPositiveInteger);
+extend("isNonnegativeInteger", isNonnegativeInteger);
+extend("validRatio", validRatio);
 
 export default Vue.extend({
   props: {

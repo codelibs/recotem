@@ -26,11 +26,11 @@ describe("Main.vue", () => {
     expect(wrapper.text()).toBe("");
     alertAxiosError({
       config: {},
-      message: "",
+      message: "Unhandled exception without response",
       name: "",
     });
     await flushPromises();
-    expect(wrapper.text()).toBe("");
+    expect(wrapper.text()).toContain("Unhandled exception without response");
 
     alertAxiosError({
       config: {},

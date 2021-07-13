@@ -6,12 +6,14 @@
           <v-radio-group class="mr-6" v-model="how">
             <v-radio :value="1" label="Use Default Values"> </v-radio>
             <v-radio
+              name="use-preset"
               :disabled="existingConfigs.length == 0"
               :value="2"
               label="Use Preset Config"
             >
             </v-radio>
-            <v-radio :value="3" label="Manually Define"> </v-radio>
+            <v-radio name="manually-define" :value="3" label="Manually Define">
+            </v-radio>
           </v-radio-group>
         </div>
         <v-divider vertical v-if="how !== 1"></v-divider>
@@ -53,12 +55,13 @@
             >
             </v-select>
             <ValidationProvider
-              name="test_user_ratio"
-              rules="min_value:0.0|is_integral"
+              name="cutoff"
+              rules="isPositiveInteger"
               v-slot="{ errors }"
             >
               <v-text-field
                 label="Cutoff"
+                name="cutoff"
                 type="number"
                 v-model.number="customConfig.cutoff"
                 :error-messages="errors"
@@ -68,10 +71,11 @@
               name="savename"
               rules="evaluationConfigNameExists"
               v-slot="{ errors }"
-              :debounce="500"
+              :debounce="300"
             >
               <v-text-field
                 label="(Optional) Save this config with name"
+                name="savename"
                 v-model="saveName"
                 :error-messages="errors"
               >
@@ -94,7 +98,7 @@ import Vue, { PropType } from "vue";
 import { ValidationObserver, ValidationProvider, extend } from "vee-validate";
 import { AuthModule } from "@/store/auth";
 import { getWithRefreshToken } from "@/utils";
-import { is_integral, max_value, min_value } from "@/utils/rules";
+import { isPositiveInteger } from "@/utils/rules";
 import { numberInputValueToNumberOrNull } from "@/utils/conversion";
 import { prettifyDate } from "@/utils/date";
 import EvaluationConfigView from "@/components/EvaluationConfigView.vue";
@@ -120,9 +124,7 @@ type Data = {
 };
 export type ResultType = createConfigArg | number | null;
 
-extend("max_value", max_value);
-extend("min_value", min_value);
-extend("is_integral", is_integral);
+extend("isPositiveInteger", isPositiveInteger);
 
 extend("evaluationConfigNameExists", {
   async validate(value: string) {
@@ -136,13 +138,16 @@ extend("evaluationConfigNameExists", {
     return `A preset with this name already exists.`;
   },
 });
-type SelectChoice = { value: string; text: string }[];
-const metricChoices: SelectChoice = [
+type ValidMetricValues =
+  paths["/api/evaluation_config/"]["post"]["requestBody"]["content"]["application/json"]["target_metric"];
+
+type SelectChoice = { value: ValidMetricValues; text: string }[];
+const metricChoices = [
   { value: "ndcg", text: "Normalized discounted cumulative gain (NDCG)" },
   { value: "recall", text: "Recall" },
   { value: "hit", text: "Hit" },
   { value: "map", text: "Mean average precision (MAP)" },
-];
+] as SelectChoice;
 
 export default Vue.extend({
   props: {
@@ -170,11 +175,9 @@ export default Vue.extend({
     async fetchExistingSplitConfigs(): Promise<void> {
       const results = await getWithRefreshToken<ExistingConfigs>(
         AuthModule,
-        `${existingConfigsUrl}/?${qs.stringify({ unnamed: false })}`
+        `${existingConfigsUrl}?${qs.stringify({ unnamed: false })}`
       );
-      if (results !== null) {
-        this.existingConfigs = results;
-      }
+      this.existingConfigs = results;
     },
   },
   async mounted() {

@@ -25,7 +25,7 @@ services:
     tty: true # docker run -t
     command: >
       sh -c '
-        if ! pytest -s --cov=./recotem/ --cov-report=html tests; then
+        if ! pytest -s --cov=./recotem/ --cov-report=html tests/test_train.py; then
           echo "test failed"
           exit 1;
         fi

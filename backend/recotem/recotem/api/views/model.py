@@ -8,6 +8,7 @@ from drf_spectacular.utils import extend_schema
 from irspack import IDMappedRecommender
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import APIException
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -23,6 +24,15 @@ class IDAndScore(serializers.Serializer):
     score = serializers.FloatField()
 
 
+class UserProfileInteractionSerializer(serializers.Serializer):
+    item_ids = serializers.ListField(child=serializers.CharField())
+    cutoff = serializers.IntegerField()
+
+
+class RecommendationResultUsingProfileSerializer(serializers.Serializer):
+    recommendations = serializers.ListField(child=IDAndScore())
+
+
 class RawRecommendationSerializer(serializers.Serializer):
     user_id = serializers.CharField()
     user_profile = serializers.ListField(child=serializers.CharField())
@@ -36,18 +46,18 @@ class RecommendationWithMetaDataSerializer(serializers.Serializer):
 
 
 @lru_cache(maxsize=1)
-def fetch_mapped_rec(pk: int) -> Optional[IDMappedRecommender]:
-    model_record = TrainedModel.objects.get(pk=pk)
+def fetch_mapped_rec(pk: int) -> IDMappedRecommender:
     try:
+        model_record = TrainedModel.objects.get(pk=pk)
         return pickle.load(model_record.file)["id_mapped_recommender"]
     except:
-        return None
+        raise APIException(detail=f"Could not find model {pk}", code=404)
 
 
 @lru_cache(maxsize=1)
 def fetch_item_metadata(pk: int) -> Optional[pd.DataFrame]:
-    model_record: ItemMetaData = ItemMetaData.objects.get(pk=pk)
     try:
+        model_record: ItemMetaData = ItemMetaData.objects.get(pk=pk)
         project: Project = model_record.project
         item_column: str = project.item_column
         df: pd.DataFrame = pickle.load(model_record.file)
@@ -55,10 +65,8 @@ def fetch_item_metadata(pk: int) -> Optional[pd.DataFrame]:
         return df.drop_duplicates(item_column).set_index(
             model_record.project.item_column
         )
-    except Exception as e:
-        print(e.args)
-
-        return None
+    except:
+        raise APIException(detail=f"Could not load item metadata {pk}", code=404)
 
 
 class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
@@ -75,8 +83,6 @@ class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     @action(detail=True, methods=["get"])
     def sample_recommendation_raw(self, request, pk=None):
         mapped_rec = fetch_mapped_rec(pk)
-        if mapped_rec is None:
-            return Response(status=404, data=dict(detail=["file deleted."]))
         X = mapped_rec.recommender.X_train_all
         sample_user_index = random.randint(0, X.shape[0] - 1)
         sample_user_id: str = mapped_rec.user_ids[sample_user_index]
@@ -103,11 +109,7 @@ class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     )
     def sample_recommendation_metadata(self, request, metadata_id: int, pk=None):
         mapped_rec = fetch_mapped_rec(pk)
-        if mapped_rec is None:
-            return Response(status=404, data=dict(detail=["file deleted."]))
         metadata = fetch_item_metadata(metadata_id)
-        if metadata is None:
-            return Response(status=404, data=dict(detail=["metadata file deleted."]))
 
         X = mapped_rec.recommender.X_train_all
         sample_user_index = random.randint(0, X.shape[0] - 1)
@@ -137,5 +139,25 @@ class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
                 user_id=sample_user_id,
                 user_profile=user_history,
                 recommendations=recommendations_json,
+            ),
+        )
+
+    @extend_schema(
+        responses={200: RecommendationResultUsingProfileSerializer},
+        request=UserProfileInteractionSerializer,
+    )
+    @action(detail=True, methods=["post"])
+    def recommend_using_profile_interaction(self, request, pk=None):
+        mapped_rec = fetch_mapped_rec(pk)
+        serializer = UserProfileInteractionSerializer(data=request.data)
+        serializer.is_valid()
+        recs = mapped_rec.get_recommendation_for_new_user(
+            serializer.validated_data["item_ids"],
+            cutoff=serializer.validated_data["cutoff"],
+        )
+        return Response(
+            status=200,
+            data=dict(
+                recommendations=[dict(item_id=str(x[0]), score=x[1]) for x in recs],
             ),
         )

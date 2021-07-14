@@ -1,7 +1,7 @@
 <template>
   <div class="mt-1">
     <v-card>
-      <training-data-list />
+      <TrainingDataList />
     </v-card>
     <div class="ma-8"></div>
     <v-card>

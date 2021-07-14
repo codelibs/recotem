@@ -9,7 +9,7 @@
             <v-card-text>
               <v-form @keyup.enter="submit">
                 <ValidationProvider
-                  rules="loginRequired"
+                  rules="required"
                   name="username"
                   v-slot="{ errors }"
                 >
@@ -25,7 +25,7 @@
                 </ValidationProvider>
                 <ValidationProvider
                   name="password"
-                  rules="loginRequired"
+                  rules="required"
                   v-slot="{ errors }"
                 >
                   <v-text-field
@@ -78,7 +78,7 @@ type tokenReturn =
   paths["/api/auth/login/"]["post"]["responses"]["200"]["content"]["application/json"];
 const tokenObtainUrl = `${baseURL}/api/auth/login/`;
 
-extend("loginRequired", {
+extend("required", {
   ...required,
   message: "{_field_} required",
 });

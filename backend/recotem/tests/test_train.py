@@ -4,11 +4,15 @@ from tempfile import NamedTemporaryFile
 from time import sleep
 from typing import IO, Optional
 
+import numpy as np
 import pandas as pd
 import pytest
 from django.test import Client
+from irspack.utils.id_mapping import IDMappedRecommender
 
 from .test_data_post import login_client
+
+RNS = np.random.RandomState(0)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -102,9 +106,19 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         for chunk in download_response.streaming_content:
             temp_ofs.write(chunk)
         temp_ofs.seek(0)
-        result = pickle.load(temp_ofs)
-        assert "id_mapped_recommender" in result
-        assert "irspack_version" in result
+        download_model = pickle.load(temp_ofs)
+        assert "id_mapped_recommender" in download_model
+        assert "irspack_version" in download_model
+    mapped_rec: IDMappedRecommender = download_model["id_mapped_recommender"]
+    for _ in range(5):
+        profile_ids = [str(x) for x in RNS.choice(mapped_rec.item_ids, size=10)]
+        gt = mapped_rec.get_recommendation_for_new_user(profile_ids, cutoff=10)
+        model_response = client.post(
+            f"{model_url}{model_id}/recommend_using_profile_interaction/",
+            data={"item_ids": profile_ids, "cutoff": 10},
+        ).json()
+        for i, rec in enumerate(model_response["recommendations"]):
+            assert gt[i][0] == rec["item_id"]
 
     job_with_train_afterward_id = client.post(
         parameter_tuning_job_url,

@@ -21,6 +21,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/Login'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Login'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Login'
         required: true
       security:
       - tokenAuth: []
@@ -69,6 +75,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/PasswordChange'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordChange'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordChange'
         required: true
       security:
       - tokenAuth: []
@@ -93,6 +105,12 @@ paths:
       requestBody:
         content:
           application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordReset'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordReset'
+          multipart/form-data:
             schema:
               $ref: '#/components/schemas/PasswordReset'
         required: true
@@ -124,6 +142,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/PasswordResetConfirm'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirm'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirm'
         required: true
       security:
       - tokenAuth: []
@@ -149,6 +173,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/TokenRefresh'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
         required: true
       responses:
         '200':
@@ -168,6 +198,12 @@ paths:
       requestBody:
         content:
           application/json:
+            schema:
+              $ref: '#/components/schemas/TokenVerify'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenVerify'
+          multipart/form-data:
             schema:
               $ref: '#/components/schemas/TokenVerify'
         required: true
@@ -220,6 +256,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/UserDetails'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/UserDetails'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/UserDetails'
         required: true
       security:
       - tokenAuth: []
@@ -247,6 +289,12 @@ paths:
       requestBody:
         content:
           application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedUserDetails'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedUserDetails'
+          multipart/form-data:
             schema:
               $ref: '#/components/schemas/PatchedUserDetails'
       security:
@@ -300,6 +348,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/EvaluationConfig'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/EvaluationConfig'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/EvaluationConfig'
       security:
       - tokenAuth: []
       - cookieAuth: []
@@ -350,6 +404,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/EvaluationConfig'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/EvaluationConfig'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/EvaluationConfig'
       security:
       - tokenAuth: []
       - cookieAuth: []
@@ -375,6 +435,12 @@ paths:
       requestBody:
         content:
           application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedEvaluationConfig'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedEvaluationConfig'
+          multipart/form-data:
             schema:
               $ref: '#/components/schemas/PatchedEvaluationConfig'
       security:
@@ -648,6 +714,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ModelConfiguration'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ModelConfiguration'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ModelConfiguration'
         required: true
       security:
       - tokenAuth: []
@@ -699,6 +771,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ModelConfiguration'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ModelConfiguration'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ModelConfiguration'
         required: true
       security:
       - tokenAuth: []
@@ -725,6 +803,12 @@ paths:
       requestBody:
         content:
           application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedModelConfiguration'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedModelConfiguration'
+          multipart/form-data:
             schema:
               $ref: '#/components/schemas/PatchedModelConfiguration'
       security:
@@ -806,6 +890,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ParameterTuningJob'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ParameterTuningJob'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ParameterTuningJob'
         required: true
       security:
       - tokenAuth: []
@@ -857,6 +947,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ParameterTuningJob'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ParameterTuningJob'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ParameterTuningJob'
         required: true
       security:
       - tokenAuth: []
@@ -883,6 +979,12 @@ paths:
       requestBody:
         content:
           application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedParameterTuningJob'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedParameterTuningJob'
+          multipart/form-data:
             schema:
               $ref: '#/components/schemas/PatchedParameterTuningJob'
       security:
@@ -950,6 +1052,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/Project'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Project'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Project'
         required: true
       security:
       - tokenAuth: []
@@ -1001,6 +1109,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/Project'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Project'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Project'
         required: true
       security:
       - tokenAuth: []
@@ -1027,6 +1141,12 @@ paths:
       requestBody:
         content:
           application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedProject'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedProject'
+          multipart/form-data:
             schema:
               $ref: '#/components/schemas/PatchedProject'
       security:
@@ -1066,7 +1186,6 @@ paths:
         name: id
         schema:
           type: integer
-        description: A unique integer value identifying this project.
         required: true
       tags:
       - project_summary
@@ -1075,11 +1194,7 @@ paths:
       - cookieAuth: []
       responses:
         '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProjectSummary'
-          description: ''
+          description: No response body
   /api/schema/:
     get:
       operationId: schema_retrieve
@@ -1264,6 +1379,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/SplitConfig'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SplitConfig'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/SplitConfig'
       security:
       - tokenAuth: []
       - cookieAuth: []
@@ -1314,6 +1435,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/SplitConfig'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SplitConfig'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/SplitConfig'
       security:
       - tokenAuth: []
       - cookieAuth: []
@@ -1339,6 +1466,12 @@ paths:
       requestBody:
         content:
           application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedSplitConfig'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedSplitConfig'
+          multipart/form-data:
             schema:
               $ref: '#/components/schemas/PatchedSplitConfig'
       security:
@@ -1427,6 +1560,34 @@ paths:
               schema:
                 $ref: '#/components/schemas/TaskLog'
           description: ''
+  /api/token/:
+    post:
+      operationId: token_create
+      description: ''
+      tags:
+      - token
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AuthToken'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AuthToken'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthToken'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthToken'
+          description: ''
   /api/trained_model/:
     get:
       operationId: trained_model_list
@@ -1476,6 +1637,12 @@ paths:
       requestBody:
         content:
           application/json:
+            schema:
+              $ref: '#/components/schemas/TrainedModel'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TrainedModel'
+          multipart/form-data:
             schema:
               $ref: '#/components/schemas/TrainedModel'
         required: true
@@ -1529,6 +1696,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/TrainedModel'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TrainedModel'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TrainedModel'
         required: true
       security:
       - tokenAuth: []
@@ -1555,6 +1728,12 @@ paths:
       requestBody:
         content:
           application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedTrainedModel'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedTrainedModel'
+          multipart/form-data:
             schema:
               $ref: '#/components/schemas/PatchedTrainedModel'
       security:
@@ -1607,6 +1786,41 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TrainedModel'
+          description: ''
+  /api/trained_model/{id}/recommend_using_profile_interaction/:
+    post:
+      operationId: trained_model_recommend_using_profile_interaction_create
+      description: ''
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this trained model.
+        required: true
+      tags:
+      - trained_model
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserProfileInteraction'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/UserProfileInteraction'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/UserProfileInteraction'
+        required: true
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecommendationResultUsingProfile'
           description: ''
   /api/trained_model/{id}/sample_recommendation_metadata/{metadata_id}/:
     get:
@@ -1876,6 +2090,22 @@ paths:
           description: No response body
 components:
   schemas:
+    AuthToken:
+      type: object
+      properties:
+        username:
+          type: string
+          writeOnly: true
+        password:
+          type: string
+          writeOnly: true
+        token:
+          type: string
+          readOnly: true
+      required:
+      - password
+      - token
+      - username
     EvaluationConfig:
       type: object
       properties:
@@ -2481,23 +2711,6 @@ components:
       - item_column
       - name
       - user_column
-    ProjectSummary:
-      type: object
-      properties:
-        n_data:
-          type: integer
-        n_complete_jobs:
-          type: integer
-        n_models:
-          type: integer
-        ins_datetime:
-          type: string
-          format: date-time
-      required:
-      - ins_datetime
-      - n_complete_jobs
-      - n_data
-      - n_models
     RawRecommendation:
       type: object
       properties:
@@ -2515,6 +2728,15 @@ components:
       - recommendations
       - user_id
       - user_profile
+    RecommendationResultUsingProfile:
+      type: object
+      properties:
+        recommendations:
+          type: array
+          items:
+            $ref: '#/components/schemas/IDAndScore'
+      required:
+      - recommendations
     RecommendationWithMetaData:
       type: object
       properties:
@@ -2773,6 +2995,18 @@ components:
       - email
       - pk
       - username
+    UserProfileInteraction:
+      type: object
+      properties:
+        item_ids:
+          type: array
+          items:
+            type: string
+        cutoff:
+          type: integer
+      required:
+      - cutoff
+      - item_ids
   securitySchemes:
     cookieAuth:
       type: apiKey

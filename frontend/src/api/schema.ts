@@ -187,6 +187,9 @@ export interface paths {
   "/api/task_log/{id}/": {
     get: operations["task_log_retrieve"];
   };
+  "/api/token/": {
+    post: operations["token_create"];
+  };
   "/api/trained_model/": {
     get: operations["trained_model_list"];
     post: operations["trained_model_create"];
@@ -199,6 +202,9 @@ export interface paths {
   };
   "/api/trained_model/{id}/download_file/": {
     get: operations["trained_model_download_file_retrieve"];
+  };
+  "/api/trained_model/{id}/recommend_using_profile_interaction/": {
+    post: operations["trained_model_recommend_using_profile_interaction_create"];
   };
   "/api/trained_model/{id}/sample_recommendation_metadata/{metadata_id}/": {
     get: operations["trained_model_sample_recommendation_metadata_retrieve"];
@@ -229,6 +235,11 @@ export interface paths {
 
 export interface components {
   schemas: {
+    AuthToken: {
+      username: string;
+      password: string;
+      token: string;
+    };
     EvaluationConfig: {
       id: number;
       ins_datetime: string;
@@ -434,15 +445,12 @@ export interface components {
       item_column: string;
       time_column?: string | null;
     };
-    ProjectSummary: {
-      n_data: number;
-      n_complete_jobs: number;
-      n_models: number;
-      ins_datetime: string;
-    };
     RawRecommendation: {
       user_id: string;
       user_profile: string[];
+      recommendations: components["schemas"]["IDAndScore"][];
+    };
+    RecommendationResultUsingProfile: {
       recommendations: components["schemas"]["IDAndScore"][];
     };
     RecommendationWithMetaData: {
@@ -533,6 +541,10 @@ export interface components {
       first_name?: string;
       last_name?: string;
     };
+    UserProfileInteraction: {
+      item_ids: string[];
+      cutoff: number;
+    };
   };
 }
 
@@ -557,6 +569,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["Login"];
+        "application/x-www-form-urlencoded": components["schemas"]["Login"];
+        "multipart/form-data": components["schemas"]["Login"];
       };
     };
   };
@@ -592,6 +606,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PasswordChange"];
+        "application/x-www-form-urlencoded": components["schemas"]["PasswordChange"];
+        "multipart/form-data": components["schemas"]["PasswordChange"];
       };
     };
   };
@@ -612,6 +628,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PasswordReset"];
+        "application/x-www-form-urlencoded": components["schemas"]["PasswordReset"];
+        "multipart/form-data": components["schemas"]["PasswordReset"];
       };
     };
   };
@@ -634,6 +652,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PasswordResetConfirm"];
+        "application/x-www-form-urlencoded": components["schemas"]["PasswordResetConfirm"];
+        "multipart/form-data": components["schemas"]["PasswordResetConfirm"];
       };
     };
   };
@@ -652,6 +672,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["TokenRefresh"];
+        "application/x-www-form-urlencoded": components["schemas"]["TokenRefresh"];
+        "multipart/form-data": components["schemas"]["TokenRefresh"];
       };
     };
   };
@@ -670,6 +692,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["TokenVerify"];
+        "application/x-www-form-urlencoded": components["schemas"]["TokenVerify"];
+        "multipart/form-data": components["schemas"]["TokenVerify"];
       };
     };
   };
@@ -713,6 +737,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["UserDetails"];
+        "application/x-www-form-urlencoded": components["schemas"]["UserDetails"];
+        "multipart/form-data": components["schemas"]["UserDetails"];
       };
     };
   };
@@ -737,6 +763,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedUserDetails"];
+        "application/x-www-form-urlencoded": components["schemas"]["PatchedUserDetails"];
+        "multipart/form-data": components["schemas"]["PatchedUserDetails"];
       };
     };
   };
@@ -767,6 +795,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["EvaluationConfig"];
+        "application/x-www-form-urlencoded": components["schemas"]["EvaluationConfig"];
+        "multipart/form-data": components["schemas"]["EvaluationConfig"];
       };
     };
   };
@@ -802,6 +832,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["EvaluationConfig"];
+        "application/x-www-form-urlencoded": components["schemas"]["EvaluationConfig"];
+        "multipart/form-data": components["schemas"]["EvaluationConfig"];
       };
     };
   };
@@ -834,6 +866,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedEvaluationConfig"];
+        "application/x-www-form-urlencoded": components["schemas"]["PatchedEvaluationConfig"];
+        "multipart/form-data": components["schemas"]["PatchedEvaluationConfig"];
       };
     };
   };
@@ -994,6 +1028,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["ModelConfiguration"];
+        "application/x-www-form-urlencoded": components["schemas"]["ModelConfiguration"];
+        "multipart/form-data": components["schemas"]["ModelConfiguration"];
       };
     };
   };
@@ -1029,6 +1065,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["ModelConfiguration"];
+        "application/x-www-form-urlencoded": components["schemas"]["ModelConfiguration"];
+        "multipart/form-data": components["schemas"]["ModelConfiguration"];
       };
     };
   };
@@ -1061,6 +1099,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedModelConfiguration"];
+        "application/x-www-form-urlencoded": components["schemas"]["PatchedModelConfiguration"];
+        "multipart/form-data": components["schemas"]["PatchedModelConfiguration"];
       };
     };
   };
@@ -1095,6 +1135,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["ParameterTuningJob"];
+        "application/x-www-form-urlencoded": components["schemas"]["ParameterTuningJob"];
+        "multipart/form-data": components["schemas"]["ParameterTuningJob"];
       };
     };
   };
@@ -1130,6 +1172,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["ParameterTuningJob"];
+        "application/x-www-form-urlencoded": components["schemas"]["ParameterTuningJob"];
+        "multipart/form-data": components["schemas"]["ParameterTuningJob"];
       };
     };
   };
@@ -1162,6 +1206,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedParameterTuningJob"];
+        "application/x-www-form-urlencoded": components["schemas"]["PatchedParameterTuningJob"];
+        "multipart/form-data": components["schemas"]["PatchedParameterTuningJob"];
       };
     };
   };
@@ -1191,6 +1237,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["Project"];
+        "application/x-www-form-urlencoded": components["schemas"]["Project"];
+        "multipart/form-data": components["schemas"]["Project"];
       };
     };
   };
@@ -1226,6 +1274,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["Project"];
+        "application/x-www-form-urlencoded": components["schemas"]["Project"];
+        "multipart/form-data": components["schemas"]["Project"];
       };
     };
   };
@@ -1258,22 +1308,20 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedProject"];
+        "application/x-www-form-urlencoded": components["schemas"]["PatchedProject"];
+        "multipart/form-data": components["schemas"]["PatchedProject"];
       };
     };
   };
   project_summary_retrieve: {
     parameters: {
       path: {
-        /** A unique integer value identifying this project. */
         id: number;
       };
     };
     responses: {
-      200: {
-        content: {
-          "application/json": components["schemas"]["ProjectSummary"];
-        };
-      };
+      /** No response body */
+      200: unknown;
     };
   };
   /**
@@ -1423,6 +1471,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["SplitConfig"];
+        "application/x-www-form-urlencoded": components["schemas"]["SplitConfig"];
+        "multipart/form-data": components["schemas"]["SplitConfig"];
       };
     };
   };
@@ -1458,6 +1508,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["SplitConfig"];
+        "application/x-www-form-urlencoded": components["schemas"]["SplitConfig"];
+        "multipart/form-data": components["schemas"]["SplitConfig"];
       };
     };
   };
@@ -1490,6 +1542,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedSplitConfig"];
+        "application/x-www-form-urlencoded": components["schemas"]["PatchedSplitConfig"];
+        "multipart/form-data": components["schemas"]["PatchedSplitConfig"];
       };
     };
   };
@@ -1525,6 +1579,22 @@ export interface operations {
       };
     };
   };
+  token_create: {
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["AuthToken"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/x-www-form-urlencoded": components["schemas"]["AuthToken"];
+        "multipart/form-data": components["schemas"]["AuthToken"];
+        "application/json": components["schemas"]["AuthToken"];
+      };
+    };
+  };
   trained_model_list: {
     parameters: {
       query: {
@@ -1556,6 +1626,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["TrainedModel"];
+        "application/x-www-form-urlencoded": components["schemas"]["TrainedModel"];
+        "multipart/form-data": components["schemas"]["TrainedModel"];
       };
     };
   };
@@ -1591,6 +1663,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["TrainedModel"];
+        "application/x-www-form-urlencoded": components["schemas"]["TrainedModel"];
+        "multipart/form-data": components["schemas"]["TrainedModel"];
       };
     };
   };
@@ -1623,6 +1697,8 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["PatchedTrainedModel"];
+        "application/x-www-form-urlencoded": components["schemas"]["PatchedTrainedModel"];
+        "multipart/form-data": components["schemas"]["PatchedTrainedModel"];
       };
     };
   };
@@ -1638,6 +1714,28 @@ export interface operations {
         content: {
           "application/json": components["schemas"]["TrainedModel"];
         };
+      };
+    };
+  };
+  trained_model_recommend_using_profile_interaction_create: {
+    parameters: {
+      path: {
+        /** A unique integer value identifying this trained model. */
+        id: number;
+      };
+    };
+    responses: {
+      200: {
+        content: {
+          "application/json": components["schemas"]["RecommendationResultUsingProfile"];
+        };
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["UserProfileInteraction"];
+        "application/x-www-form-urlencoded": components["schemas"]["UserProfileInteraction"];
+        "multipart/form-data": components["schemas"]["UserProfileInteraction"];
       };
     };
   };

@@ -1,7 +1,27 @@
 name: Full Test & Upload coverage
 on: [push, pull_request]
 jobs:
-  run_pytest_upload_coverage:
+  run_jest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v2
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: "yarn install"
+        working-directory: frontend
+        run: yarn --check-files --frozen-lockfile --non-interactive
+      - name: "jest"
+        working-directory: frontend
+        run: yarn test:unit --coverage
+      - name: "save coverage"
+        uses: "actions/upload-artifact@v2"
+        with:
+          path: frontend/coverage/clover.xml
+          name: coverage
+  run_pytest:
     runs-on: ubuntu-latest
     env:
       OS: ubuntu-latest
@@ -14,10 +34,22 @@ jobs:
         shell: bash
         run: |
           docker-compose -f docker-compose-test.yml up --exit-code-from backend
+      - name: "save coverage"
+        uses: "actions/upload-artifact@v2"
+        with:
+          name: coverage
+          path: backend/recotem/coverage.xml
+  upload-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "download coverage results"
+        uses: actions/download-artifact@v2
+        with:
+          name: coverage
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v1
         with:
-          files: ./backend/recotem/coverage.xml
+          files: ./backend/recotem/coverage.xml,./frontend/coverage/clover.xml
           verbose: false
           env_vars: OS,PYTHON
           name: codecov-umbrella

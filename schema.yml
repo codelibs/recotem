@@ -1194,7 +1194,11 @@ paths:
       - cookieAuth: []
       responses:
         '200':
-          description: No response body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectSummary'
+          description: ''
   /api/schema/:
     get:
       operationId: schema_retrieve
@@ -2711,6 +2715,23 @@ components:
       - item_column
       - name
       - user_column
+    ProjectSummary:
+      type: object
+      properties:
+        n_data:
+          type: integer
+        n_complete_jobs:
+          type: integer
+        n_models:
+          type: integer
+        ins_datetime:
+          type: string
+          format: date-time
+      required:
+      - ins_datetime
+      - n_complete_jobs
+      - n_data
+      - n_models
     RawRecommendation:
       type: object
       properties:

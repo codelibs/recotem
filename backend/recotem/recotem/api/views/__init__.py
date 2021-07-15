@@ -1,6 +1,7 @@
 from typing import Optional
 
 from django_filters import rest_framework as filters
+from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, viewsets
 from rest_framework.exceptions import NotFound
 from rest_framework.pagination import PageNumberPagination
@@ -154,6 +155,7 @@ from recotem.api.serializers.project import ProjectSummarySerializer
 
 
 class ProjectSummaryView(APIView):
+    @extend_schema(responses={200: ProjectSummarySerializer})
     def get(self, request, pk: int, format: Optional[str] = None):
         try:
             project_obj: Project = Project.objects.get(pk=pk)

@@ -445,6 +445,12 @@ export interface components {
       item_column: string;
       time_column?: string | null;
     };
+    ProjectSummary: {
+      n_data: number;
+      n_complete_jobs: number;
+      n_models: number;
+      ins_datetime: string;
+    };
     RawRecommendation: {
       user_id: string;
       user_profile: string[];
@@ -1320,8 +1326,11 @@ export interface operations {
       };
     };
     responses: {
-      /** No response body */
-      200: unknown;
+      200: {
+        content: {
+          "application/json": components["schemas"]["ProjectSummary"];
+        };
+      };
     };
   };
   /**

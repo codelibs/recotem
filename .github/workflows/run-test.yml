@@ -41,6 +41,7 @@ jobs:
           path: backend/recotem/coverage.xml
   upload-coverage:
     runs-on: ubuntu-latest
+    needs: [run_jest, run_pytest]
     steps:
       - name: "download coverage results"
         uses: actions/download-artifact@v2

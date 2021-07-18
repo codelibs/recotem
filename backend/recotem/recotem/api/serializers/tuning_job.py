@@ -1,6 +1,7 @@
 from rest_framework import serializers
+from rest_framework.exceptions import ValidationError
 
-from recotem.api.models import ParameterTuningJob, TaskAndParameterJobLink
+from recotem.api.models import ParameterTuningJob, TaskAndParameterJobLink, TrainingData
 from recotem.api.serializers.task import TaskResultSerializer
 
 
@@ -40,6 +41,9 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
         read_only_fields = ["ins_datetime", "task_links"]
 
     def create(self, validated_data):
+        data: TrainingData = validated_data["data"]
+        if data.filesize is None:
+            raise ValidationError(dict(data=[f"Data {data.pk} has been deleted."]))
         obj: ParameterTuningJob = ParameterTuningJob.objects.create(**validated_data)
         from recotem.api.tasks import start_tuning_job
 

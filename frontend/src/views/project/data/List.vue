@@ -1,5 +1,5 @@
 <template>
-  <div class="mt-1">
+  <div class="mt-1" v-if="projectId !== null">
     <v-card>
       <TrainingDataList />
     </v-card>
@@ -117,10 +117,7 @@ export default Vue.extend({
             page: this.options.page,
             page_size: this.options.itemsPerPage,
           })}`
-      ).catch((error: AxiosError) => {
-        console.log(error.response?.data);
-        return null;
-      });
+      );
       if (itemMetaData?.results !== undefined) {
         this.itemMetaData = itemMetaData.results;
         this.itemMetaTotalSize = itemMetaData.count || null;

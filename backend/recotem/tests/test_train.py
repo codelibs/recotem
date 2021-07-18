@@ -49,6 +49,12 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         "id"
     ]
 
+    pkl_file.seek(0)
+    deleted_data_id = client.post(
+        data_url, dict(project=project_id, file=pkl_file)
+    ).json()["id"]
+    client.delete(f"{data_url}{deleted_data_id}/unlink_file/")
+
     assert client.post(split_config_url, dict(heldout_ratio=1.1)).status_code == 400
     assert client.post(split_config_url, dict(test_user_ratio=-0.1)).status_code == 400
     split_id = client.post(
@@ -58,6 +64,21 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
     evaluation_id = client.post(
         evaluation_config_url, dict(cutoff=10, target_metric="map")
     ).json()["id"]
+
+    job_response_unlinked_data = client.post(
+        parameter_tuning_job_url,
+        dict(
+            data=deleted_data_id,
+            split=split_id,
+            evaluation=evaluation_id,
+            n_tasks_parallel=1,
+            n_trials=5,
+            memory_budget=1,
+            timeout_singlestep=5,
+        ),
+    )
+    job_response_unlinked_data.status_code == 400
+    assert "has been deleted" in job_response_unlinked_data.json()["data"][0]
 
     job_response = client.post(
         parameter_tuning_job_url,
@@ -70,8 +91,9 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
             memory_budget=1,
             timeout_singlestep=5,
         ),
-    ).json()
-    job_id = job_response["id"]
+    )
+    job_response.status_code == 201
+    job_id = job_response.json()["id"]
 
     best_config: Optional[int] = None
     for _ in range(30):

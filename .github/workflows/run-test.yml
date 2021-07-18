@@ -19,7 +19,7 @@ jobs:
       - name: "save coverage"
         uses: "actions/upload-artifact@v2"
         with:
-          path: frontend/coverage/clover.xml
+          path: frontend/coverage/
           name: coverage
   run_pytest:
     runs-on: ubuntu-latest

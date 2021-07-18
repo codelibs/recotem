@@ -1,6 +1,6 @@
 export function prettyFileSize(x: number | null): string {
   if (x === null) {
-    return "Unknown";
+    return "unknown";
   }
   if (x < 1024) {
     return `${x}B`;

@@ -24,6 +24,7 @@
         <v-toolbar-title>Training Data</v-toolbar-title>
         <v-spacer></v-spacer>
         <DataUpload
+          name="training-data-upload"
           v-if="!isSelection"
           v-model="trainingDataUploadDialogue"
           :projectId="projectId"
@@ -62,7 +63,6 @@ import { prettifyDate } from "@/utils/date";
 import { DataTableHeader, DataTableOptions } from "@/utils/table";
 
 import { AuthModule } from "@/store/auth";
-import { AxiosError } from "axios";
 
 import DataUpload from "@/components/DataUpload.vue";
 

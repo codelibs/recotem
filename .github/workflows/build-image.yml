@@ -29,26 +29,9 @@ jobs:
         uses: docker/metadata-action@v3
         with:
           images: ghcr.io/codelibs/recotem-backend
-      - name: Build and push Docker image (backend)
-        uses: docker/build-push-action@v2
-        with:
-          context: ./backend
-          file: ./backend/backend.dockerfile
-          #platforms: linux/amd64
-          push: true
-          tags: codelibs/recotem-backend:${{github.head_ref}}
-#      - name: Extract metadata (tags, labels) for Docker
-#        id: meta_worker
-#        uses: docker/metadata-action@v3
-#        with:
-#          images: ghcr.io/recotem-worker
-#      - name: Build and push Docker image (worker)
-#        uses: docker/build-push-action@v2
-#        with:
-#          context: ./backend
-#          file: ./backend/celery.dockerfile
-#          platforms: linux/amd64,linux/arm64
-#          push: true
-#          tags: ${{ steps.meta_worker.outputs.tags }}
-#          labels: ${{ steps.meta_worker.outputs.labels }}
-#
+      - name: Build and push docker image
+        run: |
+          version=0.0.1
+          tag=ghcr.io/codelibs/recotem-backend:${version}
+          cd backend && \
+            docker buildx build -f backend.dockerfile -t "${tag}" --push .

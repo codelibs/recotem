@@ -1,6 +1,7 @@
 import pickle
 import random
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -15,6 +16,7 @@ from rest_framework.response import Response
 
 from recotem.api.models import ItemMetaData, Project, TrainedModel
 from recotem.api.serializers import TrainedModelSerializer
+from recotem.api.utils import read_dataframe
 
 from .filemixin import FileDownloadRemoveMixin
 
@@ -60,7 +62,9 @@ def fetch_item_metadata(pk: int) -> Optional[pd.DataFrame]:
         model_record: ItemMetaData = ItemMetaData.objects.get(pk=pk)
         project: Project = model_record.project
         item_column: str = project.item_column
-        df: pd.DataFrame = pickle.load(model_record.file)
+        df: pd.DataFrame = read_dataframe(
+            Path(model_record.file.name), model_record.file
+        )
         df[item_column] = [str(x) for x in df[item_column]]
         return df.drop_duplicates(item_column).set_index(
             model_record.project.item_column

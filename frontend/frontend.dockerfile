@@ -12,7 +12,7 @@ COPY ./ /app/
 
 RUN yarn run build
 
-FROM nginx:1.15
+FROM nginx:1.21.1
 
 COPY --from=build-stage /app/dist/ /usr/share/nginx/html
 COPY --from=build-stage /app/nginx.conf /etc/nginx/conf.d/default.conf

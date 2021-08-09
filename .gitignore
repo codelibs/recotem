@@ -35,5 +35,6 @@ backend/recotem/htmlcov/*
 
 frontend/coverage
 
-recotem-compose.bat
 recotem-compose.zip
+recotem-compose.bat
+recotem-compose.sh

@@ -67,8 +67,9 @@ jobs:
              --push --platform linux/amd64,linux/arm64 .
   upload-release-artifact:
     runs-on: ubuntu-latest
-
     needs: [build-backend-worker, build-frontend]
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v2

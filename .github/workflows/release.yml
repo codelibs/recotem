@@ -81,8 +81,5 @@ jobs:
       - name: Test
         run: cat recotem-compose.bat
       - name: Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            recotem-compose.bat
-            recotem-compose.zip
+        run : |
+          gh release create ${GITHUB_REF##*/} 'recotem-compose.bat#Script for windows' 'recotem-compose.zip#Minimal docker-compose for Linux/MacOS'

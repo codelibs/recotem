@@ -53,6 +53,8 @@ cd %TEMP%\\recotem
 (
 {str_to_echo(production_env_str)}
 ) >production.env
+
+docker-compose.exe up
 """
     with open("recotem-compose.bat", "w", newline="\r\n") as ofs:
         ofs.write(bat_file_content)

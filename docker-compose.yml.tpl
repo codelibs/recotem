@@ -41,7 +41,7 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf
       - static-files:/app/dist/static
     ports:
-      - "8000:80"
+      - 8000:80
 volumes:
   data-location:
     driver: local

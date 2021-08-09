@@ -34,3 +34,6 @@ backend/recotem/htmlcov/*
 **/coverage.xml
 
 frontend/coverage
+
+recotem-compose.bat
+recotem-compose.zip

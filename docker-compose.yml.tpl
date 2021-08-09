@@ -7,39 +7,33 @@ services:
     volumes:
       - db-data:/var/lib/postgresql/data/pgdata
     env_file:
-      - envs/production.env
+      - production.env
     environment:
       - PGDATA=/var/lib/postgresql/data/pgdata
   backend:
     depends_on:
       - db
       - queue
-    build:
-      context: ./backend
-      dockerfile: backend.dockerfile
+    image: ghcr.io/codelibs/recotem-backend:{version}
     volumes:
       - data-location:/app/data
       - static-files:/app/dist/static
     env_file:
-      - envs/production.env
+      - production.env
   celery_worker:
     depends_on:
       - backend
-    build:
-      context: ./backend
-      dockerfile: celery.dockerfile
+    image: ghcr.io/codelibs/recotem-worker:{version}
     volumes:
       - data-location:/app/data
     env_file:
-      - envs/production.env
+      - production.env
   frontend:
     depends_on:
       - backend
-    build:
-      context: ./frontend
-      dockerfile: frontend.dockerfile
+    image: ghcr.io/codelibs/recotem-frontend:{version}
     env_file:
-      - envs/production.env
+      - production.env
   proxy:
     depends_on:
       - backend
@@ -49,7 +43,7 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf
       - static-files:/app/dist/static
     ports:
-      - "8000:80"
+      - 8000:80
 volumes:
   data-location:
     driver: local

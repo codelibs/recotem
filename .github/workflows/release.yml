@@ -83,4 +83,4 @@ jobs:
         run: cat recotem-compose.bat
       - name: Release
         run : |
-          gh release create ${GITHUB_REF##*/} 'recotem-compose.bat#Script for windows' 'recotem-compose.zip#Minimal docker-compose for Linux/MacOS'
+          gh release create ${GITHUB_REF##*/} 'recotem-compose.bat#Script for Windows' 'recotem-compose.sh#Script for Linux/MacOS'

@@ -1,7 +1,6 @@
 import os
 import re
 from pathlib import Path
-from zipfile import ZipFile
 
 if __name__ == "__main__":
     VERSION = re.split(r"\/", os.environ["GITHUB_REF"])[-1]
@@ -12,10 +11,37 @@ if __name__ == "__main__":
 
     nginx_conf_str = (WORKDIR / "nginx.conf").read_text()
     production_env_str = (WORKDIR / "envs" / "production.env").read_text()
-    with ZipFile("recotem-compose.zip", "w") as ofs:
-        ofs.writestr("recotem/docker-compose.yml", dc_yml_content)
-        ofs.writestr("recotem/nginx.conf", nginx_conf_str)
-        ofs.writestr("recotem/production.env", production_env_str)
+
+    def str_to_echo_unix(target: str) -> str:
+        result = ""
+        first = True
+        for l in target.splitlines():
+            if not first:
+                result += "\n"
+            first = False
+            result += re.sub(r"([\$])", r"\\\1", l)
+        return result
+
+    sh_file_content = rf"""#!/bin/sh
+cd /tmp
+mkdir -p recotem
+cd recotem
+cat > docker-compose.yml << EOM
+{str_to_echo_unix(dc_yml_content)}
+EOM
+
+cat > nginx.conf << EOM
+{str_to_echo_unix(nginx_conf_str)}
+EOM
+
+cat > production.env << EOM
+{str_to_echo_unix(production_env_str)}
+EOM
+
+docker-compose up
+"""
+    with open("recotem-compose.sh", "w", newline="\n") as ofs:
+        ofs.write(sh_file_content)
 
     def str_to_echo(target: str) -> str:
         result = ""

@@ -29,14 +29,13 @@ services:
     env_file:
       - production.env
   frontend:
-    depends_on:
-      - backend
+    backend:
+        condition: service_healthy
     image: ghcr.io/codelibs/recotem-frontend:{version}
     env_file:
       - production.env
   proxy:
     depends_on:
-      - backend
       - frontend
     image: nginx:1.21.1
     volumes:

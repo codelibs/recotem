@@ -11,3 +11,6 @@ RUN bash -c "if \"$RECOTEM_DEV\"; then pip install ipython; fi"
 COPY recotem/ /app
 EXPOSE 80
 CMD ["/app/start.sh"]
+
+HEALTHCHECK --interval=5s --timeout=5s --start-period=20s  --retries=10 \
+    CMD curl -f http://localhost:80/api/ping/ || exit 1

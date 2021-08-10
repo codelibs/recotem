@@ -24,7 +24,8 @@ services:
       - envs/production.env
   celery_worker:
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     build:
       context: ./backend
       dockerfile: celery.dockerfile
@@ -34,7 +35,8 @@ services:
       - envs/production.env
   frontend:
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     build:
       context: ./frontend
       dockerfile: frontend.dockerfile
@@ -42,7 +44,6 @@ services:
       - envs/production.env
   proxy:
     depends_on:
-      - backend
       - frontend
     image: nginx:1.21.1
     volumes:

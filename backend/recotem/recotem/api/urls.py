@@ -13,6 +13,7 @@ from recotem.api.views import (
     ItemMetaDataViewset,
     ModelConfigurationViewset,
     ParameterTuningJobViewSet,
+    PingView,
     ProjectSummaryView,
     ProjectViewSet,
     SplitConfigViewSet,
@@ -41,6 +42,7 @@ router.register(r"task_log", TaskLogViewSet, basename="task_log")
 
 urlpatterns = [
     path("", include(router.urls)),
+    path("ping/", PingView.as_view()),
     path("token/", obtain_auth_token),
     path("admin/", admin.site.urls),
     path("project_summary/<int:pk>/", ProjectSummaryView.as_view()),

@@ -1,9 +1,11 @@
 from typing import Optional
 
+from django.db import connections
+from django.db.utils import ConnectionDoesNotExist
 from django_filters import rest_framework as filters
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, viewsets
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import APIException, NotFound
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -152,6 +154,18 @@ class TaskLogViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 from recotem.api.serializers.project import ProjectSummarySerializer
+
+
+class PingView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        try:
+            conn = connections["default"]
+            return Response(dict(success=True))
+        except ConnectionDoesNotExist:
+            raise APIException(detail=dict(success=False), code=400)
 
 
 class ProjectSummaryView(APIView):

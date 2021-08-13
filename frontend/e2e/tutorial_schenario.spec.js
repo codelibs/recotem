@@ -10,6 +10,7 @@ async function screenshotWithNumber(elm, name) {
   });
 }
 test("test", async ({ page }) => {
+  test.setTimeout(120000);
   const projectName = `example`;
   // Go to http://localhost:8000/#/login?redirect=%2Fproject-list
   await page.goto("http://localhost:8000/#/login?redirect=%2Fproject-list");

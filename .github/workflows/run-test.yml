@@ -1,6 +1,33 @@
 name: Full Test & Upload coverage
 on: [push, pull_request]
 jobs:
+  run_playwright:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v2
+        with:
+          node-version: 16
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: "yarn install"
+        working-directory: frontend
+        run: yarn --check-files --frozen-lockfile --non-interactive
+      - name: "run-test"
+        run: |
+          docker-compose build
+          docker-compose up -d
+          until curl -f http://localhost:8000/api/ping/
+          do
+            echo "not success"
+            sleep 1
+          done
+          cd frontend
+          npx playwright test e2e
+      - name: "save coverage"
+        uses: "actions/upload-artifact@v2"
+        with:
+          path: frontend/imgs/*
   run_jest:
     runs-on: ubuntu-latest
     steps:

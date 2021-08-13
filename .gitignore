@@ -28,7 +28,6 @@ pnpm-debug.log*
 **.pyc
 .coverage
 
-*.csv
 backend/recotem/htmlcov/*
 
 **/coverage.xml

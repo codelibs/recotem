@@ -2,7 +2,7 @@
   <v-container>
     <ValidationObserver v-slot="{ valid }">
       <div class="d-flex">
-        <div>
+        <div name="which">
           <v-radio-group class="mr-6" v-model="how">
             <v-radio :value="1" name="use-default" label="Use Default Values">
             </v-radio>

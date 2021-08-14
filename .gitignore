@@ -28,7 +28,6 @@ pnpm-debug.log*
 **.pyc
 .coverage
 
-*.csv
 backend/recotem/htmlcov/*
 
 **/coverage.xml
@@ -38,3 +37,5 @@ frontend/coverage
 recotem-compose.zip
 recotem-compose.bat
 recotem-compose.sh
+
+frontend/imgs/

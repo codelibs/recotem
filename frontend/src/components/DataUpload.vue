@@ -44,7 +44,7 @@ export default Vue.extend({
   },
   data(): Data {
     return {
-      uploadDialog: false,
+      uploadDialog: this.value,
       createdFileId: null,
     };
   },

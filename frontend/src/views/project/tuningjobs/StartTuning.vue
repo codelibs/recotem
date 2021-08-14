@@ -44,6 +44,7 @@
                   <v-icon>mdi-arrow-left</v-icon>Previous
                 </v-btn>
                 <v-btn
+                  name="to-step-3"
                   class="ml-2"
                   :disabled="!isValid"
                   @click="step = 3"
@@ -65,6 +66,7 @@
                   <v-icon>mdi-arrow-left</v-icon>Previous
                 </v-btn>
                 <v-btn
+                  name="to-step-4"
                   class="ml-2"
                   :disabled="!isValid"
                   @click="step = 4"

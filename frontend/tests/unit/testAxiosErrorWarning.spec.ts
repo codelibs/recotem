@@ -28,6 +28,8 @@ describe("Main.vue", () => {
       config: {},
       message: "Unhandled exception without response",
       name: "",
+      isAxiosError: true,
+      toJSON: () => ({}),
     });
     await flushPromises();
     expect(wrapper.text()).toContain("Unhandled exception without response");
@@ -43,6 +45,8 @@ describe("Main.vue", () => {
         config: {},
         headers: {},
       },
+      isAxiosError: true,
+      toJSON: () => ({}),
     });
     await flushPromises();
     expect(wrapper.text()).toContain("dummyDataText");

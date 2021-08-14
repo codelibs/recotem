@@ -23,12 +23,12 @@ jobs:
             sleep 1
           done
           cd frontend
-          npx playwright test e2e 
+          npx playwright test e2e
       - name: "save imgs"
         uses: "actions/upload-artifact@v2"
         with:
           path: frontend/imgs/*
-          name: imgs          
+          name: imgs
   run_jest:
     runs-on: ubuntu-latest
     steps:

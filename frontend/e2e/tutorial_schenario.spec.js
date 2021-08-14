@@ -10,6 +10,7 @@ async function screenshotWithNumber(elm, name) {
   });
 }
 test("test", async ({ page }) => {
+  const boundingBoxInfo = [];
   test.setTimeout(120000);
   const projectName = `example`;
   // Go to http://localhost:8000/#/login?redirect=%2Fproject-list
@@ -65,12 +66,20 @@ test("test", async ({ page }) => {
     page.click('button:has-text("Create new project")'),
   ]);
   await sleep(1000);
-  await screenshotWithNumber(page, "empty-project-top");
 
+  async function hoverElem(elem) {
+    const box = await elem.boundingBox();
+    elem.hover();
+  }
+
+  const startTuningButton = await page.$("text=Start upload -> tuning");
+  hoverElem(startTuningButton);
+
+  await screenshotWithNumber(page, "empty-project-top");
   // Click text=Start upload -> tuning
   await Promise.all([
     page.waitForNavigation(/*{ url: 'http://localhost:8000/#/project/1/first-tuning' }*/),
-    page.click("text=Start upload -> tuning"),
+    startTuningButton.click(),
   ]);
   await sleep(2000);
   await screenshotWithNumber(page, "file-input");
@@ -107,13 +116,14 @@ test("test", async ({ page }) => {
   await sleep(1000);
   await screenshotWithNumber(page, "job-config");
 
-  await page.click(':nth-match(:text("Manually Define"), 3)');
-  await page.fill('input[name="n_trials"]', "5");
+  //await page.click(':nth-match(:text("Manually Define"), 3)');
+  //await page.fill('input[name="n_trials"]', "5");
   // Click button:has-text("Start The job")
   await Promise.all([
     page.waitForNavigation(/*{ url: 'http://localhost:8000/#/project/1/tuning_job/1' }*/),
     page.click('button:has-text("Start The job")'),
   ]);
+  await sleep(1000);
   await screenshotWithNumber(page, "tuning-job");
 
   // Click text=ConfigurationData purchase_log.csv Trials40Train after tuningtrueOverall timeout >> :nth-match(div, 4)
@@ -122,6 +132,7 @@ test("test", async ({ page }) => {
   await page.click("text=Logs");
   await sleep(3000);
   await screenshotWithNumber(page, "tuning-logs");
+  await sleep(20000);
 
   // Click text=Results
   await page.click("text=Logs");

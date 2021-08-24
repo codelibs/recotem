@@ -67,7 +67,8 @@
     </template>
     <div class="text-center">
       <v-btn color="primary" :to="{ name: 'first-tuning' }">
-        <v-icon>mdi-tune</v-icon> Start upload -> tuning</v-btn
+        <v-icon>mdi-tune</v-icon> Start upload
+        <v-icon>mdi-arrow-right</v-icon> tuning</v-btn
       >
     </div>
 

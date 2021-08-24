@@ -72,7 +72,7 @@ test("test", async ({ page }) => {
     elem.hover();
   }
 
-  const startTuningButton = await page.$("text=Start upload -> tuning");
+  const startTuningButton = await page.$(':has-text("Start upload")');
   hoverElem(startTuningButton);
 
   await screenshotWithNumber(page, "empty-project-top");

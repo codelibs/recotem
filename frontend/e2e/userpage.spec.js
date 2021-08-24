@@ -77,7 +77,7 @@ test("test", async ({ page }) => {
 
   await page.goto(projectURL);
 
-  const startTuningButton = await page.$("text=Start upload -> tuning");
+  const startTuningButton = await page.$('has-text:("Start upload")');
 
   await screenshotWithNumber(page, "project-top", "empty-project-top");
   // Click text=Start upload -> tuning

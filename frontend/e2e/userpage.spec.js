@@ -3,16 +3,15 @@ const { test, expect } = require("@playwright/test");
 const sleep = (msec) => new Promise((resolve) => setTimeout(resolve, msec));
 
 let i = 1;
-async function screenshotWithNumber(elm, name) {
+async function screenshotWithNumber(elm, pageName, name) {
   await elm.screenshot({
-    path: `imgs/tutorial/${i++}.${name}.png`,
+    path: `imgs/user/${pageName}:${name}.png`,
     fullPage: true,
   });
 }
 test("test", async ({ page }) => {
   const boundingBoxInfo = [];
   test.setTimeout(120000);
-  const projectName = `example`;
   // Go to http://localhost:8000/#/login?redirect=%2Fproject-list
   await page.goto("http://localhost:8000/#/login?redirect=%2Fproject-list");
 
@@ -28,7 +27,6 @@ test("test", async ({ page }) => {
   // Fill input[name="password"]
   await page.fill('input[name="password"]', "very_bad_password");
   await sleep(1000);
-  await screenshotWithNumber(page, "input-login-info");
 
   // Click button:has-text("Login")
   await Promise.all([
@@ -36,13 +34,15 @@ test("test", async ({ page }) => {
     page.click('button:has-text("Login")'),
   ]);
   await sleep(300);
-  await screenshotWithNumber(page, "project-top");
+  await screenshotWithNumber(page, "project-list", "empty-project-list");
 
   // Click div[role="tab"]:has-text("Create")
   await page.click('div[role="tab"]:has-text("Create")');
 
   // Click input[name="project-name"]
   await page.click('input[name="project-name"]');
+
+  const projectName = `my ec example`;
   await page.fill('input[name="project-name"]', projectName);
 
   // Press Tab
@@ -59,30 +59,36 @@ test("test", async ({ page }) => {
   await page.fill('input[name="item column name"]', "item_id");
   await sleep(1000);
 
-  await screenshotWithNumber(page, "fill-project-info");
+  await screenshotWithNumber(page, "project-list", "fill-project-info");
   // Click button:has-text("Create new project")
   await Promise.all([
     page.waitForNavigation(/*{ url: 'http://localhost:8000/#/project/1/' }*/),
     page.click('button:has-text("Create new project")'),
   ]);
-  await sleep(1000);
+  const projectURL = await page.url();
+  await page.goto("http://localhost:8000/#/project-list");
 
-  async function hoverElem(elem) {
-    const box = await elem.boundingBox();
-    elem.hover();
-  }
+  await sleep(1000);
+  await screenshotWithNumber(
+    page,
+    "project-list",
+    "project-list-with-instance"
+  );
+
+  await page.goto(projectURL);
 
   const startTuningButton = await page.$("text=Start upload -> tuning");
-  hoverElem(startTuningButton);
 
-  await screenshotWithNumber(page, "empty-project-top");
+  await screenshotWithNumber(page, "project-top", "empty-project-top");
   // Click text=Start upload -> tuning
   await Promise.all([
     page.waitForNavigation(/*{ url: 'http://localhost:8000/#/project/1/first-tuning' }*/),
     startTuningButton.click(),
   ]);
-  await sleep(2000);
-  await screenshotWithNumber(page, "file-input");
+  await sleep(1000);
+  const firstTuningURL = await page.url();
+
+  await screenshotWithNumber(page, "first-tuning", "file-input");
 
   // Click .v-file-input__text
   await page.click(".v-file-input__text");
@@ -95,51 +101,114 @@ test("test", async ({ page }) => {
   );
 
   await sleep(1000);
-  await screenshotWithNumber(page, "file-selection-done");
+  await screenshotWithNumber(page, "first-tuning", "file-selection-done");
 
   // Click button:has-text("Upload")
   await page.click('button:has-text("Upload")');
 
   await sleep(1000);
-  await screenshotWithNumber(page, "split-config");
+  await screenshotWithNumber(page, "first-tuning", "split-config-default");
+
+  await page.click(':nth-match(:text("Manually Define"), 1)');
+  await sleep(1000);
+  await page.fill(
+    ':nth-match(input[name="savename"], 1)',
+    "split config save name"
+  );
+  await sleep(500);
+  await screenshotWithNumber(page, "first-tuning", "split-config-manual");
+
+  // Click button:has-text("Start The job")
+
   // Click button:has-text("Continue")
   await page.click('button[name="to-step-3"]');
-  await sleep(1000);
-  await screenshotWithNumber(page, "evaluation-config");
-  await page.screenshot({
-    path: "tutorial_imgs/8.evaluation-config.png",
-    fullPage: true,
-  });
+  await sleep(500);
+  await screenshotWithNumber(page, "first-tuning", "evaluation-config-default");
+
+  await page.click(':nth-match(:text("Manually Define"), 2)');
+  await sleep(500);
+
+  await page.fill(
+    ':nth-match(input[name="savename"], 2)',
+    "evaluation config save name"
+  );
+
+  await screenshotWithNumber(page, "first-tuning", "evaluation-config-manual");
 
   // Click button:has-text("Continue")
   await page.click('button[name="to-step-4"]');
-  await sleep(1000);
-  await screenshotWithNumber(page, "job-config");
+  await sleep(500);
+  await screenshotWithNumber(page, "first-tuning", "job-config-default");
 
-  //await page.click(':nth-match(:text("Manually Define"), 3)');
-  //await page.fill('input[name="n_trials"]', "5");
+  await page.click(':nth-match(:text("Manually Define"), 3)');
+  await sleep(500);
+  await screenshotWithNumber(page, "first-tuning", "job-config-manual");
+
+  await page.fill('input[name="n_trials"]', "10");
   // Click button:has-text("Start The job")
   await Promise.all([
     page.waitForNavigation(/*{ url: 'http://localhost:8000/#/project/1/tuning_job/1' }*/),
     page.click('button:has-text("Start The job")'),
   ]);
-  await sleep(1000);
-  await screenshotWithNumber(page, "tuning-job");
-
-  // Click text=ConfigurationData purchase_log.csv Trials40Train after tuningtrueOverall timeout >> :nth-match(div, 4)
-  // Click text=Logs
+  await sleep(500);
+  await screenshotWithNumber(page, "tuning-job-detail", "tuning-job");
+  const tuningJobURL = await page.url();
   await page.click("text=Configuration");
   await page.click("text=Logs");
-  await sleep(3000);
-  await screenshotWithNumber(page, "tuning-logs");
-  await sleep(20000);
+  await sleep(500);
+  await screenshotWithNumber(page, "tuning-job-detail", "log-unfinished");
 
-  // Click text=Results
+  await page.goto(firstTuningURL);
+  // Click .v-file-input__text
+  await page.click(".v-file-input__text");
+  await sleep(1000);
+  // Upload purchase_log.csv
+  await page.setInputFiles(
+    'input[type="file"]',
+    "e2e/test_data/purchase_log.csv"
+  );
+
+  await sleep(1000);
+  //await screenshotWithNumber(page, "first-tuning", "file-selection-done");
+
+  // Click button:has-text("Upload")
+  await page.click('button:has-text("Upload")');
+
+  await sleep(1000);
+  await screenshotWithNumber(page, "first-tuning", "split-config-default");
+
+  await page.click(':nth-match(:text("Use Preset Config"), 1)');
+  await sleep(500);
+
+  await page.click(
+    ":nth-match(.v-data-table, 1) .v-data-table__wrapper table tbody tr td:nth-child(2)"
+  );
+  await sleep(500);
+  await screenshotWithNumber(page, "first-tuning", "split-config-preset");
+  // Click button:has-text("Start The job")
+
+  // Click button:has-text("Continue")
+  await page.click('button[name="to-step-3"]');
+  await page.click(':nth-match(:text("Use Preset Config"), 2)');
+  await page.click(
+    ":nth-match(.v-data-table, 2) .v-data-table__wrapper table tbody tr td:nth-child(2)"
+  );
+  await sleep(500);
+  await screenshotWithNumber(page, "first-tuning", "evaluation-config-preset");
+
+  await page.goto(tuningJobURL);
+  await page.click("text=Configuration");
+  await sleep(5000);
   await page.click("text=Logs");
-  await page.click("text=Results");
+  await sleep(1000);
+  await screenshotWithNumber(page, "tuning-job-detail", "log-finished");
 
-  await sleep(2000);
-  await screenshotWithNumber(page, "tuning-results");
+  await page.click("text=Results");
+  await sleep(1000);
+  await screenshotWithNumber(page, "tuning-job-detail", "result");
+
+  await page.close();
+  return;
 
   // Click text=model-1 >> i
   await Promise.all([
@@ -216,6 +285,32 @@ test("test", async ({ page }) => {
   await page.click('button:has-text("Sample")');
   await sleep(500);
   await screenshotWithNumber(page, "sample-with-metadata");
+
+  // Clean up using admin page
+  await page.goto("http://localhost:8000/api/admin");
+
+  await page.click("text=Projects");
+
+  // Click text=Project Project object (1) >> td
+  await page.click("text=Project Project object >> td");
+
+  // Select delete_selected
+  await page.selectOption('select[name="action"]', "delete_selected");
+
+  // Click button:has-text("Go")
+  await page.click('button:has-text("Go")');
+
+  // Click text=Are you sure? Are you sure you want to delete the selected project? All of the f
+  await page.click("text=Are you sure?");
+
+  // Click text=Yes, I’m sure
+  await page.click("text=Yes, I’m sure");
+
+  // Click text=View site
+  await Promise.all([
+    page.waitForNavigation(/*{ url: 'http://192.168.0.23:8000/#/project-list' }*/),
+    page.click("text=View site"),
+  ]);
 
   // Close page
   await page.close();

@@ -23,7 +23,7 @@ jobs:
             sleep 1
           done
           cd frontend
-          npx playwright test e2e
+          npx playwright test --workers=1 e2e
       - name: "save imgs"
         uses: "actions/upload-artifact@v2"
         with:

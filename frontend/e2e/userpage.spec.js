@@ -5,7 +5,7 @@ const sleep = (msec) => new Promise((resolve) => setTimeout(resolve, msec));
 let i = 1;
 async function screenshotWithNumber(elm, pageName, name) {
   await elm.screenshot({
-    path: `imgs/user/${pageName}:${name}.png`,
+    path: `imgs/user/${pageName}.${name}.png`,
     fullPage: true,
   });
 }

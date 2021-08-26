@@ -67,19 +67,13 @@ test("test", async ({ page }) => {
   ]);
   await sleep(1000);
 
-  async function hoverElem(elem) {
-    const box = await elem.boundingBox();
-    elem.hover();
-  }
-
-  const startTuningButton = await page.$(':has-text("Start upload")');
-  hoverElem(startTuningButton);
 
   await screenshotWithNumber(page, "empty-project-top");
-  // Click text=Start upload -> tuning
+  // Click text=Start upload -> tuningk:w
+
   await Promise.all([
     page.waitForNavigation(/*{ url: 'http://localhost:8000/#/project/1/first-tuning' }*/),
-    startTuningButton.click(),
+    page.click("text=Start upload tuning"),
   ]);
   await sleep(2000);
   await screenshotWithNumber(page, "file-input");

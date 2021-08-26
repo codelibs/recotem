@@ -77,9 +77,10 @@ test("test", async ({ page }) => {
 
   await page.goto(projectURL);
 
-  const startTuningButton = await page.$('has-text:("Start upload")');
+  const startTuningButton = await page.$("text=Start upload tuning");
+  expect(startTuningButton).not.toBe(undefined);
 
-  await screenshotWithNumber(page, "project-top", "empty-project-top");
+  await screenshotWithNumber(page, "project", "empty-project-top");
   // Click text=Start upload -> tuning
   await Promise.all([
     page.waitForNavigation(/*{ url: 'http://localhost:8000/#/project/1/first-tuning' }*/),
@@ -207,111 +208,57 @@ test("test", async ({ page }) => {
   await sleep(1000);
   await screenshotWithNumber(page, "tuning-job-detail", "result");
 
-  await page.close();
-  return;
+  await page.click('a:has-text("Tuning")');
 
-  // Click text=model-1 >> i
-  await Promise.all([
-    page.waitForNavigation(/*{ url: 'http://localhost:8000/#/project/1/trained_model/1' }*/),
-    page.click("text=model- >> i"),
-  ]);
-  await sleep(1000);
-  await screenshotWithNumber(page, "model-results");
-  // Click text=Preview results
-  await page.click("text=Preview results");
-
-  await page.click('button:has-text("Sample")');
-  await sleep(2000);
-  await screenshotWithNumber(page, "model-results-preview");
-
-  // Click a:has-text("Data")
-  await page.click('a:has-text("Data")');
-  await page.click("html");
-
-  // Click text=Item Meta Data Upload >> button[role="button"]
-
-  await sleep(1000);
-  await screenshotWithNumber(page, "item-metadata-upload");
-
-  await page.click('text=Item Meta Data Upload >> button[role="button"]');
+  const newJobButton = await page.$("text=Start new job");
+  await page.mouse.move(
+    (
+      await newJobButton.boundingBox()
+    ).x,
+    (
+      await newJobButton.boundingBox()
+    ).y
+  );
 
   await sleep(500);
-  await screenshotWithNumber(page, "item-metadata-file-input");
-  // Click form >> :nth-match(div:has-text("An item meta-data file."), 3)
-  await page.click(
-    'form >> :nth-match(div:has-text("An item meta-data file."), 3)'
-  );
-  // Upload item_info.csv
+  await screenshotWithNumber(page, "tuning-job-list", "job-list");
+  await newJobButton.click();
+  await sleep(500);
+  await screenshotWithNumber(page, "start-tuning", "start-tuning");
+
+  await page.click('a:has-text("Data")');
+  await page.mouse.move(320, 320);
+  await sleep(200);
+
+  await screenshotWithNumber(page, "data-list", "data-list");
+  // metadata upload
+  await page.click('text=Item Meta Data Upload >> button[role="button"]');
+  await sleep(500);
+  await screenshotWithNumber(page, "data-list", "metadata-upload");
+  await sleep(500);
+  await page.click(".v-file-input__text");
   await sleep(500);
   await page.setInputFiles('input[type="file"]', "e2e/test_data/item_info.csv");
-
-  // Click div[role="document"] button:has-text("Upload")
+  await sleep(500);
+  await screenshotWithNumber(page, "data-list", "meta-upload-selected");
   await page.click('div[role="document"] button:has-text("Upload")');
 
-  // Click a:has-text("Models")
-  await Promise.all([
-    page.waitForNavigation(/*{ url: 'http://localhost:8000/#/project/1/trained_model/' }*/),
-    page.click('a:has-text("Models")'),
-  ]);
-  await page.click("html");
-
-  await sleep(500);
-  await screenshotWithNumber(page, "model-selection");
-
-  // Click text=model-1.pkl
-  await page.click("text=model-");
-
-  // Click text=Preview results
-  await page.click("text=Preview results");
-
-  await sleep(500);
-  await screenshotWithNumber(page, "item-metadata-selection");
-
-  // Click div[role="button"]:has-text("Item meta-data to view")
-  await page.click('div[role="button"]:has-text("Item meta-data to view")');
-
-  // Click text=item_info.csv
-  await page.click("text=item_info.csv");
-
-  // Click button:has-text("Sample")
-  await page.click('button:has-text("Sample")');
-
-  // Click .v-input.v-input--is-label-active.v-input--is-dirty.theme--light.v-text-field.v-text-field--is-booted.v-select.v-select--chips .v-input__control
+  // data uploat
+  await page.click('button[role="button"]:has-text("Upload")');
+  await sleep(1000);
+  await screenshotWithNumber(page, "data-list", "data-upload");
   await page.click(
-    ".v-input.v-input--is-label-active.v-input--is-dirty.theme--light.v-text-field.v-text-field--is-booted.v-select.v-select--chips .v-input__control"
+    ".v-dialog.v-dialog--active .v-card .container span .v-form span .v-input .v-input__control .v-input__slot .v-text-field__slot .v-file-input__text"
   );
+  await sleep(300);
 
-  // Click button:has-text("Sample")
-  await page.click('button:has-text("Sample")');
-  await sleep(500);
-  await screenshotWithNumber(page, "sample-with-metadata");
-
-  // Clean up using admin page
-  await page.goto("http://localhost:8000/api/admin");
-
-  await page.click("text=Projects");
-
-  // Click text=Project Project object (1) >> td
-  await page.click("text=Project Project object >> td");
-
-  // Select delete_selected
-  await page.selectOption('select[name="action"]', "delete_selected");
-
-  // Click button:has-text("Go")
-  await page.click('button:has-text("Go")');
-
-  // Click text=Are you sure? Are you sure you want to delete the selected project? All of the f
-  await page.click("text=Are you sure?");
-
-  // Click text=Yes, I’m sure
-  await page.click("text=Yes, I’m sure");
-
-  // Click text=View site
-  await Promise.all([
-    page.waitForNavigation(/*{ url: 'http://192.168.0.23:8000/#/project-list' }*/),
-    page.click("text=View site"),
-  ]);
-
-  // Close page
+  await page.setInputFiles(
+    'input[type="file"]',
+    "e2e/test_data/purchase_log.csv"
+  );
+  await page.click(':nth-match(button:has-text("Upload"), 4)');
+  await sleep(300);
   await page.close();
+  page.screenshot({ path: "hoge.png", fullPage: true });
+  return;
 });

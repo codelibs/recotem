@@ -1,16 +1,25 @@
 const { test, expect } = require("@playwright/test");
+const { writeFile } = require("fs");
 
 const sleep = (msec) => new Promise((resolve) => setTimeout(resolve, msec));
 
 let i = 1;
 async function screenshotWithNumber(elm, pageName, name) {
+  console.log(`${pageName}.${name}`);
   await elm.screenshot({
     path: `imgs/user/${pageName}.${name}.png`,
     fullPage: true,
   });
 }
 test("test", async ({ page }) => {
-  const boundingBoxInfo = [];
+  async function savePageHTML(savePath) {
+    const html = await page.innerHTML("body");
+    writeFile(savePath, html, (err) => {
+      if (err) throw err;
+      console.log("The file has been saved!");
+    });
+  }
+
   test.setTimeout(120000);
   // Go to http://localhost:8000/#/login?redirect=%2Fproject-list
   await page.goto("http://localhost:8000/#/login?redirect=%2Fproject-list");
@@ -209,6 +218,7 @@ test("test", async ({ page }) => {
   await screenshotWithNumber(page, "tuning-job-detail", "result");
 
   await page.click('a:has-text("Tuning")');
+  await sleep(500);
 
   const newJobButton = await page.$("text=Start new job");
   await page.mouse.move(
@@ -240,25 +250,31 @@ test("test", async ({ page }) => {
   await sleep(500);
   await page.setInputFiles('input[type="file"]', "e2e/test_data/item_info.csv");
   await sleep(500);
-  await screenshotWithNumber(page, "data-list", "meta-upload-selected");
-  await page.click('div[role="document"] button:has-text("Upload")');
 
-  // data uploat
+  await screenshotWithNumber(page, "data-list", "meta-upload-selected");
+
+  await page.click('button[data-upload-button-name="item-meta-data-upload"]');
+  await sleep(500);
+  await screenshotWithNumber(page, "data-list", "meta-upload-complete");
+
+  // data upload
   await page.click('button[role="button"]:has-text("Upload")');
   await sleep(1000);
   await screenshotWithNumber(page, "data-list", "data-upload");
   await page.click(
-    ".v-dialog.v-dialog--active .v-card .container span .v-form span .v-input .v-input__control .v-input__slot .v-text-field__slot .v-file-input__text"
+    'div:right-of(input[data-file-input-name="training-data-upload"])'
   );
-  await sleep(300);
 
   await page.setInputFiles(
-    'input[type="file"]',
+    'input[data-file-input-name="training-data-upload"]',
     "e2e/test_data/purchase_log.csv"
   );
-  await page.click(':nth-match(button:has-text("Upload"), 4)');
-  await sleep(300);
+  await sleep(1000);
+  await screenshotWithNumber(page, "data-list", "data-selected");
+
+  await page.click('button[data-upload-button-name="training-data-upload"]');
+  await sleep(1000);
+  await screenshotWithNumber(page, "data-list", "data-upload-complete");
   await page.close();
-  page.screenshot({ path: "hoge.png", fullPage: true });
   return;
 });

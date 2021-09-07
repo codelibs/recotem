@@ -72,6 +72,6 @@ describe("App", () => {
     expect(urls.length).toBe(2);
 
     expect(wrapper.findComponent(Dashboard).exists()).toBe(true);
-    expect(wrapper.html()).toMatch(/Start upload.*tuning/g);
+    expect(wrapper.text()).toContain("Start upload");
   });
 });

@@ -67,7 +67,6 @@ test("test", async ({ page }) => {
   ]);
   await sleep(1000);
 
-
   await screenshotWithNumber(page, "empty-project-top");
   // Click text=Start upload -> tuningk:w
 
@@ -159,7 +158,7 @@ test("test", async ({ page }) => {
   await screenshotWithNumber(page, "item-metadata-file-input");
   // Click form >> :nth-match(div:has-text("An item meta-data file."), 3)
   await page.click(
-    'form >> :nth-match(div:has-text("An item meta-data file."), 3)'
+    'div:right-of(input[data-file-input-name="item-meta-data-upload"])'
   );
   // Upload item_info.csv
   await sleep(500);

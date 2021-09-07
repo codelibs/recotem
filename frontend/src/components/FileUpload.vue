@@ -1,5 +1,5 @@
 <template>
-  <v-container :name="name">
+  <v-container>
     <ValidationObserver v-slot="{ invalid }">
       <v-form>
         <ValidationProvider rules="uploadFileRequired">
@@ -20,7 +20,6 @@
           :disabled="invalid"
           @click="upload"
           v-if="uploadProgress === null"
-          :name="name"
           v-bind:data-upload-button-name="name"
           >Upload</v-btn
         >
@@ -68,7 +67,7 @@ export default Vue.extend({
     },
     name: {
       type: String as PropType<string>,
-      required: true,
+      default: "",
     },
     postURL: {
       type: String as PropType<string>,

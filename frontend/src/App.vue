@@ -46,6 +46,7 @@
           :to="{ name: 'data-list', params: { projectId: project.id } }"
           link
           :ripple="false"
+          data-nav-link-name="data"
         >
           <v-list-item-icon>
             <v-icon> mdi-folder</v-icon>
@@ -56,6 +57,7 @@
           :to="{ name: 'tuning-job-list', params: { projectId: project.id } }"
           link
           :ripple="false"
+          data-nav-link-name="tuning-job"
         >
           <v-list-item-icon>
             <v-icon> mdi-tune</v-icon>

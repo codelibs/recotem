@@ -71,6 +71,7 @@
             name: 'trained-model-list',
             params: { projectId: project.id },
           }"
+          data-nav-link-name="models"
         >
           <v-list-item-icon>
             <v-icon> mdi-calculator</v-icon>

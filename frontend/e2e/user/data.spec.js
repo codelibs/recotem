@@ -4,7 +4,7 @@ const {
   loginAndCreateProject,
   screenshotWithPrefix,
 } = require("./utils");
-test("test-tuning", async ({ page }) => {
+test("test-data", async ({ page }) => {
   await loginAndCreateProject(page, "data-page");
   await screenshotWithPrefix(page, "empty-project", "empty-project");
 

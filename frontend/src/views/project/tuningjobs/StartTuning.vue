@@ -19,6 +19,7 @@
             fileLabel="A training data file."
             v-model="uploadDataId"
             postURL="/api/training_data/"
+            name="tuning-job-data-upload-step"
           >
           </FileUpload>
         </div>

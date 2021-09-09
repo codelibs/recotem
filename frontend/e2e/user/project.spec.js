@@ -1,7 +1,7 @@
 const { test } = require("@playwright/test");
 const { sleep, login, screenshotWithPrefix } = require("./utils");
 
-test("test", async ({ page }) => {
+test("test-project", async ({ page }) => {
   const projectName = "project example";
   test.setTimeout(120000);
   await login(page);
@@ -62,7 +62,15 @@ test("test", async ({ page }) => {
   await screenshotWithPrefix(page, "first-tuning", "file-input");
 
   // Click .v-file-input__text
-  await page.click(".v-file-input__text");
+  await page.click(
+    'div:right-of(input[data-file-input-name="tuning-job-data-upload-step"])'
+  );
+
+  await page.setInputFiles(
+    'input[data-file-input-name="tuning-job-data-upload-step"]',
+    "e2e/test_data/purchase_log.csv"
+  );
+
   await sleep(1000);
 
   // Upload purchase_log.csv

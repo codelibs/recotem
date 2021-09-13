@@ -57,7 +57,7 @@
           :to="{ name: 'tuning-job-list', params: { projectId: project.id } }"
           link
           :ripple="false"
-          data-nav-link-name="tuning-job"
+          data-nav-link-name="tuning"
         >
           <v-list-item-icon>
             <v-icon> mdi-tune</v-icon>

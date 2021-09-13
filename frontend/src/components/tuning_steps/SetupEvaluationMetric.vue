@@ -35,6 +35,7 @@
               show-select
               v-model="selectedConfigs"
               class="pa-4"
+              data-table-name="evaluation-config-preset-name"
             >
               <template v-slot:top>
                 <div class="text-caption">Preset configurations:</div>

@@ -36,6 +36,7 @@
               show-select
               v-model="selectedConfigs"
               class="pa-4"
+              data-table-name="split-config-preset-name"
             >
               <template v-slot:top>
                 <div class="text-caption">Preset configurations:</div>
@@ -264,7 +265,9 @@ export default Vue.extend({
           result.heldout_ratio
         );
 
-        result["n_heldout"] = numberInputValueToNumberOrUndefined(result.n_heldout);
+        result["n_heldout"] = numberInputValueToNumberOrUndefined(
+          result.n_heldout
+        );
         result["test_user_ratio"] = numberInputValueToNumberOrUndefined(
           result.test_user_ratio
         );

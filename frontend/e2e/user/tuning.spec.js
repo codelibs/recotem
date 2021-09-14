@@ -92,7 +92,6 @@ test("test-tuning", async ({ page }) => {
   await page.goto(tuningJobSetupURL);
 
   await sleep(1000);
-  await screenshotWithPrefix(page, "debug", "debug");
 
   await page.click("div.v-simple-checkbox");
   await page.click('button[data-next-step="2"]');

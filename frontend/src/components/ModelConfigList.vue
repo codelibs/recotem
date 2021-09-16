@@ -13,6 +13,7 @@
       :headers="headers"
       :server-items-length="totalCount"
       :options.sync="options"
+      data-table-name="model-config-list"
     >
       <template v-slot:[`item.ins_datetime`]="{ value }">
         <span class="text-caption">{{ prettifyDate(value) }} </span>

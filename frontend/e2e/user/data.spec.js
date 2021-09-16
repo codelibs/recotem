@@ -47,6 +47,18 @@ test("test-data", async ({ page }) => {
   await page.click('button[data-upload-button-name="training-data-upload"]');
   await sleep(1000);
   await screenshotWithPrefix(page, "data-list", "data-upload-complete");
+
+  await page.click('[data-table-name="training-data-list"] table tbody tr');
+  await sleep(1000);
+  await screenshotWithPrefix(page, "data-detail", "data-detail");
+  await page.click("text=Start New Job");
+  await sleep(1000);
+  await screenshotWithPrefix(
+    page,
+    "start-tuning-with-data",
+    "start-tuning-with-data"
+  );
+
   await page.close();
   return;
 });

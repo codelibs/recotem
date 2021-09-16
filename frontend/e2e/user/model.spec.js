@@ -3,6 +3,7 @@ const {
   sleep,
   loginAndCreateProject,
   screenshotWithPrefix,
+  savePageHTML,
 } = require("./utils");
 
 test("test-tuning", async ({ page }) => {
@@ -51,17 +52,38 @@ test("test-tuning", async ({ page }) => {
   await page.mouse.move(320, 320);
   await sleep(5000);
   await screenshotWithPrefix(page, "trained-model-list", "trained-model-list");
+  const modelListURL = await page.url();
+
+  await page.click('a:has-text("Train new model")');
+  await sleep(1000);
 
   await page.click(
-    '[data-table-name="trained-model-list"] table tbody tr td:nth-child(2)'
+    '[data-table-name="training-data-list"] table tbody tr td div.v-simple-checkbox'
   );
+
+  await sleep(1000);
+  await screenshotWithPrefix(page, "start-training", "select-data");
+  await page.click('button[data-next-step="2"]');
+
+  await page.click(
+    '[data-table-name="model-config-list"] table tbody tr td div.v-simple-checkbox'
+  );
+  await sleep(1000);
+  await screenshotWithPrefix(page, "start-training", "model-config-list");
+  await page.click(':has-text("Start training")');
+
+  await page.goto(modelListURL);
+  await page.click('[data-table-name="trained-model-list"] table tbody tr td');
+
+  await page.click(':has-text("Model Configuration")');
   await sleep(500);
   await screenshotWithPrefix(page, "trained-model-detail", "model-information");
+  await page.click(':has-text("Model Configuration")');
   await page.click("text=Preview results");
   await page.click(':has-text("Sample")');
 
+  await sleep(1000);
   await screenshotWithPrefix(page, "trained-model-detail", "model-preview-raw");
-  await sleep(500);
 
   // Click div[role="button"]:has-text("Item meta-data to view")
   await page.click('div[role="button"]:has-text("Item meta-data to view")');

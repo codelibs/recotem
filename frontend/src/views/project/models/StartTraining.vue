@@ -12,7 +12,12 @@
         <v-row>
           <v-col cols="6" />
           <v-col cols="6">
-            <v-btn :disabled="dataId === null" @click="step = 2" color="info">
+            <v-btn
+              :disabled="dataId === null"
+              @click="step = 2"
+              color="info"
+              data-next-step="2"
+            >
               Continue <v-icon> mdi-arrow-right</v-icon>
             </v-btn>
           </v-col>
@@ -31,7 +36,7 @@
               @click="trainModel"
               color="info"
             >
-              <v-icon>mdi-calculator</v-icon>Start Training
+              <v-icon>mdi-calculator</v-icon>Start training
             </v-btn>
           </div>
         </div>

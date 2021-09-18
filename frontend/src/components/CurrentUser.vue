@@ -84,9 +84,9 @@ export default Vue.extend({
       }
 
       if (navigator.language === "ja") {
-        return `${AuthModule.docURLBase}/ja/${AuthModule.recotemVersion}/user/${this.$route.name}.html`;
+        return `${AuthModule.docURLBase}/ja/${AuthModule.recotemVersion}/docs/user/${this.$route.name}.html`;
       } else {
-        return `${AuthModule.docURLBase}/${AuthModule.recotemVersion}/user/${this.$route.name}.html`;
+        return `${AuthModule.docURLBase}/${AuthModule.recotemVersion}/docs/user/${this.$route.name}.html`;
       }
     },
   },

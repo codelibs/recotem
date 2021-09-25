@@ -7,7 +7,7 @@
           <div class="flex-grow-1"></div>
           <div>
             <v-btn color="primary" :to="{ name: 'start-training' }">
-              <v-icon>mdi-calculator</v-icon> Train New model</v-btn
+              <v-icon>mdi-calculator</v-icon> Train new model</v-btn
             >
           </div>
         </v-card-title>

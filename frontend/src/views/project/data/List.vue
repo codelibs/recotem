@@ -20,7 +20,8 @@
               v-model="itemMetaDataUploadDialogue"
               :projectId="projectId"
               postURL="/api/item_meta_data/"
-              fileLabel="An item meta-data file."
+              fileLabel="An item metadata file."
+              name="item-meta-data-upload"
             ></DataUpload>
           </v-toolbar>
         </template>

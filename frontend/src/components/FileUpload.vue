@@ -5,6 +5,7 @@
         <ValidationProvider rules="uploadFileRequired">
           <v-file-input
             :label="fileLabel"
+            v-bind:data-file-input-name="name"
             accept=".csv,.tsv,.ndjson,.jsonl,.pkl,.pickle,.csv.gz,.tsv.gz,.ndjson.gz,.jsonl.gz,.pkl.gz,.pickle.gz"
             v-model="uploadFile"
           >
@@ -19,6 +20,7 @@
           :disabled="invalid"
           @click="upload"
           v-if="uploadProgress === null"
+          v-bind:data-upload-button-name="name"
           >Upload</v-btn
         >
         <v-col cols="12" v-else>
@@ -62,6 +64,10 @@ export default Vue.extend({
     value: {
       type: Number as PropType<number | null>,
       default: null,
+    },
+    name: {
+      type: String as PropType<string>,
+      default: "",
     },
     postURL: {
       type: String as PropType<string>,

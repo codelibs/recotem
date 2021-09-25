@@ -5,7 +5,11 @@
         <div class="pl-4 text-h6">Tuning Jobs</div>
         <div class="flex-grow-1"></div>
         <div>
-          <v-btn :to="{ name: 'start-tuning' }" color="primary">
+          <v-btn
+            data-v-btn-link-to="start-tuning"
+            :to="{ name: 'start-tuning' }"
+            color="primary"
+          >
             <v-icon>mdi-tune</v-icon> Start new job</v-btn
           >
         </div>

@@ -62,7 +62,7 @@ const routes: Array<RouteConfig> = [
                     component: () => import("../views/project/data/Detail.vue"),
                   },
                   {
-                    path: "start_tuning_with",
+                    path: "start-tuning-with",
                     name: "start-tuning-with-data",
                     component: () =>
                       import("../views/project/data/StartTuningWithData.vue"),
@@ -77,11 +77,11 @@ const routes: Array<RouteConfig> = [
             ],
           },
           {
-            path: "tuning_job/",
+            path: "tuning-job/",
             component: () => import("../views/project/Data.vue"),
             children: [
               {
-                path: "start_tuning",
+                path: "start-tuning",
                 name: "start-tuning",
                 component: () =>
                   import("../views/project/tuningjobs/StartTuning.vue"),
@@ -100,16 +100,11 @@ const routes: Array<RouteConfig> = [
             ],
           },
           {
-            path: "trained_model/",
+            path: "trained-model/",
             component: () => import("../views/project/Data.vue"),
             children: [
               {
-                path: "",
-                name: "trained-model-list",
-                component: () => import("../views/project/models/List.vue"),
-              },
-              {
-                path: "start_training",
+                path: "start-training",
                 name: "start-training",
                 component: () =>
                   import("../views/project/models/StartTraining.vue"),
@@ -118,6 +113,11 @@ const routes: Array<RouteConfig> = [
                 path: ":trainedModelId/",
                 name: "trained-model-detail",
                 component: () => import("../views/project/models/ModelTop.vue"),
+              },
+              {
+                path: "",
+                name: "trained-model-list",
+                component: () => import("../views/project/models/List.vue"),
               },
             ],
           },

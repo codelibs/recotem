@@ -67,19 +67,12 @@ test("test", async ({ page }) => {
   ]);
   await sleep(1000);
 
-  async function hoverElem(elem) {
-    const box = await elem.boundingBox();
-    elem.hover();
-  }
-
-  const startTuningButton = await page.$("text=Start upload -> tuning");
-  hoverElem(startTuningButton);
-
   await screenshotWithNumber(page, "empty-project-top");
-  // Click text=Start upload -> tuning
+  // Click text=Start upload -> tuningk:w
+
   await Promise.all([
     page.waitForNavigation(/*{ url: 'http://localhost:8000/#/project/1/first-tuning' }*/),
-    startTuningButton.click(),
+    page.click("text=Start upload tuning"),
   ]);
   await sleep(2000);
   await screenshotWithNumber(page, "file-input");
@@ -106,11 +99,6 @@ test("test", async ({ page }) => {
   await page.click('button[name="to-step-3"]');
   await sleep(1000);
   await screenshotWithNumber(page, "evaluation-config");
-  await page.screenshot({
-    path: "tutorial_imgs/8.evaluation-config.png",
-    fullPage: true,
-  });
-
   // Click button:has-text("Continue")
   await page.click('button[name="to-step-4"]');
   await sleep(1000);
@@ -170,7 +158,7 @@ test("test", async ({ page }) => {
   await screenshotWithNumber(page, "item-metadata-file-input");
   // Click form >> :nth-match(div:has-text("An item meta-data file."), 3)
   await page.click(
-    'form >> :nth-match(div:has-text("An item meta-data file."), 3)'
+    'div:right-of(input[data-file-input-name="item-meta-data-upload"])'
   );
   // Upload item_info.csv
   await sleep(500);
@@ -216,6 +204,32 @@ test("test", async ({ page }) => {
   await page.click('button:has-text("Sample")');
   await sleep(500);
   await screenshotWithNumber(page, "sample-with-metadata");
+
+  // Clean up using admin page
+  await page.goto("http://localhost:8000/api/admin");
+
+  await page.click("text=Projects");
+
+  // Click text=Project Project object (1) >> td
+  await page.click("text=Project Project object >> td");
+
+  // Select delete_selected
+  await page.selectOption('select[name="action"]', "delete_selected");
+
+  // Click button:has-text("Go")
+  await page.click('button:has-text("Go")');
+
+  // Click text=Are you sure? Are you sure you want to delete the selected project? All of the f
+  await page.click("text=Are you sure?");
+
+  // Click text=Yes, I’m sure
+  await page.click("text=Yes, I’m sure");
+
+  // Click text=View site
+  await Promise.all([
+    page.waitForNavigation(/*{ url: 'http://192.168.0.23:8000/#/project-list' }*/),
+    page.click("text=View site"),
+  ]);
 
   // Close page
   await page.close();

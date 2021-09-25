@@ -21,6 +21,7 @@
           })
       "
       class="row-pointer"
+      data-table-name="trained-model-list"
     >
       <template v-slot:[`item.filesize`]="{ value }">
         {{ prettyFileSize(value) }}

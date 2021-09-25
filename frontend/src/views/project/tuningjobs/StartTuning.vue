@@ -19,6 +19,7 @@
             fileLabel="A training data file."
             v-model="uploadDataId"
             postURL="/api/training_data/"
+            name="tuning-job-data-upload-step"
           >
           </FileUpload>
         </div>
@@ -27,25 +28,30 @@
           <v-row>
             <v-col cols="6" />
             <v-col cols="6">
-              <v-btn :disabled="dataId === null" @click="step = 2" color="info">
+              <v-btn
+                data-next-step="2"
+                :disabled="dataId === null"
+                @click="step = 2"
+                color="info"
+              >
                 Continue <v-icon> mdi-arrow-right</v-icon>
               </v-btn>
             </v-col>
           </v-row>
         </template>
       </v-stepper-content>
-
       <v-stepper-content step="2" class="pt-2">
         <SplitConfigForm v-model="splitConfig">
           <template v-slot="{ isValid }">
             <div class="d-flex justify-center mt-8">
               <div>
-                <v-btn class="mr-2" @click="step = 1">
+                <v-btn class="mr-2" @click="step = 1" data-previous-step="1">
                   <v-icon>mdi-arrow-left</v-icon>Previous
                 </v-btn>
                 <v-btn
                   name="to-step-3"
                   class="ml-2"
+                  data-next-step="3"
                   :disabled="!isValid"
                   @click="step = 3"
                   color="info"
@@ -62,13 +68,14 @@
           <template v-slot="{ isValid }">
             <div class="d-flex justify-center mt-8">
               <div>
-                <v-btn class="mr-2" @click="step = 2">
+                <v-btn class="mr-2" @click="step = 2" data-previous-step="2">
                   <v-icon>mdi-arrow-left</v-icon>Previous
                 </v-btn>
                 <v-btn
                   name="to-step-4"
                   class="ml-2"
                   :disabled="!isValid"
+                  data-next-step="4"
                   @click="step = 4"
                   color="info"
                 >
@@ -92,7 +99,7 @@
                 @click="createJob"
                 color="primary"
               >
-                <v-icon>mdi-tune</v-icon>Start The job
+                <v-icon>mdi-tune</v-icon>Start the job
               </v-btn>
             </div>
           </div>

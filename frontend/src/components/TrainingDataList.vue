@@ -18,6 +18,7 @@
     :show-select="isSelection"
     :single-select="isSelection"
     v-model="selectedItem"
+    data-table-name="training-data-list"
   >
     <template v-slot:top>
       <v-toolbar flat>

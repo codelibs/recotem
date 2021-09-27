@@ -54,6 +54,7 @@
             <v-select
               :items="metricChoice"
               v-model="customConfig.target_metric"
+              label="Target Metric"
             >
             </v-select>
             <ValidationProvider

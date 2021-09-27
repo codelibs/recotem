@@ -96,6 +96,7 @@
             chips
             v-model="customConfig.tried_algorithms"
             :items="algoChoices"
+            label="Algorithms"
           >
           </v-select>
           <v-checkbox

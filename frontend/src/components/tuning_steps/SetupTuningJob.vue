@@ -159,7 +159,6 @@ const algoChoices = [
   "IALS",
   "AsymmetricCosineKNN",
   "RP3beta",
-  "AsymmetricCosineUserKNN",
   "TopPop",
   "TruncatedSVD",
 ];

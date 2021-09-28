@@ -174,7 +174,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
 # Celery settings
-CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="amqp://guest:guest@localhost")
+CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="amqp://user:bitnami@localhost")
 # CELERY_TASK_ALWAYS_EAGER = env("CELERY_TASK_ALWAYS_EAGER", cast=bool, default=False)
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_RESULT_BACKEND = "django-db"

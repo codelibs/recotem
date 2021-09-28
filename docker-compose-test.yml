@@ -1,7 +1,7 @@
 version: "3.7"
 services:
   queue:
-    image: rabbitmq:3
+    image: bitnami/rabbitmq:3.9
     ports:
       - "5672:5672"
   backend:
@@ -19,7 +19,7 @@ services:
       - "8000:80"
     environment:
       - DJANGO_SETTINGS_MODULE=recotem.settings
-      - CELERY_BROKER_URL=amqp://guest@queue:5672
+      - CELERY_BROKER_URL=amqp://user:bitnami@queue:5672
       - RECOTEM_TESTING=true
     stdin_open: true # docker run -i
     tty: true # docker run -t

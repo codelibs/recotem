@@ -1,7 +1,7 @@
 version: "3.7"
 services:
   queue:
-    image: rabbitmq:3
+    image: bitnami/rabbitmq:3.9
   db:
     image: postgres:12
     volumes:

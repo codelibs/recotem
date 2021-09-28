@@ -8,8 +8,6 @@ services:
       - db-data:/var/lib/postgresql/data/pgdata
     env_file:
       - production.env
-    environment:
-      - PGDATA=/var/lib/postgresql/data/pgdata
   backend:
     depends_on:
       - db

@@ -3,7 +3,7 @@ const { sleep, login, screenshotWithPrefix } = require("./utils");
 
 test("test-project", async ({ page }) => {
   const projectName = "project example";
-  test.setTimeout(120000);
+  test.setTimeout(200000);
   await login(page);
   await sleep(300);
   await screenshotWithPrefix(page, "project-list", "project-list");

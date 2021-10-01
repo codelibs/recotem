@@ -27,7 +27,8 @@ services:
     env_file:
       - production.env
   frontend:
-    backend:
+    depends_on:
+      backend:
         condition: service_healthy
     image: ghcr.io/codelibs/recotem-frontend:{version}
     env_file:

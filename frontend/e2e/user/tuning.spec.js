@@ -6,7 +6,7 @@ const {
 } = require("./utils");
 
 test("test-tuning", async ({ page }) => {
-  test.setTimeout(120000);
+  test.setTimeout(200000);
   await loginAndCreateProject(page, "tuning-page");
   await page.click('a[data-nav-link-name="data"]');
 

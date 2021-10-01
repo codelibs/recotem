@@ -1,8 +1,8 @@
 name: publish-release
 on:
-  push:
-    tags:
-      - "*"
+  release:
+    types:
+      - created
 jobs:
   build-backend-worker:
     permissions:
@@ -79,8 +79,6 @@ jobs:
           python-version: 3.8
       - name: Build release object
         run: python release.py
-      - name: Test
-        run: cat recotem-compose.bat
       - name: Release
         run : |
-          gh release create ${GITHUB_REF##*/} 'recotem-compose.bat#Script for Windows' 'recotem-compose.sh#Script for Linux/MacOS'
+          gh release upload ${GITHUB_REF##*/} 'recotem-compose.zip#Docker resources to try out' --clobber

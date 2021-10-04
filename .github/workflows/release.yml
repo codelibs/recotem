@@ -78,7 +78,7 @@ jobs:
         with:
           python-version: 3.8
       - name: Build release object
-        run: pip install yaml==5.4.1 && python release.py
+        run: pip install PyYaml==5.4.1 && python release.py
       - name: Release
         run : |
           gh release upload ${GITHUB_REF##*/} 'recotem-compose-${GITHUB_REF##*/}.zip#Docker resources to try out' --clobber

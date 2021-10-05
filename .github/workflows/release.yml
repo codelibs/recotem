@@ -81,4 +81,4 @@ jobs:
         run: pip install yaml==5.4.1 && python release.py
       - name: Release
         run : |
-          gh release upload ${GITHUB_REF##*/} 'recotem-compose-${GITHUB_REF##*/}.zip#Docker resources to try out' --clobber
+          gh release upload ${GITHUB_REF##*/} recotem-compose-${GITHUB_REF##*/}.zip'#Docker resources to try out' --clobber

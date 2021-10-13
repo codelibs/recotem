@@ -1,24 +1,15 @@
-# recotem
+# Recotem
 
-## Project setup
-```
-yarn install
-```
+## Overview
 
-### Compiles and hot-reloads for development
-```
-yarn serve
-```
+Recotem is an easy to use interface to recommender systems;
+Recotem can be launched on any platform with Docker.
+It ships with a Web-base UI, and you can train and (qualitatively) evaluate the recommendation engine solely using UI.
 
-### Compiles and minifies for production
-```
-yarn build
-```
+![Sample usage of recotem](./recotem-sample-image.png)
 
-### Lints and fixes files
-```
-yarn lint
-```
+Recotem is licensed under Apache 2.0
 
-### Customize configuration
-See [Configuration Reference](https://cli.vuejs.org/config/).
+## Getting Started
+
+## Development

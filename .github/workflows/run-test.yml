@@ -1,7 +1,7 @@
 name: Full Test & Upload coverage
 on:
   push:
-    tags-ignore:
+    branches:
       - '**'
   pull_request:
 jobs:

@@ -1,7 +1,9 @@
 name: pre-commit
 on:
-  pull_request:
   push:
+    branches:
+      - '**'
+  pull_request:
 jobs:
   pre-commit:
     runs-on: ubuntu-latest

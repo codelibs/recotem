@@ -5,7 +5,7 @@ import {
   Mutation,
 } from "vuex-module-decorators";
 import store from "@/store";
-import { recotemVersion, docURLBase } from "@/env";
+import { recotemVersion, recotemDocVersion, docURLBase } from "@/env";
 import { paths, components } from "@/api/schema";
 
 const tokenObtainUrl = "/api/auth/login/";
@@ -26,6 +26,7 @@ export class Auth extends VuexModule {
   currentProjectId: number | null = null;
   currentProjectDetail: Project | null = null;
   recotemVersion: string = recotemVersion;
+  recotemDocVersion: string = recotemDocVersion;
   docURLBase: string = docURLBase;
   errors: string[] = [];
 

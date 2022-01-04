@@ -16,7 +16,7 @@ class Command(BaseCommand):
             return
         pwd: str = os.environ.get("DEFAULT_ADMIN_PASSWORD")
         if pwd is None:
-            pwd_chars = string.ascii_uppercase+string.ascii_lowercase+string.digits
+            pwd_chars = string.ascii_uppercase + string.ascii_lowercase + string.digits
             pwd = "".join(secrets.choice(pwd_chars) for _ in range(12))
             pwd_msg = f' and password "{pwd}"'
         else:
@@ -24,6 +24,6 @@ class Command(BaseCommand):
         self.stdout.write(
             "No user found. "
             'Create an administrative user with username "admin"'
-            f'{pwd_msg}.'
+            f"{pwd_msg}."
         )
         User.objects.create_superuser(username="admin", password=pwd)

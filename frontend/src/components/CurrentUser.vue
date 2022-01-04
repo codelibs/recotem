@@ -35,7 +35,7 @@
             <v-icon>mdi-language-python</v-icon> django admin
           </v-list-item-title>
         </v-list-item>
-        <v-list-item class="justify-center" link :href="docURL">
+        <v-list-item class="justify-center" link :href="docURL" target="_blank">
           <v-list-item-title>
             <v-icon>mdi-help</v-icon> help
           </v-list-item-title>
@@ -84,9 +84,9 @@ export default Vue.extend({
       }
 
       if (navigator.language === "ja") {
-        return `${AuthModule.docURLBase}/ja/${AuthModule.recotemVersion}/docs/user/${this.$route.name}.html`;
+        return `${AuthModule.docURLBase}/${AuthModule.recotemDocVersion}/ja/docs/user/${this.$route.name}`;
       } else {
-        return `${AuthModule.docURLBase}/${AuthModule.recotemVersion}/docs/user/${this.$route.name}.html`;
+        return `${AuthModule.docURLBase}/${AuthModule.recotemDocVersion}/docs/user/${this.$route.name}`;
       }
     },
   },

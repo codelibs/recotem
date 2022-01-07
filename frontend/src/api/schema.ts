@@ -149,6 +149,9 @@ export interface paths {
     delete: operations["parameter_tuning_job_destroy"];
     patch: operations["parameter_tuning_job_partial_update"];
   };
+  "/api/ping/": {
+    get: operations["ping_retrieve"];
+  };
   "/api/project/": {
     get: operations["project_list"];
     post: operations["project_create"];
@@ -428,7 +431,7 @@ export interface components {
       basename?: string | null;
       filesize?: number;
     };
-    /** User model w/o password */
+    /** Custom User model w/o password */
     PatchedUserDetails: {
       pk?: number;
       /** Required. 150 characters or fewer. Letters, digits and @/./+/-/_ only. */
@@ -436,6 +439,8 @@ export interface components {
       email?: string;
       first_name?: string;
       last_name?: string;
+      /** Designates that this user has all permissions without explicitly assigning them. */
+      is_superuser?: boolean;
     };
     Project: {
       id: number;
@@ -538,7 +543,7 @@ export interface components {
       basename: string | null;
       filesize: number;
     };
-    /** User model w/o password */
+    /** Custom User model w/o password */
     UserDetails: {
       pk: number;
       /** Required. 150 characters or fewer. Letters, digits and @/./+/-/_ only. */
@@ -546,6 +551,8 @@ export interface components {
       email: string;
       first_name?: string;
       last_name?: string;
+      /** Designates that this user has all permissions without explicitly assigning them. */
+      is_superuser: boolean;
     };
     UserProfileInteraction: {
       item_ids: string[];
@@ -1215,6 +1222,12 @@ export interface operations {
         "application/x-www-form-urlencoded": components["schemas"]["PatchedParameterTuningJob"];
         "multipart/form-data": components["schemas"]["PatchedParameterTuningJob"];
       };
+    };
+  };
+  ping_retrieve: {
+    responses: {
+      /** No response body */
+      200: unknown;
     };
   };
   project_list: {

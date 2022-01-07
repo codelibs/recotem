@@ -1,6 +1,5 @@
 from typing import Any
 
-from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from recotem.api.models import (
@@ -10,6 +9,7 @@ from recotem.api.models import (
     TaskLog,
 )
 
+from .auth import UserDetailsSerializer
 from .data import TrainingDataSerializer
 from .project import ProjectSerializer, ProjectSummarySerializer
 from .trained_model import TrainedModelSerializer
@@ -64,10 +64,12 @@ class ModelConfigurationSerializer(serializers.ModelSerializer):
 __all__ = (
     "TrainingDataSerializer",
     "ProjectSerializer",
-    "ProjectSummarySerializer" "ParameterTuningJobSerializer",
+    "ProjectSummarySerializer",
+    "ParameterTuningJobSerializer",
     "TrainedModelSerializer",
     "SplitConfigSerializer",
     "EvaluationConfigSerializer",
     "TaskLogSerializer",
     "ModelConfigurationSerializer",
+    "UserDetailsSerializer",
 )

@@ -30,7 +30,7 @@
             api schema
           </v-list-item-title>
         </v-list-item>
-        <v-list-item class="justify-center" link href="/api/admin">
+        <v-list-item class="justify-center" link href="/api/admin" v-if="isSuperuser">
           <v-list-item-title>
             <v-icon>mdi-language-python</v-icon> django admin
           </v-list-item-title>
@@ -88,6 +88,10 @@ export default Vue.extend({
       } else {
         return `${AuthModule.docURLBase}/${AuthModule.recotemDocVersion}/docs/user/${this.$route.name}`;
       }
+    },
+    isSuperuser(): boolean {
+      if (this.user === null || this.user.is_superuser === undefined) return false;
+      return this.user.is_superuser;
     },
   },
   methods: {

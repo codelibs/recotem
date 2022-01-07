@@ -72,7 +72,7 @@ REST_FRAMEWORK = {
 }
 
 REST_AUTH_SERIALIZERS = {
-    'USER_DETAILS_SERIALIZER': 'recotem.api.serializers.UserDetailsSerializer',
+    "USER_DETAILS_SERIALIZER": "recotem.api.serializers.UserDetailsSerializer",
 }
 
 ROOT_URLCONF = "recotem.urls"

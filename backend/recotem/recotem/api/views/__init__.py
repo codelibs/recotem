@@ -27,11 +27,11 @@ from recotem.api.serializers import (
     EvaluationConfigSerializer,
     ModelConfigurationSerializer,
     ParameterTuningJobSerializer,
+    PingSerializer,
+    ProjectSummarySerializer,
     SplitConfigSerializer,
     TaskLogSerializer,
     TrainingDataSerializer,
-    PingSerializer,
-    ProjectSummarySerializer,
 )
 from recotem.api.serializers.data import ItemMetaDataSerializer
 

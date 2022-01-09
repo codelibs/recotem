@@ -1023,7 +1023,11 @@ paths:
       - ping
       responses:
         '200':
-          description: No response body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ping'
+          description: ''
   /api/project/:
     get:
       operationId: project_list
@@ -2702,6 +2706,13 @@ components:
           title: Superuser status
           description: Designates that this user has all permissions without explicitly
             assigning them.
+    Ping:
+      type: object
+      properties:
+        success:
+          type: boolean
+      required:
+      - success
     Project:
       type: object
       properties:

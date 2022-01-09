@@ -442,6 +442,9 @@ export interface components {
       /** Designates that this user has all permissions without explicitly assigning them. */
       is_superuser?: boolean;
     };
+    Ping: {
+      success: boolean;
+    };
     Project: {
       id: number;
       ins_datetime: string;
@@ -1226,8 +1229,11 @@ export interface operations {
   };
   ping_retrieve: {
     responses: {
-      /** No response body */
-      200: unknown;
+      200: {
+        content: {
+          "application/json": components["schemas"]["Ping"];
+        };
+      };
     };
   };
   project_list: {

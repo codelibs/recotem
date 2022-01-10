@@ -11,6 +11,7 @@ from recotem.api.models import (
 
 from .auth import UserDetailsSerializer
 from .data import TrainingDataSerializer
+from .ping import PingSerializer
 from .project import ProjectSerializer, ProjectSummarySerializer
 from .trained_model import TrainedModelSerializer
 from .tuning_job import ParameterTuningJobSerializer
@@ -72,4 +73,5 @@ __all__ = (
     "TaskLogSerializer",
     "ModelConfigurationSerializer",
     "UserDetailsSerializer",
+    "PingSerializer",
 )

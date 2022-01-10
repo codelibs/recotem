@@ -27,6 +27,8 @@ from recotem.api.serializers import (
     EvaluationConfigSerializer,
     ModelConfigurationSerializer,
     ParameterTuningJobSerializer,
+    PingSerializer,
+    ProjectSummarySerializer,
     SplitConfigSerializer,
     TaskLogSerializer,
     TrainingDataSerializer,
@@ -153,16 +155,14 @@ class TaskLogViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_class = TaskLogFilter
 
 
-from recotem.api.serializers.project import ProjectSummarySerializer
-
-
 class PingView(APIView):
     authentication_classes = []
     permission_classes = []
 
+    @extend_schema(responses={200: PingSerializer})
     def get(self, request):
         try:
-            conn = connections["default"]
+            _ = connections["default"]
             return Response(dict(success=True))
         except ConnectionDoesNotExist:
             raise APIException(detail=dict(success=False), code=400)

@@ -19,8 +19,8 @@ jobs:
         run: yarn --check-files --frozen-lockfile --non-interactive
       - name: "run-test"
         run: |
-          docker-compose build
-          docker-compose up -d
+          docker composel build
+          docker composel up -d
           until curl -f http://localhost:8000/api/ping/
           do
             echo "not success"
@@ -67,7 +67,7 @@ jobs:
       - name: Run test
         shell: bash
         run: |
-          docker-compose -f docker-compose-test.yml up --exit-code-from backend
+          docker composel -f compose-test.yaml up --exit-code-from backend
       - name: "save coverage"
         uses: "actions/upload-artifact@v2"
         with:

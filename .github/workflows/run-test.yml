@@ -31,7 +31,7 @@ jobs:
           npx playwright test e2e/user/
 
       - name: "save imgs"
-        uses: "actions/upload-artifact@v2"
+        uses: actions/upload-artifact@v4
         with:
           path: frontend/imgs/*
           name: imgs
@@ -51,7 +51,7 @@ jobs:
         working-directory: frontend
         run: yarn test:unit --coverage
       - name: "save coverage"
-        uses: "actions/upload-artifact@v2"
+        uses: actions/upload-artifact@v4
         with:
           path: frontend/coverage/
           name: coverage
@@ -69,7 +69,7 @@ jobs:
         run: |
           docker composel -f compose-test.yaml up --exit-code-from backend
       - name: "save coverage"
-        uses: "actions/upload-artifact@v2"
+        uses: actions/upload-artifact@v4
         with:
           name: coverage
           path: backend/recotem/coverage.xml
@@ -81,11 +81,11 @@ jobs:
         with:
           fetch-depth: 0
       - name: "download coverage results"
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: coverage
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v1
+        uses: codecov/codecov-action@v5
         with:
           verbose: false
           env_vars: OS,PYTHON

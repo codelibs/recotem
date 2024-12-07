@@ -8,9 +8,7 @@ import yaml
 if __name__ == "__main__":
     VERSION = re.split(r"\/", os.environ["GITHUB_REF"])[-1]
     WORKDIR = Path(__file__).resolve().parent
-    dc_content = yaml.load(
-        (WORKDIR / "compose.yaml").open(), Loader=yaml.SafeLoader
-    )
+    dc_content = yaml.load((WORKDIR / "compose.yaml").open(), Loader=yaml.SafeLoader)
     dc_content["services"]["backend"].pop("build")
     dc_content["services"]["backend"][
         "image"

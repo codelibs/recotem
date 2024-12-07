@@ -1909,7 +1909,7 @@ paths:
       responses:
         '204':
           description: No response body
-  /api/training_data/:
+  /api/data/training_data/:
     get:
       operationId: training_data_list
       description: ''
@@ -1967,7 +1967,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/TrainingData'
           description: ''
-  /api/training_data/{id}/:
+  /api/data/training_data/{id}/:
     get:
       operationId: training_data_retrieve
       description: ''
@@ -2063,7 +2063,7 @@ paths:
       responses:
         '204':
           description: No response body
-  /api/training_data/{id}/download_file/:
+  /api/data/training_data/{id}/download_file/:
     get:
       operationId: training_data_download_file_retrieve
       description: ''
@@ -2086,7 +2086,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/TrainingData'
           description: ''
-  /api/training_data/{id}/unlink_file/:
+  /api/data/training_data/{id}/unlink_file/:
     delete:
       operationId: training_data_unlink_file_destroy
       description: ''

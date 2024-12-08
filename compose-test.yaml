@@ -20,6 +20,7 @@ services:
     volumes:
       - ./backend/recotem:/app
       - test-data-location:/app/data/
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "8000:80"
     environment:

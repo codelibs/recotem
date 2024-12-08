@@ -1,17 +1,32 @@
-version: "3.7"
 services:
   queue:
-    image: bitnami/rabbitmq:3.9
+    image: rabbitmq:4.0
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: "5s"
+      timeout: "3s"
+      retries: 5
+      start_period: "5s"
+    env_file:
+      - envs/production.env
   db:
     image: postgres:12
     volumes:
       - db-data:/var/lib/postgresql/data/pgdata
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "recotem_user", "-d", "recotem"]
+      interval: "5s"
+      timeout: "3s"
+      retries: 5
+      start_period: "5s"
     env_file:
       - envs/production.env
   backend:
     depends_on:
-      - db
-      - queue
+      db:
+        condition: service_healthy
+      queue:
+        condition: service_healthy
     build:
       context: ./backend
       dockerfile: backend.dockerfile
@@ -49,7 +64,7 @@ services:
   proxy:
     depends_on:
       - frontend
-    image: nginx:1.21.1
+    image: nginx:1.27.3
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf
       - static-files:/app/dist/static

@@ -291,7 +291,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         TaskLog.objects.create(task=task_result, contents=message)
 
     if job.random_seed is None:
-        random_seed = random.randint(0, 2 ** 16)
+        random_seed = random.randint(0, 2**16)
     else:
         random_seed: int = job.random_seed
     autopilot(

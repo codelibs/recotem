@@ -1,9 +1,14 @@
-version: "3.7"
 services:
   queue:
-    image: bitnami/rabbitmq:3.9
-    ports:
-      - "5672:5672"
+    image: rabbitmq:4.0
+    env_file:
+      - envs/dev.env
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: "5s"
+      timeout: "3s"
+      retries: 5
+      start_period: "5s"
   backend:
     depends_on:
       - queue
@@ -15,6 +20,7 @@ services:
     volumes:
       - ./backend/recotem:/app
       - test-data-location:/app/data/
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "8000:80"
     environment:

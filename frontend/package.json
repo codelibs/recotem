@@ -21,7 +21,7 @@
     "vuex": "^3.4.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.12.3",
+    "@playwright/test": "<1.45",
     "@mdi/font": "^5.9.55",
     "@types/jest": "^24.0.19",
     "@typescript-eslint/eslint-plugin": "^4.18.0",
@@ -44,7 +44,7 @@
     "eslint-plugin-vue": "^6.2.2",
     "flush-promises": "^1.0.2",
     "openapi-typescript": "^3.3.1",
-    "playwright-chromium": "^1.13.1",
+    "playwright-chromium": "<1.45",
     "playwright-cli": "^0.180.0",
     "prettier": "^2.2.1",
     "sass": "^1.32.0",

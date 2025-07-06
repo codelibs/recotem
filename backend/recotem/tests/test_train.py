@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from django.test import Client
+
 from recotem.api.tasks import IDMappedRecommender
 
 from .test_data_post import login_client

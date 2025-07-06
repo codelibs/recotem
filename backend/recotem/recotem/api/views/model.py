@@ -6,7 +6,6 @@ from typing import Optional
 
 import pandas as pd
 from drf_spectacular.utils import extend_schema
-from recotem.api.tasks import IDMappedRecommender
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException
@@ -16,6 +15,7 @@ from rest_framework.response import Response
 
 from recotem.api.models import ItemMetaData, Project, TrainedModel
 from recotem.api.serializers import TrainedModelSerializer
+from recotem.api.tasks import IDMappedRecommender
 from recotem.api.utils import read_dataframe
 
 from .filemixin import FileDownloadRemoveMixin

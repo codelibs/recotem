@@ -17,7 +17,7 @@ from irspack import __version__ as irspack_version
 from irspack import split_dataframe_partial_user_holdout
 from irspack.recommenders import get_recommender_class
 from irspack.utils import df_to_sparse
-from irspack.utils.id_mapping import ItemIDMapper, IDMapper
+from irspack.utils.id_mapping import IDMapper, ItemIDMapper
 from optuna.storages import RDBStorage
 
 from recotem.api.models import (
@@ -38,31 +38,31 @@ from recotem.celery import app
 
 class IDMappedRecommender:
     """Compatibility wrapper for irspack 0.3.1 API changes"""
-    
+
     def __init__(self, recommender, user_ids, item_ids):
         self.recommender = recommender
         self.user_ids = user_ids
         self.item_ids = item_ids
         self.item_id_mapper = ItemIDMapper(item_ids=item_ids)
-        
+
         # Create user ID to index mapping
         self.user_id_to_index = {uid: idx for idx, uid in enumerate(user_ids)}
         self.index_to_user_id = {idx: uid for uid, idx in self.user_id_to_index.items()}
-    
+
     def get_recommendation_for_known_user_id(self, user_id, cutoff=10):
         """Get recommendations for a known user ID"""
         if user_id not in self.user_id_to_index:
             raise ValueError(f"User ID {user_id} not found in training data")
-        
+
         user_index = self.user_id_to_index[user_id]
-        
+
         # Try different methods to get scores depending on recommender type
         try:
-            if hasattr(self.recommender, 'get_score_for_user_id'):
+            if hasattr(self.recommender, "get_score_for_user_id"):
                 item_scores = self.recommender.get_score_for_user_id(user_index)
-            elif hasattr(self.recommender, 'get_score_from_user_id'):
+            elif hasattr(self.recommender, "get_score_from_user_id"):
                 item_scores = self.recommender.get_score_from_user_id(user_index)
-            elif hasattr(self.recommender, 'get_score'):
+            elif hasattr(self.recommender, "get_score"):
                 item_scores = self.recommender.get_score(user_index)
             else:
                 # Fallback for basic recommenders
@@ -70,16 +70,16 @@ class IDMappedRecommender:
         except Exception as e:
             # If scoring fails, return empty recommendations
             return []
-        
+
         # Get top recommendations
         top_indices = (-item_scores).argsort()[:cutoff]
         top_scores = item_scores[top_indices]
-        
+
         # Convert indices back to item IDs
         recommended_items = [self.item_ids[idx] for idx in top_indices]
-        
+
         return list(zip(recommended_items, top_scores))
-    
+
     def get_recommendation_for_new_user(self, item_ids, cutoff=10):
         """Get recommendations for a new user based on their item profile"""
         return self.item_id_mapper.recommend_for_new_user(
@@ -159,14 +159,14 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
     optuna_storage = RDBStorage(settings.DATABASE_URL)
     study_name = job.study_name()
     study_id = optuna_storage.get_study_id_from_name(study_name)
-    
+
     try:
         best_trial = optuna_storage.get_best_trial(study_id)
     except ValueError:
         # No trials found, create a simple default
         TaskLog.objects.create(
             task=task_result,
-            contents=f"No trials found, creating default TopPopRecommender config"
+            contents=f"No trials found, creating default TopPopRecommender config",
         )
         recommender_class_name = "TopPopRecommender"
         config_name = f"Default config for job {job.id}"
@@ -186,7 +186,9 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
         **{
             key: val
             for key, val in best_trial.user_attrs.items()
-            if not key.startswith("_")  # Simple validation instead of is_valid_param_name
+            if not key.startswith(
+                "_"
+            )  # Simple validation instead of is_valid_param_name
         },
     )
     best_params = {
@@ -268,7 +270,11 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
     split: SplitConfig = job.split
     evaluation: EvaluationConfig = job.evaluation
     df: pd.DataFrame = read_dataframe(Path(data.file.name), data.file)
-    tried_algorithms: List[str] = ["TopPopRecommender", "IALSRecommender", "NMFRecommender"]  # Default algorithms for irspack 0.3.1
+    tried_algorithms: List[str] = [
+        "TopPopRecommender",
+        "IALSRecommender",
+        "NMFRecommender",
+    ]  # Default algorithms for irspack 0.3.1
     if job.tried_algorithms_json is not None:
         tried_algorithms: List[str] = json.loads(job.tried_algorithms_json)
     user_column = project.user_column
@@ -302,7 +308,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
 
     optuna_storage = RDBStorage(settings.DATABASE_URL)
     study_name = job.study_name()
-    
+
     # Skip complex callback and study ID logic for simplified version
 
     if job.random_seed is None:
@@ -312,47 +318,45 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
     # Simplified optimization for irspack 0.3.1 - just create a basic study
     TaskLog.objects.create(
         task=task_result,
-        contents=f"Running simplified hyperparameter optimization for irspack 0.3.1"
+        contents=f"Running simplified hyperparameter optimization for irspack 0.3.1",
     )
-    
+
     import optuna
+
     study = optuna.create_study(
         storage=optuna_storage,
         study_name=study_name,
         load_if_exists=True,
-        direction="maximize"
+        direction="maximize",
     )
-    
+
     # Create one simple trial for testing
     trial = study.ask()
     trial.suggest_categorical("optimizer_name", ["TopPopRecommender"])
-    
+
     TaskLog.objects.create(
-        task=task_result,
-        contents=f"Created trial with TopPopRecommender"
+        task=task_result, contents=f"Created trial with TopPopRecommender"
     )
-    
+
     try:
         # Use TopPopRecommender as a simple recommender that always works
         recommender_class = get_recommender_class("TopPopRecommender")
         recommender = recommender_class(X_tv_train)
         recommender.learn()
-        
+
         # Simple evaluation - get the target metric score only
         score_dict = evaluator.get_score(recommender)
         # Extract the target metric value
         score = score_dict.get(evaluation.target_metric.lower(), 0.1)
         study.tell(trial, score)
-        
+
         TaskLog.objects.create(
-            task=task_result,
-            contents=f"TopPopRecommender score: {score}"
+            task=task_result, contents=f"TopPopRecommender score: {score}"
         )
-        
+
     except Exception as e:
         TaskLog.objects.create(
-            task=task_result,
-            contents=f"TopPopRecommender failed: {str(e)}"
+            task=task_result, contents=f"TopPopRecommender failed: {str(e)}"
         )
         study.tell(trial, 0.1)  # Small positive score to avoid issues
 

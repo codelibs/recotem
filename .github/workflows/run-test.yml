@@ -11,43 +11,53 @@ jobs:
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: 16
+          node-version: 16.20.2
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: "yarn install"
         working-directory: frontend
-        run: yarn --check-files --frozen-lockfile --non-interactive
+        run: yarn install --frozen-lockfile
       - name: "run-test"
         run: |
           docker compose build
           docker compose up -d
-          until curl -f http://localhost:8000/api/ping/
+          timeout=300
+          counter=0
+          until curl -f http://localhost:8000/api/ping/ || [ $counter -eq $timeout ]
           do
-            echo "not success"
+            echo "waiting for backend to be ready... ($counter/$timeout)"
             sleep 1
+            counter=$((counter + 1))
           done
+          if [ $counter -eq $timeout ]; then
+            echo "Backend failed to start within $timeout seconds"
+            docker compose logs
+            exit 1
+          fi
           cd frontend
+          npx playwright install --with-deps chromium
           npx playwright test --workers=1 e2e/tutorial_scenario.spec.js
           npx playwright test e2e/user/
 
       - name: "save imgs"
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          path: frontend/imgs/*
-          name: imgs
+          path: frontend/test-results/
+          name: playwright-report
   run_jest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: 16
+          node-version: 16.20.2
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: "yarn install"
         working-directory: frontend
-        run: yarn --check-files --frozen-lockfile --non-interactive
+        run: yarn install --frozen-lockfile
       - name: "jest"
         working-directory: frontend
         run: yarn test:unit --coverage
@@ -60,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       OS: ubuntu-latest
-      PYTHON: "3.9"
+      PYTHON: "3.11.11"
     steps:
       - uses: actions/checkout@v4
         with:

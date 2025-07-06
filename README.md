@@ -28,9 +28,9 @@ There are two ways to start using Recotem. Both requires [latest docker](https:/
 1. Download "Docker resources to try out" from Assets
 1. Unzip it and
    - (Windows) Click "recotem-compose" script
-   - (Linux & MacOS) Run `docker-compose` there.
+   - (Linux & MacOS) Run `docker compose` there.
      ```sh
-        docker-compose up`
+        docker compose up
      ```
 
 See [https://recotem.org/guide/installation.html]([https://recotem.org/guide/installation.html]) for a friendlier introduction.
@@ -40,18 +40,18 @@ See [https://recotem.org/guide/installation.html]([https://recotem.org/guide/ins
 1. Clone this repository.
 2. In the repository top directory, simply run
    ```sh
-       docker-compose up
+       docker compose up
    ```
 
 ## Development
 
 ### Backend & Worker
 
-To run the backend (and worker) in Django development mode, use `docker-compose-dev.yml`.
+To run the backend (and worker) in Django development mode, use `compose-dev.yaml`.
 
 ```
-docker-compose -f docker-compose-dev.yml build
-docker-compose -f docker-compose-dev.yml up
+docker compose -f compose-dev.yaml build
+docker compose -f compose-dev.yaml up
 ```
 
 ### frontend

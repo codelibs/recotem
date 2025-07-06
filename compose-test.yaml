@@ -11,7 +11,8 @@ services:
       start_period: "5s"
   backend:
     depends_on:
-      - queue
+      queue:
+        condition: service_started
     build:
       context: ./backend
       dockerfile: backend.dockerfile
@@ -41,4 +42,3 @@ services:
       '
 volumes:
   test-data-location:
-    driver: local

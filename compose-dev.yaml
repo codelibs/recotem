@@ -24,9 +24,9 @@ services:
   backend:
     depends_on:
       db:
-        condition: service_healthy
+        condition: service_started
       queue:
-        condition: service_healthy
+        condition: service_started
     build:
       context: ./backend
       dockerfile: backend.dockerfile
@@ -47,9 +47,12 @@ services:
       - envs/dev.env
   celery_worker:
     depends_on:
-      - db
-      - backend
-      - queue
+      db:
+        condition: service_started
+      backend:
+        condition: service_started
+      queue:
+        condition: service_started
     build:
       context: ./backend
       dockerfile: celery.dockerfile
@@ -60,6 +63,4 @@ services:
       - envs/dev.env
 volumes:
   data-location:
-    driver: local
   db-data:
-    driver: local

@@ -30,7 +30,7 @@ There are two ways to start using Recotem. Both requires [latest docker](https:/
    - (Windows) Click "recotem-compose" script
    - (Linux & MacOS) Run `docker compose` there.
      ```sh
-        docker compose up`
+        docker compose up
      ```
 
 See [https://recotem.org/guide/installation.html]([https://recotem.org/guide/installation.html]) for a friendlier introduction.

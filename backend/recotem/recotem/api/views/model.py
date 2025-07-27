@@ -6,7 +6,8 @@ from typing import Optional
 
 import pandas as pd
 from drf_spectacular.utils import extend_schema
-from irspack import IDMappedRecommender
+
+# IDMappedRecommender is now defined as a wrapper in tasks.py for compatibility
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException
@@ -48,7 +49,7 @@ class RecommendationWithMetaDataSerializer(serializers.Serializer):
 
 
 @lru_cache(maxsize=1)
-def fetch_mapped_rec(pk: int) -> IDMappedRecommender:
+def fetch_mapped_rec(pk: int):  # Returns our custom IDMappedRecommender wrapper
     try:
         model_record = TrainedModel.objects.get(pk=pk)
         return pickle.load(model_record.file)["id_mapped_recommender"]

@@ -8,9 +8,11 @@ import numpy as np
 import pandas as pd
 import pytest
 from django.test import Client
-from irspack.utils.id_mapping import IDMappedRecommender
 
 from .test_data_post import login_client
+
+# IDMappedRecommender is now our custom wrapper defined in tasks.py
+
 
 RNS = np.random.RandomState(0)
 
@@ -131,7 +133,9 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         download_model = pickle.load(temp_ofs)
         assert "id_mapped_recommender" in download_model
         assert "irspack_version" in download_model
-    mapped_rec: IDMappedRecommender = download_model["id_mapped_recommender"]
+    mapped_rec = download_model[
+        "id_mapped_recommender"
+    ]  # Our custom IDMappedRecommender wrapper
     for _ in range(5):
         profile_ids = [str(x) for x in RNS.choice(mapped_rec.item_ids, size=10)]
         gt = mapped_rec.get_recommendation_for_new_user(profile_ids, cutoff=10)

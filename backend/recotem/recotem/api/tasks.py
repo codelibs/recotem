@@ -125,6 +125,7 @@ class TaskBackend:
 
 
 def search_one(
+    pipe,
     X,
     evaluator,
     optimizer_names,
@@ -158,7 +159,8 @@ def search_one(
 
             # Evaluate
             scores = evaluator.get_score(recommender)
-            target_metric = evaluator.target_metric.name.lower()
+            # target_metric is already a string in irspack 0.4.0
+            target_metric = evaluator.target_metric if isinstance(evaluator.target_metric, str) else evaluator.target_metric.name.lower()
 
             if target_metric in scores:
                 return scores[target_metric]
@@ -299,7 +301,8 @@ def autopilot(
             def train_and_evaluate():
                 recommender = recommender_class(X_train, **params).learn()
                 scores = evaluator.get_score(recommender)
-                target_metric = evaluator.target_metric.name.lower()
+                # target_metric is already a string in irspack 0.4.0
+                target_metric = evaluator.target_metric if isinstance(evaluator.target_metric, str) else evaluator.target_metric.name.lower()
 
                 if target_metric in scores:
                     return scores[target_metric]
@@ -400,11 +403,13 @@ def get_optimizer_class(optimizer_name):
 class IDMappedRecommender:
     """Compatibility wrapper for irspack 0.4.0 to maintain API compatibility"""
 
-    def __init__(self, recommender, user_ids, item_ids):
+    def __init__(self, recommender, user_ids, item_ids, X_train=None):
         self.recommender = recommender
         self.id_mapper = IDMapper(user_ids, item_ids)
         self.user_ids = user_ids
         self.item_ids = item_ids
+        # Store training matrix for new user recommendations
+        self.X_train = X_train
 
     def get_score(self, user_ids):
         import numpy as np
@@ -436,7 +441,13 @@ class IDMappedRecommender:
         import numpy as np
 
         # Return top popular items that are not in consumed_item_ids
-        item_popularity = np.array(self.recommender.X_train_all.sum(axis=0)).flatten()
+        # Use X_train if available, otherwise fall back to a simple approach
+        if self.X_train is not None:
+            item_popularity = np.array(self.X_train.sum(axis=0)).flatten()
+        else:
+            # Fallback: use uniform popularity
+            item_popularity = np.ones(len(self.item_ids))
+
         consumed_indices = set(
             self.id_mapper.item_id_to_index[iid]
             for iid in consumed_item_ids
@@ -558,7 +569,7 @@ def train_recommender_func(
     rec = recommender_class(X, **param).learn()
     with tempfile.TemporaryFile() as temp_fs:
         # Use the module-level IDMappedRecommender class for pickle compatibility
-        mapped_rec = IDMappedRecommender(rec, uids, iids)
+        mapped_rec = IDMappedRecommender(rec, uids, iids, X_train=X)
         pickle.dump(
             dict(
                 id_mapped_recommender=mapped_rec,
@@ -767,11 +778,13 @@ def run_search_func(task_result, parameter_tuning_job_id: int, index: int) -> No
         trial = optuna_storage.get_trial(trial_id)
         params = trial.params.copy()
         algo: str = params.pop("optimizer_name")
+        # target_metric is already a string in irspack 0.4.0
+        target_metric_name = evaluator.target_metric if isinstance(evaluator.target_metric, str) else evaluator.target_metric.name
         if trial.value is None or trial.value == 0.0:
             message = f"Trial {i} with {algo} / {params}: timeout."
         else:
             message = f"""Trial {i} with {algo} / {params}: {trial.state.name}.
-{evaluator.target_metric.name}@{evaluator.cutoff}={-trial.value}"""
+{target_metric_name}@{evaluator.cutoff}={-trial.value}"""
         TaskLog.objects.create(task=task_result, contents=message)
 
     if job.random_seed is None:
@@ -802,92 +815,8 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
     print(
         f"run_search: Starting Celery task for job {parameter_tuning_job_id}, index {index}"
     )
+    self.update_state(state="STARTED", meta=[])
     return run_search_func(task_result, parameter_tuning_job_id, index)
-    logs = [
-        dict(message=f"Started the parameter tuning jog {parameter_tuning_job_id} ")
-    ]
-    self.update_state(state="STARTED", meta=logs)
-    job: ParameterTuningJob = ParameterTuningJob.objects.get(id=parameter_tuning_job_id)
-
-    n_trials: int = job.n_trials // job.n_tasks_parallel
-
-    if index < (job.n_trials % job.n_tasks_parallel):
-        n_trials += 1
-
-    TaskAndParameterJobLink.objects.create(job=job, task=task_result)
-    data: TrainingData = job.data
-    project: Project = data.project
-    split: SplitConfig = job.split
-    evaluation: EvaluationConfig = job.evaluation
-    df: pd.DataFrame = read_dataframe(Path(data.file.name), data.file)
-    tried_algorithms: List[str] = DEFAULT_SEARCHNAMES
-    if job.tried_algorithms_json is not None:
-        tried_algorithms: List[str] = json.loads(job.tried_algorithms_json)
-    user_column = project.user_column
-    item_column = project.item_column
-
-    TaskLog.objects.create(
-        task=task_result,
-        contents=f"""Start job {parameter_tuning_job_id} / worker {index}.""",
-    )
-
-    dataset, _ = split_dataframe_partial_user_holdout(
-        df,
-        user_column=user_column,
-        item_column=item_column,
-        time_column=project.time_column,
-        n_val_user=split.n_test_users,
-        val_user_ratio=split.test_user_ratio,
-        test_user_ratio=0.0,
-        heldout_ratio_val=split.heldout_ratio,
-        n_heldout_val=split.n_heldout,
-    )
-    train = dataset["train"]
-    val = dataset["val"]
-    X_tv_train = sps.vstack([train.X_train, val.X_train])
-    evaluator = Evaluator(
-        val.X_test,
-        offset=train.n_users,
-        target_metric=evaluation.target_metric.lower(),
-        cutoff=evaluation.cutoff,
-    )
-
-    optuna_storage = RDBStorage(settings.DATABASE_URL)
-    study_name = job.study_name()
-    study_id = optuna_storage.get_study_id_from_name(study_name)
-
-    def callback(i: int, df: pd.DataFrame) -> None:
-        trial_id = optuna_storage.get_trial_id_from_study_id_trial_number(study_id, i)
-        trial = optuna_storage.get_trial(trial_id)
-        params = trial.params.copy()
-        algo: str = params.pop("optimizer_name")
-        if trial.value is None or trial.value == 0.0:
-            message = f"Trial {i} with {algo} / {params}: timeout."
-        else:
-            message = f"""Trial {i} with {algo} / {params}: {trial.state.name}.
-{evaluator.target_metric.name}@{evaluator.cutoff}={-trial.value}"""
-        TaskLog.objects.create(task=task_result, contents=message)
-
-    if job.random_seed is None:
-        random_seed = random.randint(0, 2**16)
-    else:
-        random_seed: int = job.random_seed
-
-    print(f"run_search: About to call autopilot with {n_trials} trials")
-    autopilot(
-        X_tv_train,
-        evaluator,
-        n_trials=n_trials,
-        memory_budget=job.memory_budget,
-        timeout_overall=job.timeout_overall,
-        timeout_singlestep=job.timeout_singlestep,
-        random_seed=random_seed + index,
-        callback=callback,
-        storage=optuna_storage,
-        study_name=study_name,
-        task_resource_provider=BilliardBackend,
-        algorithms=tried_algorithms,
-    )
 
 
 def start_tuning_job(job: ParameterTuningJob) -> None:

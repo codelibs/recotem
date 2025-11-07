@@ -160,7 +160,11 @@ def search_one(
             # Evaluate
             scores = evaluator.get_score(recommender)
             # target_metric is already a string in irspack 0.4.0
-            target_metric = evaluator.target_metric if isinstance(evaluator.target_metric, str) else evaluator.target_metric.name.lower()
+            target_metric = (
+                evaluator.target_metric
+                if isinstance(evaluator.target_metric, str)
+                else evaluator.target_metric.name.lower()
+            )
 
             if target_metric in scores:
                 return scores[target_metric]
@@ -302,7 +306,11 @@ def autopilot(
                 recommender = recommender_class(X_train, **params).learn()
                 scores = evaluator.get_score(recommender)
                 # target_metric is already a string in irspack 0.4.0
-                target_metric = evaluator.target_metric if isinstance(evaluator.target_metric, str) else evaluator.target_metric.name.lower()
+                target_metric = (
+                    evaluator.target_metric
+                    if isinstance(evaluator.target_metric, str)
+                    else evaluator.target_metric.name.lower()
+                )
 
                 if target_metric in scores:
                     return scores[target_metric]
@@ -779,7 +787,11 @@ def run_search_func(task_result, parameter_tuning_job_id: int, index: int) -> No
         params = trial.params.copy()
         algo: str = params.pop("optimizer_name")
         # target_metric is already a string in irspack 0.4.0
-        target_metric_name = evaluator.target_metric if isinstance(evaluator.target_metric, str) else evaluator.target_metric.name
+        target_metric_name = (
+            evaluator.target_metric
+            if isinstance(evaluator.target_metric, str)
+            else evaluator.target_metric.name
+        )
         if trial.value is None or trial.value == 0.0:
             message = f"Trial {i} with {algo} / {params}: timeout."
         else:

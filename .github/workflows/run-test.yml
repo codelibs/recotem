@@ -22,11 +22,25 @@ jobs:
         run: |
           docker compose build
           docker compose up -d
+          echo "Waiting for services to start..."
+          sleep 5
+          echo "=== Docker Compose Status ==="
+          docker compose ps
+          echo "=== Backend Logs ==="
+          docker compose logs backend
+          echo "=== Queue Logs ==="
+          docker compose logs queue
+          echo "=== DB Logs ==="
+          docker compose logs db
+          echo "=== Testing API endpoint ==="
           until curl -f http://localhost:8000/api/ping/
           do
-            echo "not success"
+            echo "API not ready, waiting..."
+            docker compose ps
+            docker compose logs --tail=20 backend
             sleep 1
           done
+          echo "API is ready!"
           cd frontend
           npx playwright test --workers=1 e2e/tutorial_scenario.spec.js
           npx playwright test e2e/user/

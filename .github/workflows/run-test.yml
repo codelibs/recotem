@@ -20,7 +20,7 @@ jobs:
         run: yarn --check-files --frozen-lockfile --non-interactive --ignore-engines
       - name: "install playwright browsers"
         working-directory: frontend
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
       - name: "run-test"
         run: |
           docker compose build

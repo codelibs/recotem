@@ -430,6 +430,8 @@ class IDMappedRecommender:
 
         user_index = self.id_mapper.user_id_to_index[user_id]
         scores = self.recommender.get_score(np.array([user_index]))[0]
+        # Replace NaN values with 0.0 to ensure JSON compatibility
+        scores = np.nan_to_num(scores, nan=0.0)
         if item_ids is None:
             return scores
         item_indices = [self.id_mapper.item_id_to_index[iid] for iid in item_ids]
@@ -440,8 +442,10 @@ class IDMappedRecommender:
 
         user_index = self.id_mapper.user_id_to_index[user_id]
         scores = self.recommender.get_score(np.array([user_index]))[0]
+        # Replace NaN values with 0.0 to ensure JSON compatibility
+        scores = np.nan_to_num(scores, nan=0.0)
         top_indices = np.argsort(scores)[::-1][:cutoff]
-        return [(self.item_ids[i], scores[i]) for i in top_indices]
+        return [(self.item_ids[i], float(scores[i])) for i in top_indices]
 
     def get_recommendation_for_new_user(self, consumed_item_ids, cutoff=10):
         # For new user recommendations, we'll use a simple approach
@@ -456,6 +460,9 @@ class IDMappedRecommender:
             # Fallback: use uniform popularity
             item_popularity = np.ones(len(self.item_ids))
 
+        # Replace NaN values with 0.0 to ensure JSON compatibility
+        item_popularity = np.nan_to_num(item_popularity, nan=0.0)
+
         consumed_indices = set(
             self.id_mapper.item_id_to_index[iid]
             for iid in consumed_item_ids
@@ -467,7 +474,7 @@ class IDMappedRecommender:
             if i not in consumed_indices
         ]
         candidates.sort(key=lambda x: x[1], reverse=True)
-        return [(self.item_ids[i], pop) for i, pop in candidates[:cutoff]]
+        return [(self.item_ids[i], float(pop)) for i, pop in candidates[:cutoff]]
 
 
 # Suggestion class has been removed in irspack 0.4.0 - reimplemented

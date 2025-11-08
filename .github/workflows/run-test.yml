@@ -17,7 +17,7 @@ jobs:
           fetch-depth: 0
       - name: "yarn install"
         working-directory: frontend
-        run: yarn --check-files --frozen-lockfile --non-interactive
+        run: yarn --check-files --frozen-lockfile --non-interactive --ignore-engines
       - name: "run-test"
         run: |
           docker compose build
@@ -47,7 +47,7 @@ jobs:
           fetch-depth: 0
       - name: "yarn install"
         working-directory: frontend
-        run: yarn --check-files --frozen-lockfile --non-interactive
+        run: yarn --check-files --frozen-lockfile --non-interactive --ignore-engines
       - name: "jest"
         working-directory: frontend
         run: yarn test:unit --coverage

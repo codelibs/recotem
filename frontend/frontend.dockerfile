@@ -6,7 +6,7 @@ WORKDIR /app
 
 # cache yarn
 COPY ./package.json /app/package.json
-RUN npm install yarn && yarn
+RUN npm install yarn && yarn --ignore-engines
 
 COPY ./ /app/
 

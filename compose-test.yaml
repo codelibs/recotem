@@ -12,7 +12,7 @@ services:
   backend:
     depends_on:
       queue:
-        condition: service_started
+        condition: service_healthy
     build:
       context: ./backend
       dockerfile: backend.dockerfile

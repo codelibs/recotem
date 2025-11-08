@@ -1,5 +1,5 @@
 # stage 0
-FROM node:16-bullseye as build-stage
+FROM node:20-bullseye as build-stage
 
 RUN apt-get update && apt-get install -y wget --no-install-recommends
 WORKDIR /app

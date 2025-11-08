@@ -5,6 +5,9 @@ on:
       - '**'
   pull_request:
   workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   run_playwright:
     runs-on: ubuntu-latest
@@ -20,7 +23,7 @@ jobs:
         run: yarn --check-files --frozen-lockfile --non-interactive --ignore-engines
       - name: "install playwright browsers"
         working-directory: frontend
-        run: yarn playwright install chromium
+        run: npx playwright install chromium
       - name: "run-test"
         run: |
           docker compose build
@@ -45,8 +48,8 @@ jobs:
           done
           echo "API is ready!"
           cd frontend
-          yarn playwright test --workers=1 e2e/tutorial_scenario.spec.js
-          yarn playwright test e2e/user/
+          npx playwright test --workers=1 e2e/tutorial_scenario.spec.js
+          npx playwright test e2e/user/
 
       - name: "save imgs"
         uses: actions/upload-artifact@v4

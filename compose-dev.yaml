@@ -10,7 +10,7 @@ services:
     env_file:
       - envs/dev.env
   db:
-    image: postgres:12
+    image: postgres:14
     volumes:
       - db-data:/var/lib/postgresql/data/pgdata
     healthcheck:

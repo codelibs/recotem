@@ -8057,13 +8057,6 @@ pkg-dir@^4.1.0:
   dependencies:
     find-up "^4.0.0"
 
-playwright-chromium@<1.45:
-  version "1.44.1"
-  resolved "https://registry.yarnpkg.com/playwright-chromium/-/playwright-chromium-1.44.1.tgz#9e49189d6c31bfa40851c4e5c4277b02cc8021e5"
-  integrity sha512-S35fvljThsCDhUiGSYST3MkT7hsUvNA6SC+fAaBxKLUdOkc6ohatxD+A5HoN7fEK3zE+yI0ARANSGRHTHJR6UQ==
-  dependencies:
-    playwright-core "1.44.1"
-
 playwright-core@1.44.1:
   version "1.44.1"
   resolved "https://registry.yarnpkg.com/playwright-core/-/playwright-core-1.44.1.tgz#53ec975503b763af6fc1a7aa995f34bc09ff447c"

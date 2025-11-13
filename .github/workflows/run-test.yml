@@ -29,7 +29,7 @@ jobs:
           docker compose build
           docker compose up -d
           echo "Waiting for services to start..."
-          sleep 5
+          sleep 10
           echo "=== Docker Compose Status ==="
           docker compose ps
           echo "=== Backend Logs ==="
@@ -39,14 +39,23 @@ jobs:
           echo "=== DB Logs ==="
           docker compose logs db
           echo "=== Testing API endpoint ==="
+          attempt=0
+          max_attempts=60
           until curl -f http://localhost:8000/api/ping/
           do
-            echo "API not ready, waiting..."
-            docker compose ps
-            docker compose logs --tail=20 backend
-            sleep 1
+            attempt=$((attempt + 1))
+            if [ $attempt -ge $max_attempts ]; then
+              echo "API failed to start after $max_attempts attempts"
+              docker compose ps
+              docker compose logs backend
+              exit 1
+            fi
+            echo "API not ready, waiting... (attempt $attempt/$max_attempts)"
+            sleep 2
           done
           echo "API is ready!"
+          echo "Waiting additional time for frontend to be fully ready..."
+          sleep 5
           cd frontend
           npx playwright test --workers=1 e2e/tutorial_scenario.spec.js
           npx playwright test e2e/user/

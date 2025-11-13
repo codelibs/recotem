@@ -16,6 +16,11 @@ test("test", async ({ page }) => {
   // Go to http://localhost:8000/#/login?redirect=%2Fproject-list
   await page.goto("http://localhost:8000/#/login?redirect=%2Fproject-list");
 
+  // Wait for page to be fully loaded and overlay to disappear
+  await page.waitForLoadState('networkidle');
+  await page.waitForSelector('.v-overlay__scrim', { state: 'hidden', timeout: 10000 }).catch(() => {});
+  await page.waitForSelector('input[name="username"]', { state: 'visible' });
+
   // Click input[name="username"]
   await page.click('input[name="username"]');
 

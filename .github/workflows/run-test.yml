@@ -28,8 +28,27 @@ jobs:
         run: |
           docker compose build
           docker compose up -d
-          echo "Waiting for services to start..."
+
+          echo "=== Waiting for database to be ready ==="
+          attempt=0
+          max_db_attempts=30
+          until docker compose exec -T db pg_isready -U recotem_user -d recotem 2>/dev/null
+          do
+            attempt=$((attempt + 1))
+            if [ $attempt -ge $max_db_attempts ]; then
+              echo "Database failed to start after $max_db_attempts attempts"
+              docker compose ps
+              docker compose logs db
+              exit 1
+            fi
+            echo "Database not ready, waiting... (attempt $attempt/$max_db_attempts)"
+            sleep 2
+          done
+          echo "Database is ready!"
+
+          echo "=== Waiting for services to initialize ==="
           sleep 10
+
           echo "=== Docker Compose Status ==="
           docker compose ps
           echo "=== Backend Logs ==="
@@ -38,6 +57,7 @@ jobs:
           docker compose logs queue
           echo "=== DB Logs ==="
           docker compose logs db
+
           echo "=== Testing API endpoint ==="
           attempt=0
           max_attempts=60
@@ -48,14 +68,20 @@ jobs:
               echo "API failed to start after $max_attempts attempts"
               docker compose ps
               docker compose logs backend
+              docker compose logs db
               exit 1
             fi
             echo "API not ready, waiting... (attempt $attempt/$max_attempts)"
             sleep 2
           done
           echo "API is ready!"
-          echo "Waiting additional time for frontend to be fully ready..."
+
+          echo "=== Waiting additional time for frontend to be fully ready ==="
           sleep 5
+
+          echo "=== Final service status before tests ==="
+          docker compose ps
+
           cd frontend
           npx playwright test --workers=1 e2e/tutorial_scenario.spec.js
           npx playwright test e2e/user/

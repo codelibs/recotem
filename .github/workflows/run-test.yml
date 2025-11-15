@@ -27,64 +27,34 @@ jobs:
       - name: "run-test"
         run: |
           docker compose build
-          docker compose up -d
+          docker compose up -d --wait
 
-          echo "=== Waiting for containers to start ==="
-          sleep 15
-
-          echo "=== Checking database readiness ==="
-          attempt=0
-          max_db_attempts=30
-          until docker compose exec -T db pg_isready -U recotem_user -d recotem 2>/dev/null
-          do
-            attempt=$((attempt + 1))
-            if [ $attempt -ge $max_db_attempts ]; then
-              echo "Database failed to start after $max_db_attempts attempts"
-              docker compose ps
-              docker compose logs db
-              exit 1
-            fi
-            echo "Database not ready, waiting... (attempt $attempt/$max_db_attempts)"
-            sleep 2
-          done
-          echo "Database is ready!"
-
-          echo "=== Waiting for all services to initialize ==="
-          sleep 10
-
-          echo "=== Docker Compose Status ==="
+          echo "=== Core services are healthy ==="
           docker compose ps
-          echo "=== Backend Logs ==="
-          docker compose logs backend
-          echo "=== Queue Logs ==="
-          docker compose logs queue
-          echo "=== DB Logs ==="
-          docker compose logs db
 
-          echo "=== Testing API endpoint ==="
-          attempt=0
-          max_attempts=60
-          until curl -f http://localhost:8000/api/ping/
-          do
-            attempt=$((attempt + 1))
-            if [ $attempt -ge $max_attempts ]; then
-              echo "API failed to start after $max_attempts attempts"
+          echo "=== Waiting for API to be accessible through proxy ==="
+          for i in {1..30}; do
+            if curl -f http://localhost:8000/api/ping/; then
+              echo "API is accessible!"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "API failed to become accessible"
               docker compose ps
               docker compose logs backend
-              docker compose logs db
+              docker compose logs proxy
               exit 1
             fi
-            echo "API not ready, waiting... (attempt $attempt/$max_attempts)"
+            echo "Waiting for API... (attempt $i/30)"
             sleep 2
           done
-          echo "API is ready!"
 
-          echo "=== Waiting additional time for frontend to be fully ready ==="
-          sleep 5
+          echo "=== Service Logs ==="
+          docker compose logs backend
+          docker compose logs queue
+          docker compose logs db
 
-          echo "=== Final service status before tests ==="
-          docker compose ps
-
+          echo "=== Running Playwright tests ==="
           cd frontend
           npx playwright test --workers=1 e2e/tutorial_scenario.spec.js
           npx playwright test e2e/user/

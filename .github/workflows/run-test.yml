@@ -29,7 +29,10 @@ jobs:
           docker compose build
           docker compose up -d
 
-          echo "=== Waiting for database to be ready ==="
+          echo "=== Waiting for containers to start ==="
+          sleep 15
+
+          echo "=== Checking database readiness ==="
           attempt=0
           max_db_attempts=30
           until docker compose exec -T db pg_isready -U recotem_user -d recotem 2>/dev/null
@@ -46,7 +49,7 @@ jobs:
           done
           echo "Database is ready!"
 
-          echo "=== Waiting for services to initialize ==="
+          echo "=== Waiting for all services to initialize ==="
           sleep 10
 
           echo "=== Docker Compose Status ==="

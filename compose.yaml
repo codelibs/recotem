@@ -59,12 +59,18 @@ services:
     build:
       context: ./frontend
       dockerfile: frontend.dockerfile
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: "5s"
+      timeout: "3s"
+      retries: 5
+      start_period: "10s"
     env_file:
       - envs/production.env
   proxy:
     depends_on:
       frontend:
-        condition: service_started
+        condition: service_healthy
       backend:
         condition: service_healthy
     image: nginx:1.27.3
@@ -73,6 +79,12 @@ services:
       - static-files:/app/dist/static
     ports:
       - "8000:80"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/api/ping/"]
+      interval: "5s"
+      timeout: "3s"
+      retries: 10
+      start_period: "15s"
 volumes:
   data-location:
   db-data:

@@ -29,30 +29,15 @@ jobs:
           docker compose build
           docker compose up -d --wait
 
-          echo "=== Core services are healthy ==="
+          echo "=== All services are healthy ==="
           docker compose ps
-
-          echo "=== Waiting for API to be accessible through proxy ==="
-          for i in {1..30}; do
-            if curl -f http://localhost:8000/api/ping/; then
-              echo "API is accessible!"
-              break
-            fi
-            if [ $i -eq 30 ]; then
-              echo "API failed to become accessible"
-              docker compose ps
-              docker compose logs backend
-              docker compose logs proxy
-              exit 1
-            fi
-            echo "Waiting for API... (attempt $i/30)"
-            sleep 2
-          done
 
           echo "=== Service Logs ==="
           docker compose logs backend
           docker compose logs queue
           docker compose logs db
+          docker compose logs frontend
+          docker compose logs proxy
 
           echo "=== Running Playwright tests ==="
           cd frontend

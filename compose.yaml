@@ -73,7 +73,9 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
-    image: nginx:1.27.3
+    build:
+      context: .
+      dockerfile: proxy.dockerfile
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf
       - static-files:/app/dist/static

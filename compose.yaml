@@ -60,7 +60,7 @@ services:
       context: ./frontend
       dockerfile: frontend.dockerfile
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      test: ["CMD-SHELL", "test -f /usr/share/nginx/html/index.html && wget --spider -q http://localhost:80/ || exit 1"]
       interval: "5s"
       timeout: "3s"
       retries: 5
@@ -80,7 +80,7 @@ services:
     ports:
       - "8000:80"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/api/ping/"]
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:80/api/ping/ || exit 1"]
       interval: "5s"
       timeout: "3s"
       retries: 10

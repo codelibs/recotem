@@ -29,8 +29,34 @@ jobs:
           docker compose build
           docker compose up -d --wait
 
-          echo "=== All services are healthy ==="
+          echo "=== All services should be healthy ==="
           docker compose ps
+
+          echo "=== Verifying service health statuses ==="
+          if ! docker compose ps --format json | jq -e '.[] | select(.Health != "healthy" and .Health != null)' > /dev/null 2>&1; then
+            echo "All services with healthchecks are healthy"
+          else
+            echo "ERROR: Some services are not healthy"
+            docker compose ps
+            exit 1
+          fi
+
+          echo "=== Verifying API accessibility ==="
+          for i in {1..10}; do
+            if curl -f http://localhost:8000/api/ping/; then
+              echo "API is accessible through proxy!"
+              break
+            fi
+            if [ $i -eq 10 ]; then
+              echo "ERROR: API not accessible after 10 attempts"
+              docker compose logs backend
+              docker compose logs proxy
+              docker compose logs frontend
+              exit 1
+            fi
+            echo "Waiting for API... (attempt $i/10)"
+            sleep 2
+          done
 
           echo "=== Service Logs ==="
           docker compose logs backend

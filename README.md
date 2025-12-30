@@ -1,81 +1,98 @@
 # Recotem
 
-## Overview
-
-Recotem is an easy to use interface to recommender systems;
-Recotem can be launched on any platform with Docker.
-It ships with a Web-base UI, and you can train and (qualitatively) evaluate the recommendation engine solely using UI.
+An easy-to-use interface to recommender systems.
 
 ![Sample usage of recotem](./recotem-sample-image.png)
 
-Recotem is licensed under Apache 2.0.
+## Features
 
-## Website
+- Launch on any platform with Docker
+- Web-based UI for training and evaluating recommendation engines
+- No coding required for basic usage
+- Supports various recommendation algorithms via [irspack](https://github.com/tohtsky/irspack)
 
-[recotem.org](https://recotem.org)
+## Quick Start
 
-## Issues/Questions
+### Prerequisites
 
-[discuss.codelibs.org](https://discuss.codelibs.org/c/recotemen/11)
+- [Docker](https://docs.docker.com/get-docker/) (with Docker Compose)
 
-## Getting Started
+### Option 1: Using Pre-built Images (Recommended)
 
-There are two ways to start using Recotem. Both requires [latest docker](https://docs.docker.com/get-docker/).
+1. Download the latest release from [GitHub Releases](https://github.com/codelibs/recotem/releases/latest)
+2. Unzip and run:
 
-### 1. Using pre-built image.
+```bash
+docker compose up
+```
 
-1. Visit [latest release](https://github.com/codelibs/recotem/releases/latest)
-1. Download "Docker resources to try out" from Assets
-1. Unzip it and
-   - (Windows) Click "recotem-compose" script
-   - (Linux & MacOS) Run `docker compose` there.
-     ```sh
-        docker compose up
-     ```
+3. Open http://localhost:8000 in your browser
 
-See [https://recotem.org/guide/installation.html]([https://recotem.org/guide/installation.html]) for a friendlier introduction.
+### Option 2: Building from Source
 
-### 2. Building the image
+```bash
+git clone https://github.com/codelibs/recotem.git
+cd recotem
+docker compose up
+```
 
-1. Clone this repository.
-2. In the repository top directory, simply run
-   ```sh
-       docker compose up
-   ```
+## Architecture
+
+```
+                    +----------------+
+                    |     Proxy      |
+                    |    (nginx)     |
+                    +-------+--------+
+                            |
+            +---------------+---------------+
+            |                               |
+    +-------v--------+             +--------v-------+
+    |    Frontend    |             |    Backend     |
+    |   (Vue.js)     |             |   (Django)     |
+    +----------------+             +--------+-------+
+                                           |
+                       +-------------------+-------------------+
+                       |                   |                   |
+               +-------v------+    +-------v-------+   +-------v-------+
+               |   Database   |    |     Queue     |   | Celery Worker |
+               | (PostgreSQL) |    |  (RabbitMQ)   |   |   (irspack)   |
+               +--------------+    +---------------+   +---------------+
+```
+
+## Production Deployment
+
+For production deployments, use `compose-production.yaml`:
+
+```bash
+# 1. Configure environment variables
+cp .env.example .env
+# Edit .env with your settings
+
+# 2. Start services
+docker compose -f compose-production.yaml up -d
+```
+
+See [.env.example](.env.example) for required configuration.
 
 ## Development
 
-### Backend & Worker
+See [DEVELOPMENT.md](DEVELOPMENT.md) for development setup and guidelines.
 
-To run the backend (and worker) in Django development mode, use `compose-dev.yaml`.
+## Contributing
 
-```
-docker compose -f compose-dev.yaml build
-docker compose -f compose-dev.yaml up
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 
-### frontend
+## Related Tools
 
-To run the frontend webpack-dev-sever, you will need a descent version of yarn.
+- [recotem-cli](https://github.com/codelibs/recotem-cli) - Command-line interface for Recotem
+- [recotem-batch-example](https://github.com/codelibs/recotem-batch-example) - Batch execution on Amazon ECS
 
-After `yarn` under `frontend/` directory to install the dependency, run
+## Resources
 
-```sh
-cd frontend
-yarn serve
-```
+- Website: [recotem.org](https://recotem.org)
+- Documentation: [recotem.org/guide/](https://recotem.org/guide/)
+- Community: [discuss.codelibs.org](https://discuss.codelibs.org/c/recotemen/11)
 
-In order for the frontend to work with the API, you first have to launch the backend following the above instruction.
+## License
 
-## Command-line tool
-
-[recotem-cli](https://github.com/codelibs/recotem-cli) allows you to
-
-- tune & train recommender systems
-- obtain the recommendation result
-
-via command-line interface.
-
-## Batch execution on ECS
-
-There is [an example project](https://github.com/codelibs/recotem-batch-example) which uses recotem to batch-execute recommendation task on Amazon ECS.
+Apache 2.0

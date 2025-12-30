@@ -11,79 +11,59 @@ concurrency:
 jobs:
   run_playwright:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
       - name: "yarn install"
         working-directory: frontend
         run: yarn --check-files --frozen-lockfile --non-interactive --ignore-engines
       - name: "install playwright browsers"
         working-directory: frontend
         run: npx playwright install chromium
-      - name: "run-test"
+      - name: "Build Docker images"
+        run: docker compose build
+      - name: "Start services"
+        run: docker compose up -d --wait --wait-timeout 180
+      - name: "Verify services are healthy"
         run: |
-          docker compose build
-          docker compose up -d --wait
-
-          echo "=== All services should be healthy ==="
+          echo "=== Service Status ==="
           docker compose ps
 
-          echo "=== Verifying service health statuses ==="
-          if ! docker compose ps --format json | jq -e '.[] | select(.Health != "healthy" and .Health != null)' > /dev/null 2>&1; then
-            echo "All services with healthchecks are healthy"
-          else
-            echo "ERROR: Some services are not healthy"
-            docker compose ps
-            exit 1
-          fi
-
-          echo "=== Verifying API accessibility ==="
-          for i in {1..10}; do
-            if curl -f http://localhost:8000/api/ping/; then
-              echo "API is accessible through proxy!"
-              break
-            fi
-            if [ $i -eq 10 ]; then
-              echo "ERROR: API not accessible after 10 attempts"
-              docker compose logs backend
-              docker compose logs proxy
-              docker compose logs frontend
-              exit 1
-            fi
-            echo "Waiting for API... (attempt $i/10)"
-            sleep 2
-          done
-
-          echo "=== Service Logs ==="
-          docker compose logs backend
-          docker compose logs queue
-          docker compose logs db
-          docker compose logs frontend
-          docker compose logs proxy
-
-          echo "=== Running Playwright tests ==="
-          cd frontend
+          echo "=== Waiting for API accessibility ==="
+          timeout 60 bash -c 'until curl -sf http://localhost:8000/api/ping/; do echo "Waiting for API..."; sleep 2; done'
+          echo "API is accessible!"
+      - name: "Run Playwright tests"
+        working-directory: frontend
+        run: |
           npx playwright test --workers=1 e2e/tutorial_scenario.spec.js
           npx playwright test e2e/user/
-
-      - name: "save imgs"
+      - name: "Upload test screenshots"
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           path: frontend/imgs/*
           name: imgs
+      - name: "Show logs on failure"
+        if: failure()
+        run: |
+          echo "=== Docker Compose Logs ==="
+          docker compose logs
+
   run_jest:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
       - name: "yarn install"
         working-directory: frontend
         run: yarn --check-files --frozen-lockfile --non-interactive --ignore-engines
@@ -95,8 +75,10 @@ jobs:
         with:
           path: frontend/coverage/
           name: frontend-coverage
+
   run_pytest:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       OS: ubuntu-latest
       PYTHON: "3.12"
@@ -113,6 +95,7 @@ jobs:
         with:
           name: backend-coverage
           path: backend/recotem/coverage.xml
+
   upload-coverage:
     runs-on: ubuntu-latest
     needs: [run_jest, run_pytest]

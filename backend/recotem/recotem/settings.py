@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "rest_framework",
     "rest_framework.authtoken",
+    "rest_framework_simplejwt",
     "corsheaders",
     "dj_rest_auth",
     "django_filters",

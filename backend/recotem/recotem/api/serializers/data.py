@@ -66,7 +66,7 @@ class ItemMetaDataSerializer(serializers.ModelSerializer):
             try:
                 df[[c]].to_json(orient="records")
                 valid_column_names.append(c)
-            except:
+            except Exception:
                 continue
         obj.valid_columns_list_json = json.dumps(valid_column_names)
         obj.filesize = obj.file.size

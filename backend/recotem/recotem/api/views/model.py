@@ -52,7 +52,7 @@ def fetch_mapped_rec(pk: int) -> IDMappedRecommender:
     try:
         model_record = TrainedModel.objects.get(pk=pk)
         return pickle.load(model_record.file)["id_mapped_recommender"]
-    except:
+    except Exception:
         raise APIException(detail=f"Could not find model {pk}", code=404)
 
 
@@ -69,7 +69,7 @@ def fetch_item_metadata(pk: int) -> Optional[pd.DataFrame]:
         return df.drop_duplicates(item_column).set_index(
             model_record.project.item_column
         )
-    except:
+    except Exception:
         raise APIException(detail=f"Could not load item metadata {pk}", code=404)
 
 
@@ -154,7 +154,7 @@ class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     def recommend_using_profile_interaction(self, request, pk=None):
         mapped_rec = fetch_mapped_rec(pk)
         serializer = UserProfileInteractionSerializer(data=request.data)
-        serializer.is_valid()
+        serializer.is_valid(raise_exception=True)
         recs = mapped_rec.get_recommendation_for_new_user(
             serializer.validated_data["item_ids"],
             cutoff=serializer.validated_data["cutoff"],

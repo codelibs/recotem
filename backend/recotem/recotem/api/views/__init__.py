@@ -114,7 +114,7 @@ class EvaluationConfigFilter(filters.FilterSet):
 class EvaluationConfigViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
-    queryset = EvaluationConfig.objects.all().filter()
+    queryset = EvaluationConfig.objects.all()
     serializer_class = EvaluationConfigSerializer
     filter_backends = (filters.DjangoFilterBackend,)
     filterset_class = EvaluationConfigFilter

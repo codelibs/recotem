@@ -1,6 +1,5 @@
 from datetime import timedelta
 from pathlib import Path
-from re import X
 from typing import List
 
 import environ
@@ -71,8 +70,13 @@ REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
 }
 
-REST_AUTH_SERIALIZERS = {
+# dj-rest-auth settings (5.x+ unified configuration)
+REST_AUTH = {
     "USER_DETAILS_SERIALIZER": "recotem.api.serializers.UserDetailsSerializer",
+    "SESSION_LOGIN": True,
+    "USE_JWT": True,
+    "JWT_AUTH_REFRESH_COOKIE": "refresh-token",
+    "JWT_AUTH_COOKIE_USE_CSRF": True,
 }
 
 ROOT_URLCONF = "recotem.urls"
@@ -191,11 +195,6 @@ CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "default"
 CELERY_TASK_SERIALIZER = "json"
 
-
-REST_SESSION_LOGIN = True
-REST_USE_JWT = True
-JWT_AUTH_REFRESH_COOKIE = "refresh-token"
-JWT_AUTH_COOKIE_USE_CSRF = True
 
 SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),

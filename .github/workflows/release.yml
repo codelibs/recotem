@@ -71,13 +71,13 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: Setup python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.8
+          python-version: "3.12"
       - name: Build release object
-        run: pip install PyYaml==5.4.1 && python release.py
+        run: pip install PyYAML>=6.0.2 && python release.py
       - name: Release
         run : |
           gh release upload ${GITHUB_REF##*/} recotem-compose-${GITHUB_REF##*/}.zip'#Docker resources to try out' --clobber

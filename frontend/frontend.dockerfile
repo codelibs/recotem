@@ -1,5 +1,5 @@
 # stage 0
-FROM node:16 as build-stage
+FROM node:20 as build-stage
 
 RUN apt-get update && apt-get install -y wget --no-install-recommends
 WORKDIR /app

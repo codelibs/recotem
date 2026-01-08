@@ -12,7 +12,8 @@ from irspack.utils.id_mapping import IDMappedRecommender
 
 from .test_data_post import login_client
 
-RNS = np.random.RandomState(0)
+# Use default_rng instead of deprecated RandomState for NumPy 2.x compatibility
+RNG = np.random.default_rng(seed=0)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -133,7 +134,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         assert "irspack_version" in download_model
     mapped_rec: IDMappedRecommender = download_model["id_mapped_recommender"]
     for _ in range(5):
-        profile_ids = [str(x) for x in RNS.choice(mapped_rec.item_ids, size=10)]
+        profile_ids = [str(x) for x in RNG.choice(mapped_rec.item_ids, size=10)]
         gt = mapped_rec.get_recommendation_for_new_user(profile_ids, cutoff=10)
         model_response = client.post(
             f"{model_url}{model_id}/recommend_using_profile_interaction/",

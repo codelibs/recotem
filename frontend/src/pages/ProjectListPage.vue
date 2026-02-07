@@ -11,8 +11,22 @@
       />
     </div>
 
-    <Message v-if="projectStore.error" severity="error" :closable="false" class="mb-4">
-      Failed to load projects. Please try again.
+    <Message
+      v-if="projectStore.error"
+      severity="error"
+      :closable="false"
+      class="mb-4"
+    >
+      <div class="flex items-center gap-2">
+        <span>Failed to load projects.</span>
+        <Button
+          label="Retry"
+          icon="pi pi-refresh"
+          text
+          size="small"
+          @click="projectStore.fetchProjects()"
+        />
+      </div>
     </Message>
 
     <div
@@ -92,8 +106,8 @@ import Button from "primevue/button";
 import Dialog from "primevue/dialog";
 import Message from "primevue/message";
 import Skeleton from "primevue/skeleton";
-import dayjs from "dayjs";
 import { useProjectStore } from "@/stores/project";
+import { formatDate } from "@/utils/format";
 import ProjectCreateForm from "@/components/project/ProjectCreateForm.vue";
 
 const projectStore = useProjectStore();
@@ -101,10 +115,6 @@ const router = useRouter();
 const showCreate = ref(false);
 
 onMounted(() => projectStore.fetchProjects());
-
-function formatDate(dt: string) {
-  return dayjs(dt).format("MMM D, YYYY");
-}
 
 function onProjectCreated() {
   showCreate.value = false;

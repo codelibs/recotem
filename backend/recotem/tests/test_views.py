@@ -5,12 +5,11 @@ from django.test import Client
 from django.urls import reverse
 
 from recotem.api.models import (
-    Project,
-    SplitConfig,
     EvaluationConfig,
     ModelConfiguration,
+    Project,
+    SplitConfig,
 )
-
 
 User = get_user_model()
 
@@ -423,3 +422,160 @@ class TestViewSetAuthentication:
         )
 
         assert resp.status_code == 401
+
+
+@pytest.mark.django_db
+class TestProjectOwnershipIsolation:
+    """Tests that users can only see and modify their own projects."""
+
+    def test_user_cannot_see_other_users_projects(self, client: Client):
+        """User A's projects should not be visible to User B."""
+        user_a = User.objects.create_user(username="user_a", password="pass")
+        user_b = User.objects.create_user(username="user_b", password="pass")
+
+        # User A creates a project
+        client.force_login(user_a)
+        project_url = reverse("project-list")
+        client.post(
+            project_url,
+            dict(name="private_project", user_column="u", item_column="i"),
+        )
+
+        # User B lists projects — should not see User A's project
+        client.force_login(user_b)
+        resp = client.get(project_url)
+        assert resp.status_code == 200
+        names = [p["name"] for p in resp.json()["results"]]
+        assert "private_project" not in names
+
+    def test_user_cannot_update_other_users_project(self, client: Client):
+        """User B should not be able to update User A's project."""
+        user_a = User.objects.create_user(username="user_a", password="pass")
+        user_b = User.objects.create_user(username="user_b", password="pass")
+
+        client.force_login(user_a)
+        project_url = reverse("project-list")
+        resp = client.post(
+            project_url,
+            dict(name="a_project", user_column="u", item_column="i"),
+        )
+        project_id = resp.json()["id"]
+
+        # User B tries to update
+        client.force_login(user_b)
+        detail_url = reverse("project-detail", args=[project_id])
+        resp = client.patch(
+            detail_url,
+            dict(name="hacked"),
+            content_type="application/json",
+        )
+        assert resp.status_code == 404
+
+    def test_user_cannot_delete_other_users_project(self, client: Client):
+        """User B should not be able to delete User A's project."""
+        user_a = User.objects.create_user(username="user_a", password="pass")
+        user_b = User.objects.create_user(username="user_b", password="pass")
+
+        client.force_login(user_a)
+        project_url = reverse("project-list")
+        resp = client.post(
+            project_url,
+            dict(name="to_protect", user_column="u", item_column="i"),
+        )
+        project_id = resp.json()["id"]
+
+        # User B tries to delete
+        client.force_login(user_b)
+        detail_url = reverse("project-detail", args=[project_id])
+        resp = client.delete(detail_url)
+        assert resp.status_code == 404
+
+        # Verify it still exists
+        assert Project.objects.filter(id=project_id).exists()
+
+
+@pytest.mark.django_db
+class TestModelConfigurationViewSet:
+    """Tests for ModelConfigurationViewSet CRUD operations."""
+
+    def test_create_model_configuration(self, client: Client):
+        """Test creating a new model configuration."""
+        user = User.objects.create_user(username="test_user", password="pass")
+        client.force_login(user)
+
+        project = Project.objects.create(
+            name="mc_test", user_column="u", item_column="i", owner=user
+        )
+
+        mc_url = reverse("model_configuration-list")
+        resp = client.post(
+            mc_url,
+            dict(
+                name="test_config",
+                project=project.id,
+                recommender_class_name="IALSRecommender",
+                parameters_json="{}",
+            ),
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["name"] == "test_config"
+        assert data["recommender_class_name"] == "IALSRecommender"
+
+        mc = ModelConfiguration.objects.get(id=data["id"])
+        assert mc.project == project
+
+    def test_list_model_configurations(self, client: Client):
+        """Test listing model configurations."""
+        user = User.objects.create_user(username="test_user", password="pass")
+        client.force_login(user)
+
+        project = Project.objects.create(
+            name="mc_list", user_column="u", item_column="i", owner=user
+        )
+        ModelConfiguration.objects.create(
+            name="config_1",
+            project=project,
+            recommender_class_name="IALSRecommender",
+            parameters_json="{}",
+        )
+        ModelConfiguration.objects.create(
+            name="config_2",
+            project=project,
+            recommender_class_name="TopPopRecommender",
+            parameters_json="{}",
+        )
+
+        mc_url = reverse("model_configuration-list")
+        resp = client.get(mc_url)
+        assert resp.status_code == 200
+        data = resp.json()
+        names = [c["name"] for c in data["results"]]
+        assert "config_1" in names
+        assert "config_2" in names
+
+    def test_unauthenticated_cannot_create_model_configuration(self, client: Client):
+        """Unauthenticated users should not be able to create model configurations."""
+        mc_url = reverse("model_configuration-list")
+        resp = client.post(
+            mc_url,
+            dict(
+                name="unauth_config",
+                recommender_class_name="IALSRecommender",
+                parameters_json="{}",
+            ),
+            content_type="application/json",
+        )
+        assert resp.status_code == 401
+
+
+@pytest.mark.django_db
+class TestPingEndpoint:
+    """Tests for the health check endpoint."""
+
+    def test_ping_returns_ok(self, client: Client):
+        """Ping endpoint should return 200 without authentication."""
+        resp = client.get("/api/ping/")
+        assert resp.status_code == 200

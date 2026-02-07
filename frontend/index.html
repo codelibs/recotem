@@ -7,6 +7,16 @@
     <title>Recotem - Recommendation System Builder</title>
   </head>
   <body>
+    <script>
+      // Apply dark mode class before first paint to prevent FOUC
+      (function() {
+        var stored = localStorage.getItem('dark-mode');
+        var dark = stored !== null
+          ? stored === 'true'
+          : window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (dark) document.documentElement.classList.add('dark-mode');
+      })();
+    </script>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

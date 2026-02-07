@@ -1,10 +1,31 @@
 from datetime import timedelta
 from pathlib import Path
 from typing import List
+from urllib.parse import urlparse, urlunparse
 
 import environ
 
 env = environ.Env(DEBUG=(bool, True))
+
+
+def _inject_redis_password_if_missing(url: str, password: str) -> str:
+    """Inject REDIS_PASSWORD into redis:// URLs that do not already have auth."""
+    if not password:
+        return url
+    parsed = urlparse(url)
+    if parsed.scheme not in {"redis", "rediss"}:
+        return url
+    if parsed.password:
+        return url
+
+    host = parsed.hostname or "localhost"
+    port = f":{parsed.port}" if parsed.port else ""
+    if parsed.username:
+        auth = f"{parsed.username}:{password}@"
+    else:
+        auth = f":{password}@"
+    netloc = f"{auth}{host}{port}"
+    return urlunparse(parsed._replace(netloc=netloc))
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -28,11 +49,26 @@ if not DEBUG:
             "SECRET_KEY must be changed from default for production (DEBUG=False). "
             "Set the SECRET_KEY environment variable to a unique, unpredictable value."
         )
+    if len(SECRET_KEY) < 50:
+        raise RuntimeError(
+            "SECRET_KEY must be at least 50 characters long for production (DEBUG=False). "
+            "Generate a strong random key with: python -c 'from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())'"
+        )
     if "*" in ALLOWED_HOSTS:
         raise RuntimeError(
             "ALLOWED_HOSTS must not contain '*' in production (DEBUG=False). "
             "Set the ALLOWED_HOSTS environment variable to your domain names."
         )
+
+# Security headers (production)
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
+SECURE_BROWSER_XSS_FILTER = True
+if not DEBUG:
+    SECURE_HSTS_SECONDS = int(env("SECURE_HSTS_SECONDS", default=31536000))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SECURE_SSL_REDIRECT = env.bool("SECURE_SSL_REDIRECT", default=False)
 
 
 # Application definition
@@ -110,7 +146,6 @@ REST_FRAMEWORK = {
     "UPLOADED_FILES_USE_URL": False,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
-    "EXCEPTION_HANDLER": "recotem.api.exception_handler.custom_exception_handler",
     "DEFAULT_VERSIONING_CLASS": "rest_framework.versioning.URLPathVersioning",
     "DEFAULT_VERSION": "v1",
     "ALLOWED_VERSIONS": ["v1"],
@@ -151,15 +186,10 @@ WSGI_APPLICATION = "recotem.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
-DATABASES = {
-    "default": env.db(
-        "DATABASE_URL",
-        default=f'sqlite:///{(BASE_DIR / "data" / "db.sqlite3")}',
-    )
-}
-DATABASE_URL = env(
-    "DATABASE_URL", default=f'sqlite:///{(BASE_DIR / "data" / "db.sqlite3")}'
-)
+_DEFAULT_DB_URL = f'sqlite:///{(BASE_DIR / "data" / "db.sqlite3")}'
+DATABASE_URL = env("DATABASE_URL", default=_DEFAULT_DB_URL)
+DATABASES = {"default": env.db("DATABASE_URL", default=_DEFAULT_DB_URL)}
+DATABASES["default"]["CONN_MAX_AGE"] = int(env("CONN_MAX_AGE", default=0))
 
 
 # Password validation
@@ -201,6 +231,10 @@ elif _STORAGE_TYPE == "S3":
     AWS_ACCESS_KEY_ID = env("AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY = env("AWS_SECRET_ACCESS_KEY")
     AWS_STORAGE_BUCKET_NAME = env("AWS_STORAGE_BUCKET_NAME")
+    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+        raise RuntimeError(
+            "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set when RECOTEM_STORAGE_TYPE=S3"
+        )
     AWS_LOCATION = env("AWS_LOCATION", default="")
     AWS_S3_ENDPOINT_URL = env("AWS_S3_ENDPOINT_URL", default=None)
 
@@ -224,11 +258,6 @@ STATIC_ROOT = BASE_DIR / "dist" / "static"
 STATICFILES_DIRS: List[Path] = []
 
 
-##########
-# STATIC #
-##########
-
-
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 
@@ -236,7 +265,11 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
 # Celery settings
-CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="redis://localhost:6379/0")
+REDIS_PASSWORD = env("REDIS_PASSWORD", default="")
+CELERY_BROKER_URL = _inject_redis_password_if_missing(
+    env("CELERY_BROKER_URL", default="redis://localhost:6379/0"),
+    REDIS_PASSWORD,
+)
 # CELERY_TASK_ALWAYS_EAGER = env("CELERY_TASK_ALWAYS_EAGER", cast=bool, default=False)
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_RESULT_BACKEND = "django-db"
@@ -255,35 +288,128 @@ SIMPLE_JWT = {
 # ASGI application
 ASGI_APPLICATION = "recotem.asgi.application"
 
-# Channel layers (Redis)
-_REDIS_URL = env("CELERY_BROKER_URL", default="redis://localhost:6379/0")
-_REDIS_HOST = _REDIS_URL.replace("redis://", "").split("/")[0]
+# Channel layers (Redis db=1, separate from Celery broker on db=0)
+_CHANNELS_REDIS_URL = CELERY_BROKER_URL.rsplit("/", 1)[0] + "/1"
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [(_REDIS_HOST.split(":")[0], int(_REDIS_HOST.split(":")[1]))],
+            "hosts": [_CHANNELS_REDIS_URL],
         },
     },
 }
 
 
 # Cache configuration (Redis db 2)
+_CACHE_REDIS_URL = _inject_redis_password_if_missing(
+    env("CACHE_REDIS_URL", default="redis://localhost:6379/2"),
+    REDIS_PASSWORD,
+)
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
-        "LOCATION": env("CACHE_REDIS_URL", default="redis://localhost:6379/2"),
+        "LOCATION": _CACHE_REDIS_URL,
         "TIMEOUT": 300,
         "KEY_PREFIX": env("CACHE_KEY_PREFIX", default="recotem"),
     },
 }
 
+# Upload size limit (bytes, default 500MB to match nginx client_max_body_size)
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(
+    env("DATA_UPLOAD_MAX_MEMORY_SIZE", default=524288000)
+)
+
 # Model cache size (number of trained models kept in LRU cache)
 MODEL_CACHE_SIZE = int(env("MODEL_CACHE_SIZE", default=8))
+
+# Model cache timeout (seconds)
+MODEL_CACHE_TIMEOUT = int(env("MODEL_CACHE_TIMEOUT", default=3600))
 
 # Celery task time limits (seconds)
 CELERY_TASK_TIME_LIMIT = int(env("CELERY_TASK_TIME_LIMIT", default=3600))
 CELERY_TASK_SOFT_TIME_LIMIT = int(env("CELERY_TASK_SOFT_TIME_LIMIT", default=3480))
+
+
+# Logging — structured JSON in production, simple in development
+
+import logging as _logging
+import re as _re
+
+
+class _SensitiveDataFilter(_logging.Filter):
+    """Mask passwords in DATABASE_URL, AWS credentials, and other sensitive patterns."""
+
+    _URL_PASSWORD_RE = _re.compile(r"://([^:]+):([^@]+)@")
+    _AWS_KEY_RE = _re.compile(
+        r"(AWS_SECRET_ACCESS_KEY|aws_secret_access_key)\s*[=:]\s*\S+",
+    )
+    _AWS_SESSION_RE = _re.compile(
+        r"(AWS_SESSION_TOKEN|aws_session_token)\s*[=:]\s*\S+",
+    )
+
+    def filter(self, record: _logging.LogRecord) -> bool:
+        if record.args and isinstance(record.args, tuple):
+            record.args = tuple(self._mask(a) for a in record.args)
+        record.msg = self._mask(record.msg)
+        return True
+
+    def _mask(self, value):
+        if isinstance(value, str):
+            value = self._URL_PASSWORD_RE.sub(r"://\1:***@", value)
+            value = self._AWS_KEY_RE.sub(r"\1=***", value)
+            value = self._AWS_SESSION_RE.sub(r"\1=***", value)
+        return value
+
+
+_LOG_FORMATTERS = {
+    "simple": {
+        "format": "%(levelname)s %(asctime)s %(name)s %(message)s",
+    },
+    "json": {
+        "()": "pythonjsonlogger.json.JsonFormatter",
+        "format": "%(asctime)s %(name)s %(levelname)s %(message)s",
+    },
+}
+_LOG_FORMATTER = "simple" if DEBUG else "json"
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": _LOG_FORMATTERS,
+    "filters": {
+        "sensitive_data": {
+            "()": "recotem.settings._SensitiveDataFilter",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": _LOG_FORMATTER,
+            "filters": ["sensitive_data"],
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": env("LOG_LEVEL", default="INFO"),
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": env("DJANGO_LOG_LEVEL", default="WARNING"),
+            "propagate": False,
+        },
+        "celery": {
+            "handlers": ["console"],
+            "level": env("CELERY_LOG_LEVEL", default="INFO"),
+            "propagate": False,
+        },
+        "recotem": {
+            "handlers": ["console"],
+            "level": env("LOG_LEVEL", default="INFO"),
+            "propagate": False,
+        },
+    },
+}
 
 
 # drf-spectacular settings

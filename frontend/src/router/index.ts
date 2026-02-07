@@ -76,6 +76,16 @@ const routes: RouteRecordRaw[] = [
             component: () => import("@/pages/TuningJobDetailPage.vue"),
           },
           {
+            path: "model-configs",
+            name: "model-configs",
+            component: () => import("@/pages/ModelConfigPage.vue"),
+          },
+          {
+            path: "model-comparison",
+            name: "model-comparison",
+            component: () => import("@/pages/ModelComparisonPage.vue"),
+          },
+          {
             path: "models",
             name: "model-list",
             component: () => import("@/pages/ModelListPage.vue"),
@@ -94,6 +104,12 @@ const routes: RouteRecordRaw[] = [
       },
     ],
   },
+  {
+    path: "/:pathMatch(.*)*",
+    name: "not-found",
+    component: () => import("@/pages/NotFoundPage.vue"),
+    meta: { requiresAuth: false },
+  },
 ];
 
 const router = createRouter({
@@ -101,24 +117,30 @@ const router = createRouter({
   routes,
 });
 
-// Navigation guard for authentication
+// Navigation guard for authentication and param validation
 router.beforeEach((to, from, next) => {
   const authStore = useAuthStore();
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth !== false);
 
   if (requiresAuth && !authStore.isAuthenticated) {
-    // User is not authenticated, redirect to login with return URL
-    next({
-      path: "/login",
-      query: { redirect: to.fullPath },
-    });
-  } else if (to.path === "/login" && authStore.isAuthenticated) {
-    // User is already authenticated, redirect to home
-    next("/");
-  } else {
-    // Proceed with navigation
-    next();
+    next({ path: "/login", query: { redirect: to.fullPath } });
+    return;
   }
+  if (to.path === "/login" && authStore.isAuthenticated) {
+    next("/");
+    return;
+  }
+
+  // Validate numeric route params
+  const { projectId, dataId, jobId, modelId } = to.params;
+  for (const [key, val] of Object.entries({ projectId, dataId, jobId, modelId })) {
+    if (val !== undefined && !/^\d+$/.test(val as string)) {
+      next({ name: "not-found" });
+      return;
+    }
+  }
+
+  next();
 });
 
 // Save last visited project ID

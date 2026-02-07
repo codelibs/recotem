@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount } from "@vue/test-utils";
-import { createTestingPinia } from "@pinia/testing";
+import { createPinia } from "pinia";
 import LoginPage from "@/pages/LoginPage.vue";
 import PrimeVue from "primevue/config";
 
@@ -16,7 +16,7 @@ function mountLoginPage() {
     global: {
       plugins: [
         PrimeVue,
-        createTestingPinia({ createSpy: vi.fn }),
+        createPinia(),
       ],
       stubs: {
         FormField: {

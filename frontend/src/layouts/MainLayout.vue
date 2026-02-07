@@ -1,6 +1,9 @@
 <template>
   <div class="flex h-screen overflow-hidden bg-neutral-10">
-    <a href="#main-content" class="skip-link">Skip to main content</a>
+    <a
+      href="#main-content"
+      class="skip-link"
+    >Skip to main content</a>
 
     <!-- Sidebar -->
     <aside
@@ -10,7 +13,10 @@
     >
       <!-- Logo -->
       <div class="flex items-center h-14 px-4 border-b border-neutral-30">
-        <i class="pi pi-prime text-primary text-xl" aria-hidden="true" />
+        <i
+          class="pi pi-prime text-primary text-xl"
+          aria-hidden="true"
+        />
         <span
           v-show="!collapsed"
           class="ml-3 font-semibold text-neutral-800 truncate"
@@ -18,14 +24,20 @@
         <button
           class="ml-auto p-1 rounded hover:bg-neutral-30 focus-visible:outline-2 focus-visible:outline-primary"
           :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'"
-          @click="collapsed = !collapsed"
+          @click="toggleSidebar"
         >
-          <i :class="['pi text-sm', collapsed ? 'pi-angle-right' : 'pi-angle-left']" aria-hidden="true" />
+          <i
+            :class="['pi text-sm', collapsed ? 'pi-angle-right' : 'pi-angle-left']"
+            aria-hidden="true"
+          />
         </button>
       </div>
 
       <!-- Nav -->
-      <nav class="flex-1 overflow-y-auto py-2" aria-label="Sidebar">
+      <nav
+        class="flex-1 overflow-y-auto py-2"
+        aria-label="Sidebar"
+      >
         <SidebarLink
           to="/projects"
           icon="pi-folder"
@@ -64,13 +76,28 @@
             label="Models"
             :collapsed="collapsed"
           />
+          <SidebarLink
+            :to="`/projects/${projectStore.currentProject.id}/model-configs`"
+            icon="pi-cog"
+            label="Configs"
+            :collapsed="collapsed"
+          />
+          <SidebarLink
+            :to="`/projects/${projectStore.currentProject.id}/model-comparison`"
+            icon="pi-chart-bar"
+            label="Compare"
+            :collapsed="collapsed"
+          />
         </template>
       </nav>
 
       <!-- User -->
       <div class="border-t border-neutral-30 p-3">
         <div class="flex items-center">
-          <div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-white text-sm font-medium" aria-hidden="true">
+          <div
+            class="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-white text-sm font-medium"
+            aria-hidden="true"
+          >
             {{ authStore.user?.username?.charAt(0)?.toUpperCase() ?? '?' }}
           </div>
           <span
@@ -80,10 +107,24 @@
           <button
             v-show="!collapsed"
             class="ml-auto p-1 rounded hover:bg-neutral-30 focus-visible:outline-2 focus-visible:outline-primary"
+            :aria-label="isDark ? 'Switch to light mode' : 'Switch to dark mode'"
+            @click="toggleDarkMode"
+          >
+            <i
+              :class="['pi text-sm text-neutral-200', isDark ? 'pi-sun' : 'pi-moon']"
+              aria-hidden="true"
+            />
+          </button>
+          <button
+            v-show="!collapsed"
+            class="ml-1 p-1 rounded hover:bg-neutral-30 focus-visible:outline-2 focus-visible:outline-primary"
             aria-label="Logout"
             @click="handleLogout"
           >
-            <i class="pi pi-sign-out text-sm text-neutral-200" aria-hidden="true" />
+            <i
+              class="pi pi-sign-out text-sm text-neutral-200"
+              aria-hidden="true"
+            />
           </button>
         </div>
       </div>
@@ -91,10 +132,17 @@
 
     <!-- Main -->
     <div class="flex-1 flex flex-col overflow-hidden">
-      <header class="h-14 flex items-center px-6 border-b border-neutral-30 bg-white" role="banner">
+      <header
+        class="h-14 flex items-center px-6 border-b border-neutral-30 bg-white"
+        role="banner"
+      >
         <Breadcrumb :model="breadcrumbItems" />
       </header>
-      <main id="main-content" class="flex-1 overflow-y-auto p-6" role="main">
+      <main
+        id="main-content"
+        class="flex-1 overflow-y-auto p-6"
+        role="main"
+      >
         <router-view />
       </main>
     </div>
@@ -107,13 +155,20 @@ import { useRoute, useRouter } from "vue-router";
 import Breadcrumb from "primevue/breadcrumb";
 import { useAuthStore } from "@/stores/auth";
 import { useProjectStore } from "@/stores/project";
+import { useDarkMode } from "@/composables/useDarkMode";
 import SidebarLink from "@/components/layout/SidebarLink.vue";
 
 const authStore = useAuthStore();
 const projectStore = useProjectStore();
+const { isDark, toggle: toggleDarkMode } = useDarkMode();
 const route = useRoute();
 const router = useRouter();
-const collapsed = ref(false);
+const collapsed = ref(localStorage.getItem("sidebar-collapsed") === "true");
+
+function toggleSidebar() {
+  collapsed.value = !collapsed.value;
+  localStorage.setItem("sidebar-collapsed", String(collapsed.value));
+}
 
 // Build breadcrumb from route
 const breadcrumbItems = computed(() => {

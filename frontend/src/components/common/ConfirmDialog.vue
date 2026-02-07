@@ -8,7 +8,9 @@
     role="alertdialog"
     :aria-label="header"
   >
-    <p class="text-neutral-500">{{ message }}</p>
+    <p class="text-neutral-500">
+      {{ message }}
+    </p>
     <template #footer>
       <div class="flex justify-end gap-2">
         <Button
@@ -19,8 +21,8 @@
         <Button
           :label="confirmLabel"
           :severity="danger ? 'danger' : 'primary'"
-          @click="handleConfirm"
           autofocus
+          @click="handleConfirm"
         />
       </div>
     </template>

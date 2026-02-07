@@ -22,5 +22,13 @@ jobs:
       run: npm ci
     - uses: actions/setup-python@v5
       with:
-        python-version: '3.13'
+        python-version: '3.12'  # Must match backend/Dockerfile
     - uses: pre-commit/action@v3.0.1
+    - name: Check for auto-fixed files
+      if: failure()
+      run: |
+        if ! git diff --quiet; then
+          echo "::error::Pre-commit hooks auto-fixed files. Please run pre-commit locally and commit the changes."
+          git diff --stat
+          exit 1
+        fi

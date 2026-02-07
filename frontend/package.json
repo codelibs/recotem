@@ -14,19 +14,17 @@
     "generate:types": "openapi-typescript http://localhost:8000/api/v1/schema/ -o src/api/generated-types.ts"
   },
   "dependencies": {
-    "@primevue/themes": "^4.2.0",
-    "@tanstack/vue-query": "^5.62.0",
+    "@primevue/themes": "^4.5.0",
     "dayjs": "^1.11.13",
     "ofetch": "^1.4.1",
     "pinia": "^2.3.0",
     "primeicons": "^7.0.0",
-    "primevue": "^4.2.0",
-    "vee-validate": "^4.14.0",
+    "primevue": "^4.5.0",
     "vue": "^3.5.13",
-    "vue-router": "^4.5.0",
-    "zod": "^3.24.0"
+    "vue-router": "^4.5.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.11.1",
     "@playwright/test": "^1.49.0",
     "@types/node": "^22.10.0",
     "@typescript-eslint/parser": "^8.0.0",

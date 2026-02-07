@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount } from "@vue/test-utils";
-import { createTestingPinia } from "@pinia/testing";
+import { createPinia } from "pinia";
 import DataUploadPage from "@/pages/DataUploadPage.vue";
 import PrimeVue from "primevue/config";
 
@@ -14,7 +14,7 @@ function mountPage() {
     global: {
       plugins: [
         PrimeVue,
-        createTestingPinia({ createSpy: vi.fn }),
+        createPinia(),
       ],
     },
   });

@@ -8,12 +8,14 @@ from django_celery_results.models import TaskResult
 
 from recotem.api.models import (
     EvaluationConfig,
+    ItemMetaData,
     ModelConfiguration,
     ParameterTuningJob,
     Project,
     SplitConfig,
     TaskAndParameterJobLink,
     TaskLog,
+    TrainedModel,
     TrainingData,
 )
 
@@ -198,3 +200,71 @@ def test_task_logs_are_isolated_per_user(client: Client):
     assert other_resp.status_code == 200
     assert log.id not in [item["id"] for item in other_resp.json()["results"]]
     assert client.get(reverse("task_log-detail", args=[log.id])).status_code == 404
+
+
+@pytest.mark.django_db
+def test_sample_recommendation_metadata_must_belong_to_same_project(client: Client):
+    user = User.objects.create_user(username="metadata_user", password="pass")
+    client.force_login(user)
+
+    project_a = Project.objects.create(
+        name="metadata_project_a",
+        owner=user,
+        user_column="userId",
+        item_column="movieId",
+    )
+    project_b = Project.objects.create(
+        name="metadata_project_b",
+        owner=user,
+        user_column="userId",
+        item_column="movieId",
+    )
+    data_a = TrainingData.objects.create(project=project_a, filesize=1)
+    config_a = ModelConfiguration.objects.create(
+        name="metadata_config_a",
+        project=project_a,
+        recommender_class_name="TopPopRecommender",
+        parameters_json="{}",
+    )
+    model = TrainedModel.objects.create(configuration=config_a, data_loc=data_a)
+    metadata_other_project = ItemMetaData.objects.create(project=project_b, filesize=1)
+
+    response = client.get(
+        f"/api/v1/trained_model/{model.id}/sample_recommendation_metadata/{metadata_other_project.id}/"
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_recommendation_endpoint_rejects_invalid_cutoff(client: Client):
+    user = User.objects.create_user(username="recommendation_user", password="pass")
+    client.force_login(user)
+
+    project = Project.objects.create(
+        name="recommendation_project",
+        owner=user,
+        user_column="userId",
+        item_column="movieId",
+    )
+    data = TrainingData.objects.create(project=project, filesize=1)
+    config = ModelConfiguration.objects.create(
+        name="recommendation_config",
+        project=project,
+        recommender_class_name="TopPopRecommender",
+        parameters_json="{}",
+    )
+    model = TrainedModel.objects.create(configuration=config, data_loc=data)
+
+    response_non_int = client.get(
+        f"/api/v1/trained_model/{model.id}/recommendation/",
+        {"user_id": "u1", "cutoff": "invalid"},
+    )
+    assert response_non_int.status_code == 400
+    assert response_non_int.json()["detail"] == "cutoff must be an integer."
+
+    response_non_positive = client.get(
+        f"/api/v1/trained_model/{model.id}/recommendation/",
+        {"user_id": "u1", "cutoff": 0},
+    )
+    assert response_non_positive.status_code == 400
+    assert response_non_positive.json()["detail"] == "cutoff must be >= 1."

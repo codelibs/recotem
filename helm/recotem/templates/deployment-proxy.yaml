@@ -18,9 +18,11 @@ spec:
       {{- include "recotem.imagePullSecrets" . | nindent 6 }}
       securityContext:
         runAsNonRoot: true
+        runAsUser: 101
+        fsGroup: 101
       containers:
         - name: proxy
-          image: "{{ .Values.image.proxy.repository }}:{{ .Values.image.proxy.tag }}"
+          image: "{{ .Values.image.proxy.repository }}:{{ .Values.image.proxy.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.proxy.pullPolicy }}
           ports:
             - name: http

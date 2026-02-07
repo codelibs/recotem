@@ -5,6 +5,7 @@
         icon="pi pi-arrow-left"
         text
         rounded
+        aria-label="Back to model list"
         @click="router.push(`/projects/${projectId}/models`)"
       />
       <h2 class="text-xl font-bold text-neutral-800">
@@ -54,8 +55,8 @@
           />
         </div>
         <DataTable
-          v-if="recommendations.length"
-          :value="recommendations"
+          v-if="sortedRecommendations.length"
+          :value="sortedRecommendations"
           striped-rows
         >
           <Column
@@ -65,6 +66,7 @@
           <Column
             field="score"
             header="Score"
+            :sortable="true"
           >
             <template #body="{ data }">
               {{ data.score.toFixed(4) }}
@@ -75,7 +77,7 @@
           v-else-if="recFetched"
           class="text-center py-4 text-neutral-200"
         >
-          No recommendations found
+          No recommendations found for user "{{ userId }}"
         </div>
       </div>
     </div>
@@ -83,15 +85,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import DataTable from "primevue/datatable";
 import Column from "primevue/column";
 import InputText from "primevue/inputtext";
 import InputNumber from "primevue/inputnumber";
 import Button from "primevue/button";
-import dayjs from "dayjs";
 import { api } from "@/api/client";
+import { formatDate, formatFileSize } from "@/utils/format";
 import { useNotification } from "@/composables/useNotification";
 import type { TrainedModel, Recommendation } from "@/types";
 
@@ -107,6 +109,10 @@ const recommendations = ref<Recommendation[]>([]);
 const recLoading = ref(false);
 const recFetched = ref(false);
 
+const sortedRecommendations = computed(() =>
+  [...recommendations.value].sort((a, b) => b.score - a.score),
+);
+
 onMounted(async () => {
   model.value = await api(`/trained_model/${modelId}/`);
 });
@@ -121,20 +127,14 @@ async function fetchRecommendations() {
     });
     recommendations.value = res;
     recFetched.value = true;
-  } catch {
-    notify.error("Failed to get recommendations");
+  } catch (e: any) {
+    const detail = e?.data?.detail ?? "Failed to get recommendations";
+    notify.error(detail);
+    recFetched.value = true;
   } finally {
     recLoading.value = false;
   }
 }
 
-function formatSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1048576).toFixed(1)} MB`;
-}
-
-function formatDate(dt: string) {
-  return dayjs(dt).format("MMM D, YYYY HH:mm");
-}
+const formatSize = formatFileSize;
 </script>

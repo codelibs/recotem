@@ -1,3 +1,4 @@
+from django.db import transaction
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
@@ -23,6 +24,7 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
             "data",
             "split",
             "evaluation",
+            "status",
             "n_tasks_parallel",
             "n_trials",
             "memory_budget",
@@ -38,7 +40,7 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
             "ins_datetime",
             "task_links",
         ]
-        read_only_fields = ["ins_datetime", "task_links"]
+        read_only_fields = ["ins_datetime", "task_links", "status"]
 
     def validate(self, attrs):
         request = self.context.get("request")
@@ -63,5 +65,5 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
         obj: ParameterTuningJob = ParameterTuningJob.objects.create(**validated_data)
         from recotem.api.tasks import start_tuning_job
 
-        start_tuning_job(obj)
+        transaction.on_commit(lambda: start_tuning_job(obj))
         return obj

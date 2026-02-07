@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from django.test import Client
-from irspack.utils.id_mapping import IDMappedRecommender
+from recotem.api.services.id_mapper_compat import IDMappedRecommender
 
 from .test_data_post import login_client
 

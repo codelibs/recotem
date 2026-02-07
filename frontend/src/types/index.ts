@@ -1,7 +1,11 @@
 // Frontend type definitions for the Recotem API.
-// These should be kept in sync with the backend serializers.
-// Run `npm run generate:types` to auto-generate from OpenAPI schema,
-// then update these types as needed.
+//
+// When the backend is running, auto-generate types from OpenAPI schema:
+//   npm run generate:types
+//
+// Generated types land in src/api/generated-types.ts.
+// This file re-exports the canonical types used throughout the app.
+// WebSocket message types live in ./websocket.ts (not in OpenAPI).
 
 export interface Project {
   id: number;
@@ -75,16 +79,26 @@ export interface TrainedModel {
   filesize: number;
 }
 
-export interface TaskLink {
-  id: number;
-  task: string;
+export interface TaskResult {
+  task_id: string;
+  status: string;
+  date_created: string | null;
+  date_done: string | null;
+  traceback: string | null;
 }
+
+export interface TaskLink {
+  task: TaskResult;
+}
+
+export type TuningJobStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
 
 export interface ParameterTuningJob {
   id: number;
   data: number;
   split: number;
   evaluation: number;
+  status: TuningJobStatus;
   n_tasks_parallel: number;
   n_trials: number;
   memory_budget: number;
@@ -137,3 +151,12 @@ export interface User {
   username: string;
   email: string;
 }
+
+/** Standard DRF error response body. */
+export interface ApiErrorResponse {
+  detail?: string;
+  [field: string]: string | string[] | undefined;
+}
+
+// Re-export WebSocket types for convenience
+export type { WsStatusUpdate, WsStatusData, WsLogMessage, WsMessage } from "./websocket";

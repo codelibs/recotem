@@ -27,7 +27,11 @@ services:
       redis-server
       ${REDIS_PASSWORD:+--requirepass $REDIS_PASSWORD}
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        [
+          "CMD-SHELL",
+          "if [ -n \"$REDIS_PASSWORD\" ]; then redis-cli -a \"$REDIS_PASSWORD\" ping; else redis-cli ping; fi",
+        ]
       interval: "5s"
       timeout: "3s"
       retries: 5
@@ -87,6 +91,12 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: celery -A recotem worker --loglevel=INFO
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A recotem inspect ping --timeout 10 2>&1 | grep -qi 'pong'"]
+      interval: 60s
+      timeout: 20s
+      start_period: 45s
+      retries: 3
     volumes:
       - data-location:/data
     env_file:
@@ -117,6 +127,12 @@ services:
       - "8000:8000"
     volumes:
       - static-files:/app/dist/static:ro
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 64M
     logging:
       driver: json-file
       options:

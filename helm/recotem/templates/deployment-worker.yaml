@@ -18,13 +18,25 @@ spec:
         {{- include "recotem.workerSelectorLabels" . | nindent 8 }}
     spec:
       {{- include "recotem.imagePullSecrets" . | nindent 6 }}
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ .Values.serviceAccount.name | default (include "recotem.fullname" .) }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "recotem.workerSelectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
       containers:
         - name: worker
-          image: "{{ .Values.image.backend.repository }}:{{ .Values.image.backend.tag }}"
+          image: "{{ .Values.image.backend.repository }}:{{ .Values.image.backend.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.backend.pullPolicy }}
           command: ["celery", "-A", "recotem", "worker", "--loglevel=INFO"]
           envFrom:
@@ -32,6 +44,26 @@ spec:
                 name: {{ include "recotem.fullname" . }}-config
             - secretRef:
                 name: {{ include "recotem.fullname" . }}-secret
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "celery -A recotem inspect ping --timeout 10 2>&1 | grep -qi 'pong'"
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "celery -A recotem inspect ping --timeout 10 2>&1 | grep -qi 'pong'"
+            initialDelaySeconds: 30
+            periodSeconds: 120
+            timeoutSeconds: 20
+            failureThreshold: 3
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
           volumeMounts:

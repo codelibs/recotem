@@ -1,9 +1,13 @@
 import { test, expect, type Page } from "@playwright/test";
 
+const ADMIN_USERNAME = process.env.E2E_ADMIN_USERNAME ?? "admin";
+const ADMIN_PASSWORD =
+  process.env.E2E_ADMIN_PASSWORD ?? "CHANGE_ME_to_a_secure_admin_password";
+
 async function login(page: Page) {
-  await page.goto("/login");
-  await page.getByPlaceholder("Enter username").fill("admin");
-  await page.getByPlaceholder("Enter password").fill("very_bad_password");
+  await page.goto("/login", { waitUntil: "domcontentloaded" });
+  await page.getByPlaceholder("Enter username").fill(ADMIN_USERNAME);
+  await page.getByPlaceholder("Enter password").fill(ADMIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page).toHaveURL(/\/projects/);
 }

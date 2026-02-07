@@ -1,18 +1,19 @@
 import random
 
-from django.db import models as db_models
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from recotem.api.models import TrainedModel
+from recotem.api.exceptions import ResourceNotFoundError
+from recotem.api.models import ItemMetaData, TrainedModel
 from recotem.api.serializers import TrainedModelSerializer
 from recotem.api.services.model_service import fetch_item_metadata, fetch_mapped_rec
 
-from . import StandardPagination
 from .filemixin import FileDownloadRemoveMixin
+from .mixins import OwnedResourceMixin
+from .pagination import StandardPagination
 
 
 class IDAndScore(serializers.Serializer):
@@ -41,22 +42,19 @@ class RecommendationWithMetaDataSerializer(serializers.Serializer):
     recommendations = serializers.CharField()
 
 
-class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
+class TrainedModelViewset(OwnedResourceMixin, viewsets.ModelViewSet, FileDownloadRemoveMixin):
     permission_classes = [IsAuthenticated]
     serializer_class = TrainedModelSerializer
     filterset_fields = ["id", "data_loc", "data_loc__project"]
     pagination_class = StandardPagination
+    owner_lookup = "data_loc__project__owner"
 
     def get_queryset(self):
-        user = self.request.user
         return (
             TrainedModel.objects.select_related(
                 "configuration", "configuration__project", "data_loc", "data_loc__project"
             )
-            .filter(
-                db_models.Q(data_loc__project__owner=user)
-                | db_models.Q(data_loc__project__owner__isnull=True)
-            )
+            .filter(self.get_owner_filter())
             .order_by("-ins_datetime")
         )
 
@@ -89,7 +87,14 @@ class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
         url_path=r"sample_recommendation_metadata/(?P<metadata_id>\d+)",
     )
     def sample_recommendation_metadata(self, request, metadata_id: int, pk=None):
-        mapped_rec = fetch_mapped_rec(pk)
+        model = self.get_object()
+        if not ItemMetaData.objects.filter(
+            id=metadata_id,
+            project_id=model.data_loc.project_id,
+        ).exists():
+            raise ResourceNotFoundError(detail=f"Item metadata {metadata_id} not found.")
+
+        mapped_rec = fetch_mapped_rec(model.id)
         metadata = fetch_item_metadata(metadata_id)
 
         X = mapped_rec.recommender.X_train_all
@@ -134,9 +139,16 @@ class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     def recommendation(self, request, pk=None):
         """Get recommendations for a known user by user ID."""
         user_id = request.query_params.get("user_id")
-        cutoff = int(request.query_params.get("cutoff", 10))
+        cutoff_raw = request.query_params.get("cutoff", 10)
         if not user_id:
             return Response(status=400, data={"detail": "user_id is required."})
+        try:
+            cutoff = int(cutoff_raw)
+        except (TypeError, ValueError):
+            return Response(status=400, data={"detail": "cutoff must be an integer."})
+        if cutoff < 1:
+            return Response(status=400, data={"detail": "cutoff must be >= 1."})
+
         mapped_rec = fetch_mapped_rec(pk)
         try:
             recs = mapped_rec.get_recommendation_for_known_user_id(

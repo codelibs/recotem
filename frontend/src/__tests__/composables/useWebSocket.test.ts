@@ -406,4 +406,129 @@ describe("useWebSocket", () => {
       expect(true).toBe(true);
     });
   });
+
+  describe("connectionState", () => {
+    it("should_start_as_disconnected", () => {
+      const { connectionState } = useWebSocket("/ws/test/");
+      expect(connectionState.value).toBe("disconnected");
+    });
+
+    it("should_transition_to_connecting_on_first_connect", () => {
+      const { connect, connectionState } = useWebSocket("/ws/test/");
+      connect();
+      expect(connectionState.value).toBe("connecting");
+    });
+
+    it("should_transition_to_connected_on_open", () => {
+      const { connect, connectionState } = useWebSocket("/ws/test/");
+      connect();
+      mockWebSocketInstance.onopen();
+      expect(connectionState.value).toBe("connected");
+    });
+
+    it("should_transition_to_reconnecting_after_unexpected_close", () => {
+      const { connect, connectionState } = useWebSocket("/ws/test/");
+      connect();
+      mockWebSocketInstance.onopen();
+
+      // Unexpected close triggers reconnect
+      mockWebSocketInstance.onclose();
+      expect(connectionState.value).toBe("reconnecting");
+    });
+
+    it("should_transition_to_disconnected_on_intentional_close", () => {
+      const { connect, disconnect, connectionState } = useWebSocket("/ws/test/");
+      connect();
+      mockWebSocketInstance.onopen();
+
+      disconnect();
+      expect(connectionState.value).toBe("disconnected");
+    });
+
+    it("should_transition_to_disconnected_after_max_reconnect_attempts", () => {
+      const { connect, connectionState } = useWebSocket("/ws/test/");
+
+      // Exhaust all reconnect attempts
+      for (let i = 0; i < 11; i++) {
+        connect();
+        mockWebSocketInstance.onclose();
+      }
+
+      // After max attempts, should be disconnected (not reconnecting)
+      expect(connectionState.value).toBe("disconnected");
+    });
+  });
+
+  describe("heartbeat", () => {
+    it("should_respond_with_pong_when_ping_received", () => {
+      const { connect } = useWebSocket("/ws/test/");
+      connect();
+      mockWebSocketInstance.onopen();
+      mockWebSocketInstance.readyState = 1; // OPEN
+
+      // Server sends a ping
+      mockWebSocketInstance.onmessage({
+        data: JSON.stringify({ type: "ping" }),
+      });
+
+      // Client should respond with pong
+      expect(mockWebSocketInstance.send).toHaveBeenCalledWith(
+        JSON.stringify({ type: "pong" })
+      );
+    });
+
+    it("should_not_add_ping_messages_to_messages_array", () => {
+      const { connect, messages } = useWebSocket("/ws/test/");
+      connect();
+      mockWebSocketInstance.onopen();
+      mockWebSocketInstance.readyState = 1; // OPEN
+
+      // Server sends a ping
+      mockWebSocketInstance.onmessage({
+        data: JSON.stringify({ type: "ping" }),
+      });
+
+      // Ping should not appear in messages
+      expect(messages.value).toHaveLength(0);
+    });
+
+    it("should_still_process_normal_messages_after_ping", () => {
+      const { connect, messages } = useWebSocket("/ws/test/");
+      connect();
+      mockWebSocketInstance.onopen();
+      mockWebSocketInstance.readyState = 1; // OPEN
+
+      // Ping first
+      mockWebSocketInstance.onmessage({
+        data: JSON.stringify({ type: "ping" }),
+      });
+
+      // Then a normal message
+      mockWebSocketInstance.onmessage({
+        data: JSON.stringify({ type: "status_update", status: "running" }),
+      });
+
+      expect(messages.value).toHaveLength(1);
+      expect(messages.value[0]).toEqual({ type: "status_update", status: "running" });
+    });
+  });
+
+  describe("message buffer limit", () => {
+    it("should_cap_messages_at_max_limit", () => {
+      const { connect, messages } = useWebSocket("/ws/test/");
+      connect();
+      mockWebSocketInstance.onopen();
+
+      // Send more than MAX_MESSAGES (500)
+      for (let i = 0; i < 510; i++) {
+        mockWebSocketInstance.onmessage({
+          data: JSON.stringify({ id: i }),
+        });
+      }
+
+      expect(messages.value.length).toBeLessThanOrEqual(500);
+      // Should keep the most recent messages
+      expect(messages.value[messages.value.length - 1]).toEqual({ id: 509 });
+    });
+  });
 });

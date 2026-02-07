@@ -63,6 +63,15 @@ class ModelConfigurationSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["tuning_job", "ins_datetime"]
 
+    def validate_recommender_class_name(self, value):
+        import re
+
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", value):
+            raise serializers.ValidationError(
+                "Must be a valid Python identifier (letters, digits, underscores)."
+            )
+        return value
+
     def validate_project(self, project):
         request = self.context.get("request")
         user = getattr(request, "user", None)

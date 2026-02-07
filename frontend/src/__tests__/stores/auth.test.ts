@@ -19,6 +19,9 @@ describe("useAuthStore", () => {
     mockOfetch = ofetch as any;
     vi.clearAllMocks();
 
+    // Default: resolve to undefined (prevents .catch() on undefined errors)
+    mockOfetch.mockResolvedValue(undefined);
+
     // Setup Pinia - create fresh instance for each test
     setActivePinia(createPinia());
 
@@ -213,6 +216,7 @@ describe("useAuthStore", () => {
       expect(mockOfetch).toHaveBeenCalledWith("/api/v1/auth/token/refresh/", {
         method: "POST",
         body: { refresh: "valid-refresh-token" },
+        timeout: 5000,
       });
       expect(store.accessToken).toBe("new-access-token");
       expect(localStorage.setItem).toHaveBeenCalledWith(

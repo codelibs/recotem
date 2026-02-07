@@ -1,9 +1,8 @@
 import json
-import pickle
+import pickle  # noqa: S403
 import tempfile
 
 from django.core.files.storage import default_storage
-from irspack import IDMappedRecommender
 from irspack import __version__ as irspack_version
 from irspack.recommenders.base import get_recommender_class
 from irspack.utils import df_to_sparse
@@ -13,9 +12,12 @@ from recotem.api.models import (
     TrainedModel,
     TrainingData,
 )
+from recotem.api.services.id_mapper_compat import IDMappedRecommender
+from recotem.api.services.pickle_signing import sign_pickle_bytes
 
 # NOTE: pickle is required for irspack model serialization.
 # IDMappedRecommender contains scipy sparse matrices and numpy arrays.
+# HMAC-SHA256 signing is applied to prevent tampering.
 
 
 def train_and_save_model(model: TrainedModel) -> TrainedModel:
@@ -41,14 +43,15 @@ def train_and_save_model(model: TrainedModel) -> TrainedModel:
     rec = recommender_class(X, **param).learn()
     with tempfile.TemporaryFile() as temp_fs:
         mapped_rec = IDMappedRecommender(rec, uids, iids)
-        pickle.dump(  # noqa: S301
+        payload = pickle.dumps(  # noqa: S301
             dict(
                 id_mapped_recommender=mapped_rec,
                 irspack_version=irspack_version,
                 recotem_trained_model_id=model.id,
             ),
-            temp_fs,
         )
+        signed = sign_pickle_bytes(payload)
+        temp_fs.write(signed)
         temp_fs.seek(0)
         file_ = default_storage.save(f"trained_models/model-{model.id}.pkl", temp_fs)
         model.file = file_

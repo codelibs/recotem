@@ -1,8 +1,9 @@
 import { computed } from "vue";
+import type { WsStatusUpdate, WsLogMessage } from "@/types";
 import { useWebSocket } from "./useWebSocket";
 
 export function useJobStatus(jobId: number) {
-  const { messages, isConnected, connect, disconnect } = useWebSocket(
+  const { messages, isConnected, connectionState, connect, disconnect } = useWebSocket<WsStatusUpdate>(
     `/ws/job/${jobId}/status/`
   );
 
@@ -11,13 +12,13 @@ export function useJobStatus(jobId: number) {
     return messages.value[messages.value.length - 1];
   });
 
-  return { messages, isConnected, latestStatus, connect, disconnect };
+  return { messages, isConnected, connectionState, latestStatus, connect, disconnect };
 }
 
 export function useJobLogs(jobId: number) {
-  const { messages, isConnected, connect, disconnect } = useWebSocket(
+  const { messages, isConnected, connectionState, connect, disconnect } = useWebSocket<WsLogMessage>(
     `/ws/job/${jobId}/logs/`
   );
 
-  return { logs: messages, isConnected, connect, disconnect };
+  return { logs: messages, isConnected, connectionState, connect, disconnect };
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mount, flushPromises } from "@vue/test-utils";
-import { createTestingPinia } from "@pinia/testing";
+import { mount } from "@vue/test-utils";
+import { createPinia } from "pinia";
 import ProjectListPage from "@/pages/ProjectListPage.vue";
 import PrimeVue from "primevue/config";
 
@@ -18,7 +18,7 @@ function mountPage() {
     global: {
       plugins: [
         PrimeVue,
-        createTestingPinia({ createSpy: vi.fn }),
+        createPinia(),
       ],
       stubs: {
         Dialog: true,

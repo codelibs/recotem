@@ -1,29 +1,35 @@
 # Multi-stage Dockerfile for Recotem backend
 # Used for both the backend (daphne) and worker (celery) services
 
-FROM python:3.13-slim AS base
+FROM python:3.12-slim AS base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 curl \
     && rm -rf /var/lib/apt/lists/*
 
 FROM base AS builder
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libpq-dev \
     && rm -rf /var/lib/apt/lists/*
-COPY requirements.txt /tmp/
-RUN pip install --prefix=/install --no-cache-dir -r /tmp/requirements.txt
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
 
 # Testing stage: includes test deps and dataset download
 FROM base AS testing
-COPY --from=builder /install /usr/local
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project
 COPY recotem/ /app
-RUN pip install --no-cache-dir pytest pytest-celery pytest-cov pytest-django \
-    && python -c "from irspack.dataset import MovieLens100KDataManager; MovieLens100KDataManager(force_download=True)"
+RUN uv run python -c "from irspack.dataset import MovieLens100KDataManager; MovieLens100KDataManager(force_download=True)"
 
 # Production stage
 FROM base
-COPY --from=builder /install /usr/local
+COPY --from=builder /app/.venv /app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
 
 RUN groupadd -r -g 1000 appuser \
     && useradd -r -u 1000 -g appuser -d /app -s /sbin/nologin appuser \

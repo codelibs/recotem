@@ -5,7 +5,7 @@ from drf_spectacular.views import (
     SpectacularRedocView,
     SpectacularSwaggerView,
 )
-from rest_framework.authtoken.views import obtain_auth_token
+from rest_framework.permissions import AllowAny
 from rest_framework.routers import DefaultRouter
 
 from recotem.api.throttles import LoginRateThrottle
@@ -44,7 +44,6 @@ router.register(r"task_log", TaskLogViewSet, basename="task_log")
 urlpatterns = [
     path("", include(router.urls)),
     path("ping/", PingView.as_view()),
-    path("token/", obtain_auth_token),
     path("project_summary/<int:pk>/", ProjectSummaryView.as_view()),
     path(
         "auth/login/",
@@ -52,13 +51,24 @@ urlpatterns = [
         name="rest_login",
     ),
     path("auth/", include("dj_rest_auth.urls")),
-    path("schema/", SpectacularAPIView.as_view(), name="schema"),
+    # OpenAPI schema endpoints — public for API discoverability
+    path(
+        "schema/",
+        SpectacularAPIView.as_view(permission_classes=[AllowAny]),
+        name="schema",
+    ),
     path(
         "schema/swagger-ui/",
-        SpectacularSwaggerView.as_view(url_name="schema"),
+        SpectacularSwaggerView.as_view(
+            url_name="schema", permission_classes=[AllowAny]
+        ),
         name="swagger-ui",
     ),
     path(
-        "schema/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"
+        "schema/redoc/",
+        SpectacularRedocView.as_view(
+            url_name="schema", permission_classes=[AllowAny]
+        ),
+        name="redoc",
     ),
 ]

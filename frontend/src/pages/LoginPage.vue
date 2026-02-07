@@ -5,10 +5,15 @@
     </h2>
     <form
       class="space-y-4"
-      @submit.prevent="handleLogin"
       novalidate
+      @submit.prevent="handleLogin"
     >
-      <FormField label="Username" name="username" :error="usernameError" required>
+      <FormField
+        label="Username"
+        name="username"
+        :error="usernameError"
+        required
+      >
         <template #default="{ id, hasError }">
           <InputText
             :id="id"
@@ -23,7 +28,12 @@
           />
         </template>
       </FormField>
-      <FormField label="Password" name="password" :error="passwordError" required>
+      <FormField
+        label="Password"
+        name="password"
+        :error="passwordError"
+        required
+      >
         <template #default="{ id, hasError }">
           <Password
             :id="id"

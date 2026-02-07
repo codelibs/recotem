@@ -74,6 +74,9 @@ describe("api client", () => {
     mockOfetchCreate.mockClear();
     mockOfetch.mockClear();
 
+    // Default: resolve to undefined so auth store logout's server-side call works
+    mockOfetch.mockResolvedValue(undefined);
+
     // Capture the callbacks passed to ofetch.create
     mockOfetchCreate.mockImplementation((config: any) => {
       onRequestCallback = config.onRequest;
@@ -167,10 +170,11 @@ describe("api client", () => {
       // Act
       await onResponseErrorCallback({ request, response, options });
 
-      // Assert - refresh was called
+      // Assert - refresh was called (with timeout from auth store)
       expect(mockOfetch).toHaveBeenCalledWith("/api/v1/auth/token/refresh/", {
         method: "POST",
         body: { refresh: "refresh-token" },
+        timeout: 5000,
       });
 
       // Assert - original request was retried
@@ -200,8 +204,11 @@ describe("api client", () => {
       expect(authStore.refreshToken).toBeNull();
       expect(authStore.user).toBeNull();
 
-      // Assert - refresh was NOT called
-      expect(mockOfetch).not.toHaveBeenCalled();
+      // Assert - refresh was NOT called (only server-side logout call if any)
+      const refreshCalls = mockOfetch.mock.calls.filter(
+        (c: any[]) => String(c[0]).includes("token/refresh"),
+      );
+      expect(refreshCalls).toHaveLength(0);
     });
 
     it("should_logout_on_401_for_token_refresh_endpoint", async () => {
@@ -219,7 +226,12 @@ describe("api client", () => {
       // Assert
       expect(authStore.accessToken).toBeNull();
       expect(authStore.refreshToken).toBeNull();
-      expect(mockOfetch).not.toHaveBeenCalled();
+
+      // Assert - refresh was NOT called (only server-side logout call if any)
+      const refreshCalls = mockOfetch.mock.calls.filter(
+        (c: any[]) => String(c[0]).includes("token/refresh"),
+      );
+      expect(refreshCalls).toHaveLength(0);
     });
 
     it("should_logout_when_refresh_token_fails", async () => {
@@ -262,11 +274,11 @@ describe("api client", () => {
       expect(authStore.refreshToken).toBeNull();
     });
 
-    it("should_not_interfere_with_non_401_errors", async () => {
+    it("should_not_interfere_with_non_5xx_non_401_errors", async () => {
       // Arrange
       authStore.accessToken = "token";
       const request = "/api/v1/projects/";
-      const response = { status: 500 };
+      const response = { status: 403 };
       const options: FetchOptions = {};
 
       // Act
@@ -275,6 +287,26 @@ describe("api client", () => {
       // Assert - should return undefined (no special handling)
       expect(result).toBeUndefined();
       expect(mockOfetch).not.toHaveBeenCalled();
+    });
+
+    it("should_retry_on_5xx_errors_with_backoff", async () => {
+      // Arrange
+      authStore.accessToken = "token";
+      const request = "/api/v1/projects/";
+      const response = { status: 500 };
+      const options: FetchOptions = {};
+      mockOfetch.mockResolvedValueOnce({ data: "recovered" });
+
+      // Act
+      await onResponseErrorCallback({ request, response, options });
+
+      // Assert - should retry the request
+      expect(mockOfetch).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          _retryCount: 1,
+        })
+      );
     });
 
     it("should_handle_request_as_string", async () => {

@@ -28,7 +28,7 @@ jobs:
         run: npm run lint
       - name: Unit tests with coverage
         working-directory: frontend
-        run: npx vitest run --coverage
+        run: npx vitest run --coverage --coverage.thresholds.lines=80
       - name: Save frontend coverage
         uses: actions/upload-artifact@v4
         with:
@@ -64,14 +64,32 @@ jobs:
             echo "Waiting for services..."
             sleep 2
           done
+          docker compose exec -T backend python manage.py migrate
+          docker compose exec -T backend python manage.py create_superuser
+          docker compose exec -T backend python manage.py create_test_users \
+            --user e2e_user_a:e2e_password_a \
+            --user e2e_user_b:e2e_password_b
       - name: Run Playwright tests
         working-directory: frontend
+        env:
+          E2E_ADMIN_USERNAME: admin
+          E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD || 'ci-test-admin-password-not-for-production' }}
+          E2E_API_BASE_URL: http://localhost:8000/api/v1
+          E2E_USER_A_USERNAME: e2e_user_a
+          E2E_USER_A_PASSWORD: e2e_password_a
+          E2E_USER_B_USERNAME: e2e_user_b
+          E2E_USER_B_PASSWORD: e2e_password_b
         run: npx playwright test
+      - name: Cleanup docker services
+        if: always()
+        run: docker compose down -v --remove-orphans
       - name: Save test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          path: frontend/playwright-report/
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
           name: playwright-report
 
   run_pytest:
@@ -110,38 +128,43 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
-      - name: Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          python-version: "3.12"
       - name: Install dependencies
         working-directory: backend
-        run: |
-          pip install -r requirements.txt
-          pip install pytest pytest-cov pytest-django
+        run: uv sync --frozen
       - name: Cache MovieLens dataset
         uses: actions/cache@v4
         with:
           path: ~/.cache/irspack
           key: movielens-100k
       - name: Download test data
-        run: python -c "from irspack.dataset import MovieLens100KDataManager; MovieLens100KDataManager(force_download=True)"
+        working-directory: backend
+        run: uv run python -c "from irspack.dataset import MovieLens100KDataManager; MovieLens100KDataManager(force_download=True)"
       - name: Run pytest
-        working-directory: backend/recotem
-        run: pytest -s --cov=./recotem/ --cov-report=xml tests/
-      - name: Validate OpenAPI schema is up to date
+        working-directory: backend
+        run: uv run pytest -s --cov=./recotem/recotem/ --cov-report=xml:recotem/coverage.xml --cov-fail-under=80 recotem/tests/
+      - name: Generate and validate OpenAPI schema
         working-directory: backend/recotem
         run: |
-          python manage.py spectacular --file /tmp/schema.yml
+          uv run --project .. python manage.py spectacular --file /tmp/schema.yml
           if [ -f ../../docs/openapi-schema.yml ]; then
             diff ../../docs/openapi-schema.yml /tmp/schema.yml || \
-              (echo "OpenAPI schema is out of date. Run: cd backend/recotem && python manage.py spectacular --file ../../docs/openapi-schema.yml" && exit 1)
+              (echo "::error::OpenAPI schema is out of date. Run: cd backend/recotem && uv run python manage.py spectacular --file ../../docs/openapi-schema.yml" && exit 1)
+          else
+            echo "::warning::docs/openapi-schema.yml not found. Generate it with: cd backend/recotem && uv run python manage.py spectacular --file ../../docs/openapi-schema.yml"
+          fi
+      - name: Validate generated frontend types
+        working-directory: backend/recotem
+        run: |
+          uv run --project .. python manage.py spectacular --file /tmp/schema.yml
+          if [ -f ../../frontend/src/api/generated-types.ts ]; then
+            cd ../../frontend
+            npx openapi-typescript /tmp/schema.yml -o /tmp/generated-types.ts
+            diff src/api/generated-types.ts /tmp/generated-types.ts || \
+              (echo "Generated types are out of date. Run: npm run generate:types" && exit 1)
           fi
       - name: Save coverage
         uses: actions/upload-artifact@v4

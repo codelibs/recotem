@@ -5,11 +5,11 @@
 image:
   backend:
     repository: recotem/backend
-    tag: "latest"
+    tag: ""
     pullPolicy: IfNotPresent
   proxy:
     repository: recotem/proxy
-    tag: "latest"
+    tag: ""
     pullPolicy: IfNotPresent
   pullSecrets: []
 
@@ -44,6 +44,7 @@ worker:
     minReplicas: 1
     maxReplicas: 5
     targetCPUUtilization: 70
+    targetMemoryUtilization: 80
 
 # Nginx proxy configuration
 proxy:
@@ -120,8 +121,43 @@ config:
   throttleAnonRate: "20/min"
   throttleUserRate: "100/min"
   throttleLoginRate: "5/min"
+  logLevel: "INFO"
+  djangoLogLevel: "WARNING"
+  celeryLogLevel: "INFO"
+
+# Network policy (restrict pod-to-pod and egress traffic)
+# Recommended: enable in production for defense-in-depth
+networkPolicy:
+  enabled: true
+
+# Pod disruption budget (ensure availability during node maintenance)
+# Recommended: enable in production to avoid downtime during rolling updates
+podDisruptionBudget:
+  enabled: true
+  backend:
+    minAvailable: 1
+  worker:
+    minAvailable: 1
+
+# ServiceAccount configuration
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+    # eks.amazonaws.com/role-arn: arn:aws:iam::123456789:role/recotem
+    # iam.gke.io/gcp-service-account: recotem@project.iam.gserviceaccount.com
+
+# Pod Security Standards labels (applied to the namespace)
+podSecurityStandards:
+  enforce: baseline
+  warn: restricted
 
 # Secret values (provide via --set or external secret management)
+# For production, use one of:
+#   - helm secrets plugin: https://github.com/jkroepke/helm-secrets
+#   - External Secrets Operator (ESO): https://external-secrets.io
+#   - Sealed Secrets: https://sealed-secrets.netlify.app
+# Never commit actual secret values to version control.
 secrets:
   # REQUIRED: set these for deployment
   secretKey: ""

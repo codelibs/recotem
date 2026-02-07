@@ -1,40 +1,52 @@
+# OS
 .DS_Store
-node_modules
-/dist
-backend/recotem/dist/
 
-
-# local env files
-.env.local
-.env.*.local
-
-# Log files
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# Editor directories and files
-.idea
-.vscode
+# Editor / IDE
+.idea/
+.vscode/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
 
-**db.sqlite3
+# Python
+__pycache__/
+*.pyc
+*.pyo
 .python-version
-**.pyc
+.venv/
 .coverage
-
-backend/recotem/htmlcov/*
-
 **/coverage.xml
+.ruff_cache/
 
-frontend/coverage
+# Django
+**/db.sqlite3
+backend/recotem/htmlcov/
 
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Frontend build
+/dist/
+frontend/dist/
+backend/recotem/dist/
+frontend/coverage/
+frontend/imgs/
+
+# Frontend misc
+frontend/.vite/
+frontend/playwright-report/
+frontend/test-results/
+
+# Environment
+.env.local
+.env.*.local
+
+# Deployment artifacts
 recotem-compose/
 recotem-compose*.zip
 
-frontend/imgs/
+# Tools
+.serena/

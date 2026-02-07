@@ -1,0 +1,131 @@
+# Default values for recotem
+# Override in values-production.yaml for production deployments
+
+# Container image configuration
+image:
+  backend:
+    repository: recotem/backend
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  proxy:
+    repository: recotem/proxy
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# Backend (Django/Daphne) configuration
+backend:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilization: 70
+
+# Celery worker configuration
+worker:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilization: 70
+
+# Nginx proxy configuration
+proxy:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 8000
+
+# Ingress configuration
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: recotem.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: recotem-tls
+  #    hosts:
+  #      - recotem.example.com
+
+# Persistent volume claims
+persistence:
+  data:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+  staticFiles:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi
+
+# External dependencies
+# Set these if using external managed services instead of in-cluster
+postgresql:
+  # If external is true, use the host/port below instead of deploying PostgreSQL
+  external: false
+  host: ""
+  port: 5432
+  database: recotem
+  username: recotem_user
+
+redis:
+  external: false
+  host: ""
+  port: 6379
+
+# Django configuration (non-secret values go in ConfigMap)
+config:
+  debug: "false"
+  allowedHosts: "localhost"
+  celeryBrokerDb: "0"
+  cacheRedisDb: "2"
+  cacheKeyPrefix: "recotem"
+  modelCacheSize: "8"
+  celeryTaskTimeLimit: "3600"
+  celeryTaskSoftTimeLimit: "3480"
+  throttleAnonRate: "20/min"
+  throttleUserRate: "100/min"
+  throttleLoginRate: "5/min"
+
+# Secret values (provide via --set or external secret management)
+secrets:
+  # REQUIRED: set these for deployment
+  secretKey: ""
+  databaseUrl: ""
+  defaultAdminPassword: ""
+  # Optional
+  redisPassword: ""

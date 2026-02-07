@@ -1,0 +1,13 @@
+apiVersion: v2
+name: recotem
+description: A Helm chart for Recotem - recommendation system builder
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - recommendation
+  - machine-learning
+  - django
+  - vue
+maintainers:
+  - name: Recotem Team

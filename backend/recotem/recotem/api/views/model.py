@@ -1,23 +1,17 @@
-import pickle
 import random
-from functools import lru_cache
-from pathlib import Path
-from typing import Optional
 
-import pandas as pd
+from django.db import models as db_models
 from drf_spectacular.utils import extend_schema
-from irspack import IDMappedRecommender
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import APIException
-from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from recotem.api.models import ItemMetaData, Project, TrainedModel
+from recotem.api.models import TrainedModel
 from recotem.api.serializers import TrainedModelSerializer
-from recotem.api.utils import read_dataframe
+from recotem.api.services.model_service import fetch_item_metadata, fetch_mapped_rec
 
+from . import StandardPagination
 from .filemixin import FileDownloadRemoveMixin
 
 
@@ -47,41 +41,24 @@ class RecommendationWithMetaDataSerializer(serializers.Serializer):
     recommendations = serializers.CharField()
 
 
-@lru_cache(maxsize=1)
-def fetch_mapped_rec(pk: int) -> IDMappedRecommender:
-    try:
-        model_record = TrainedModel.objects.get(pk=pk)
-        return pickle.load(model_record.file)["id_mapped_recommender"]
-    except Exception:
-        raise APIException(detail=f"Could not find model {pk}", code=404)
-
-
-@lru_cache(maxsize=1)
-def fetch_item_metadata(pk: int) -> Optional[pd.DataFrame]:
-    try:
-        model_record: ItemMetaData = ItemMetaData.objects.get(pk=pk)
-        project: Project = model_record.project
-        item_column: str = project.item_column
-        df: pd.DataFrame = read_dataframe(
-            Path(model_record.file.name), model_record.file
-        )
-        df[item_column] = [str(x) for x in df[item_column]]
-        return df.drop_duplicates(item_column).set_index(
-            model_record.project.item_column
-        )
-    except Exception:
-        raise APIException(detail=f"Could not load item metadata {pk}", code=404)
-
-
 class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
     permission_classes = [IsAuthenticated]
-    queryset = TrainedModel.objects.all().order_by("-ins_datetime")
     serializer_class = TrainedModelSerializer
     filterset_fields = ["id", "data_loc", "data_loc__project"]
+    pagination_class = StandardPagination
 
-    class pagination_class(PageNumberPagination):
-        page_size = 10
-        page_size_query_param = "page_size"
+    def get_queryset(self):
+        user = self.request.user
+        return (
+            TrainedModel.objects.select_related(
+                "configuration", "configuration__project", "data_loc", "data_loc__project"
+            )
+            .filter(
+                db_models.Q(data_loc__project__owner=user)
+                | db_models.Q(data_loc__project__owner__isnull=True)
+            )
+            .order_by("-ins_datetime")
+        )
 
     @extend_schema(responses={200: RawRecommendationSerializer})
     @action(detail=True, methods=["get"])
@@ -144,6 +121,31 @@ class TrainedModelViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
                 user_profile=user_history,
                 recommendations=recommendations_json,
             ),
+        )
+
+    @extend_schema(
+        parameters=[
+            serializers.CharField(help_text="User ID"),
+            serializers.IntegerField(help_text="Number of recommendations"),
+        ],
+        responses={200: IDAndScore(many=True)},
+    )
+    @action(detail=True, methods=["get"])
+    def recommendation(self, request, pk=None):
+        """Get recommendations for a known user by user ID."""
+        user_id = request.query_params.get("user_id")
+        cutoff = int(request.query_params.get("cutoff", 10))
+        if not user_id:
+            return Response(status=400, data={"detail": "user_id is required."})
+        mapped_rec = fetch_mapped_rec(pk)
+        try:
+            recs = mapped_rec.get_recommendation_for_known_user_id(
+                user_id, cutoff=cutoff
+            )
+        except KeyError:
+            return Response(status=404, data={"detail": f"User '{user_id}' not found."})
+        return Response(
+            data=[dict(item_id=str(x[0]), score=x[1]) for x in recs],
         )
 
     @extend_schema(

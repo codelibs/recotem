@@ -28,10 +28,25 @@ class ModelWithInsDatetime(models.Model):
 
 
 class Project(ModelWithInsDatetime):
-    name = models.TextField(unique=True)
+    name = models.TextField()
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="projects",
+        null=True,  # nullable for backward compat with existing rows
+        blank=True,
+    )
     user_column = models.CharField(max_length=256)
     item_column = models.CharField(max_length=256)
     time_column = models.CharField(max_length=256, blank=False, null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "name"],
+                name="unique_project_name_per_owner",
+            ),
+        ]
 
 
 class TrainingData(ModelWithInsDatetime, BaseFileModel):
@@ -97,6 +112,9 @@ def save_file_size(
 
 class SplitConfig(ModelWithInsDatetime):
     name = models.CharField(max_length=256, null=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
 
     class SplitScheme(models.TextChoices):
         RANDOM = "RG", _("Random")
@@ -118,6 +136,9 @@ class SplitConfig(ModelWithInsDatetime):
 class EvaluationConfig(ModelWithInsDatetime):
     name = models.CharField(max_length=256, null=True)
     cutoff = models.IntegerField(default=20)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
 
     class TargetMetric(models.TextChoices):
         NDCG = "ndcg", "Normalized discounted cumulative gain"

@@ -1,18 +1,10 @@
 services:
-  queue:
-    image: rabbitmq:4.0
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: "5s"
-      timeout: "3s"
-      retries: 5
-      start_period: "5s"
-    env_file:
-      - envs/dev.env
   db:
-    image: postgres:12
+    image: postgres:17-alpine
+    ports:
+      - "5432:5432"
     volumes:
-      - db-data:/var/lib/postgresql/data/pgdata
+      - dev-db-data:/var/lib/postgresql/data/pgdata
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "recotem_user", "-d", "recotem"]
       interval: "5s"
@@ -21,46 +13,17 @@ services:
       start_period: "5s"
     env_file:
       - envs/dev.env
-  backend:
-    depends_on:
-      db:
-        condition: service_started
-      queue:
-        condition: service_started
-    build:
-      context: ./backend
-      dockerfile: backend.dockerfile
-      args:
-        - RECOTEM_DEV=true
-    volumes:
-      - ./backend/recotem:/app
-      - data-location:/app/data
+
+  redis:
+    image: redis:7-alpine
     ports:
-      - "8000:80"
+      - "6379:6379"
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:80/api/ping/ || exit 1"]
-      interval: "10s"
-      timeout: "5s"
-      retries: 2
+      test: ["CMD", "redis-cli", "ping"]
+      interval: "5s"
+      timeout: "3s"
+      retries: 5
       start_period: "5s"
-    env_file:
-      - envs/dev.env
-  celery_worker:
-    depends_on:
-      db:
-        condition: service_started
-      backend:
-        condition: service_started
-      queue:
-        condition: service_started
-    build:
-      context: ./backend
-      dockerfile: celery.dockerfile
-    volumes:
-      - ./backend/recotem:/app
-      - data-location:/app/data
-    env_file:
-      - envs/dev.env
+
 volumes:
-  data-location:
-  db-data:
+  dev-db-data:

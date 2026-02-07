@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "recotem.fullname" . }}-config
+  labels:
+    {{- include "recotem.labels" . | nindent 4 }}
+data:
+  DEBUG: {{ .Values.config.debug | quote }}
+  ALLOWED_HOSTS: {{ .Values.config.allowedHosts | quote }}
+  CELERY_BROKER_URL: "redis://{{ include "recotem.redisHost" . }}:{{ .Values.redis.port }}/{{ .Values.config.celeryBrokerDb }}"
+  CACHE_REDIS_URL: "redis://{{ include "recotem.redisHost" . }}:{{ .Values.redis.port }}/{{ .Values.config.cacheRedisDb }}"
+  CACHE_KEY_PREFIX: {{ .Values.config.cacheKeyPrefix | quote }}
+  MODEL_CACHE_SIZE: {{ .Values.config.modelCacheSize | quote }}
+  CELERY_TASK_TIME_LIMIT: {{ .Values.config.celeryTaskTimeLimit | quote }}
+  CELERY_TASK_SOFT_TIME_LIMIT: {{ .Values.config.celeryTaskSoftTimeLimit | quote }}
+  THROTTLE_ANON_RATE: {{ .Values.config.throttleAnonRate | quote }}
+  THROTTLE_USER_RATE: {{ .Values.config.throttleUserRate | quote }}
+  THROTTLE_LOGIN_RATE: {{ .Values.config.throttleLoginRate | quote }}

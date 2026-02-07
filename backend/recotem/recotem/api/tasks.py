@@ -1,28 +1,25 @@
 import json
-import pickle
 import random
 import re
-import tempfile
 from logging import Logger
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
 import scipy.sparse as sps
+from asgiref.sync import async_to_sync
 from billiard.connection import Pipe
 from billiard.context import Process
 from celery import chain, group
+from channels.layers import get_channel_layer
 from django.conf import settings
-from django.core.files.storage import default_storage
 from django_celery_results.models import TaskResult
-from irspack import Evaluator, IDMappedRecommender, InteractionMatrix
+from irspack import Evaluator, InteractionMatrix
 from irspack import __version__ as irspack_version
 from irspack import autopilot, get_optimizer_class, split_dataframe_partial_user_holdout
 from irspack.optimizers.autopilot import DEFAULT_SEARCHNAMES, TaskBackend, search_one
 from irspack.parameter_tuning import Suggestion
 from irspack.parameter_tuning.parameter_range import is_valid_param_name
-from irspack.recommenders.base import get_recommender_class
-from irspack.utils import df_to_sparse
 from optuna.storages import RDBStorage
 
 from recotem.api.models import (
@@ -37,8 +34,35 @@ from recotem.api.models import (
     TrainedModel,
     TrainingData,
 )
+from recotem.api.services.training_service import train_and_save_model
 from recotem.api.utils import read_dataframe
 from recotem.celery import app
+
+
+def _send_ws_log(job_id: int, message: str) -> None:
+    """Send a log message to the WebSocket group for the given job."""
+    try:
+        channel_layer = get_channel_layer()
+        if channel_layer is not None:
+            async_to_sync(channel_layer.group_send)(
+                f"job_{job_id}_logs",
+                {"type": "task_log_message", "message": message},
+            )
+    except Exception:
+        pass  # WebSocket delivery is best-effort
+
+
+def _send_ws_status(job_id: int, status: str, data: dict = None) -> None:
+    """Send a status update to the WebSocket group for the given job."""
+    try:
+        channel_layer = get_channel_layer()
+        if channel_layer is not None:
+            async_to_sync(channel_layer.group_send)(
+                f"job_{job_id}_status",
+                {"type": "job_status_update", "status": status, "data": data or {}},
+            )
+    except Exception:
+        pass  # WebSocket delivery is best-effort
 
 
 class BilliardBackend(TaskBackend):
@@ -90,42 +114,9 @@ def train_recommender_func(
     task_result, model_id: int, parameter_tuning_job_id: Optional[int] = None
 ):
     model: TrainedModel = TrainedModel.objects.get(id=model_id)
-
-    model_config: ModelConfiguration = model.configuration
-    data: TrainingData = model.data_loc
-
     TaskAndTrainedModelLink.objects.create(model=model, task=task_result)
-    assert model_config.project.id == data.project.id
-    project: Project = data.project
-    user_column = project.user_column
-    item_column = project.item_column
-    recommender_class = get_recommender_class(model_config.recommender_class_name)
 
-    X, uids, iids = df_to_sparse(data.validate_return_df(), user_column, item_column)
-    uids = [str(uid) for uid in uids]
-    iids = [str(iid) for iid in iids]
-
-    model.irspack_version = irspack_version
-
-    param = json.loads(model_config.parameters_json)
-    rec = recommender_class(X, **param).learn()
-    with tempfile.TemporaryFile() as temp_fs:
-        mapped_rec = IDMappedRecommender(rec, uids, iids)
-        pickle.dump(
-            dict(
-                id_mapped_recommender=mapped_rec,
-                irspack_version=irspack_version,
-                recotem_trained_model_id=model_id,
-            ),
-            temp_fs,
-        )
-        temp_fs.seek(0)
-        file_ = default_storage.save(f"trained_models/model-{model.id}.pkl", temp_fs)
-        model.file = file_
-        model.save()
-
-    model.filesize = model.file.size
-    model.save()
+    train_and_save_model(model)
 
     if parameter_tuning_job_id is not None:
         job: ParameterTuningJob = ParameterTuningJob.objects.get(
@@ -135,11 +126,19 @@ def train_recommender_func(
         job.save()
 
 
-@app.task(bind=True)
+@app.task(
+    bind=True,
+    time_limit=settings.CELERY_TASK_TIME_LIMIT,
+    soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+)
 def task_train_recommender(self, model_id: int) -> None:
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
     self.update_state(state="STARTED", meta=[])
-    train_recommender_func(task_result, model_id)
+    try:
+        train_recommender_func(task_result, model_id)
+    except Exception as e:
+        TaskLog.objects.create(task=task_result, contents=f"Training failed: {e}")
+        raise
 
 
 def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
@@ -149,7 +148,7 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
     TaskAndParameterJobLink.objects.create(job=job, task=task_result)
 
     data: TrainingData = job.data
-    project: TrainingData = data.project
+    project: Project = data.project
 
     optuna_storage = RDBStorage(settings.DATABASE_URL)
     study_name = job.study_name()
@@ -190,26 +189,34 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
             "This might be caused by too short timeout or too small validation set."
         )
 
-    TaskLog.objects.create(
-        task=task_result,
-        contents=f"""Job {parameter_tuning_job_id} complete.""",
-    )
-    TaskLog.objects.create(
-        task=task_result,
-        contents=f"""Found best configuration: {recommender_class_name} / {best_params} with {evaluation.target_metric}@{evaluation.cutoff} = {-best_trial.value}""",
-    )
+    msg_complete = f"Job {parameter_tuning_job_id} complete."
+    TaskLog.objects.create(task=task_result, contents=msg_complete)
+    _send_ws_log(parameter_tuning_job_id, msg_complete)
+
+    msg_best = f"Found best configuration: {recommender_class_name} / {best_params} with {evaluation.target_metric}@{evaluation.cutoff} = {-best_trial.value}"
+    TaskLog.objects.create(task=task_result, contents=msg_best)
+    _send_ws_log(parameter_tuning_job_id, msg_best)
+    _send_ws_status(parameter_tuning_job_id, "completed", {"best_score": -best_trial.value})
 
     return config.id
 
 
-@app.task(bind=True)
+@app.task(
+    bind=True,
+    time_limit=settings.CELERY_TASK_TIME_LIMIT,
+    soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+)
 def task_create_best_config(self, parameter_tuning_job_id: int, *args) -> int:
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
     self.update_state(state="STARTED", meta=[])
     return create_best_config_fun(task_result, parameter_tuning_job_id)
 
 
-@app.task(bind=True)
+@app.task(
+    bind=True,
+    time_limit=settings.CELERY_TASK_TIME_LIMIT,
+    soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+)
 def task_create_best_config_train_rec(self, parameter_tuning_job_id: int, *args) -> int:
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
     self.update_state(state="STARTED", meta=[])
@@ -221,7 +228,11 @@ def task_create_best_config_train_rec(self, parameter_tuning_job_id: int, *args)
     train_recommender_func(task_result, model.id, parameter_tuning_job_id)
 
 
-@app.task(bind=True)
+@app.task(
+    bind=True,
+    time_limit=settings.CELERY_TASK_TIME_LIMIT,
+    soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+)
 def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
 
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
@@ -248,10 +259,10 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
     user_column = project.user_column
     item_column = project.item_column
 
-    TaskLog.objects.create(
-        task=task_result,
-        contents=f"""Start job {parameter_tuning_job_id} / worker {index}.""",
-    )
+    msg_start = f"Start job {parameter_tuning_job_id} / worker {index}."
+    TaskLog.objects.create(task=task_result, contents=msg_start)
+    _send_ws_log(parameter_tuning_job_id, msg_start)
+    _send_ws_status(parameter_tuning_job_id, "running")
 
     dataset, _ = split_dataframe_partial_user_holdout(
         df,
@@ -289,25 +300,33 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
             message = f"""Trial {i} with {algo} / {params}: {trial.state.name}.
 {evaluator.target_metric.name}@{evaluator.cutoff}={-trial.value}"""
         TaskLog.objects.create(task=task_result, contents=message)
+        _send_ws_log(parameter_tuning_job_id, message)
 
     if job.random_seed is None:
         random_seed = random.randint(0, 2**16)
     else:
         random_seed: int = job.random_seed
-    autopilot(
-        X_tv_train,
-        evaluator,
-        n_trials=n_trials,
-        memory_budget=job.memory_budget,
-        timeout_overall=job.timeout_overall,
-        timeout_singlestep=job.timeout_singlestep,
-        random_seed=random_seed + index,
-        callback=callback,
-        storage=optuna_storage,
-        study_name=study_name,
-        task_resource_provider=BilliardBackend,
-        algorithms=tried_algorithms,
-    )
+    try:
+        autopilot(
+            X_tv_train,
+            evaluator,
+            n_trials=n_trials,
+            memory_budget=job.memory_budget,
+            timeout_overall=job.timeout_overall,
+            timeout_singlestep=job.timeout_singlestep,
+            random_seed=random_seed + index,
+            callback=callback,
+            storage=optuna_storage,
+            study_name=study_name,
+            task_resource_provider=BilliardBackend,
+            algorithms=tried_algorithms,
+        )
+    except Exception as e:
+        msg_error = f"Search worker {index} for job {parameter_tuning_job_id} failed: {e}"
+        TaskLog.objects.create(task=task_result, contents=msg_error)
+        _send_ws_log(parameter_tuning_job_id, msg_error)
+        _send_ws_status(parameter_tuning_job_id, "error", {"error": str(e)})
+        raise
 
 
 def start_tuning_job(job: ParameterTuningJob) -> None:

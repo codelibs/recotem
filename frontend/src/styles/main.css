@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+@theme {
+  /* Primary colors */
+  --color-primary: #0052CC;
+  --color-primary-hover: #0065FF;
+  --color-primary-active: #0747A6;
+
+  /* Semantic colors */
+  --color-success: #36B37E;
+  --color-success-light: #E3FCEF;
+  --color-warning: #FFAB00;
+  --color-warning-light: #FFFAE6;
+  --color-danger: #DE350B;
+  --color-danger-light: #FFEBE6;
+  --color-info: #0065FF;
+  --color-info-light: #DEEBFF;
+
+  /* Neutral palette (Atlassian N-scale) */
+  --color-neutral-10: #FAFBFC;
+  --color-neutral-20: #F4F5F7;
+  --color-neutral-30: #EBECF0;
+  --color-neutral-40: #DFE1E6;
+  --color-neutral-100: #7A869A;
+  --color-neutral-200: #6B778C;
+  --color-neutral-500: #42526E;
+  --color-neutral-800: #172B4D;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 1px rgba(9, 30, 66, 0.25), 0 0 1px rgba(9, 30, 66, 0.31);
+  --shadow-md: 0 4px 8px -2px rgba(9, 30, 66, 0.25), 0 0 1px rgba(9, 30, 66, 0.31);
+  --shadow-lg: 0 8px 16px -4px rgba(9, 30, 66, 0.25), 0 0 1px rgba(9, 30, 66, 0.31);
+
+  /* Border radius */
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+}
+
+/* Dark mode overrides */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-neutral-10: #1B2638;
+    --color-neutral-20: #1D2D44;
+    --color-neutral-30: #253858;
+    --color-neutral-40: #344563;
+    --color-neutral-100: #8993A4;
+    --color-neutral-200: #9FADBC;
+    --color-neutral-500: #B6C2CF;
+    --color-neutral-800: #DEE4EA;
+  }
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  color: var(--color-neutral-800);
+  background-color: var(--color-neutral-10);
+}
+
+/* Skip link for accessibility */
+.skip-link {
+  position: absolute;
+  top: -40px;
+  left: 0;
+  background: var(--color-primary);
+  color: white;
+  padding: 8px 16px;
+  z-index: 100;
+  transition: top 0.2s;
+}
+.skip-link:focus {
+  top: 0;
+}

@@ -16,4 +16,4 @@ if !  python manage.py collectstatic --noinput; then
 echo "failed to collectstatic."
 exit 1;
 fi
-exec python manage.py runserver 0.0.0.0:80
+exec daphne recotem.asgi:application -b 0.0.0.0 -p 80

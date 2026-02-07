@@ -40,8 +40,10 @@ def read_dataframe(filepath: Path, file: IO) -> pd.DataFrame:
     if suffix in READ_RULES:
         try:
             df = READ_RULES[suffix](input_stream)
-        except Exception:
-            raise ValidationError(f"Failed to parse {filepath.name} as {suffix} file.")
+        except (TypeError, ValueError, pd.errors.ParserError) as e:
+            raise ValidationError(
+                f"Failed to parse {filepath.name} as {suffix} file: {e}"
+            )
     else:
         raise ValidationError(
             f"{suffix} file not supported. Supported file formats are {'/'.join(list(READ_RULES.keys()))} with gzip compression (.gz/.gzip)."

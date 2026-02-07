@@ -22,6 +22,13 @@ class TrainingDataSerializer(serializers.ModelSerializer):
             "filesize",
         ]
 
+    def validate_project(self, project: Project) -> Project:
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user is not None and project.owner_id not in (None, user.id):
+            raise serializers.ValidationError("Project not found.")
+        return project
+
     def create(self, validated_data):
         obj: TrainingData = TrainingData.objects.create(**validated_data)
         try:
@@ -51,6 +58,13 @@ class ItemMetaDataSerializer(serializers.ModelSerializer):
             "filesize",
         ]
 
+    def validate_project(self, project: Project) -> Project:
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user is not None and project.owner_id not in (None, user.id):
+            raise serializers.ValidationError("Project not found.")
+        return project
+
     def create(self, validated_data):
         obj: ItemMetaData = ItemMetaData.objects.create(**validated_data)
         try:
@@ -66,7 +80,7 @@ class ItemMetaDataSerializer(serializers.ModelSerializer):
             try:
                 df[[c]].to_json(orient="records")
                 valid_column_names.append(c)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
         obj.valid_columns_list_json = json.dumps(valid_column_names)
         obj.filesize = obj.file.size

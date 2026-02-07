@@ -40,6 +40,22 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["ins_datetime", "task_links"]
 
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        data = attrs.get("data")
+        split = attrs.get("split")
+        evaluation = attrs.get("evaluation")
+        if user is None:
+            return attrs
+        if data is not None and data.project.owner_id not in (None, user.id):
+            raise ValidationError(dict(data=["Data not found."]))
+        if split is not None and split.created_by_id not in (None, user.id):
+            raise ValidationError(dict(split=["Split config not found."]))
+        if evaluation is not None and evaluation.created_by_id not in (None, user.id):
+            raise ValidationError(dict(evaluation=["Evaluation config not found."]))
+        return attrs
+
     def create(self, validated_data):
         data: TrainingData = validated_data["data"]
         if data.filesize is None:

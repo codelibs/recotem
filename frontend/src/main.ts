@@ -1,23 +1,29 @@
-import Vue from "vue";
-import "./plugins/axios";
+import { createApp } from "vue";
+import { createPinia } from "pinia";
+import { VueQueryPlugin } from "@tanstack/vue-query";
+import PrimeVue from "primevue/config";
+import Aura from "@primevue/themes/aura";
+import ToastService from "primevue/toastservice";
+import ConfirmationService from "primevue/confirmationservice";
 import App from "./App.vue";
 import router from "./router";
-import store from "./store";
-import vuetify from "./plugins/vuetify";
+import "./styles/main.css";
+import "primeicons/primeicons.css";
 
-import '@fontsource/roboto/100.css';
-import '@fontsource/roboto/300.css';
-import '@fontsource/roboto/400.css';
-import '@fontsource/roboto/500.css';
-import '@fontsource/roboto/700.css';
-import '@fontsource/roboto/900.css';
+const app = createApp(App);
 
+app.use(createPinia());
+app.use(router);
+app.use(VueQueryPlugin);
+app.use(PrimeVue, {
+  theme: {
+    preset: Aura,
+    options: {
+      darkModeSelector: ".dark-mode",
+    },
+  },
+});
+app.use(ToastService);
+app.use(ConfirmationService);
 
-Vue.config.productionTip = false;
-
-new Vue({
-  router,
-  store,
-  vuetify,
-  render: (h) => h(App),
-}).$mount("#app");
+app.mount("#app");

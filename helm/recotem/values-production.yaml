@@ -1,0 +1,60 @@
+# Production overrides for recotem Helm chart
+# Usage: helm install recotem ./helm/recotem -f helm/recotem/values-production.yaml
+
+backend:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilization: 70
+
+worker:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilization: 70
+
+proxy:
+  replicaCount: 2
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: recotem.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: recotem-tls
+      hosts:
+        - recotem.example.com
+
+persistence:
+  data:
+    size: 50Gi
+  staticFiles:
+    size: 2Gi
+
+config:
+  debug: "false"
+  allowedHosts: "recotem.example.com"

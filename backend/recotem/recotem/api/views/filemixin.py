@@ -8,19 +8,19 @@ from recotem.api.models.base_file_model import BaseFileModel
 class FileDownloadRemoveMixin:
     @action(detail=True, methods=["delete"])
     def unlink_file(self, request, pk: int):
-        obj: BaseFileModel = self.serializer_class.Meta.model.objects.get(pk=int(pk))
+        obj: BaseFileModel = self.get_object()
         obj.delete_file()
         return Response(self.get_serializer(obj, many=False).data)
 
     @action(detail=True, methods=["get"])
     def download_file(self, request, pk: int):
-        obj: BaseFileModel = self.serializer_class.Meta.model.objects.get(pk=int(pk))
+        obj: BaseFileModel = self.get_object()
         if not obj.file:
             return Response(status=404, data=dict(detail=["file deleted."]))
         response = StreamingHttpResponse(
             obj.file,
             status=200,
-            content_type="application/octed-stream",
+            content_type="application/octet-stream",
             headers={"Content-Disposition": f'attachment; filename="{obj.basename()}"'},
         )
         response["Cache-Control"] = "no-cache"

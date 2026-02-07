@@ -21,6 +21,7 @@ class SplitConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = SplitConfig
         fields = "__all__"
+        read_only_fields = ["created_by"]
 
     def validate_heldout_ratio(self, value: Any):
         value_f = float(value)
@@ -39,6 +40,7 @@ class EvaluationConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = EvaluationConfig
         fields = "__all__"
+        read_only_fields = ["created_by"]
 
 
 class TaskLogSerializer(serializers.ModelSerializer):
@@ -60,6 +62,13 @@ class ModelConfigurationSerializer(serializers.ModelSerializer):
             "ins_datetime",
         ]
         read_only_fields = ["tuning_job", "ins_datetime"]
+
+    def validate_project(self, project):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user is not None and project.owner_id not in (None, user.id):
+            raise serializers.ValidationError("Project not found.")
+        return project
 
 
 __all__ = (

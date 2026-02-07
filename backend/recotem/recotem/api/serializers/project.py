@@ -7,6 +7,33 @@ class ProjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = Project
         fields = "__all__"
+        read_only_fields = ["owner"]
+
+    def validate_name(self, value):
+        request = self.context.get("request")
+        if request and hasattr(request, "user") and request.user.is_authenticated:
+            owner = request.user
+        else:
+            owner = None
+
+        qs = Project.objects.filter(owner=owner, name=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                "A project with this name already exists."
+            )
+
+        # Legacy projects (owner=None): ensure global uniqueness
+        if owner is None:
+            qs = Project.objects.filter(owner__isnull=True, name=value)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError(
+                    "A project with this name already exists."
+                )
+        return value
 
 
 class TrainingDataForSummarySerializer(serializers.ModelSerializer):

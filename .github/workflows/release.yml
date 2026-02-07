@@ -9,6 +9,7 @@ jobs:
       contents: read
       packages: write
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,7 +17,6 @@ jobs:
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -24,49 +24,115 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push docker image (backend)
-        run: |
-          tag=ghcr.io/codelibs/recotem-backend:${GITHUB_REF##*/}
-          cd backend && \
-            docker buildx build -f backend.dockerfile -t "${tag}" \
-              --push --platform linux/amd64,linux/arm64 .
-          cd ..
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/codelibs/recotem-backend:${{ github.ref_name }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
       - name: Build and push docker image (worker)
-        run: |
-          tag=ghcr.io/codelibs/recotem-worker:${GITHUB_REF##*/}
-          cd backend && \
-            docker buildx build -f celery.dockerfile -t "${tag}" \
-              --push --platform linux/amd64,linux/arm64 .
-          cd ..
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/codelibs/recotem-worker:${{ github.ref_name }}
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
 
-  build-frontend:
+  build-proxy:
     permissions:
       contents: read
       packages: write
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
-      -
-        name: Set up Docker Buildx
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push docker image (frontend)
+      - name: Build and push docker image (proxy)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: proxy.dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/codelibs/recotem-proxy:${{ github.ref_name }}
+          cache-from: type=gha,scope=proxy
+          cache-to: type=gha,mode=max,scope=proxy
+
+  scan-images:
+    needs: [build-backend-worker, build-proxy]
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        image: [recotem-backend, recotem-worker, recotem-proxy]
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "ghcr.io/codelibs/${{ matrix.image }}:${{ github.ref_name }}"
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  helm-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [build-backend-worker, build-proxy]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+      - name: Lint Helm chart
+        run: helm lint helm/recotem/
+      - name: Package Helm chart
+        env:
+          TAG_REF: ${{ github.ref_name }}
         run: |
-          tag=ghcr.io/codelibs/recotem-frontend:${GITHUB_REF##*/}
-          cd frontend && \
-            docker buildx build -f frontend.dockerfile -t "${tag}" \
-             --push --platform linux/amd64,linux/arm64 .
+          helm package helm/recotem/ --version "${TAG_REF#v}" --app-version "${TAG_REF#v}"
+      - name: Upload Helm package
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: recotem-*.tgz
+
   upload-release-artifact:
     runs-on: ubuntu-latest
-    needs: [build-backend-worker, build-frontend]
+    timeout-minutes: 10
+    needs: [build-backend-worker, build-proxy, helm-package]
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -75,9 +141,16 @@ jobs:
       - name: Setup python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
       - name: Build release object
         run: pip install PyYAML>=6.0.2 && python release.py
+      - name: Download Helm chart
+        uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
       - name: Release
-        run : |
-          gh release upload ${GITHUB_REF##*/} recotem-compose-${GITHUB_REF##*/}.zip'#Docker resources to try out' --clobber
+        env:
+          TAG_REF: ${{ github.ref_name }}
+        run: |
+          gh release upload "${TAG_REF}" "recotem-compose-${TAG_REF}.zip#Docker resources to try out" --clobber
+          gh release upload "${TAG_REF}" recotem-*.tgz#"Helm chart" --clobber

@@ -1,12 +1,11 @@
 import io
 import pickle  # noqa: S403
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 from django.conf import settings
 from django.core.cache import cache
-from django.db.models.signals import post_delete
+from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
 from recotem.api.exceptions import ModelLoadError, ResourceNotFoundError
@@ -60,7 +59,7 @@ def fetch_mapped_rec(pk: int) -> IDMappedRecommender:
         raise ModelLoadError(detail=f"Could not load model {pk}: {e}")
 
 
-def fetch_item_metadata(pk: int) -> Optional[pd.DataFrame]:
+def fetch_item_metadata(pk: int) -> pd.DataFrame | None:
     """Load and cache item metadata as a DataFrame indexed by item column."""
     cache_key = f"{_METADATA_KEY_PREFIX}{pk}"
     cached = cache.get(cache_key)
@@ -88,12 +87,14 @@ def fetch_item_metadata(pk: int) -> Optional[pd.DataFrame]:
 
 
 @receiver(post_delete, sender=TrainedModel)
+@receiver(post_save, sender=TrainedModel)
 def clear_model_cache(sender, instance, **kwargs):
-    """Evict specific model from cache when deleted."""
+    """Evict specific model from cache when saved or deleted."""
     cache.delete(f"{_MODEL_KEY_PREFIX}{instance.pk}")
 
 
 @receiver(post_delete, sender=ItemMetaData)
+@receiver(post_save, sender=ItemMetaData)
 def clear_metadata_cache(sender, instance, **kwargs):
-    """Evict specific metadata from cache when deleted."""
+    """Evict specific metadata from cache when saved or deleted."""
     cache.delete(f"{_METADATA_KEY_PREFIX}{instance.pk}")

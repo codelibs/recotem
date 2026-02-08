@@ -2,12 +2,12 @@ import gzip
 import pickle
 from tempfile import NamedTemporaryFile
 from time import sleep
-from typing import IO, Optional
 
 import numpy as np
 import pandas as pd
 import pytest
 from django.test import Client
+
 from recotem.api.services.id_mapper_compat import IDMappedRecommender
 
 from .test_data_post import login_client
@@ -30,7 +30,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
     project_resp = client.post(
         project_url,
         dict(
-            name=f"ml_project",
+            name="ml_project",
             user_column="userId",
             item_column="movieId",
             time_column="timestamp",
@@ -40,7 +40,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         raise RuntimeError(project_resp.json())
 
     project_id = project_resp.json()["id"]
-    pkl_file = NamedTemporaryFile(suffix=f".json.gz")
+    pkl_file = NamedTemporaryFile(suffix=".json.gz")
     pkl_gzip_file = gzip.open(pkl_file, mode="wb")
     ml100k.to_json(pkl_gzip_file)
     pkl_gzip_file.close()
@@ -96,7 +96,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
     job_response.status_code == 201
     job_id = job_response.json()["id"]
 
-    best_config: Optional[int] = None
+    best_config: int | None = None
     for _ in range(30):
         job = client.get(f"{parameter_tuning_job_url}{job_id}/").json()
         best_config = job["best_config"]
@@ -156,7 +156,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         ),
     ).json()["id"]
 
-    tuned_model_id: Optional[int] = None
+    tuned_model_id: int | None = None
     for _ in range(20):
         job_ = client.get(
             f"{parameter_tuning_job_url}{job_with_train_afterward_id}/"

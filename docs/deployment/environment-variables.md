@@ -32,11 +32,33 @@
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis URL for Celery broker (db 0) |
+| `CHANNELS_REDIS_URL` | `redis://localhost:6379/1` | Redis URL for Django Channels WebSocket layer (db 1) |
 | `CACHE_REDIS_URL` | `redis://localhost:6379/2` | Redis URL for cache (db 2) |
 | `CACHE_KEY_PREFIX` | `recotem` | Cache key prefix |
-| `REDIS_PASSWORD` | (empty) | Redis password (optional) |
+| `REDIS_PASSWORD` | (empty) | Redis password (optional, see below) |
 
-If `REDIS_PASSWORD` is set and `CELERY_BROKER_URL` / `CACHE_REDIS_URL` do not include credentials, Recotem injects the password automatically at runtime.
+### Redis password injection
+
+When `REDIS_PASSWORD` is set, Recotem automatically injects the password into any `redis://` or `rediss://` URL that does not already contain credentials. This applies to all three Redis URLs:
+
+- `CELERY_BROKER_URL`
+- `CHANNELS_REDIS_URL`
+- `CACHE_REDIS_URL`
+
+For example, if you set:
+
+```env
+REDIS_PASSWORD=mysecret
+CELERY_BROKER_URL=redis://redis:6379/0
+```
+
+Recotem transforms the URL at startup to `redis://:mysecret@redis:6379/0`.
+
+URLs that already contain a password (e.g. `redis://:existingpass@redis:6379/0`) are left unchanged. This allows you to use different passwords for different Redis instances if needed.
+
+**When to use `REDIS_PASSWORD`**: Use it when all three Redis databases share the same Redis server and password. This avoids repeating the password in every URL.
+
+**When to set individual URLs**: If you use separate Redis instances (e.g. managed ElastiCache for broker, a different instance for cache), set credentials directly in each URL and leave `REDIS_PASSWORD` empty.
 
 ## Authentication
 
@@ -51,6 +73,7 @@ If `REDIS_PASSWORD` is set and `CELERY_BROKER_URL` / `CACHE_REDIS_URL` do not in
 | `THROTTLE_ANON_RATE` | `20/min` | Anonymous user rate limit |
 | `THROTTLE_USER_RATE` | `100/min` | Authenticated user rate limit |
 | `THROTTLE_LOGIN_RATE` | `5/min` | Login endpoint rate limit |
+| `THROTTLE_RECOMMENDATION_RATE` | `30/min` | Recommendation endpoint rate limit |
 
 ## Celery Worker
 
@@ -58,6 +81,13 @@ If `REDIS_PASSWORD` is set and `CELERY_BROKER_URL` / `CACHE_REDIS_URL` do not in
 |----------|---------|-------------|
 | `CELERY_TASK_TIME_LIMIT` | `3600` | Hard task timeout (seconds) |
 | `CELERY_TASK_SOFT_TIME_LIMIT` | `3480` | Soft task timeout (seconds) |
+| `CELERY_RESULT_EXPIRES` | `604800` | How long to keep task results in DB (seconds, default 7 days) |
+
+## Database Connection
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONN_MAX_AGE` | `600` | Database connection lifetime in seconds. Set to `0` to close after each request. Default `600` is optimized for ASGI (Daphne) persistent connections. |
 
 ## Logging
 
@@ -73,7 +103,7 @@ In production (`DEBUG=false`), logs are output as structured JSON using `python-
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SECURE_SSL_REDIRECT` | `false` | Redirect all HTTP to HTTPS (production only) |
+| `SECURE_SSL_REDIRECT` | `true` | Redirect all HTTP to HTTPS (set `false` to disable) |
 | `SECURE_HSTS_SECONDS` | `31536000` | HSTS header max-age (production only, 1 year default) |
 
 These settings are only active when `DEBUG=false`. HSTS and SSL redirect should be enabled when serving behind TLS termination.
@@ -90,10 +120,11 @@ These settings are only active when `DEBUG=false`. HSTS and SSL redirect should 
 |----------|---------|-------------|
 | `MODEL_CACHE_SIZE` | `8` | Number of trained models in LRU cache |
 
-## Storage (S3)
+## Storage
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `MEDIA_ROOT` | `<BASE_DIR>/data` | Path for uploaded files. Set to `/data` in Docker to match the volume mount |
 | `RECOTEM_STORAGE_TYPE` | (empty) | Set to `S3` for S3 storage |
 | `AWS_ACCESS_KEY_ID` | — | AWS access key |
 | `AWS_SECRET_ACCESS_KEY` | — | AWS secret key |
@@ -142,6 +173,7 @@ VITE_WS_BASE_URL=wss://api.example.com/ws
 SECRET_KEY=<generate-a-random-key>
 DATABASE_URL=postgresql://recotem_user:password@rds-endpoint:5432/recotem
 CELERY_BROKER_URL=redis://elasticache-endpoint:6379/0
+CHANNELS_REDIS_URL=redis://elasticache-endpoint:6379/1
 CACHE_REDIS_URL=redis://elasticache-endpoint:6379/2
 REDIS_PASSWORD=<redis-auth-token>
 ALLOWED_HOSTS=recotem.example.com

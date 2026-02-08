@@ -15,6 +15,7 @@ export function useWebSocket<T = unknown>(path: string) {
   let reconnectAttempts = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let intentionalClose = false;
+  let lastSeq = -1;
 
   function buildUrl(): string {
     const wsBase = import.meta.env.VITE_WS_BASE_URL;
@@ -42,6 +43,7 @@ export function useWebSocket<T = unknown>(path: string) {
   function connect() {
     intentionalClose = false;
     connectionState.value = reconnectAttempts > 0 ? "reconnecting" : "connecting";
+    lastSeq = -1;
     ws = new WebSocket(buildUrl());
 
     ws.onopen = () => {
@@ -56,6 +58,17 @@ export function useWebSocket<T = unknown>(path: string) {
       if (data.type === "ping") {
         send({ type: "pong" });
         return;
+      }
+      // Sequence number tracking
+      if (typeof data.seq === "number") {
+        if (data.seq <= lastSeq) {
+          console.warn(`[useWebSocket] Duplicate message: seq=${data.seq}, lastSeq=${lastSeq}. Discarding.`);
+          return;
+        }
+        if (data.seq > lastSeq + 1) {
+          console.warn(`[useWebSocket] Sequence gap: expected=${lastSeq + 1}, received=${data.seq}.`);
+        }
+        lastSeq = data.seq;
       }
       messages.value.push(data as T);
       if (messages.value.length > MAX_MESSAGES) {

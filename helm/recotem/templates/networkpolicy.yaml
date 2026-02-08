@@ -32,15 +32,19 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    # Allow connections to PostgreSQL (same namespace pods or external)
+    # Allow connections to PostgreSQL
     - to:
-        - podSelector: {}
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.postgresql.podLabels | nindent 14 }}
       ports:
         - port: {{ .Values.postgresql.port }}
           protocol: TCP
-    # Allow connections to Redis (same namespace pods or external)
+    # Allow connections to Redis
     - to:
-        - podSelector: {}
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.redis.podLabels | nindent 14 }}
       ports:
         - port: {{ .Values.redis.port }}
           protocol: TCP
@@ -70,16 +74,58 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    # Allow connections to PostgreSQL (same namespace pods or external)
+    # Allow connections to PostgreSQL
     - to:
-        - podSelector: {}
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.postgresql.podLabels | nindent 14 }}
       ports:
         - port: {{ .Values.postgresql.port }}
           protocol: TCP
-    # Allow connections to Redis (same namespace pods or external)
+    # Allow connections to Redis
     - to:
-        - podSelector: {}
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.redis.podLabels | nindent 14 }}
       ports:
         - port: {{ .Values.redis.port }}
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "recotem.fullname" . }}-proxy
+  labels:
+    {{- include "recotem.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "recotem.proxySelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from ingress controller or external
+    - ports:
+        - port: 8000
+          protocol: TCP
+  egress:
+    # Allow DNS resolution (kube-system only)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow connections to backend
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "recotem.backendSelectorLabels" . | nindent 14 }}
+      ports:
+        - port: 80
           protocol: TCP
 {{- end }}

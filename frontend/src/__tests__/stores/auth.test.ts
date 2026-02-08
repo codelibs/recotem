@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setActivePinia, createPinia } from "pinia";
-import { useAuthStore } from "@/stores/auth";
+import { useAuthStore, calcRefreshDelay } from "@/stores/auth";
 import type { User } from "@/types";
 
 // Mock ofetch
@@ -11,7 +11,7 @@ vi.mock("ofetch", () => ({
 describe("useAuthStore", () => {
   let store: ReturnType<typeof useAuthStore>;
   let mockOfetch: any;
-  let localStorageMock: Record<string, string>;
+  let sessionStorageMock: Record<string, string>;
 
   beforeEach(async () => {
     // Reset and setup ofetch mock first
@@ -33,24 +33,24 @@ describe("useAuthStore", () => {
     store.refreshToken = null;
     store.user = null;
 
-    // Mock localStorage
-    localStorageMock = {};
-    vi.stubGlobal("localStorage", {
-      getItem: vi.fn((key: string) => localStorageMock[key] || null),
+    // Mock sessionStorage
+    sessionStorageMock = {};
+    vi.stubGlobal("sessionStorage", {
+      getItem: vi.fn((key: string) => sessionStorageMock[key] || null),
       setItem: vi.fn((key: string, value: string) => {
-        localStorageMock[key] = value;
+        sessionStorageMock[key] = value;
       }),
       removeItem: vi.fn((key: string) => {
-        delete localStorageMock[key];
+        delete sessionStorageMock[key];
       }),
       clear: vi.fn(() => {
-        localStorageMock = {};
+        sessionStorageMock = {};
       }),
     });
   });
 
   describe("login", () => {
-    it("should_store_tokens_in_state_and_localStorage_when_login_succeeds", async () => {
+    it("should_store_tokens_in_state_and_sessionStorage_when_login_succeeds", async () => {
       // Arrange
       const mockTokens = {
         access: "mock-access-token",
@@ -85,12 +85,12 @@ describe("useAuthStore", () => {
       expect(store.user).toEqual(mockUser);
       expect(store.isAuthenticated).toBe(true);
 
-      // Assert - verify localStorage
-      expect(localStorage.setItem).toHaveBeenCalledWith(
+      // Assert - verify sessionStorage
+      expect(sessionStorage.setItem).toHaveBeenCalledWith(
         "access_token",
         "mock-access-token"
       );
-      expect(localStorage.setItem).toHaveBeenCalledWith(
+      expect(sessionStorage.setItem).toHaveBeenCalledWith(
         "refresh_token",
         "mock-refresh-token"
       );
@@ -116,13 +116,13 @@ describe("useAuthStore", () => {
   });
 
   describe("logout", () => {
-    it("should_clear_tokens_and_user_from_state_and_localStorage", async () => {
+    it("should_clear_tokens_and_user_from_state_and_sessionStorage", async () => {
       // Arrange - setup authenticated state
       store.accessToken = "access-token";
       store.refreshToken = "refresh-token";
       store.user = { pk: 1, username: "testuser", email: "test@example.com" };
-      localStorageMock["access_token"] = "access-token";
-      localStorageMock["refresh_token"] = "refresh-token";
+      sessionStorageMock["access_token"] = "access-token";
+      sessionStorageMock["refresh_token"] = "refresh-token";
 
       // Act
       await store.logout();
@@ -133,9 +133,9 @@ describe("useAuthStore", () => {
       expect(store.user).toBeNull();
       expect(store.isAuthenticated).toBe(false);
 
-      // Assert - verify localStorage cleared
-      expect(localStorage.removeItem).toHaveBeenCalledWith("access_token");
-      expect(localStorage.removeItem).toHaveBeenCalledWith("refresh_token");
+      // Assert - verify sessionStorage cleared
+      expect(sessionStorage.removeItem).toHaveBeenCalledWith("access_token");
+      expect(sessionStorage.removeItem).toHaveBeenCalledWith("refresh_token");
     });
 
     it("should_handle_logout_when_already_logged_out", async () => {
@@ -219,7 +219,7 @@ describe("useAuthStore", () => {
         timeout: 5000,
       });
       expect(store.accessToken).toBe("new-access-token");
-      expect(localStorage.setItem).toHaveBeenCalledWith(
+      expect(sessionStorage.setItem).toHaveBeenCalledWith(
         "access_token",
         "new-access-token"
       );
@@ -251,8 +251,8 @@ describe("useAuthStore", () => {
       // Assert
       expect(store.accessToken).toBeNull();
       expect(store.refreshToken).toBeNull();
-      expect(localStorage.removeItem).toHaveBeenCalledWith("access_token");
-      expect(localStorage.removeItem).toHaveBeenCalledWith("refresh_token");
+      expect(sessionStorage.removeItem).toHaveBeenCalledWith("access_token");
+      expect(sessionStorage.removeItem).toHaveBeenCalledWith("refresh_token");
     });
   });
 
@@ -275,18 +275,83 @@ describe("useAuthStore", () => {
   });
 
   describe("initialization", () => {
-    it("should_load_tokens_from_localStorage_on_creation", () => {
+    it("should_load_tokens_from_sessionStorage_on_creation", () => {
       // Arrange
-      localStorageMock["access_token"] = "stored-access-token";
-      localStorageMock["refresh_token"] = "stored-refresh-token";
+      sessionStorageMock["access_token"] = "stored-access-token";
+      sessionStorageMock["refresh_token"] = "stored-refresh-token";
 
       // Act - create completely new Pinia instance and store
       setActivePinia(createPinia());
       const newStore = useAuthStore();
 
-      // Assert - tokens should be loaded from localStorage
+      // Assert - tokens should be loaded from sessionStorage
       expect(newStore.accessToken).toBe("stored-access-token");
       expect(newStore.refreshToken).toBe("stored-refresh-token");
     });
+  });
+});
+
+describe("calcRefreshDelay", () => {
+  it("returns 0 when token is already expired", () => {
+    const now = 1000000;
+    const exp = now - 1000; // expired 1s ago
+    expect(calcRefreshDelay(exp, now)).toBe(0);
+  });
+
+  it("returns 0 when remaining time is less than MIN_REFRESH_MARGIN_MS (30s)", () => {
+    const now = 1000000;
+    const exp = now + 20000; // expires in 20s
+    expect(calcRefreshDelay(exp, now)).toBe(0);
+  });
+
+  it("returns 75% of remaining time for long-lived tokens", () => {
+    const now = 0;
+    const exp = 3600000; // expires in 1 hour
+    // 75% of 3600000 = 2700000ms, margin = 3600000-30000 = 3570000ms
+    // min(2700000, 3570000) = 2700000
+    expect(calcRefreshDelay(exp, now)).toBe(2700000);
+  });
+
+  it("returns margin-based delay when 75% exceeds remaining-minus-margin", () => {
+    const now = 0;
+    const exp = 60000; // expires in 60s
+    // 75% of 60000 = 45000ms, margin = 60000-30000 = 30000ms
+    // min(45000, 30000) = 30000
+    expect(calcRefreshDelay(exp, now)).toBe(30000);
+  });
+
+  it("works correctly for default 300s token lifetime", () => {
+    const now = 0;
+    const exp = 300000; // 300s = 5 min
+    // 75% of 300000 = 225000ms, margin = 300000-30000 = 270000ms
+    // min(225000, 270000) = 225000 => refreshes after 225s (75s before expiry)
+    expect(calcRefreshDelay(exp, now)).toBe(225000);
+  });
+
+  it("works correctly for 3600s token lifetime", () => {
+    const now = 0;
+    const exp = 3600000; // 1 hour
+    // 75% of 3600000 = 2700000, margin = 3570000
+    // min(2700000, 3570000) = 2700000 => refreshes after 45min (15min before expiry)
+    expect(calcRefreshDelay(exp, now)).toBe(2700000);
+  });
+
+  it("returns 0 when expMs equals nowMs", () => {
+    expect(calcRefreshDelay(5000, 5000)).toBe(0);
+  });
+
+  it("handles remaining time exactly at 30s margin boundary", () => {
+    const now = 0;
+    const exp = 30000; // exactly 30s remaining
+    // margin = 30000-30000 = 0 => returns 0
+    expect(calcRefreshDelay(exp, now)).toBe(0);
+  });
+
+  it("handles remaining time just above 30s margin boundary", () => {
+    const now = 0;
+    const exp = 31000; // 31s remaining
+    // 75% of 31000 = 23250, margin = 31000-30000 = 1000
+    // min(23250, 1000) = 1000
+    expect(calcRefreshDelay(exp, now)).toBe(1000);
   });
 });

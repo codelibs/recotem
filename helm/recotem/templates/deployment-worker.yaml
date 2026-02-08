@@ -64,6 +64,10 @@ spec:
             periodSeconds: 120
             timeoutSeconds: 20
             failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "celery -A recotem control shutdown --timeout 30"]
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
           volumeMounts:

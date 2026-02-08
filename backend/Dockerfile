@@ -2,6 +2,10 @@
 # Used for both the backend (daphne) and worker (celery) services
 
 FROM python:3.12-slim AS base
+
+LABEL org.opencontainers.image.source="https://github.com/tohtsky/recotem"
+LABEL org.opencontainers.image.description="Recotem recommendation system backend"
+LABEL org.opencontainers.image.licenses="MIT"
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 curl \
     && rm -rf /var/lib/apt/lists/*
@@ -40,6 +44,8 @@ WORKDIR /app
 COPY --chown=appuser:appuser recotem/ /app
 
 USER appuser
+
+STOPSIGNAL SIGTERM
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:80/api/ping/ || exit 1

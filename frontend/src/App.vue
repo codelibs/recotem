@@ -30,7 +30,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, onErrorCaptured } from "vue";
+import { ref, onUnmounted, onErrorCaptured } from "vue";
 import Toast from "primevue/toast";
 import Button from "primevue/button";
 import router from "./router";
@@ -79,10 +79,6 @@ const removeBeforeEach = router.beforeEach((_to, _from, next) => {
 
 const removeAfterEach = router.afterEach(() => {
   stopLoading();
-});
-
-onMounted(() => {
-  // Guards already registered
 });
 
 onUnmounted(() => {

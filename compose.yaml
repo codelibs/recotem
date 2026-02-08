@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:17-alpine
+    image: postgres:17.2-alpine
     restart: unless-stopped
     volumes:
       - db-data:/var/lib/postgresql/data/pgdata
@@ -21,16 +21,20 @@ services:
       - backend-net
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     restart: unless-stopped
-    command: >
-      redis-server
-      ${REDIS_PASSWORD:+--requirepass $REDIS_PASSWORD}
+    command:
+      [
+        "sh", "-c",
+        "redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru $${REDIS_PASSWORD:+--requirepass $$REDIS_PASSWORD}",
+      ]
+    env_file:
+      - envs/production.env
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "if [ -n \"$REDIS_PASSWORD\" ]; then redis-cli -a \"$REDIS_PASSWORD\" ping; else redis-cli ping; fi",
+          "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-cli -a \"$$REDIS_PASSWORD\" ping; else redis-cli ping; fi",
         ]
       interval: "5s"
       timeout: "3s"
@@ -54,7 +58,6 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: daphne recotem.asgi:application -b 0.0.0.0 -p 80
     volumes:
       - data-location:/data
       - static-files:/app/dist/static
@@ -127,6 +130,12 @@ services:
       - "8000:8000"
     volumes:
       - static-files:/app/dist/static:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8000/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     deploy:
       resources:
         limits:

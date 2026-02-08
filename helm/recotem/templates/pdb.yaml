@@ -24,4 +24,17 @@ spec:
   selector:
     matchLabels:
       {{- include "recotem.workerSelectorLabels" . | nindent 6 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "recotem.fullname" . }}-proxy
+  labels:
+    {{- include "recotem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.proxy.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "recotem.proxySelectorLabels" . | nindent 6 }}
 {{- end }}

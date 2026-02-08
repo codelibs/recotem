@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:17-alpine
+    image: postgres:17.2-alpine
     ports:
       - "5432:5432"
     volumes:
@@ -15,7 +15,11 @@ services:
       - envs/dev.env
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     healthcheck:

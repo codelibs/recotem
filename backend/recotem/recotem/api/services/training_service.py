@@ -1,6 +1,6 @@
-import json
 import pickle  # noqa: S403
 import tempfile
+from pathlib import Path
 
 from django.core.files.storage import default_storage
 from irspack import __version__ as irspack_version
@@ -14,6 +14,7 @@ from recotem.api.models import (
 )
 from recotem.api.services.id_mapper_compat import IDMappedRecommender
 from recotem.api.services.pickle_signing import sign_pickle_bytes
+from recotem.api.utils import read_dataframe
 
 # NOTE: pickle is required for irspack model serialization.
 # IDMappedRecommender contains scipy sparse matrices and numpy arrays.
@@ -33,13 +34,15 @@ def train_and_save_model(model: TrainedModel) -> TrainedModel:
     item_column = project.item_column
     recommender_class = get_recommender_class(model_config.recommender_class_name)
 
-    X, uids, iids = df_to_sparse(data.validate_return_df(), user_column, item_column)
+    # Skip column validation — already validated at upload time
+    df = read_dataframe(Path(data.file.name), data.file)
+    X, uids, iids = df_to_sparse(df, user_column, item_column)
     uids = [str(uid) for uid in uids]
     iids = [str(iid) for iid in iids]
 
     model.irspack_version = irspack_version
 
-    param = json.loads(model_config.parameters_json)
+    param = model_config.parameters_json
     rec = recommender_class(X, **param).learn()
     with tempfile.TemporaryFile() as temp_fs:
         mapped_rec = IDMappedRecommender(rec, uids, iids)

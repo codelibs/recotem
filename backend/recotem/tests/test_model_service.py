@@ -64,7 +64,7 @@ def model_config(project):
         name="test_config",
         project=project,
         recommender_class_name="IALSRecommender",
-        parameters_json='{"n_components": 10}',
+        parameters_json={"n_components": 10},
     )
 
 

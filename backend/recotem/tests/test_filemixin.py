@@ -1,12 +1,12 @@
 """Tests for FileDownloadRemoveMixin access control."""
+from tempfile import NamedTemporaryFile
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 from django.urls import reverse
-from tempfile import NamedTemporaryFile
 
 from recotem.api.models import TrainingData
-
 
 User = get_user_model()
 

@@ -22,7 +22,7 @@ def test_create_model_configuration(client: Client):
         {
             "project": project.id,
             "recommender_class_name": "IALSRecommender",
-            "parameters_json": '{"n_components": 64}',
+            "parameters_json": {"n_components": 64},
         },
         content_type="application/json",
     )
@@ -38,10 +38,10 @@ def test_list_model_configurations_filtered_by_project(client: Client):
     p2 = Project.objects.create(name="P2", owner=user, user_column="u", item_column="i")
 
     ModelConfiguration.objects.create(
-        project=p1, recommender_class_name="IALS", parameters_json="{}"
+        project=p1, recommender_class_name="IALS", parameters_json={}
     )
     ModelConfiguration.objects.create(
-        project=p2, recommender_class_name="P3", parameters_json="{}"
+        project=p2, recommender_class_name="P3", parameters_json={}
     )
 
     client.force_login(user)

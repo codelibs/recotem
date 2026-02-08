@@ -5,11 +5,11 @@
         icon="pi pi-arrow-left"
         text
         rounded
-        aria-label="Back to data list"
+        :aria-label="t('common.back')"
         @click="router.push(`/projects/${projectId}/data`)"
       />
       <h2 class="text-xl font-bold text-neutral-800">
-        {{ data?.basename ?? 'Data Detail' }}
+        {{ data?.basename ?? t('data.detail') }}
       </h2>
     </div>
 
@@ -19,7 +19,7 @@
       :closable="false"
       class="mb-4"
     >
-      Failed to load data details. Please try again.
+      {{ error?.message ?? t('data.failedToLoadDetails') }}
     </Message>
 
     <div
@@ -39,19 +39,19 @@
     >
       <div class="bg-white rounded-lg shadow-sm border border-neutral-30 p-6">
         <div class="grid grid-cols-2 gap-4 text-sm">
-          <div><span class="text-neutral-100">File:</span> <span class="text-neutral-800">{{ data.basename }}</span></div>
-          <div><span class="text-neutral-100">Size:</span> <span class="text-neutral-800">{{ formatSize(data.filesize) }}</span></div>
-          <div><span class="text-neutral-100">Uploaded:</span> <span class="text-neutral-800">{{ formatDate(data.ins_datetime) }}</span></div>
-          <div><span class="text-neutral-100">ID:</span> <span class="text-neutral-800">{{ data.id }}</span></div>
+          <div><span class="text-neutral-100">{{ t('data.file') }}:</span> <span class="text-neutral-800">{{ data.basename }}</span></div>
+          <div><span class="text-neutral-100">{{ t('data.size') }}:</span> <span class="text-neutral-800">{{ formatSize(data.filesize) }}</span></div>
+          <div><span class="text-neutral-100">{{ t('data.uploaded') }}:</span> <span class="text-neutral-800">{{ formatDate(data.ins_datetime) }}</span></div>
+          <div><span class="text-neutral-100">{{ t('data.id') }}:</span> <span class="text-neutral-800">{{ data.id }}</span></div>
         </div>
         <div class="mt-6 flex gap-3">
           <Button
-            label="Start Tuning"
+            :label="t('data.startTuning')"
             icon="pi pi-play"
             @click="router.push({ name: 'tuning-new', query: { dataId: data.id.toString() } })"
           />
           <Button
-            label="Download"
+            :label="t('common.download')"
             icon="pi pi-download"
             severity="secondary"
             @click="downloadFile"
@@ -63,13 +63,13 @@
       <div class="bg-white rounded-lg shadow-sm border border-neutral-30 p-6">
         <div class="flex items-center justify-between mb-4">
           <h3 class="font-semibold text-neutral-800">
-            Data Preview
+            {{ t('data.previewTitle') }}
           </h3>
           <span
             v-if="preview"
             class="text-sm text-neutral-100"
           >
-            {{ preview.total_rows }} total rows
+            {{ t('data.totalRows', { n: preview.total_rows }) }}
           </span>
         </div>
 
@@ -107,7 +107,7 @@
           v-else
           class="text-sm text-neutral-100"
         >
-          Unable to load data preview.
+          {{ t('data.previewFailed') }}
         </div>
       </div>
     </div>
@@ -117,6 +117,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import Button from "primevue/button";
 import Message from "primevue/message";
 import Skeleton from "primevue/skeleton";
@@ -124,15 +125,18 @@ import DataTable from "primevue/datatable";
 import Column from "primevue/column";
 import { api } from "@/api/client";
 import { formatDate, formatFileSize } from "@/utils/format";
-import type { TrainingData } from "@/types";
+import type { ClassifiedApiError, TrainingData } from "@/types";
+import { ENDPOINTS } from "@/api/endpoints";
+import { classifyApiError } from "@/api/client";
 
+const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
 const projectId = route.params.projectId as string;
 const dataId = route.params.dataId as string;
 const data = ref<TrainingData | null>(null);
 const loading = ref(false);
-const error = ref(false);
+const error = ref<ClassifiedApiError | null>(null);
 const preview = ref<{ columns: string[]; rows: unknown[][]; total_rows: number } | null>(null);
 const previewLoading = ref(false);
 
@@ -149,12 +153,12 @@ const previewRows = computed(() => {
 
 onMounted(async () => {
   loading.value = true;
-  error.value = false;
+  error.value = null;
   try {
-    data.value = await api(`/training_data/${dataId}/`);
+    data.value = await api(ENDPOINTS.TRAINING_DATA_DETAIL(Number(dataId)));
     loadPreview();
-  } catch {
-    error.value = true;
+  } catch (e) {
+    error.value = classifyApiError(e);
   } finally {
     loading.value = false;
   }
@@ -163,7 +167,7 @@ onMounted(async () => {
 async function loadPreview() {
   previewLoading.value = true;
   try {
-    preview.value = await api(`/training_data/${dataId}/preview/`, { params: { n_rows: 50 } });
+    preview.value = await api(ENDPOINTS.TRAINING_DATA_PREVIEW(Number(dataId)), { params: { n_rows: 50 } });
   } catch {
     preview.value = null;
   } finally {

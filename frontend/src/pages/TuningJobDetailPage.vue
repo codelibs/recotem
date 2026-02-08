@@ -5,16 +5,17 @@
         icon="pi pi-arrow-left"
         text
         rounded
-        aria-label="Back to tuning jobs"
+        :aria-label="$t('tuning.backToJobs')"
         @click="router.push(`/projects/${projectId}/tuning`)"
       />
       <h2 class="text-xl font-bold text-neutral-800">
-        Tuning Job #{{ jobId }}
+        {{ $t('tuning.jobDetail') }} #{{ jobId }}
       </h2>
       <Tag
         v-if="job"
         :severity="statusSeverity"
-        :value="job.status"
+        :value="job.status ? $t(`tuning.jobStatus.${job.status}`) : ''"
+        aria-live="polite"
       />
     </div>
 
@@ -25,9 +26,9 @@
       class="mb-4"
     >
       <div class="flex items-center gap-2">
-        <span>Failed to load tuning job details.</span>
+        <span>{{ error?.message ?? $t('tuning.failedToLoadDetail') }}</span>
         <Button
-          label="Retry"
+          :label="$t('common.retry')"
           icon="pi pi-refresh"
           text
           size="small"
@@ -41,10 +42,11 @@
       severity="warn"
       :closable="false"
       class="mb-4"
+      aria-live="assertive"
     >
       <div class="flex items-center gap-2">
         <i class="pi pi-spin pi-spinner" />
-        <span>Real-time updates paused. Reconnecting...</span>
+        <span>{{ $t('tuning.reconnectingMessage') }}</span>
       </div>
     </Message>
 
@@ -53,8 +55,9 @@
       severity="info"
       :closable="false"
       class="mb-4"
+      aria-live="assertive"
     >
-      <span>Real-time updates disconnected. Refresh to reconnect.</span>
+      <span>{{ $t('tuning.disconnectedMessage') }}</span>
     </Message>
 
     <div
@@ -72,15 +75,15 @@
       <!-- Job Info -->
       <div class="bg-white rounded-lg shadow-sm border border-neutral-30 p-6">
         <h3 class="font-semibold text-neutral-800 mb-4">
-          Job Details
+          {{ $t('tuning.jobDetails') }}
         </h3>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-          <div><span class="text-neutral-100">Trials:</span> {{ job.n_trials }}</div>
-          <div><span class="text-neutral-100">Parallel:</span> {{ job.n_tasks_parallel }}</div>
-          <div><span class="text-neutral-100">Memory:</span> {{ job.memory_budget }} MB</div>
-          <div><span class="text-neutral-100">Best Score:</span> {{ job.best_score?.toFixed(4) ?? '-' }}</div>
-          <div><span class="text-neutral-100">Created:</span> {{ formatDate(job.ins_datetime) }}</div>
-          <div><span class="text-neutral-100">Train After:</span> {{ job.train_after_tuning ? 'Yes' : 'No' }}</div>
+          <div><span class="text-neutral-100">{{ $t('tuning.trials') }}:</span> {{ job.n_trials }}</div>
+          <div><span class="text-neutral-100">{{ $t('tuning.parallel') }}:</span> {{ job.n_tasks_parallel }}</div>
+          <div><span class="text-neutral-100">{{ $t('tuning.memory') }}:</span> {{ job.memory_budget }} MB</div>
+          <div><span class="text-neutral-100">{{ $t('tuning.bestScore') }}:</span> {{ job.best_score?.toFixed(4) ?? '-' }}</div>
+          <div><span class="text-neutral-100">{{ $t('common.createdAt') }}:</span> {{ formatDate(job.ins_datetime) }}</div>
+          <div><span class="text-neutral-100">{{ $t('tuning.trainAfter') }}:</span> {{ job.train_after_tuning ? $t('tuning.yes') : $t('tuning.no') }}</div>
         </div>
 
         <div
@@ -88,7 +91,7 @@
           class="mt-4"
         >
           <Button
-            label="Train Model"
+            :label="$t('models.trainModel')"
             icon="pi pi-play"
             @click="router.push(`/projects/${projectId}/models`)"
           />
@@ -99,29 +102,30 @@
       <div class="bg-white rounded-lg shadow-sm border border-neutral-30 p-6">
         <div class="flex items-center justify-between mb-4">
           <h3 class="font-semibold text-neutral-800">
-            Logs
+            {{ $t('tuning.logs') }}
           </h3>
           <div class="flex items-center gap-2">
             <Button
               v-if="allLogs.length > 0"
-              v-tooltip="'Download logs'"
+              v-tooltip="$t('tuning.downloadLogs')"
               icon="pi pi-download"
               text
               size="small"
-              aria-label="Download logs"
+              :aria-label="$t('tuning.downloadLogs')"
               @click="downloadLogs"
             />
             <Tag
               v-if="wsConnected"
               severity="success"
-              value="Live"
+              :value="$t('tuning.live')"
             />
           </div>
         </div>
         <div
           ref="logContainer"
-          class="bg-neutral-10 rounded-md p-4 max-h-96 overflow-y-auto font-mono text-xs space-y-1"
           aria-live="polite"
+          :aria-label="$t('tuning.jobLogsLabel')"
+          class="bg-neutral-10 rounded-md p-4 max-h-96 overflow-y-auto font-mono text-xs space-y-1"
         >
           <div
             v-for="(log, i) in allLogs"
@@ -134,7 +138,7 @@
             v-if="allLogs.length === 0"
             class="text-neutral-100"
           >
-            No logs yet...
+            {{ $t('tuning.noLogsYet') }}
           </div>
         </div>
       </div>
@@ -145,6 +149,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, nextTick } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import Button from "primevue/button";
 import Message from "primevue/message";
 import Skeleton from "primevue/skeleton";
@@ -154,10 +159,14 @@ import { api } from "@/api/client";
 import { formatDate } from "@/utils/format";
 import { useAbortOnUnmount } from "@/composables/useAbortOnUnmount";
 import { useJobLogs } from "@/composables/useJobStatus";
-import type { ParameterTuningJob, TaskLog } from "@/types";
+import type { ClassifiedApiError, ParameterTuningJob, TaskLog } from "@/types";
+import { JOB_STATUS } from "@/types";
+import { ENDPOINTS } from "@/api/endpoints";
+import { classifyApiError, unwrapResults } from "@/api/client";
 
 const vTooltip = Tooltip;
 
+const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
 const { signal } = useAbortOnUnmount();
@@ -167,7 +176,7 @@ const job = ref<ParameterTuningJob | null>(null);
 const taskLogs = ref<TaskLog[]>([]);
 const logContainer = ref<HTMLElement | null>(null);
 const loading = ref(false);
-const error = ref(false);
+const error = ref<ClassifiedApiError | null>(null);
 const wsWasConnected = ref(false);
 
 const { logs: wsLogs, isConnected: wsConnected, connectionState: wsConnectionState, connect } = useJobLogs(Number(jobId));
@@ -178,9 +187,9 @@ watch(wsConnected, (val) => {
 
 const statusSeverity = computed(() => {
   switch (job.value?.status) {
-    case "COMPLETED": return "success";
-    case "FAILED": return "danger";
-    case "RUNNING": return "info";
+    case JOB_STATUS.COMPLETED: return "success";
+    case JOB_STATUS.FAILED: return "danger";
+    case JOB_STATUS.RUNNING: return "info";
     default: return "secondary";
   }
 });
@@ -211,17 +220,17 @@ watch(allLogs, async () => {
 
 async function loadJob() {
   loading.value = true;
-  error.value = false;
+  error.value = null;
   try {
-    job.value = await api(`/parameter_tuning_job/${jobId}/`, { signal });
+    job.value = await api(ENDPOINTS.PARAMETER_TUNING_JOB_DETAIL(Number(jobId)), { signal });
     try {
-      const res = await api(`/task_log/`, { params: { tuning_job_id: jobId }, signal });
-      taskLogs.value = res.results ?? res;
+      const res = await api(ENDPOINTS.TASK_LOG, { params: { tuning_job_id: jobId }, signal });
+      taskLogs.value = unwrapResults(res);
     } catch { /* no logs endpoint or no logs */ }
     if (!job.value?.best_config) connect();
   } catch (e) {
     if ((e as Error).name !== "AbortError") {
-      error.value = true;
+      error.value = classifyApiError(e);
     }
   } finally {
     loading.value = false;

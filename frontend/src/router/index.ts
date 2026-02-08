@@ -118,11 +118,12 @@ const router = createRouter({
 });
 
 // Navigation guard for authentication and param validation
-router.beforeEach((to, from, next) => {
+router.beforeEach((to, _from, next) => {
   const authStore = useAuthStore();
-  const requiresAuth = to.matched.some((record) => record.meta.requiresAuth !== false);
+  // A route is public if any matched record explicitly sets requiresAuth: false
+  const isPublic = to.matched.some((record) => record.meta.requiresAuth === false);
 
-  if (requiresAuth && !authStore.isAuthenticated) {
+  if (!isPublic && !authStore.isAuthenticated) {
     next({ path: "/login", query: { redirect: to.fullPath } });
     return;
   }
@@ -133,7 +134,7 @@ router.beforeEach((to, from, next) => {
 
   // Validate numeric route params
   const { projectId, dataId, jobId, modelId } = to.params;
-  for (const [key, val] of Object.entries({ projectId, dataId, jobId, modelId })) {
+  for (const [, val] of Object.entries({ projectId, dataId, jobId, modelId })) {
     if (val !== undefined && !/^\d+$/.test(val as string)) {
       next({ name: "not-found" });
       return;

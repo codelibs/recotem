@@ -1,7 +1,7 @@
 from rest_framework import permissions, viewsets
 
 from recotem.api.models import Project
-from recotem.api.serializers.project import ProjectSerializer, ProjectSummarySerializer
+from recotem.api.serializers.project import ProjectSerializer
 
 from .mixins import OwnedResourceMixin
 

@@ -2,10 +2,10 @@
   <div>
     <div class="flex items-center justify-between mb-6">
       <h2 class="text-xl font-bold text-neutral-800">
-        Training Data
+        {{ t('data.title') }}
       </h2>
       <Button
-        label="Upload Data"
+        :label="t('data.uploadData')"
         icon="pi pi-upload"
         @click="router.push(`/projects/${projectId}/data/upload`)"
       />
@@ -18,9 +18,9 @@
       class="mb-4"
     >
       <div class="flex items-center gap-2">
-        <span>Failed to load data.</span>
+        <span>{{ error?.message ?? t('data.failedToLoadShort') }}</span>
         <Button
-          label="Retry"
+          :label="t('common.retry')"
           icon="pi pi-refresh"
           text
           size="small"
@@ -35,11 +35,11 @@
       striped-rows
       paginator
       :rows="20"
-      empty-message="No data uploaded yet"
+      :empty-message="t('data.noDataShort')"
     >
       <Column
         field="basename"
-        header="File Name"
+        :header="t('data.fileName')"
         sortable
       >
         <template #body="{ data }">
@@ -53,7 +53,7 @@
       </Column>
       <Column
         field="filesize"
-        header="Size"
+        :header="t('data.size')"
         sortable
       >
         <template #body="{ data }">
@@ -62,7 +62,7 @@
       </Column>
       <Column
         field="ins_datetime"
-        header="Uploaded"
+        :header="t('data.uploaded')"
         sortable
       >
         <template #body="{ data }">
@@ -70,7 +70,7 @@
         </template>
       </Column>
       <Column
-        header="Actions"
+        :header="t('common.actions')"
         :style="{ width: '120px' }"
       >
         <template #body="{ data }">
@@ -79,7 +79,7 @@
             severity="danger"
             text
             rounded
-            :aria-label="`Delete ${data.basename}`"
+            :aria-label="`${t('common.delete')} ${data.basename}`"
             @click="confirmDelete(data)"
           />
         </template>
@@ -88,10 +88,10 @@
 
     <ConfirmDialog
       v-model:visible="showDeleteConfirm"
-      header="Delete Data"
-      :message="`Are you sure you want to delete ${deleteTarget?.basename}?`"
-      confirm-label="Delete"
-      cancel-label="Cancel"
+      :header="t('data.deleteTitle')"
+      :message="t('data.deleteConfirmNamed', { name: deleteTarget?.basename })"
+      :confirm-label="t('common.delete')"
+      :cancel-label="t('common.cancel')"
       danger
       @confirm="executeDelete"
     />
@@ -101,6 +101,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import DataTable from "primevue/datatable";
 import Column from "primevue/column";
 import Button from "primevue/button";
@@ -110,8 +111,11 @@ import { formatDate, formatFileSize } from "@/utils/format";
 import { useNotification } from "@/composables/useNotification";
 import { useAbortOnUnmount } from "@/composables/useAbortOnUnmount";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
-import type { TrainingData } from "@/types";
+import type { ClassifiedApiError, TrainingData } from "@/types";
+import { ENDPOINTS } from "@/api/endpoints";
+import { classifyApiError, unwrapResults } from "@/api/client";
 
+const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
 const notify = useNotification();
@@ -119,19 +123,19 @@ const { signal } = useAbortOnUnmount();
 const projectId = route.params.projectId as string;
 const dataList = ref<TrainingData[]>([]);
 const loading = ref(false);
-const error = ref(false);
+const error = ref<ClassifiedApiError | null>(null);
 const showDeleteConfirm = ref(false);
 const deleteTarget = ref<TrainingData | null>(null);
 
 async function fetchData() {
   loading.value = true;
-  error.value = false;
+  error.value = null;
   try {
-    const res = await api(`/training_data/`, { params: { project: projectId }, signal });
-    dataList.value = res.results ?? res;
+    const res = await api(ENDPOINTS.TRAINING_DATA, { params: { project: projectId }, signal });
+    dataList.value = unwrapResults(res);
   } catch (e) {
     if ((e as Error).name !== "AbortError") {
-      error.value = true;
+      error.value = classifyApiError(e);
     }
   } finally {
     loading.value = false;
@@ -150,11 +154,11 @@ function confirmDelete(data: TrainingData) {
 async function executeDelete() {
   if (!deleteTarget.value) return;
   try {
-    await api(`/training_data/${deleteTarget.value.id}/`, { method: "DELETE" });
+    await api(ENDPOINTS.TRAINING_DATA_DETAIL(deleteTarget.value.id), { method: "DELETE" });
     dataList.value = dataList.value.filter(d => d.id !== deleteTarget.value!.id);
-    notify.success("Data deleted");
+    notify.success(t("data.deleteSuccess"));
   } catch {
-    notify.error("Failed to delete data");
+    notify.error(t("data.deleteFailed"));
   }
   deleteTarget.value = null;
 }

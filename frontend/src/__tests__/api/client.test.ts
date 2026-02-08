@@ -8,10 +8,22 @@ vi.mock("ofetch", () => {
   const mockOfetchCreate = vi.fn();
   const mockOfetch = vi.fn();
 
+  class MockFetchError extends Error {
+    response: any;
+    data: any;
+    constructor(message: string, options?: { response?: any; data?: any }) {
+      super(message);
+      this.name = "FetchError";
+      this.response = options?.response;
+      this.data = options?.data;
+    }
+  }
+
   return {
     ofetch: Object.assign(mockOfetch, {
       create: mockOfetchCreate,
     }),
+    FetchError: MockFetchError,
   };
 });
 
@@ -41,6 +53,18 @@ describe("api client", () => {
       }),
       removeItem: vi.fn((key: string) => {
         delete localStorageMock[key];
+      }),
+    });
+
+    // Mock sessionStorage (auth store uses sessionStorage for tokens)
+    const sessionStorageMock: Record<string, string> = {};
+    vi.stubGlobal("sessionStorage", {
+      getItem: vi.fn((key: string) => sessionStorageMock[key] || null),
+      setItem: vi.fn((key: string, value: string) => {
+        sessionStorageMock[key] = value;
+      }),
+      removeItem: vi.fn((key: string) => {
+        delete sessionStorageMock[key];
       }),
     });
 
@@ -394,5 +418,116 @@ describe("api client", () => {
       // Assert - token was refreshed and stored
       expect(authStore.accessToken).toBe("fresh-token");
     });
+  });
+});
+
+
+describe("classifyApiError", () => {
+  let classifyApiError: any;
+  let MockFetchError: any;
+
+  beforeEach(async () => {
+    setActivePinia(createPinia());
+    vi.resetModules();
+    const clientModule = await import("@/api/client");
+    classifyApiError = clientModule.classifyApiError;
+    const ofetchModule = await import("ofetch");
+    MockFetchError = (ofetchModule as any).FetchError;
+  });
+
+  it("classifies 400 as validation error", () => {
+    const err = new MockFetchError("Bad request", {
+      response: { status: 400 },
+      data: { name: ["This field is required."] },
+    });
+    const result = classifyApiError(err);
+    expect(result.kind).toBe("validation");
+    expect(result.status).toBe(400);
+    expect(result.fieldErrors).toEqual({ name: ["This field is required."] });
+  });
+
+  it("classifies 401 as unauthorized", () => {
+    const err = new MockFetchError("Unauthorized", {
+      response: { status: 401 },
+      data: { detail: "Token expired." },
+    });
+    const result = classifyApiError(err);
+    expect(result.kind).toBe("unauthorized");
+    expect(result.message).toBe("Token expired.");
+  });
+
+  it("classifies 403 as forbidden", () => {
+    const err = new MockFetchError("Forbidden", {
+      response: { status: 403 },
+      data: { detail: "Permission denied." },
+    });
+    const result = classifyApiError(err);
+    expect(result.kind).toBe("forbidden");
+  });
+
+  it("classifies 404 as not_found", () => {
+    const err = new MockFetchError("Not found", {
+      response: { status: 404 },
+      data: { detail: "Not found." },
+    });
+    const result = classifyApiError(err);
+    expect(result.kind).toBe("not_found");
+  });
+
+  it("classifies 429 as rate_limited", () => {
+    const err = new MockFetchError("Too many requests", {
+      response: { status: 429 },
+      data: { detail: "Request was throttled." },
+    });
+    const result = classifyApiError(err);
+    expect(result.kind).toBe("rate_limited");
+  });
+
+  it("classifies 500 as server_error", () => {
+    const err = new MockFetchError("Server error", {
+      response: { status: 500 },
+      data: {},
+    });
+    const result = classifyApiError(err);
+    expect(result.kind).toBe("server_error");
+  });
+
+  it("classifies network error (no response)", () => {
+    const err = new MockFetchError("fetch failed", {});
+    const result = classifyApiError(err);
+    expect(result.kind).toBe("network_error");
+  });
+
+  it("classifies timeout error", () => {
+    const err = new MockFetchError("timeout", {});
+    const result = classifyApiError(err);
+    expect(result.kind).toBe("timeout");
+  });
+
+  it("classifies unknown error types", () => {
+    const result = classifyApiError(new Error("unexpected"));
+    expect(result.kind).toBe("unknown");
+    expect(result.message).toBe("unexpected");
+  });
+
+  it("classifies non-Error values", () => {
+    const result = classifyApiError("string error");
+    expect(result.kind).toBe("unknown");
+  });
+});
+
+describe("unwrapResults", () => {
+  it("returns array as-is", async () => {
+    // Dynamic import to avoid module mock interference
+    const { unwrapResults } = await import("@/api/client");
+    const arr = [{ id: 1 }, { id: 2 }];
+    expect(unwrapResults(arr)).toBe(arr);
+  });
+
+  it("extracts results from paginated response", async () => {
+    const { unwrapResults } = await import("@/api/client");
+    const items = [{ id: 1 }, { id: 2 }];
+    const paginated = { count: 2, next: null, previous: null, results: items };
+    expect(unwrapResults(paginated)).toBe(items);
   });
 });

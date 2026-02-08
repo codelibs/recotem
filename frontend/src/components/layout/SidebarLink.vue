@@ -4,7 +4,7 @@
     :class="[
       'flex items-center mx-2 px-3 py-2 rounded-md text-sm transition-colors',
       isActive
-        ? 'bg-primary bg-opacity-10 text-primary font-medium'
+        ? 'bg-primary/10 text-primary font-medium'
         : 'text-neutral-500 hover:bg-neutral-30'
     ]"
     :title="collapsed ? label : undefined"

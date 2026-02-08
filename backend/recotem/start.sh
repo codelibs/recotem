@@ -11,12 +11,12 @@ if ! python manage.py migrate; then
   exit 1
 fi
 
-if ! python manage.py create_test_users; then
-  echo "failed to initialize users."
+if ! python manage.py create_superuser; then
+  echo "failed to initialize admin user."
   exit 1
 fi
 
-if ! python manage.py assign_owners; then
+if ! python manage.py assign_owners --user admin; then
   echo "failed to assign owners."
   exit 1
 fi

@@ -1,4 +1,3 @@
-from typing import Optional
 
 from django.contrib.auth.models import AbstractBaseUser
 from django.db.models import Count, Q
@@ -8,7 +7,7 @@ from recotem.api.models import Project
 
 
 def get_project_or_404(
-    pk: int, user: Optional[AbstractBaseUser] = None
+    pk: int, user: AbstractBaseUser | None = None
 ) -> Project:
     """Retrieve a project by primary key and optional user access check."""
     try:

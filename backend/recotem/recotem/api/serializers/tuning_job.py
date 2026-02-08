@@ -42,6 +42,15 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["ins_datetime", "task_links", "status"]
 
+    def validate_tried_algorithms_json(self, value):
+        if value is None:
+            return value
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise serializers.ValidationError("Must be a JSON array of strings.")
+        return value
+
     def validate(self, attrs):
         request = self.context.get("request")
         user = getattr(request, "user", None)

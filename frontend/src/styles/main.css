@@ -48,15 +48,23 @@
 }
 
 /* Dark mode overrides (toggled via .dark-mode class on <html>) */
+/* Contrast ratios verified against WCAG AA (4.5:1 for normal text) */
 .dark-mode {
-  --color-neutral-10: #1B2638;
-  --color-neutral-20: #1D2D44;
-  --color-neutral-30: #253858;
-  --color-neutral-40: #344563;
-  --color-neutral-100: #8993A4;
-  --color-neutral-200: #9FADBC;
-  --color-neutral-500: #B6C2CF;
-  --color-neutral-800: #DEE4EA;
+  --color-primary: #4C9AFF;
+  --color-primary-hover: #6BB5FF;
+  --color-primary-active: #2684FF;
+  --color-neutral-10: #161B22;
+  --color-neutral-20: #1C2333;
+  --color-neutral-30: #2D3748;
+  --color-neutral-40: #3D4F65;
+  --color-neutral-100: #A1AEBE;
+  --color-neutral-200: #B8C4D0;
+  --color-neutral-500: #CDD5DE;
+  --color-neutral-800: #E8ECF0;
+  --color-success: #4ADE80;
+  --color-danger: #F87171;
+  --color-warning: #FBBF24;
+  --color-info: #60A5FA;
 }
 
 .dark-mode .bg-white {
@@ -103,8 +111,60 @@ details summary:hover {
 
 /* Standardize PrimeVue border radius to match design tokens */
 :root {
+  --p-border-radius-sm: var(--radius-sm);
   --p-border-radius: var(--radius-md);
+  --p-border-radius-lg: var(--radius-lg);
 }
+
+/* ADS-compliant card pattern */
+.card {
+  background: white;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-neutral-30);
+  box-shadow: var(--shadow-sm);
+  padding: 1.5rem;
+}
+
+.dark-mode .card {
+  background: var(--color-neutral-20);
+}
+
+/* ADS badge/lozenge patterns */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+}
+.badge-success { background: var(--color-success-light); color: #006644; }
+.badge-danger { background: var(--color-danger-light); color: #BF2600; }
+.badge-warning { background: var(--color-warning-light); color: #FF8B00; }
+.badge-info { background: var(--color-info-light); color: #0747A6; }
+.badge-neutral { background: var(--color-neutral-30); color: var(--color-neutral-500); }
+
+.dark-mode .badge-success { color: var(--color-success); }
+.dark-mode .badge-danger { color: var(--color-danger); }
+.dark-mode .badge-warning { color: var(--color-warning); }
+.dark-mode .badge-info { color: var(--color-info); }
+.dark-mode .badge-neutral { color: var(--color-neutral-200); }
+
+/* ADS progress bar */
+.progress-track {
+  height: 8px;
+  background: var(--color-neutral-30);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.progress-fill.success { background: var(--color-success); }
 
 /* Route transition loading bar */
 .route-loading-bar {

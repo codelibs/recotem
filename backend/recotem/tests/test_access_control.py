@@ -148,7 +148,7 @@ def test_cannot_create_trained_model_with_foreign_resources(client: Client):
         name="private_config",
         project=project,
         recommender_class_name="TopPopRecommender",
-        parameters_json="{}",
+        parameters_json={},
     )
 
     client.force_login(user_b)
@@ -224,7 +224,7 @@ def test_sample_recommendation_metadata_must_belong_to_same_project(client: Clie
         name="metadata_config_a",
         project=project_a,
         recommender_class_name="TopPopRecommender",
-        parameters_json="{}",
+        parameters_json={},
     )
     model = TrainedModel.objects.create(configuration=config_a, data_loc=data_a)
     metadata_other_project = ItemMetaData.objects.create(project=project_b, filesize=1)
@@ -251,7 +251,7 @@ def test_recommendation_endpoint_rejects_invalid_cutoff(client: Client):
         name="recommendation_config",
         project=project,
         recommender_class_name="TopPopRecommender",
-        parameters_json="{}",
+        parameters_json={},
     )
     model = TrainedModel.objects.create(configuration=config, data_loc=data)
 

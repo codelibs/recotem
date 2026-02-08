@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "recotem.fullname" . }}-test-connection"
+  labels:
+    {{- include "recotem.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  containers:
+    - name: wget
+      image: busybox:1.37
+      command: ['wget']
+      args: ['--timeout=5', '-qO-', 'http://{{ include "recotem.fullname" . }}:{{ .Values.service.port }}/api/v1/ping/']
+  restartPolicy: Never

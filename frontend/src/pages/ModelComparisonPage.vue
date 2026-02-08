@@ -8,7 +8,7 @@
         @click="router.push(`/projects/${projectId}/tuning`)"
       />
       <h2 class="text-xl font-bold text-neutral-800">
-        Compare Tuning Jobs
+        {{ $t('compare.title') }}
       </h2>
     </div>
 
@@ -18,13 +18,13 @@
       :closable="false"
       class="mb-4"
     >
-      Failed to load tuning jobs. Please try again.
+      {{ error?.message ?? t('compare.failedToLoad') }}
     </Message>
 
     <!-- Job Selection -->
     <div class="bg-white rounded-lg shadow-sm border border-neutral-30 p-6 mb-6">
       <h3 class="font-semibold text-neutral-800 mb-4">
-        Select Jobs to Compare
+        {{ $t('compare.selectJobsToCompare') }}
       </h3>
       <div class="flex flex-wrap gap-3 mb-4">
         <div
@@ -47,7 +47,7 @@
               v-if="job.best_score"
               class="text-neutral-100"
             >
-              (score: {{ job.best_score.toFixed(4) }})
+              ({{ $t('tuning.score') }}: {{ job.best_score.toFixed(4) }})
             </span>
           </label>
         </div>
@@ -56,7 +56,7 @@
         v-if="availableJobs.length === 0 && !loading"
         class="text-sm text-neutral-100"
       >
-        No completed tuning jobs available.
+        {{ $t('compare.noCompletedJobs') }}
       </p>
     </div>
 
@@ -66,14 +66,14 @@
       class="bg-white rounded-lg shadow-sm border border-neutral-30 p-6"
     >
       <h3 class="font-semibold text-neutral-800 mb-4">
-        Comparison
+        {{ $t('compare.comparison') }}
       </h3>
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead>
             <tr class="border-b border-neutral-30">
               <th class="text-left py-2 pr-4 text-neutral-100 font-medium">
-                Attribute
+                {{ $t('compare.attribute') }}
               </th>
               <th
                 v-for="job in selectedJobs"
@@ -87,20 +87,20 @@
           <tbody>
             <tr class="border-b border-neutral-30">
               <td class="py-2 pr-4 text-neutral-100">
-                Best Score
+                {{ $t('tuning.bestScore') }}
               </td>
               <td
                 v-for="job in selectedJobs"
                 :key="job.id"
                 class="py-2 px-4"
-                :class="{ 'font-bold text-green-700': job.id === bestJobId }"
+                :class="{ 'font-bold text-success': job.id === bestJobId }"
               >
                 {{ job.best_score?.toFixed(4) ?? '-' }}
               </td>
             </tr>
             <tr class="border-b border-neutral-30">
               <td class="py-2 pr-4 text-neutral-100">
-                Trials
+                {{ $t('tuning.trials') }}
               </td>
               <td
                 v-for="job in selectedJobs"
@@ -112,7 +112,7 @@
             </tr>
             <tr class="border-b border-neutral-30">
               <td class="py-2 pr-4 text-neutral-100">
-                Parallel Tasks
+                {{ $t('compare.parallelTasks') }}
               </td>
               <td
                 v-for="job in selectedJobs"
@@ -124,7 +124,7 @@
             </tr>
             <tr class="border-b border-neutral-30">
               <td class="py-2 pr-4 text-neutral-100">
-                Memory Budget
+                {{ $t('compare.memoryBudget') }}
               </td>
               <td
                 v-for="job in selectedJobs"
@@ -136,7 +136,7 @@
             </tr>
             <tr class="border-b border-neutral-30">
               <td class="py-2 pr-4 text-neutral-100">
-                irspack Version
+                {{ $t('models.irspackVersion') }}
               </td>
               <td
                 v-for="job in selectedJobs"
@@ -148,7 +148,7 @@
             </tr>
             <tr>
               <td class="py-2 pr-4 text-neutral-100">
-                Created
+                {{ $t('common.createdAt') }}
               </td>
               <td
                 v-for="job in selectedJobs"
@@ -167,7 +167,7 @@
       v-else-if="selectedJobIds.length > 0 && selectedJobIds.length < 2"
       class="text-sm text-neutral-100 mt-4"
     >
-      Select at least 2 jobs to compare.
+      {{ $t('compare.selectAtLeast2') }}
     </div>
   </div>
 </template>
@@ -175,20 +175,24 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import Button from "primevue/button";
 import Checkbox from "primevue/checkbox";
 import Message from "primevue/message";
 import { api } from "@/api/client";
 import { formatDate } from "@/utils/format";
-import type { ParameterTuningJob } from "@/types";
+import type { ClassifiedApiError, ParameterTuningJob } from "@/types";
+import { ENDPOINTS } from "@/api/endpoints";
+import { classifyApiError, unwrapResults } from "@/api/client";
 
+const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
 const projectId = route.params.projectId as string;
 const availableJobs = ref<ParameterTuningJob[]>([]);
 const selectedJobIds = ref<number[]>([]);
 const loading = ref(false);
-const error = ref(false);
+const error = ref<ClassifiedApiError | null>(null);
 
 const selectedJobs = computed(() =>
   availableJobs.value.filter(j => selectedJobIds.value.includes(j.id))
@@ -202,14 +206,14 @@ const bestJobId = computed(() => {
 
 onMounted(async () => {
   loading.value = true;
-  error.value = false;
+  error.value = null;
   try {
-    const res = await api(`/parameter_tuning_job/`, { params: { data__project: projectId } });
-    const jobs: ParameterTuningJob[] = res.results ?? res;
+    const res = await api(ENDPOINTS.PARAMETER_TUNING_JOB, { params: { data__project: projectId } });
+    const jobs: ParameterTuningJob[] = unwrapResults(res);
     // Show only jobs that have a best_config (completed)
     availableJobs.value = jobs.filter(j => j.best_config != null);
-  } catch {
-    error.value = true;
+  } catch (e) {
+    error.value = classifyApiError(e);
   } finally {
     loading.value = false;
   }

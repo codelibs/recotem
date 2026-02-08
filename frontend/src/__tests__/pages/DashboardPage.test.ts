@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { nextTick } from "vue";
+import { computed, nextTick } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import DashboardPage from "@/pages/DashboardPage.vue";
 import PrimeVue from "primevue/config";
+import i18n from "@/i18n";
 
 vi.mock("vue-router", () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -17,17 +18,22 @@ vi.mock("@/composables/useAbortOnUnmount", () => ({
 const apiMock = vi.fn();
 vi.mock("@/api/client", () => ({
   api: (...args: unknown[]) => apiMock(...args),
+  classifyApiError: (err: any) => ({ kind: "unknown", status: undefined, message: err?.message ?? "Unknown error", fieldErrors: undefined }),
 }));
 
 function mountPage() {
   return mount(DashboardPage, {
     global: {
-      plugins: [PrimeVue, createPinia()],
+      plugins: [PrimeVue, createPinia(), i18n],
+      provide: {
+        currentProject: computed(() => null),
+      },
       stubs: {
         Button: { template: '<button @click="$attrs.onClick?.()"><slot />{{ $attrs.label }}</button>', inheritAttrs: false },
         Message: { template: '<div class="message"><slot /></div>' },
         Skeleton: { template: '<div class="skeleton" />' },
         StatCard: { template: '<div class="stat-card" />' },
+        EmptyState: { template: '<div class="empty-state">{{ title }} {{ description }}<slot /></div>', props: ["icon", "title", "description"] },
       },
     },
   });
@@ -64,7 +70,7 @@ describe("DashboardPage", () => {
     const wrapper = mountPage();
     await flushPromises();
     expect(wrapper.find(".message").exists()).toBe(true);
-    expect(wrapper.text()).toContain("Failed to load");
+    expect(wrapper.text()).toContain("Network error");
     expect(wrapper.text()).toContain("Retry");
   });
 
@@ -138,5 +144,126 @@ describe("DashboardPage", () => {
 
     expect(wrapper.text()).toContain("Get started");
     expect(wrapper.text()).toContain("Upload training data, then start tuning.");
+  });
+
+  // --- Error scenario tests ---
+
+  it("displays error severity message from classifyApiError", async () => {
+    apiMock.mockRejectedValueOnce(new Error("Server is down"));
+    const wrapper = mountPage();
+    await flushPromises();
+
+    expect(wrapper.find(".message").exists()).toBe(true);
+    expect(wrapper.text()).toContain("Server is down");
+  });
+
+  it("hides skeleton loaders after error response", async () => {
+    apiMock.mockRejectedValueOnce(new Error("Request failed"));
+    const wrapper = mountPage();
+    await flushPromises();
+
+    expect(wrapper.findAll(".skeleton").length).toBe(0);
+  });
+
+  it("shows skeleton loaders during loading and hides on success", async () => {
+    let resolveApi: (value: unknown) => void;
+    apiMock.mockReturnValue(new Promise((resolve) => { resolveApi = resolve; }));
+
+    const wrapper = mountPage();
+    await nextTick();
+
+    // Loading state: skeletons visible
+    expect(wrapper.findAll(".skeleton").length).toBeGreaterThan(0);
+    expect(wrapper.findAll(".stat-card").length).toBe(0);
+
+    // Resolve the API call
+    resolveApi!({
+      n_data: 2,
+      n_complete_jobs: 1,
+      n_models: 1,
+      ins_datetime: "2025-01-01T00:00:00Z",
+    });
+    await flushPromises();
+
+    // Loaded state: stat cards visible, no skeletons
+    expect(wrapper.findAll(".skeleton").length).toBe(0);
+    expect(wrapper.findAll(".stat-card").length).toBe(3);
+  });
+
+  it("clears error and shows loading on retry", async () => {
+    let resolveRetry: (value: unknown) => void;
+    apiMock
+      .mockRejectedValueOnce(new Error("First failure"))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveRetry = resolve; }));
+
+    const wrapper = mountPage();
+    await flushPromises();
+
+    // Error state
+    expect(wrapper.find(".message").exists()).toBe(true);
+
+    // Click retry
+    const retryBtn = wrapper.findAll("button").find(b => b.text().includes("Retry"));
+    await retryBtn!.trigger("click");
+    await nextTick();
+
+    // During retry: error should be cleared, loading skeleton should show
+    expect(wrapper.findAll(".skeleton").length).toBeGreaterThan(0);
+
+    // Resolve retry
+    resolveRetry!({
+      n_data: 1,
+      n_complete_jobs: 0,
+      n_models: 0,
+      ins_datetime: "2025-01-01T00:00:00Z",
+    });
+    await flushPromises();
+
+    // Success state
+    expect(wrapper.find(".message").exists()).toBe(false);
+    expect(wrapper.findAll(".stat-card").length).toBe(3);
+  });
+
+  it("shows error message after retry also fails", async () => {
+    apiMock
+      .mockRejectedValueOnce(new Error("First failure"))
+      .mockRejectedValueOnce(new Error("Second failure"));
+
+    const wrapper = mountPage();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("First failure");
+
+    // Click retry
+    const retryBtn = wrapper.findAll("button").find(b => b.text().includes("Retry"));
+    await retryBtn!.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Second failure");
+  });
+
+  it("does not show empty state when loading", async () => {
+    apiMock.mockReturnValue(new Promise(() => {})); // never resolves
+    const wrapper = mountPage();
+    await nextTick();
+
+    expect(wrapper.find(".empty-state").exists()).toBe(false);
+  });
+
+  it("does not show empty state when error is displayed", async () => {
+    apiMock.mockRejectedValueOnce(new Error("Fail"));
+    const wrapper = mountPage();
+    await flushPromises();
+
+    expect(wrapper.find(".empty-state").exists()).toBe(false);
+    expect(wrapper.find(".message").exists()).toBe(true);
+  });
+
+  it("renders 3 skeleton placeholders during loading", async () => {
+    apiMock.mockReturnValue(new Promise(() => {})); // never resolves
+    const wrapper = mountPage();
+    await nextTick();
+
+    expect(wrapper.findAll(".skeleton").length).toBe(3);
   });
 });

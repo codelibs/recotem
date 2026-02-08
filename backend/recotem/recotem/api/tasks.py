@@ -1,26 +1,24 @@
-import json
 import logging
 import random
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import optuna
 import pandas as pd
 import scipy.sparse as sps
 from asgiref.sync import async_to_sync
 from celery import chain, group
+from celery.exceptions import SoftTimeLimitExceeded
 from channels.layers import get_channel_layer
 from django.conf import settings
 from django.db import transaction
-from django.db.models import F
 from django_celery_results.models import TaskResult
 from irspack import Evaluator, split_dataframe_partial_user_holdout
 from irspack import __version__ as irspack_version
 from irspack.optimization.parameter_range import is_valid_param_name
 from irspack.recommenders.base import get_recommender_class
 from optuna.samplers import TPESampler
-from optuna.storages import RDBStorage
 from optuna.trial import FrozenTrial
 
 from recotem.api.models import (
@@ -36,18 +34,11 @@ from recotem.api.models import (
     TrainingData,
 )
 from recotem.api.services.training_service import train_and_save_model
+from recotem.api.services.tuning_service import get_optuna_storage
 from recotem.api.utils import read_dataframe
 from recotem.celery import app
 
 logger = logging.getLogger(__name__)
-
-
-def _get_optuna_storage() -> RDBStorage:
-    """Create an Optuna RDBStorage with connection pooling."""
-    return RDBStorage(
-        settings.DATABASE_URL,
-        engine_kwargs={"pool_size": 5, "max_overflow": 10},
-    )
 
 
 def _send_ws_log(job_id: int, message: str) -> None:
@@ -76,14 +67,14 @@ def _send_ws_status(job_id: int, status: str, data: dict = None) -> None:
         logger.warning("Failed to send WebSocket status for job %d: %s", job_id, exc)
 
 
-DEFAULT_SEARCH_RECOMMENDERS: List[str] = [
+DEFAULT_SEARCH_RECOMMENDERS: list[str] = [
     "IALSRecommender",
     "CosineKNNRecommender",
     "TopPopRecommender",
 ]
 
 
-def _resolve_recommender_class_name(algorithm_name: str) -> Optional[str]:
+def _resolve_recommender_class_name(algorithm_name: str) -> str | None:
     candidates = [algorithm_name]
     if algorithm_name.endswith("Optimizer"):
         candidates.append(algorithm_name.replace("Optimizer", "Recommender"))
@@ -98,13 +89,12 @@ def _resolve_recommender_class_name(algorithm_name: str) -> Optional[str]:
     return None
 
 
-def _get_search_recommender_classes(raw_algorithms_json: Optional[str]) -> List[str]:
+def _get_search_recommender_classes(raw_algorithms_json: list[str] | None) -> list[str]:
     if raw_algorithms_json is None:
         return DEFAULT_SEARCH_RECOMMENDERS.copy()
 
-    raw_algorithms: List[str] = json.loads(raw_algorithms_json)
     resolved = []
-    for algorithm_name in raw_algorithms:
+    for algorithm_name in raw_algorithms_json:
         recommender_class_name = _resolve_recommender_class_name(algorithm_name)
         if recommender_class_name is not None:
             resolved.append(recommender_class_name)
@@ -114,10 +104,10 @@ def _get_search_recommender_classes(raw_algorithms_json: Optional[str]) -> List[
 
 
 def train_recommender_func(
-    task_result, model_id: int, parameter_tuning_job_id: Optional[int] = None
+    task_result, model_id: int, parameter_tuning_job_id: int | None = None
 ):
     model: TrainedModel = TrainedModel.objects.get(id=model_id)
-    TaskAndTrainedModelLink.objects.create(model=model, task=task_result)
+    TaskAndTrainedModelLink.objects.get_or_create(task=task_result, defaults={"model": model})
 
     try:
         train_and_save_model(model)
@@ -150,6 +140,12 @@ def task_train_recommender(self, model_id: int) -> None:
     self.update_state(state="STARTED", meta=[])
     try:
         train_recommender_func(task_result, model_id)
+    except SoftTimeLimitExceeded:
+        logger.error("Training timed out for model %d", model_id)
+        TaskLog.objects.create(
+            task=task_result, contents=f"Training timed out for model {model_id}"
+        )
+        raise
     except Exception as e:
         logger.exception("Training failed for model %d", model_id)
         TaskLog.objects.create(task=task_result, contents=f"Training failed: {e}")
@@ -163,12 +159,12 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
         )
         evaluation: EvaluationConfig = job.evaluation
 
-        TaskAndParameterJobLink.objects.create(job=job, task=task_result)
+        TaskAndParameterJobLink.objects.get_or_create(task=task_result, defaults={"job": job})
 
         data: TrainingData = job.data
         project: Project = data.project
 
-        optuna_storage = _get_optuna_storage()
+        optuna_storage = get_optuna_storage()
         study_name = job.study_name()
         study_id = optuna_storage.get_study_id_from_name(study_name)
         best_trial = optuna_storage.get_best_trial(study_id)
@@ -206,7 +202,7 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
         config = ModelConfiguration.objects.create(
             name=config_name,
             project=project,
-            parameters_json=json.dumps(best_params),
+            parameters_json=best_params,
             recommender_class_name=recommender_class_name,
         )
 
@@ -294,7 +290,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
     if index < (job.n_trials % job.n_tasks_parallel):
         n_trials += 1
 
-    TaskAndParameterJobLink.objects.create(job=job, task=task_result)
+    TaskAndParameterJobLink.objects.get_or_create(task=task_result, defaults={"job": job})
     data: TrainingData = job.data
     project: Project = data.project
     split: SplitConfig = job.split
@@ -337,7 +333,10 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
     )
 
     study_name = job.study_name()
-    optuna_storage = _get_optuna_storage()
+    optuna_storage = get_optuna_storage()
+
+    log_buffer: list[TaskLog] = []
+    BULK_FLUSH_SIZE = 10
 
     def callback(study: optuna.Study, trial: FrozenTrial) -> None:
         params = trial.params.copy()
@@ -353,7 +352,10 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         else:
             message = f"""Trial {trial.number} with {algo} / {params}: {trial.state.name}.
 {evaluator.target_metric.name}@{evaluator.cutoff}={-trial.value}"""
-        TaskLog.objects.create(task=task_result, contents=message)
+        log_buffer.append(TaskLog(task=task_result, contents=message))
+        if len(log_buffer) >= BULK_FLUSH_SIZE:
+            TaskLog.objects.bulk_create(log_buffer)
+            log_buffer.clear()
         _send_ws_log(parameter_tuning_job_id, message)
 
     if job.random_seed is None:
@@ -375,7 +377,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
             tried_recommenders,
         )
         recommender_class = get_recommender_class(recommender_class_name)
-        params: Dict[str, Any] = recommender_class.default_suggest_parameter(trial, {})
+        params: dict[str, Any] = recommender_class.default_suggest_parameter(trial, {})
         recommender = recommender_class(X_tv_train, **params)
         recommender.learn_with_optimizer(evaluator, trial)
         score = evaluator.get_score(recommender)
@@ -392,6 +394,18 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
             timeout=job.timeout_overall,
             callbacks=[callback],
         )
+    except SoftTimeLimitExceeded:
+        logger.error(
+            "Search worker %d for job %d timed out", index, parameter_tuning_job_id
+        )
+        ParameterTuningJob.objects.filter(id=parameter_tuning_job_id).update(
+            status=ParameterTuningJob.Status.FAILED
+        )
+        msg_timeout = f"Search worker {index} for job {parameter_tuning_job_id} timed out"
+        TaskLog.objects.create(task=task_result, contents=msg_timeout)
+        _send_ws_log(parameter_tuning_job_id, msg_timeout)
+        _send_ws_status(parameter_tuning_job_id, "error", {"error": "Task timed out"})
+        raise
     except Exception as e:
         logger.exception(
             "Search worker %d for job %d failed", index, parameter_tuning_job_id
@@ -404,13 +418,26 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         _send_ws_log(parameter_tuning_job_id, msg_error)
         _send_ws_status(parameter_tuning_job_id, "error", {"error": str(e)})
         raise
+    finally:
+        # Flush any remaining buffered log entries so they are never lost,
+        # regardless of whether the task succeeded, failed, or was interrupted.
+        if log_buffer:
+            try:
+                TaskLog.objects.bulk_create(log_buffer)
+            except Exception:
+                logger.exception(
+                    "Failed to flush %d buffered TaskLog entries for job %d",
+                    len(log_buffer),
+                    parameter_tuning_job_id,
+                )
+            log_buffer.clear()
 
 
 def start_tuning_job(job: ParameterTuningJob) -> None:
     job.status = ParameterTuningJob.Status.PENDING
     job.save(update_fields=["status"])
 
-    optuna_storage = _get_optuna_storage()
+    optuna_storage = get_optuna_storage()
     study_name = job.study_name()
     optuna.create_study(
         storage=optuna_storage,

@@ -1,6 +1,8 @@
-import { ofetch, type FetchOptions } from "ofetch";
+import { ofetch, type FetchOptions, FetchError } from "ofetch";
 import { useAuthStore } from "@/stores/auth";
 import { API_BASE_URL } from "./config";
+import type { ApiErrorKind, ClassifiedApiError } from "@/types";
+import i18n from "@/i18n";
 
 let isRefreshing = false;
 let refreshPromise: Promise<boolean> | null = null;
@@ -89,3 +91,85 @@ export const api = ofetch.create({
     }
   },
 });
+
+/**
+ * Classify a caught error into a structured ApiError with kind, message,
+ * and optional field-level errors for validation failures.
+ */
+function t(key: string): string {
+  return i18n.global.t(key);
+}
+
+export function classifyApiError(err: unknown): ClassifiedApiError {
+  if (err instanceof FetchError) {
+    const status = err.response?.status ?? null;
+    const body = err.data as Record<string, unknown> | undefined;
+
+    if (status === null) {
+      if (err.message?.includes("timeout")) {
+        return { kind: "timeout", status: null, message: t("errors.timeout"), raw: err };
+      }
+      return { kind: "network_error", status: null, message: t("errors.networkError"), raw: err };
+    }
+
+    const detail = typeof body?.detail === "string" ? body.detail : undefined;
+
+    const kindMap: Record<number, ApiErrorKind> = {
+      400: "validation",
+      401: "unauthorized",
+      403: "forbidden",
+      404: "not_found",
+      429: "rate_limited",
+    };
+    const kind: ApiErrorKind = kindMap[status] ?? (status >= 500 ? "server_error" : "unknown");
+
+    const messages: Record<ApiErrorKind, string> = {
+      validation: t("errors.validation"),
+      unauthorized: t("errors.unauthorized"),
+      forbidden: t("errors.forbidden"),
+      not_found: t("errors.notFound"),
+      rate_limited: t("errors.rateLimited"),
+      server_error: t("errors.serverError"),
+      network_error: t("errors.networkError"),
+      timeout: t("errors.timeout"),
+      unknown: t("errors.unknown"),
+    };
+
+    let fieldErrors: Record<string, string[]> | undefined;
+    if (kind === "validation" && body) {
+      fieldErrors = {};
+      for (const [key, val] of Object.entries(body)) {
+        if (key === "detail") continue;
+        if (Array.isArray(val)) {
+          fieldErrors[key] = val.map(String);
+        } else if (typeof val === "string") {
+          fieldErrors[key] = [val];
+        }
+      }
+      if (Object.keys(fieldErrors).length === 0) fieldErrors = undefined;
+    }
+
+    return {
+      kind,
+      status,
+      message: detail ?? messages[kind],
+      fieldErrors,
+      raw: err,
+    };
+  }
+
+  return {
+    kind: "unknown",
+    status: null,
+    message: err instanceof Error ? err.message : t("errors.unknown"),
+    raw: err,
+  };
+}
+
+/**
+ * Unwrap a paginated DRF response to a plain array.
+ * Handles both `{ results: T[] }` and raw `T[]` responses.
+ */
+export function unwrapResults<T>(res: { results: T[] } | T[]): T[] {
+  return Array.isArray(res) ? res : res.results;
+}

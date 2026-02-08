@@ -5,6 +5,7 @@ from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 
 from recotem.api.exceptions import ResourceNotFoundError
 from recotem.api.models import ItemMetaData, TrainedModel
@@ -48,6 +49,26 @@ class TrainedModelViewset(OwnedResourceMixin, viewsets.ModelViewSet, FileDownloa
     filterset_fields = ["id", "data_loc", "data_loc__project"]
     pagination_class = StandardPagination
     owner_lookup = "data_loc__project__owner"
+
+    def get_throttles(self):
+        if self.action in (
+            "sample_recommendation_raw",
+            "sample_recommendation_metadata",
+            "recommendation",
+            "recommend_using_profile_interaction",
+        ):
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
+
+    def get_throttle_scope(self):
+        if self.action in (
+            "sample_recommendation_raw",
+            "sample_recommendation_metadata",
+            "recommendation",
+            "recommend_using_profile_interaction",
+        ):
+            return "recommendation"
+        return None
 
     def get_queryset(self):
         return (

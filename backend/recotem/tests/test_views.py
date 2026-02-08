@@ -514,7 +514,7 @@ class TestModelConfigurationViewSet:
                 name="test_config",
                 project=project.id,
                 recommender_class_name="IALSRecommender",
-                parameters_json="{}",
+                parameters_json={},
             ),
             content_type="application/json",
         )
@@ -539,13 +539,13 @@ class TestModelConfigurationViewSet:
             name="config_1",
             project=project,
             recommender_class_name="IALSRecommender",
-            parameters_json="{}",
+            parameters_json={},
         )
         ModelConfiguration.objects.create(
             name="config_2",
             project=project,
             recommender_class_name="TopPopRecommender",
-            parameters_json="{}",
+            parameters_json={},
         )
 
         mc_url = reverse("model_configuration-list")
@@ -564,7 +564,7 @@ class TestModelConfigurationViewSet:
             dict(
                 name="unauth_config",
                 recommender_class_name="IALSRecommender",
-                parameters_json="{}",
+                parameters_json={},
             ),
             content_type="application/json",
         )

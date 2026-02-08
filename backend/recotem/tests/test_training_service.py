@@ -55,7 +55,7 @@ def model_config(project):
         name="training_test_config",
         project=project,
         recommender_class_name="TopPopRecommender",
-        parameters_json="{}",
+        parameters_json={},
     )
 
 
@@ -95,7 +95,7 @@ class TestTrainAndSaveModel:
             name="ials_config",
             project=project,
             recommender_class_name="IALSRecommender",
-            parameters_json='{"n_components": 2}',
+            parameters_json={"n_components": 2},
         )
         model = TrainedModel.objects.create(
             configuration=config,
@@ -115,7 +115,7 @@ class TestTrainAndSaveModel:
             name="invalid_config",
             project=project,
             recommender_class_name="NonExistentRecommender",
-            parameters_json="{}",
+            parameters_json={},
         )
         model = TrainedModel.objects.create(
             configuration=config,
@@ -125,11 +125,11 @@ class TestTrainAndSaveModel:
         with pytest.raises((ImportError, AttributeError, ValueError)):
             train_and_save_model(model)
 
-    def test_train_and_save_model_raises_on_invalid_json_params(
+    def test_train_and_save_model_raises_on_invalid_params_type(
         self, model_config, training_data
     ):
-        """train_and_save_model should raise when parameters_json is malformed."""
-        model_config.parameters_json = "not valid json"
+        """train_and_save_model should raise when parameters_json is not a dict."""
+        model_config.parameters_json = ["not", "a", "dict"]
         model_config.save()
 
         model = TrainedModel.objects.create(
@@ -137,7 +137,7 @@ class TestTrainAndSaveModel:
             data_loc=training_data,
         )
 
-        with pytest.raises(ValueError):
+        with pytest.raises(TypeError):
             train_and_save_model(model)
 
     def test_model_file_is_signed_with_hmac(self, model_config, training_data):

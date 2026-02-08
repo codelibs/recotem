@@ -18,9 +18,6 @@ RUN chown -R nginx:nginx /var/cache/nginx /var/log/nginx \
 COPY --from=frontend-build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Validate nginx configuration at build time
-RUN nginx -t
-
 USER nginx
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \

@@ -7,6 +7,18 @@ on:
   workflow_dispatch:
 
 jobs:
+  secret_scanning:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: TruffleHog secret scan
+        uses: trufflesecurity/trufflehog@v3
+        with:
+          extra_args: --since-commit HEAD~1
+
   run_frontend_tests:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -53,9 +65,17 @@ jobs:
       - name: Install Playwright browsers
         working-directory: frontend
         run: npx playwright install --with-deps
+      - name: Generate E2E test credentials
+        run: |
+          echo "E2E_ADMIN_PASSWORD=$(openssl rand -base64 24)" >> "$GITHUB_ENV"
+          echo "E2E_USER_A_PASSWORD=$(openssl rand -base64 24)" >> "$GITHUB_ENV"
+          echo "E2E_USER_B_PASSWORD=$(openssl rand -base64 24)" >> "$GITHUB_ENV"
+          echo "CI_SECRET_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          echo "CI_ADMIN_PASSWORD=$(openssl rand -base64 24)" >> "$GITHUB_ENV"
       - name: Build and start services
         env:
-          SECRET_KEY: ci-test-secret-key-not-for-production
+          SECRET_KEY: ${{ env.CI_SECRET_KEY }}
+          DEFAULT_ADMIN_PASSWORD: ${{ env.CI_ADMIN_PASSWORD }}
         run: |
           docker compose build
           docker compose up -d
@@ -67,18 +87,18 @@ jobs:
           docker compose exec -T backend python manage.py migrate
           docker compose exec -T backend python manage.py create_superuser
           docker compose exec -T backend python manage.py create_test_users \
-            --user e2e_user_a:e2e_password_a \
-            --user e2e_user_b:e2e_password_b
+            --user "e2e_user_a:${E2E_USER_A_PASSWORD}" \
+            --user "e2e_user_b:${E2E_USER_B_PASSWORD}"
       - name: Run Playwright tests
         working-directory: frontend
         env:
           E2E_ADMIN_USERNAME: admin
-          E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD || 'ci-test-admin-password-not-for-production' }}
+          E2E_ADMIN_PASSWORD: ${{ env.E2E_ADMIN_PASSWORD }}
           E2E_API_BASE_URL: http://localhost:8000/api/v1
           E2E_USER_A_USERNAME: e2e_user_a
-          E2E_USER_A_PASSWORD: e2e_password_a
+          E2E_USER_A_PASSWORD: ${{ env.E2E_USER_A_PASSWORD }}
           E2E_USER_B_USERNAME: e2e_user_b
-          E2E_USER_B_PASSWORD: e2e_password_b
+          E2E_USER_B_PASSWORD: ${{ env.E2E_USER_B_PASSWORD }}
         run: npx playwright test
       - name: Cleanup docker services
         if: always()
@@ -95,6 +115,10 @@ jobs:
   run_pytest:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+      fail-fast: false
     services:
       postgres:
         image: postgres:17-alpine
@@ -131,7 +155,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
+      - name: Verify lock file is up to date
+        working-directory: backend
+        run: uv lock --check
       - name: Install dependencies
         working-directory: backend
         run: uv sync --frozen
@@ -169,8 +196,25 @@ jobs:
       - name: Save coverage
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-coverage
+          name: pytest-coverage-py${{ matrix.python-version }}
           path: backend/recotem/coverage.xml
+
+  scan-pr-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -t recotem-backend:pr --target production backend/
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: recotem-backend:pr
+          format: table
+          exit-code: 1
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
 
   upload-coverage:
     runs-on: ubuntu-latest
@@ -183,7 +227,7 @@ jobs:
       - name: Download backend coverage
         uses: actions/download-artifact@v4
         with:
-          name: pytest-coverage
+          name: pytest-coverage-py3.12
           path: coverage-backend
       - name: Download frontend coverage
         uses: actions/download-artifact@v4

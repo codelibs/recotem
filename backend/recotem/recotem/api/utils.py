@@ -1,6 +1,7 @@
 import gzip
+from collections.abc import Callable
 from pathlib import Path
-from typing import IO, Callable, Dict, Optional, Union
+from typing import IO, Union
 
 import pandas as pd
 from rest_framework.exceptions import ValidationError
@@ -9,7 +10,7 @@ INPUT_STREAM_TYPE = Union[IO, gzip.GzipFile]
 
 PREVIEW_ROW_LIMIT = 200
 
-READ_RULES: Dict[str, Callable[[INPUT_STREAM_TYPE], pd.DataFrame]] = {
+READ_RULES: dict[str, Callable[[INPUT_STREAM_TYPE], pd.DataFrame]] = {
     ".csv": lambda f: pd.read_csv(f),
     ".tsv": lambda f: pd.read_csv(f, sep="\t"),
     ".json": lambda f: pd.read_json(f),
@@ -20,7 +21,7 @@ READ_RULES: Dict[str, Callable[[INPUT_STREAM_TYPE], pd.DataFrame]] = {
 }
 
 # Formats that support nrows parameter for partial reads
-_NROWS_FORMATS: Dict[str, Callable[[INPUT_STREAM_TYPE, int], pd.DataFrame]] = {
+_NROWS_FORMATS: dict[str, Callable[[INPUT_STREAM_TYPE, int], pd.DataFrame]] = {
     ".csv": lambda f, n: pd.read_csv(f, nrows=n),
     ".tsv": lambda f, n: pd.read_csv(f, sep="\t", nrows=n),
     ".ndjson": lambda f, n: pd.read_json(f, lines=True, orient="records", nrows=n),
@@ -29,7 +30,7 @@ _NROWS_FORMATS: Dict[str, Callable[[INPUT_STREAM_TYPE, int], pd.DataFrame]] = {
 
 
 def read_dataframe(
-    filepath: Path, file: IO, *, nrows: Optional[int] = None
+    filepath: Path, file: IO, *, nrows: int | None = None
 ) -> pd.DataFrame:
     input_stream: INPUT_STREAM_TYPE = file
     suffixes = filepath.suffixes
@@ -40,7 +41,7 @@ def read_dataframe(
         suffix = suffixes[0]
         compression = suffixes[1]
         if compression not in (".gz", ".gzip"):
-            raise ValidationError(f"Only .gzip or .gz compression are supported.")
+            raise ValidationError("Only .gzip or .gz compression are supported.")
         else:
             input_stream = gzip.open(file, mode="rb")
     elif len(suffixes) == 1:

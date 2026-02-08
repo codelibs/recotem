@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 from django.conf import settings
@@ -63,7 +62,7 @@ class TrainingData(ModelWithInsDatetime, BaseFileModel):
         df = read_dataframe(pathname, self.file)
         user_column: str = self.project.user_column
         item_column: str = self.project.item_column
-        time_column: Optional[str] = self.project.time_column
+        time_column: str | None = self.project.time_column
 
         if time_column is not None:
             if time_column not in df:
@@ -90,7 +89,7 @@ class TrainingData(ModelWithInsDatetime, BaseFileModel):
 
 class ItemMetaData(ModelWithInsDatetime, BaseFileModel):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, db_index=True)
-    valid_columns_list_json = models.TextField(null=True)
+    valid_columns_list_json = models.JSONField(null=True)
 
     def validate_return_df(self) -> pd.DataFrame:
         pathname = Path(self.file.name)
@@ -106,7 +105,7 @@ class ItemMetaData(ModelWithInsDatetime, BaseFileModel):
 
 @receiver(models.signals.post_save, sender=TrainingData)
 def save_file_size(
-    sender, instance: Optional[TrainingData] = None, created: bool = False, **kwargs
+    sender, instance: TrainingData | None = None, created: bool = False, **kwargs
 ) -> None:
     if not created:
         return
@@ -173,11 +172,11 @@ _recommender_class_validator = RegexValidator(
 
 class ModelConfiguration(ModelWithInsDatetime):
     name = models.CharField(max_length=256, null=True)
-    project = models.ForeignKey(Project, on_delete=models.CASCADE)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, db_index=True)
     recommender_class_name = models.CharField(
         max_length=128, validators=[_recommender_class_validator]
     )
-    parameters_json = models.TextField()
+    parameters_json = models.JSONField(default=dict)
 
     class Meta:
         constraints = [
@@ -215,7 +214,7 @@ class ParameterTuningJob(ModelWithInsDatetime):
     timeout_overall = models.IntegerField(null=True)
     timeout_singlestep = models.IntegerField(null=True)
     random_seed = models.IntegerField(null=True)
-    tried_algorithms_json = models.TextField(null=True)
+    tried_algorithms_json = models.JSONField(null=True)
 
     irspack_version = models.CharField(max_length=16, null=True)
 

@@ -65,7 +65,8 @@ service:
 # Ingress configuration
 ingress:
   enabled: false
-  className: nginx
+  # Ingress class name (e.g. "nginx" for nginx-ingress-controller)
+  className: ""
   annotations: {}
     # cert-manager.io/cluster-issuer: letsencrypt-prod
   hosts:
@@ -102,11 +103,20 @@ postgresql:
   port: 5432
   database: recotem
   username: recotem_user
+  # Pod selector labels for NetworkPolicy (in-cluster PostgreSQL only)
+  podLabels:
+    app.kubernetes.io/name: postgresql
 
 redis:
   external: false
   host: ""
   port: 6379
+  # Memory limits for in-cluster Redis
+  maxmemory: "256mb"
+  maxmemoryPolicy: "allkeys-lru"
+  # Pod selector labels for NetworkPolicy (in-cluster Redis only)
+  podLabels:
+    app.kubernetes.io/name: redis
 
 # Django configuration (non-secret values go in ConfigMap)
 config:
@@ -137,6 +147,8 @@ podDisruptionBudget:
   backend:
     minAvailable: 1
   worker:
+    minAvailable: 1
+  proxy:
     minAvailable: 1
 
 # ServiceAccount configuration

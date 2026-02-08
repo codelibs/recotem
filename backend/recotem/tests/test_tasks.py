@@ -168,7 +168,7 @@ def test_train_recommender_func_sets_failed_on_error(
         name="test_config",
         project=project,
         recommender_class_name="IALSRecommender",
-        parameters_json="{}",
+        parameters_json={},
     )
     model = TrainedModel.objects.create(configuration=config, data_loc=data)
     job = ParameterTuningJob.objects.create(
@@ -243,7 +243,7 @@ def test_task_timeout_handling(user, project, split_config, eval_config, ml100k)
         name="timeout_config",
         project=project,
         recommender_class_name="IALSRecommender",
-        parameters_json="{}",
+        parameters_json={},
     )
     model = TrainedModel.objects.create(configuration=config, data_loc=data)
     job = ParameterTuningJob.objects.create(
@@ -284,7 +284,7 @@ def test_job_status_stays_failed_when_task_throws(
         name="failed_config",
         project=project,
         recommender_class_name="IALSRecommender",
-        parameters_json="{}",
+        parameters_json={},
     )
     model = TrainedModel.objects.create(configuration=config, data_loc=data)
     job = ParameterTuningJob.objects.create(

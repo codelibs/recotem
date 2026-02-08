@@ -1,4 +1,4 @@
-from typing import Iterable, List, Tuple
+from collections.abc import Iterable
 
 from irspack.utils.id_mapping import IDMapper
 
@@ -8,8 +8,8 @@ class IDMappedRecommender:
 
     def __init__(self, recommender, user_ids: Iterable[str], item_ids: Iterable[str]):
         self.recommender = recommender
-        self.user_ids: List[str] = [str(u) for u in user_ids]
-        self.item_ids: List[str] = [str(i) for i in item_ids]
+        self.user_ids: list[str] = [str(u) for u in user_ids]
+        self.item_ids: list[str] = [str(i) for i in item_ids]
         self._mapper = IDMapper(self.user_ids, self.item_ids)
 
     def __setstate__(self, state):
@@ -25,7 +25,7 @@ class IDMappedRecommender:
 
     def get_recommendation_for_known_user_id(
         self, user_id: str, cutoff: int = 20
-    ) -> List[Tuple[str, float]]:
+    ) -> list[tuple[str, float]]:
         try:
             return self._mapper.recommend_for_known_user_id(
                 self.recommender,
@@ -37,7 +37,7 @@ class IDMappedRecommender:
 
     def get_recommendation_for_new_user(
         self, item_ids: Iterable[str], cutoff: int = 20
-    ) -> List[Tuple[str, float]]:
+    ) -> list[tuple[str, float]]:
         return self._mapper.recommend_for_new_user(
             self.recommender,
             [str(item_id) for item_id in item_ids],

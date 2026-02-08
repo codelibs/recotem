@@ -32,6 +32,7 @@ npm-debug.log*
 /dist/
 frontend/dist/
 backend/recotem/dist/
+backend/recotem/data/
 frontend/coverage/
 frontend/imgs/
 
@@ -43,6 +44,8 @@ frontend/test-results/
 # Environment
 .env.local
 .env.*.local
+envs/dev.env
+envs/production.env
 
 # Deployment artifacts
 recotem-compose/

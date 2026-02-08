@@ -1,13 +1,18 @@
 import asyncio
 import json
+import logging
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 from django.db import models
 
-from recotem.api.models import ParameterTuningJob
+from recotem.api.models import ParameterTuningJob, TaskLog
+
+logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = 60  # seconds
+# Maximum number of historical log entries sent to late-joining clients.
+LATE_JOIN_BUFFER_LIMIT = 500
 
 
 class AuthenticatedConsumerMixin:
@@ -63,8 +68,26 @@ class HeartbeatMixin:
                 pass
 
 
-class JobStatusConsumer(AuthenticatedConsumerMixin, HeartbeatMixin, AsyncWebsocketConsumer):
+class JobStatusConsumer(
+    AuthenticatedConsumerMixin, HeartbeatMixin, AsyncWebsocketConsumer
+):
     """WebSocket consumer for real-time job status updates."""
+
+    @database_sync_to_async
+    def _get_current_job_status(self, job_id: int) -> dict | None:
+        """Fetch current job status for late-joining clients."""
+        try:
+            job = ParameterTuningJob.objects.get(id=job_id)
+            return {
+                "type": "status_update",
+                "status": job.status.lower(),
+                "data": {
+                    "best_score": job.best_score,
+                    "buffered": True,
+                },
+            }
+        except ParameterTuningJob.DoesNotExist:
+            return None
 
     async def connect(self):
         if not await self.check_auth():
@@ -74,10 +97,18 @@ class JobStatusConsumer(AuthenticatedConsumerMixin, HeartbeatMixin, AsyncWebsock
             await self.close(code=4403)
             return
         self.group_name = f"job_{self.job_id}_status"
+        self._seq = 0
 
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
         self.start_heartbeat()
+
+        # Send current job status to late-joining clients.
+        current_status = await self._get_current_job_status(self.job_id)
+        if current_status is not None:
+            current_status["seq"] = self._seq
+            self._seq += 1
+            await self.send(text_data=json.dumps(current_status))
 
     async def disconnect(self, close_code):
         self.stop_heartbeat()
@@ -86,19 +117,42 @@ class JobStatusConsumer(AuthenticatedConsumerMixin, HeartbeatMixin, AsyncWebsock
 
     async def job_status_update(self, event):
         """Handle job status update messages from the channel layer."""
-        await self.send(
-            text_data=json.dumps(
-                {
-                    "type": "status_update",
-                    "status": event["status"],
-                    "data": event.get("data", {}),
-                }
-            )
-        )
+        msg = {
+            "type": "status_update",
+            "status": event["status"],
+            "data": event.get("data", {}),
+            "seq": self._seq,
+        }
+        self._seq += 1
+        await self.send(text_data=json.dumps(msg))
 
 
-class TaskLogConsumer(AuthenticatedConsumerMixin, HeartbeatMixin, AsyncWebsocketConsumer):
+class TaskLogConsumer(
+    AuthenticatedConsumerMixin, HeartbeatMixin, AsyncWebsocketConsumer
+):
     """WebSocket consumer for streaming task log messages."""
+
+    @database_sync_to_async
+    def _get_existing_logs(self, job_id: int) -> list[dict]:
+        """Fetch existing TaskLog entries for a job, ordered by creation time.
+
+        Returns up to LATE_JOIN_BUFFER_LIMIT entries so late-joining clients
+        can see the history of a running (or completed) job.
+        """
+        logs = (
+            TaskLog.objects.filter(task__tuning_job_link__job_id=job_id)
+            .order_by("ins_datetime")
+            .values_list("contents", "ins_datetime")[:LATE_JOIN_BUFFER_LIMIT]
+        )
+        return [
+            {
+                "type": "log",
+                "message": contents,
+                "timestamp": ins_dt.isoformat() if ins_dt else "",
+                "buffered": True,
+            }
+            for contents, ins_dt in logs
+        ]
 
     async def connect(self):
         if not await self.check_auth():
@@ -108,10 +162,23 @@ class TaskLogConsumer(AuthenticatedConsumerMixin, HeartbeatMixin, AsyncWebsocket
             await self.close(code=4403)
             return
         self.group_name = f"job_{self.job_id}_logs"
+        self._seq = 0
 
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
         self.start_heartbeat()
+
+        # Send existing log entries to late-joining clients.
+        try:
+            existing_logs = await self._get_existing_logs(self.job_id)
+            for log_entry in existing_logs:
+                log_entry["seq"] = self._seq
+                self._seq += 1
+                await self.send(text_data=json.dumps(log_entry))
+        except Exception:
+            logger.exception(
+                "Failed to send log buffer for job %d", self.job_id
+            )
 
     async def disconnect(self, close_code):
         self.stop_heartbeat()
@@ -120,12 +187,11 @@ class TaskLogConsumer(AuthenticatedConsumerMixin, HeartbeatMixin, AsyncWebsocket
 
     async def task_log_message(self, event):
         """Handle task log messages from the channel layer."""
-        await self.send(
-            text_data=json.dumps(
-                {
-                    "type": "log",
-                    "message": event["message"],
-                    "timestamp": event.get("timestamp", ""),
-                }
-            )
-        )
+        msg = {
+            "type": "log",
+            "message": event["message"],
+            "timestamp": event.get("timestamp", ""),
+            "seq": self._seq,
+        }
+        self._seq += 1
+        await self.send(text_data=json.dumps(msg))

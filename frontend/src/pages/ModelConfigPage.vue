@@ -2,7 +2,7 @@
   <div>
     <div class="flex items-center justify-between mb-6">
       <h2 class="text-xl font-bold text-neutral-800">
-        Model Configurations
+        {{ $t('configs.title') }}
       </h2>
     </div>
 
@@ -12,7 +12,7 @@
       :closable="false"
       class="mb-4"
     >
-      Failed to load configurations. Please try again.
+      {{ error?.message ?? t('configs.failedToLoad') }}
     </Message>
 
     <DataTable
@@ -21,7 +21,7 @@
       striped-rows
       paginator
       :rows="20"
-      empty-message="No model configurations yet"
+      :empty-message="$t('configs.noConfigs')"
     >
       <Column
         field="id"
@@ -31,7 +31,7 @@
       />
       <Column
         field="name"
-        header="Name"
+        :header="$t('common.name')"
         sortable
       >
         <template #body="{ data }">
@@ -40,11 +40,11 @@
       </Column>
       <Column
         field="recommender_class_name"
-        header="Algorithm"
+        :header="$t('configs.algorithm')"
         sortable
       />
       <Column
-        header="Parameters"
+        :header="$t('configs.parameters')"
       >
         <template #body="{ data }">
           <code class="text-xs bg-neutral-10 px-2 py-1 rounded">
@@ -54,7 +54,7 @@
       </Column>
       <Column
         field="ins_datetime"
-        header="Created"
+        :header="$t('common.createdAt')"
         sortable
       >
         <template #body="{ data }">
@@ -62,7 +62,7 @@
         </template>
       </Column>
       <Column
-        header="Actions"
+        :header="$t('common.actions')"
         :style="{ width: '120px' }"
       >
         <template #body="{ data }">
@@ -87,7 +87,7 @@
     <!-- Detail Dialog -->
     <Dialog
       v-model:visible="showDetail"
-      header="Configuration Details"
+      :header="$t('configs.configDetails')"
       :style="{ width: '600px' }"
       modal
     >
@@ -96,15 +96,15 @@
         class="space-y-4"
       >
         <div class="text-sm">
-          <span class="text-neutral-100">Name:</span>
+          <span class="text-neutral-100">{{ $t('common.name') }}:</span>
           <span class="ml-2 text-neutral-800">{{ selectedConfig.name || '(unnamed)' }}</span>
         </div>
         <div class="text-sm">
-          <span class="text-neutral-100">Algorithm:</span>
+          <span class="text-neutral-100">{{ $t('configs.algorithm') }}:</span>
           <span class="ml-2 text-neutral-800">{{ selectedConfig.recommender_class_name }}</span>
         </div>
         <div>
-          <span class="text-sm text-neutral-100">Parameters:</span>
+          <span class="text-sm text-neutral-100">{{ $t('configs.parameters') }}:</span>
           <pre class="mt-1 bg-neutral-10 rounded-md p-4 text-xs overflow-x-auto">{{ formatJson(selectedConfig.parameters_json) }}</pre>
         </div>
       </div>
@@ -112,10 +112,10 @@
 
     <ConfirmDialog
       v-model:visible="showDeleteConfirm"
-      header="Delete Configuration"
-      :message="`Are you sure you want to delete configuration '${deleteTarget?.name || '#' + deleteTarget?.id}'?`"
-      confirm-label="Delete"
-      cancel-label="Cancel"
+      :header="$t('configs.deleteConfig')"
+      :message="$t('configs.deleteConfirm')"
+      :confirm-label="$t('common.delete')"
+      :cancel-label="$t('common.cancel')"
       danger
       @confirm="executeDelete"
     />
@@ -125,6 +125,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { useRoute } from "vue-router";
+import { useI18n } from "vue-i18n";
 import DataTable from "primevue/datatable";
 import Column from "primevue/column";
 import Button from "primevue/button";
@@ -134,14 +135,17 @@ import { api } from "@/api/client";
 import { formatDate } from "@/utils/format";
 import { useNotification } from "@/composables/useNotification";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
-import type { ModelConfiguration } from "@/types";
+import type { ClassifiedApiError, ModelConfiguration } from "@/types";
+import { ENDPOINTS } from "@/api/endpoints";
+import { classifyApiError, unwrapResults } from "@/api/client";
 
+const { t } = useI18n();
 const route = useRoute();
 const notify = useNotification();
 const projectId = route.params.projectId as string;
 const configs = ref<ModelConfiguration[]>([]);
 const loading = ref(false);
-const error = ref(false);
+const error = ref<ClassifiedApiError | null>(null);
 const showDetail = ref(false);
 const selectedConfig = ref<ModelConfiguration | null>(null);
 const showDeleteConfirm = ref(false);
@@ -149,12 +153,12 @@ const deleteTarget = ref<ModelConfiguration | null>(null);
 
 onMounted(async () => {
   loading.value = true;
-  error.value = false;
+  error.value = null;
   try {
-    const res = await api(`/model_configuration/`, { params: { project: projectId } });
-    configs.value = res.results ?? res;
-  } catch {
-    error.value = true;
+    const res = await api(ENDPOINTS.MODEL_CONFIGURATION, { params: { project: projectId } });
+    configs.value = unwrapResults(res);
+  } catch (e) {
+    error.value = classifyApiError(e);
   } finally {
     loading.value = false;
   }
@@ -186,11 +190,11 @@ function confirmDelete(config: ModelConfiguration) {
 async function executeDelete() {
   if (!deleteTarget.value) return;
   try {
-    await api(`/model_configuration/${deleteTarget.value.id}/`, { method: "DELETE" });
+    await api(ENDPOINTS.MODEL_CONFIGURATION_DETAIL(deleteTarget.value.id), { method: "DELETE" });
     configs.value = configs.value.filter(c => c.id !== deleteTarget.value!.id);
-    notify.success("Configuration deleted");
+    notify.success(t("configs.configDeleted"));
   } catch {
-    notify.error("Failed to delete configuration");
+    notify.error(t("configs.failedToDelete"));
   }
   deleteTarget.value = null;
 }

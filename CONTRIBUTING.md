@@ -70,7 +70,15 @@ git clone https://github.com/tohtsky/recotem.git
 cd recotem
 ```
 
-### 2. Start infrastructure services
+### 2. Set up environment files
+
+```bash
+make setup-env
+```
+
+This copies `envs/dev.env.example` to `envs/dev.env`. Edit `envs/dev.env` to set your local passwords and secrets. The actual env files are gitignored; only the `.example` templates are tracked.
+
+### 3. Start infrastructure services
 
 ```bash
 docker compose -f compose-dev.yaml up -d
@@ -78,7 +86,7 @@ docker compose -f compose-dev.yaml up -d
 
 This starts PostgreSQL and Redis containers for local development.
 
-### 3. Backend setup
+### 4. Backend setup
 
 ```bash
 cd backend
@@ -89,14 +97,14 @@ uv run python manage.py createsuperuser
 uv run daphne recotem.asgi:application -b 0.0.0.0 -p 8000
 ```
 
-### 4. Celery worker (separate terminal)
+### 5. Celery worker (separate terminal)
 
 ```bash
 cd backend/recotem
 uv run celery -A recotem worker --loglevel=INFO
 ```
 
-### 5. Frontend setup (separate terminal)
+### 6. Frontend setup (separate terminal)
 
 ```bash
 cd frontend
@@ -224,7 +232,16 @@ import DataTable from "primevue/datatable";
 import Button from "primevue/button";
 ```
 
-Style with **Tailwind CSS 4**. Use the `@theme` tokens defined in `src/assets/main.css`.
+Style with **Tailwind CSS 4**. Use the `@theme` tokens defined in `src/styles/main.css`.
+
+### Internationalization (i18n)
+
+All user-visible strings must be externalized using **vue-i18n**:
+
+1. Add keys to both `frontend/src/i18n/locales/en.json` and `ja.json`
+2. Use `$t('key')` in templates or `t('key')` from `useI18n()` in `<script setup>`
+3. For non-component contexts (e.g., API client), use `i18n.global.t('key')`
+4. Use reusable components (`EmptyState`, `PageHeader`, `FormField`) instead of inline patterns
 
 ## Coding Standards
 

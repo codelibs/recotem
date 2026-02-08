@@ -8,38 +8,38 @@
         @click="router.push(`/projects/${projectId}/models`)"
       />
       <h2 class="text-xl font-bold text-neutral-800">
-        Train Model
+        {{ $t('models.trainModel') }}
       </h2>
     </div>
 
     <div class="bg-white rounded-lg shadow-sm border border-neutral-30 p-6 max-w-xl">
       <div class="space-y-4">
         <div>
-          <label class="block text-sm font-medium mb-1">Training Data</label>
+          <label class="block text-sm font-medium mb-1">{{ $t('models.trainingData') }}</label>
           <Select
             v-model="form.data"
             :options="dataOptions"
             option-label="basename"
             option-value="id"
-            placeholder="Select data"
+            :placeholder="$t('models.selectData')"
             class="w-full"
           />
         </div>
         <div>
-          <label class="block text-sm font-medium mb-1">Model Configuration</label>
+          <label class="block text-sm font-medium mb-1">{{ $t('models.configuration') }}</label>
           <Select
             v-model="form.config"
             :options="configOptions"
             option-label="label"
             option-value="id"
-            placeholder="Select configuration"
+            :placeholder="$t('models.selectConfiguration')"
             class="w-full"
           />
         </div>
       </div>
       <div class="mt-6">
         <Button
-          label="Start Training"
+          :label="$t('models.startTraining')"
           icon="pi pi-play"
           :loading="submitting"
           :disabled="!form.data || !form.config"
@@ -53,12 +53,15 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import Select from "primevue/select";
 import Button from "primevue/button";
-import { api } from "@/api/client";
+import { api, unwrapResults } from "@/api/client";
+import { ENDPOINTS } from "@/api/endpoints";
 import { useNotification } from "@/composables/useNotification";
 import type { TrainingData, ModelConfiguration } from "@/types";
 
+const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
 const notify = useNotification();
@@ -71,11 +74,11 @@ const form = reactive({ data: null as number | null, config: null as number | nu
 
 onMounted(async () => {
   const [dataRes, configRes] = await Promise.all([
-    api(`/training_data/`, { params: { project: projectId } }),
-    api(`/model_configuration/`, { params: { project: projectId } }),
+    api(ENDPOINTS.TRAINING_DATA, { params: { project: projectId } }),
+    api(ENDPOINTS.MODEL_CONFIGURATION, { params: { project: projectId } }),
   ]);
-  dataOptions.value = dataRes.results ?? dataRes;
-  const configs: ModelConfiguration[] = configRes.results ?? configRes;
+  dataOptions.value = unwrapResults(dataRes);
+  const configs: ModelConfiguration[] = unwrapResults(configRes);
   configOptions.value = configs.map(c => ({ id: c.id, label: c.name || `${c.recommender_class_name} #${c.id}` }));
 });
 
@@ -83,14 +86,14 @@ async function submitTraining() {
   if (!form.data || !form.config) return;
   submitting.value = true;
   try {
-    const model = await api("/trained_model/", {
+    const model = await api(ENDPOINTS.TRAINED_MODEL, {
       method: "POST",
       body: { data_loc: form.data, configuration: form.config },
     });
-    notify.success("Training started");
+    notify.success(t("models.trainingStarted"));
     router.push(`/projects/${projectId}/models/${model.id}`);
   } catch {
-    notify.error("Failed to start training");
+    notify.error(t("models.failedToStartTraining"));
   } finally {
     submitting.value = false;
   }

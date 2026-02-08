@@ -1,7 +1,8 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { api } from "@/api/client";
-import type { Project } from "@/types";
+import { api, classifyApiError, unwrapResults } from "@/api/client";
+import { ENDPOINTS } from "@/api/endpoints";
+import type { ClassifiedApiError, Project } from "@/types";
 
 type ProjectCreateInput = Pick<
   Project,
@@ -12,16 +13,16 @@ export const useProjectStore = defineStore("project", () => {
   const projects = ref<Project[]>([]);
   const currentProject = ref<Project | null>(null);
   const loading = ref(false);
-  const error = ref(false);
+  const error = ref<ClassifiedApiError | null>(null);
 
   async function fetchProjects() {
     loading.value = true;
-    error.value = false;
+    error.value = null;
     try {
-      const response = await api("/project/");
-      projects.value = response.results ?? response;
-    } catch {
-      error.value = true;
+      const response = await api(ENDPOINTS.PROJECT);
+      projects.value = unwrapResults(response);
+    } catch (err) {
+      error.value = classifyApiError(err);
     } finally {
       loading.value = false;
     }
@@ -29,24 +30,26 @@ export const useProjectStore = defineStore("project", () => {
 
   async function fetchProject(id: number) {
     loading.value = true;
-    error.value = false;
+    error.value = null;
     try {
-      currentProject.value = await api(`/project/${id}/`);
-    } catch {
-      error.value = true;
+      currentProject.value = await api(`${ENDPOINTS.PROJECT}${id}/`);
+    } catch (err) {
+      error.value = classifyApiError(err);
     } finally {
       loading.value = false;
     }
   }
 
   async function createProject(data: ProjectCreateInput) {
-    const project = await api("/project/", { method: "POST", body: data });
+    error.value = null;
+    const project = await api(ENDPOINTS.PROJECT, { method: "POST", body: data });
     projects.value.unshift(project);
     return project;
   }
 
   async function deleteProject(id: number) {
-    await api(`/project/${id}/`, { method: "DELETE" });
+    error.value = null;
+    await api(`${ENDPOINTS.PROJECT}${id}/`, { method: "DELETE" });
     projects.value = projects.value.filter((p) => p.id !== id);
     if (currentProject.value?.id === id) {
       currentProject.value = null;

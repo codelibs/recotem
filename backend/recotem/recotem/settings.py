@@ -1,6 +1,5 @@
 from datetime import timedelta
 from pathlib import Path
-from typing import List
 from urllib.parse import urlparse, urlunparse
 
 import environ
@@ -40,7 +39,7 @@ SECRET_KEY = env("SECRET_KEY", default="VeryBadSecret@ChangeThis")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env("DEBUG")
 
-ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["localhost"])
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["localhost"] if DEBUG else [])
 
 # Runtime safety checks for production
 if not DEBUG:
@@ -59,6 +58,12 @@ if not DEBUG:
             "ALLOWED_HOSTS must not contain '*' in production (DEBUG=False). "
             "Set the ALLOWED_HOSTS environment variable to your domain names."
         )
+    if not ALLOWED_HOSTS:
+        raise RuntimeError(
+            "ALLOWED_HOSTS must be set for production (DEBUG=False). "
+            "Set the ALLOWED_HOSTS environment variable to your domain names, "
+            "e.g. ALLOWED_HOSTS=example.com,www.example.com"
+        )
 
 # Security headers (production)
 SECURE_CONTENT_TYPE_NOSNIFF = True
@@ -68,7 +73,10 @@ if not DEBUG:
     SECURE_HSTS_SECONDS = int(env("SECURE_HSTS_SECONDS", default=31536000))
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
-    SECURE_SSL_REDIRECT = env.bool("SECURE_SSL_REDIRECT", default=False)
+    SECURE_SSL_REDIRECT = env.bool("SECURE_SSL_REDIRECT", default=True)
+    SESSION_COOKIE_SECURE = env.bool("SESSION_COOKIE_SECURE", default=True)
+    CSRF_COOKIE_SECURE = env.bool("CSRF_COOKIE_SECURE", default=True)
+    SESSION_COOKIE_HTTPONLY = True
 
 
 # Application definition
@@ -112,23 +120,30 @@ MIDDLEWARE = [
 _cors_origins = env.list("CORS_ALLOWED_ORIGINS", default=[])
 if _cors_origins:
     CORS_ALLOWED_ORIGINS = _cors_origins
-else:
-    # Same-origin: allow all only in debug mode
-    CORS_ALLOW_ALL_ORIGINS = DEBUG
+elif DEBUG:
+    CORS_ALLOWED_ORIGINS = [
+        "http://localhost:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8000",
+    ]
 
 CORS_ALLOW_CREDENTIALS = True
 
-# CSRF trusted origins (required for cross-domain frontend/backend deployments)
+# CSRF trusted origins — required for Django Admin on non-HTTPS origins
+# and for any cross-domain frontend/backend deployments.
+# Auto-derive from ALLOWED_HOSTS when not explicitly set.
 _csrf_origins = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 if _csrf_origins:
     CSRF_TRUSTED_ORIGINS = _csrf_origins
+else:
+    CSRF_TRUSTED_ORIGINS = [f"http://{h}" for h in ALLOWED_HOSTS if h != "*"]
 
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.TokenAuthentication",
-        "rest_framework.authentication.SessionAuthentication",
         "dj_rest_auth.jwt_auth.JWTCookieAuthentication",
+        "rest_framework.authentication.TokenAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
@@ -141,6 +156,7 @@ REST_FRAMEWORK = {
         "anon": env("THROTTLE_ANON_RATE", default="20/min"),
         "user": env("THROTTLE_USER_RATE", default="100/min"),
         "login": env("THROTTLE_LOGIN_RATE", default="5/min"),
+        "recommendation": env("THROTTLE_RECOMMENDATION_RATE", default="30/min"),
     },
     "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
     "UPLOADED_FILES_USE_URL": False,
@@ -156,10 +172,9 @@ REST_FRAMEWORK = {
 # dj-rest-auth settings (5.x+ unified configuration)
 REST_AUTH = {
     "USER_DETAILS_SERIALIZER": "recotem.api.serializers.UserDetailsSerializer",
-    "SESSION_LOGIN": True,
+    "SESSION_LOGIN": False,
     "USE_JWT": True,
     "JWT_AUTH_REFRESH_COOKIE": "refresh-token",
-    "JWT_AUTH_COOKIE_USE_CSRF": True,
 }
 
 ROOT_URLCONF = "recotem.urls"
@@ -189,7 +204,7 @@ WSGI_APPLICATION = "recotem.wsgi.application"
 _DEFAULT_DB_URL = f'sqlite:///{(BASE_DIR / "data" / "db.sqlite3")}'
 DATABASE_URL = env("DATABASE_URL", default=_DEFAULT_DB_URL)
 DATABASES = {"default": env.db("DATABASE_URL", default=_DEFAULT_DB_URL)}
-DATABASES["default"]["CONN_MAX_AGE"] = int(env("CONN_MAX_AGE", default=0))
+DATABASES["default"]["CONN_MAX_AGE"] = int(env("CONN_MAX_AGE", default=600))
 
 
 # Password validation
@@ -226,7 +241,7 @@ USE_TZ = True
 
 _STORAGE_TYPE = env("RECOTEM_STORAGE_TYPE", default="")
 if not _STORAGE_TYPE:
-    MEDIA_ROOT = BASE_DIR / "data"
+    MEDIA_ROOT = Path(env("MEDIA_ROOT", default=str(BASE_DIR / "data")))
 elif _STORAGE_TYPE == "S3":
     AWS_ACCESS_KEY_ID = env("AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY = env("AWS_SECRET_ACCESS_KEY")
@@ -255,7 +270,7 @@ elif _STORAGE_TYPE == "S3":
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "dist" / "static"
 
-STATICFILES_DIRS: List[Path] = []
+STATICFILES_DIRS: list[Path] = []
 
 
 # Default primary key field type
@@ -273,6 +288,7 @@ CELERY_BROKER_URL = _inject_redis_password_if_missing(
 # CELERY_TASK_ALWAYS_EAGER = env("CELERY_TASK_ALWAYS_EAGER", cast=bool, default=False)
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_RESULT_BACKEND = "django-db"
+CELERY_RESULT_EXPIRES = int(env("CELERY_RESULT_EXPIRES", default=86400 * 7))  # 7 days
 CELERY_CACHE_BACKEND = "default"
 CELERY_TASK_SERIALIZER = "json"
 
@@ -289,7 +305,10 @@ SIMPLE_JWT = {
 ASGI_APPLICATION = "recotem.asgi.application"
 
 # Channel layers (Redis db=1, separate from Celery broker on db=0)
-_CHANNELS_REDIS_URL = CELERY_BROKER_URL.rsplit("/", 1)[0] + "/1"
+_CHANNELS_REDIS_URL = _inject_redis_password_if_missing(
+    env("CHANNELS_REDIS_URL", default="redis://localhost:6379/1"),
+    REDIS_PASSWORD,
+)
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",

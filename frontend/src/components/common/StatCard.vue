@@ -4,7 +4,7 @@
     class="block bg-white rounded-lg shadow-sm border border-neutral-30 p-5 hover:shadow-md transition-shadow"
   >
     <div class="flex items-center gap-3">
-      <div class="w-10 h-10 rounded-md bg-primary bg-opacity-10 flex items-center justify-center">
+      <div class="w-10 h-10 rounded-md bg-primary/10 flex items-center justify-center">
         <i :class="['pi', icon, 'text-primary']" />
       </div>
       <div>

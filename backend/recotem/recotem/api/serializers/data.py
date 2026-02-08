@@ -1,5 +1,3 @@
-import json
-
 from rest_framework import exceptions, serializers
 
 from recotem.api.models import ItemMetaData, Project, TrainingData
@@ -35,7 +33,7 @@ class TrainingDataSerializer(serializers.ModelSerializer):
             obj.validate_return_df()
         except exceptions.ValidationError as e:
             obj.delete()
-            raise e
+            raise exceptions.ValidationError({"file": e.detail})
         return obj
 
 
@@ -71,7 +69,7 @@ class ItemMetaDataSerializer(serializers.ModelSerializer):
             df = obj.validate_return_df()
         except exceptions.ValidationError as e:
             obj.delete()
-            raise e
+            raise exceptions.ValidationError({"file": e.detail})
         project: Project = obj.project
         valid_column_names = []
         for c in df.columns:
@@ -82,7 +80,7 @@ class ItemMetaDataSerializer(serializers.ModelSerializer):
                 valid_column_names.append(c)
             except (TypeError, ValueError):
                 continue
-        obj.valid_columns_list_json = json.dumps(valid_column_names)
+        obj.valid_columns_list_json = valid_column_names
         obj.filesize = obj.file.size
         obj.save()
         return obj

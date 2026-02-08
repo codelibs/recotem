@@ -146,7 +146,7 @@ class TestModelConfigurationSerializer:
                 "name": f"config_{name}",
                 "project": p.id,
                 "recommender_class_name": name,
-                "parameters_json": "{}",
+                "parameters_json": {},
             }
             serializer = ModelConfigurationSerializer(
                 data=data, context={"request": request}
@@ -182,7 +182,7 @@ class TestModelConfigurationSerializer:
                 "name": f"config_{name}",
                 "project": p.id,
                 "recommender_class_name": name,
-                "parameters_json": "{}",
+                "parameters_json": {},
             }
             serializer = ModelConfigurationSerializer(
                 data=data, context={"request": request}
@@ -204,13 +204,75 @@ class TestModelConfigurationSerializer:
             "name": "special_chars",
             "project": p.id,
             "recommender_class_name": "Evil$Recommender",
-            "parameters_json": "{}",
+            "parameters_json": {},
         }
         serializer = ModelConfigurationSerializer(
             data=data, context={"request": request}
         )
         assert not serializer.is_valid()
         assert "recommender_class_name" in serializer.errors
+
+    def test_parameters_json_valid(self, user, factory):
+        """Valid JSON object should pass validation."""
+        from recotem.api.serializers import ModelConfigurationSerializer
+
+        p = Project.objects.create(
+            name="JsonValid", user_column="u", item_column="i", owner=user
+        )
+        request = factory.post("/api/v1/model_configuration/")
+        request.user = user
+        data = {
+            "name": "json_test",
+            "project": p.id,
+            "recommender_class_name": "IALSRecommender",
+            "parameters_json": {"alpha": 0.1, "n_components": 64},
+        }
+        serializer = ModelConfigurationSerializer(
+            data=data, context={"request": request}
+        )
+        assert serializer.is_valid(), serializer.errors
+
+    def test_parameters_json_non_dict_rejected(self, user, factory):
+        """Non-dict type (string) should be rejected."""
+        from recotem.api.serializers import ModelConfigurationSerializer
+
+        p = Project.objects.create(
+            name="JsonInvalid", user_column="u", item_column="i", owner=user
+        )
+        request = factory.post("/api/v1/model_configuration/")
+        request.user = user
+        data = {
+            "name": "bad_json",
+            "project": p.id,
+            "recommender_class_name": "IALSRecommender",
+            "parameters_json": "not a dict",
+        }
+        serializer = ModelConfigurationSerializer(
+            data=data, context={"request": request}
+        )
+        assert not serializer.is_valid()
+        assert "parameters_json" in serializer.errors
+
+    def test_parameters_json_array_rejected(self, user, factory):
+        """JSON array (not object) should be rejected."""
+        from recotem.api.serializers import ModelConfigurationSerializer
+
+        p = Project.objects.create(
+            name="JsonArray", user_column="u", item_column="i", owner=user
+        )
+        request = factory.post("/api/v1/model_configuration/")
+        request.user = user
+        data = {
+            "name": "array_json",
+            "project": p.id,
+            "recommender_class_name": "IALSRecommender",
+            "parameters_json": [1, 2, 3],
+        }
+        serializer = ModelConfigurationSerializer(
+            data=data, context={"request": request}
+        )
+        assert not serializer.is_valid()
+        assert "parameters_json" in serializer.errors
 
 
 @pytest.mark.django_db
@@ -313,6 +375,122 @@ class TestParameterTuningJobSerializer:
         )
         assert not serializer.is_valid()
         assert "data" in serializer.errors
+
+    def test_tried_algorithms_json_valid(self, user, factory):
+        """Valid JSON array of strings should pass validation."""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        from recotem.api.models import TrainingData
+        from recotem.api.serializers.tuning_job import ParameterTuningJobSerializer
+
+        p = Project.objects.create(
+            name="AlgoJson", user_column="u", item_column="i", owner=user
+        )
+        td = TrainingData.objects.create(
+            project=p,
+            file=SimpleUploadedFile("data.csv", b"u,i\n1,2\n", content_type="text/csv"),
+        )
+        sc = SplitConfig.objects.create(name="s", created_by=user)
+        ec = EvaluationConfig.objects.create(name="e", created_by=user)
+
+        request = factory.post("/api/v1/parameter_tuning_job/")
+        request.user = user
+        data = {
+            "data": td.id,
+            "split": sc.id,
+            "evaluation": ec.id,
+            "n_trials": 2,
+            "tried_algorithms_json": ["IALSRecommender", "TopPopRecommender"],
+        }
+        serializer = ParameterTuningJobSerializer(
+            data=data, context={"request": request}
+        )
+        assert serializer.is_valid(), serializer.errors
+
+    def test_tried_algorithms_json_invalid_json(self, user, factory):
+        """Invalid JSON should be rejected."""
+        from recotem.api.serializers.tuning_job import ParameterTuningJobSerializer
+
+        request = factory.post("/api/v1/parameter_tuning_job/")
+        request.user = user
+        data = {
+            "data": 1,
+            "split": 1,
+            "evaluation": 1,
+            "tried_algorithms_json": "not valid json",
+        }
+        serializer = ParameterTuningJobSerializer(
+            data=data, context={"request": request}
+        )
+        assert not serializer.is_valid()
+        assert "tried_algorithms_json" in serializer.errors
+
+    def test_tried_algorithms_json_not_array(self, user, factory):
+        """JSON that is not an array of strings should be rejected."""
+        from recotem.api.serializers.tuning_job import ParameterTuningJobSerializer
+
+        request = factory.post("/api/v1/parameter_tuning_job/")
+        request.user = user
+        data = {
+            "data": 1,
+            "split": 1,
+            "evaluation": 1,
+            "tried_algorithms_json": {"key": "value"},
+        }
+        serializer = ParameterTuningJobSerializer(
+            data=data, context={"request": request}
+        )
+        assert not serializer.is_valid()
+        assert "tried_algorithms_json" in serializer.errors
+
+    def test_tried_algorithms_json_array_of_non_strings(self, user, factory):
+        """JSON array containing non-strings should be rejected."""
+        from recotem.api.serializers.tuning_job import ParameterTuningJobSerializer
+
+        request = factory.post("/api/v1/parameter_tuning_job/")
+        request.user = user
+        data = {
+            "data": 1,
+            "split": 1,
+            "evaluation": 1,
+            "tried_algorithms_json": [1, 2, 3],
+        }
+        serializer = ParameterTuningJobSerializer(
+            data=data, context={"request": request}
+        )
+        assert not serializer.is_valid()
+        assert "tried_algorithms_json" in serializer.errors
+
+    def test_tried_algorithms_json_null_accepted(self, user, factory):
+        """Null tried_algorithms_json should be accepted."""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        from recotem.api.models import TrainingData
+        from recotem.api.serializers.tuning_job import ParameterTuningJobSerializer
+
+        p = Project.objects.create(
+            name="NullAlgo", user_column="u", item_column="i", owner=user
+        )
+        td = TrainingData.objects.create(
+            project=p,
+            file=SimpleUploadedFile("data.csv", b"u,i\n1,2\n", content_type="text/csv"),
+        )
+        sc = SplitConfig.objects.create(name="s", created_by=user)
+        ec = EvaluationConfig.objects.create(name="e", created_by=user)
+
+        request = factory.post("/api/v1/parameter_tuning_job/")
+        request.user = user
+        data = {
+            "data": td.id,
+            "split": sc.id,
+            "evaluation": ec.id,
+            "n_trials": 2,
+            "tried_algorithms_json": None,
+        }
+        serializer = ParameterTuningJobSerializer(
+            data=data, context={"request": request}
+        )
+        assert serializer.is_valid(), serializer.errors
 
 
 @pytest.mark.django_db

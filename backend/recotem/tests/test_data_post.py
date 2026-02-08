@@ -12,8 +12,8 @@ from pandas import testing as pd_testing
 
 from recotem.api.models import TrainingData
 
-I_O_functions: typing.List[
-    typing.Tuple[
+I_O_functions: list[
+    tuple[
         str,
         typing.Callable[[pd.DataFrame, typing.IO], None],
         typing.Callable[[typing.IO], pd.DataFrame],
@@ -287,7 +287,7 @@ def test_datetime(
     project_resp = client.post(
         project_url,
         dict(
-            name=f"ml_project_wrong_timecolumn",
+            name="ml_project_wrong_timecolumn",
             user_column="userId",
             item_column="movieId",
             time_column="timestamp",
@@ -295,7 +295,7 @@ def test_datetime(
     )
 
     project_id = project_resp.json()["id"]
-    pkl_file = NamedTemporaryFile(suffix=f".json.gz")
+    pkl_file = NamedTemporaryFile(suffix=".json.gz")
     pkl_gzip_file = gzip.open(pkl_file, mode="wb")
     ml100k_dummy_ts = ml100k.copy()
     ml100k_dummy_ts["timestamp"] = "This is not a time!"
@@ -305,7 +305,7 @@ def test_datetime(
 
     response = client.post(data_url, dict(project=project_id, file=pkl_file))
     assert response.status_code == 400
-    assert 'Could not interpret "timestamp" as datetime.' == response.json()["error"]["detail"][0]
+    assert response.json()["error"]["detail"][0] == 'Could not interpret "timestamp" as datetime.'
 
 
 @pytest.mark.django_db
@@ -320,14 +320,14 @@ def test_metadata_post(
     project_resp = client.post(
         project_url,
         dict(
-            name=f"ml_project_metadata_upload",
+            name="ml_project_metadata_upload",
             user_column="userId",
             item_column="movieId",
         ),
     )
 
     project_id = project_resp.json()["id"]
-    json_file = NamedTemporaryFile(suffix=f".json.gz")
+    json_file = NamedTemporaryFile(suffix=".json.gz")
     json_gzip_file = gzip.open(json_file, mode="wb")
     ml100k_dummy_ts = ml100k_item.copy()
     ml100k_dummy_ts.to_json(json_gzip_file)
@@ -338,7 +338,7 @@ def test_metadata_post(
     assert response.status_code == 201
     j = response.json()
     assert j["filesize"] is not None
-    columns = json.loads(j["valid_columns_list_json"])
+    columns = j["valid_columns_list_json"]
     assert "title" in columns
     assert "release_date" in columns
     assert "video_release_date" in columns

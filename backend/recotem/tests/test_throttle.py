@@ -86,3 +86,36 @@ def test_throttle_returns_retry_after_header(client: Client):
     res = client.get(reverse("project-list"))
     assert res.status_code == 429
     assert "Retry-After" in res
+
+
+@pytest.mark.django_db
+@override_settings(
+    REST_FRAMEWORK={
+        "DEFAULT_AUTHENTICATION_CLASSES": [
+            "rest_framework.authentication.SessionAuthentication",
+        ],
+        "DEFAULT_PERMISSION_CLASSES": [
+            "rest_framework.permissions.IsAuthenticated",
+        ],
+        "DEFAULT_THROTTLE_CLASSES": [],
+        "DEFAULT_THROTTLE_RATES": {
+            "recommendation": "2/min",
+        },
+    }
+)
+def test_recommendation_scoped_rate_limit(client: Client):
+    """Recommendation endpoints should use the 'recommendation' scoped throttle."""
+    user = User.objects.create_user(username="rec_throttle_user", password="pass")
+    client.force_login(user)
+
+    # The recommendation endpoint requires a valid trained model.
+    # Since we don't have one, we expect 404, but NOT 429 until after limit.
+    url = "/api/v1/trained_model/99999/recommendation/"
+    for _ in range(2):
+        res = client.get(url)
+        # 404 (model not found) is the expected response
+        assert res.status_code in (404, 400, 500)
+
+    # After exceeding the limit, should get 429
+    res = client.get(url)
+    assert res.status_code == 429

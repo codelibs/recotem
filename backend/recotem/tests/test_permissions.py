@@ -1,12 +1,12 @@
 """Tests for permission-based access control across resources."""
+from tempfile import NamedTemporaryFile
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 from django.urls import reverse
-from tempfile import NamedTemporaryFile
 
-from recotem.api.models import Project, TrainingData
-
+from recotem.api.models import Project
 
 User = get_user_model()
 

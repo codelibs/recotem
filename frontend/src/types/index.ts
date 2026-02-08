@@ -91,6 +91,13 @@ export interface TaskLink {
   task: TaskResult;
 }
 
+export const JOB_STATUS = {
+  PENDING: "PENDING",
+  RUNNING: "RUNNING",
+  COMPLETED: "COMPLETED",
+  FAILED: "FAILED",
+} as const;
+
 export type TuningJobStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
 
 export interface ParameterTuningJob {
@@ -156,6 +163,26 @@ export interface User {
 export interface ApiErrorResponse {
   detail?: string;
   [field: string]: string | string[] | undefined;
+}
+
+/** Classified API error types for granular error handling. */
+export type ApiErrorKind =
+  | "validation"      // 400 — field-level validation errors
+  | "unauthorized"    // 401 — auth failure
+  | "forbidden"       // 403 — permission denied
+  | "not_found"       // 404 — resource not found
+  | "rate_limited"    // 429 — throttled
+  | "server_error"    // 5xx — backend failure
+  | "network_error"   // no response — connectivity issue
+  | "timeout"         // request timed out
+  | "unknown";        // anything else
+
+export interface ClassifiedApiError {
+  kind: ApiErrorKind;
+  status: number | null;
+  message: string;
+  fieldErrors?: Record<string, string[]>;
+  raw?: unknown;
 }
 
 // Re-export WebSocket types for convenience

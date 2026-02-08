@@ -1,10 +1,8 @@
 import re
 from pathlib import PurePath
-from typing import Optional
 
 from django.db import models
 from django.utils.crypto import get_random_string
-from rest_framework.exceptions import ValidationError
 
 remove_rand = re.compile("_.{7}$")
 
@@ -34,7 +32,7 @@ class BaseFileModel(models.Model):
         self.filesize = None
         self.save()
 
-    def basename(self) -> Optional[str]:
+    def basename(self) -> str | None:
         if self.file is None or self.file.name is None:
             return None
         path = PurePath(self.file.name)

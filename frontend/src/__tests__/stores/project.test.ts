@@ -1,11 +1,18 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setActivePinia, createPinia } from "pinia";
 import { useProjectStore } from "@/stores/project";
-import type { Project } from "@/types";
+import type { ClassifiedApiError, Project } from "@/types";
 
 // Mock the api client
 vi.mock("@/api/client", () => ({
   api: vi.fn(),
+  unwrapResults: (res: any) => Array.isArray(res) ? res : res.results,
+  classifyApiError: (err: unknown) => ({
+    kind: "unknown",
+    status: null,
+    message: err instanceof Error ? err.message : "Unknown error",
+    raw: err,
+  }),
 }));
 
 describe("useProjectStore", () => {
@@ -58,7 +65,7 @@ describe("useProjectStore", () => {
       expect(mockApi).toHaveBeenCalledWith("/project/");
       expect(store.projects).toEqual([mockProject, mockProject2]);
       expect(store.loading).toBe(false);
-      expect(store.error).toBe(false);
+      expect(store.error).toBeNull();
     });
 
     it("should_handle_non_paginated_response", async () => {
@@ -72,7 +79,7 @@ describe("useProjectStore", () => {
       // Assert
       expect(store.projects).toEqual([mockProject]);
       expect(store.loading).toBe(false);
-      expect(store.error).toBe(false);
+      expect(store.error).toBeNull();
     });
 
     it("should_set_loading_true_during_fetch", async () => {
@@ -99,21 +106,23 @@ describe("useProjectStore", () => {
       await store.fetchProjects();
 
       // Assert
-      expect(store.error).toBe(true);
+      expect(store.error).not.toBeNull();
+      expect(store.error!.kind).toBe("unknown");
+      expect(store.error!.message).toBe("Network error");
       expect(store.loading).toBe(false);
       expect(store.projects).toEqual([]);
     });
 
     it("should_reset_error_state_before_new_fetch", async () => {
       // Arrange - set error state
-      store.error = true;
+      store.error = { kind: "unknown", status: null, message: "Previous error" } as ClassifiedApiError;
       mockApi.mockResolvedValueOnce({ results: [mockProject] });
 
       // Act
       await store.fetchProjects();
 
       // Assert
-      expect(store.error).toBe(false);
+      expect(store.error).toBeNull();
       expect(store.projects).toEqual([mockProject]);
     });
   });
@@ -130,7 +139,7 @@ describe("useProjectStore", () => {
       expect(mockApi).toHaveBeenCalledWith("/project/1/");
       expect(store.currentProject).toEqual(mockProject);
       expect(store.loading).toBe(false);
-      expect(store.error).toBe(false);
+      expect(store.error).toBeNull();
     });
 
     it("should_set_error_when_fetch_single_project_fails", async () => {
@@ -141,7 +150,9 @@ describe("useProjectStore", () => {
       await store.fetchProject(999);
 
       // Assert
-      expect(store.error).toBe(true);
+      expect(store.error).not.toBeNull();
+      expect(store.error!.kind).toBe("unknown");
+      expect(store.error!.message).toBe("Project not found");
       expect(store.loading).toBe(false);
       expect(store.currentProject).toBeNull();
     });
@@ -313,7 +324,7 @@ describe("useProjectStore", () => {
       expect(freshStore.projects).toEqual([]);
       expect(freshStore.currentProject).toBeNull();
       expect(freshStore.loading).toBe(false);
-      expect(freshStore.error).toBe(false);
+      expect(freshStore.error).toBeNull();
     });
   });
 });

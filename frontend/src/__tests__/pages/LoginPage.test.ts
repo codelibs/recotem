@@ -3,6 +3,7 @@ import { mount } from "@vue/test-utils";
 import { createPinia } from "pinia";
 import LoginPage from "@/pages/LoginPage.vue";
 import PrimeVue from "primevue/config";
+import i18n from "@/i18n";
 
 // Mock vue-router
 const mockPush = vi.fn();
@@ -17,6 +18,7 @@ function mountLoginPage() {
       plugins: [
         PrimeVue,
         createPinia(),
+        i18n,
       ],
       stubs: {
         FormField: {

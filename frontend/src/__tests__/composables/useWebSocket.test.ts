@@ -513,6 +513,83 @@ describe("useWebSocket", () => {
     });
   });
 
+  describe("sequence tracking", () => {
+    it("should_accept_messages_with_incrementing_seq", () => {
+      const { connect, messages } = useWebSocket("/ws/test/");
+      connect();
+      mockWebSocketInstance.onopen();
+
+      mockWebSocketInstance.onmessage({ data: JSON.stringify({ type: "log", seq: 0 }) });
+      mockWebSocketInstance.onmessage({ data: JSON.stringify({ type: "log", seq: 1 }) });
+      mockWebSocketInstance.onmessage({ data: JSON.stringify({ type: "log", seq: 2 }) });
+
+      expect(messages.value).toHaveLength(3);
+    });
+
+    it("should_discard_duplicate_messages", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const { connect, messages } = useWebSocket("/ws/test/");
+      connect();
+      mockWebSocketInstance.onopen();
+
+      mockWebSocketInstance.onmessage({ data: JSON.stringify({ type: "log", seq: 0 }) });
+      mockWebSocketInstance.onmessage({ data: JSON.stringify({ type: "log", seq: 0 }) });
+
+      expect(messages.value).toHaveLength(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Duplicate message")
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("should_warn_on_sequence_gap_but_still_process", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const { connect, messages } = useWebSocket("/ws/test/");
+      connect();
+      mockWebSocketInstance.onopen();
+
+      mockWebSocketInstance.onmessage({ data: JSON.stringify({ type: "log", seq: 0 }) });
+      mockWebSocketInstance.onmessage({ data: JSON.stringify({ type: "log", seq: 5 }) });
+
+      expect(messages.value).toHaveLength(2);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Sequence gap")
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("should_reset_lastSeq_on_reconnect", () => {
+      const { connect, messages } = useWebSocket("/ws/test/");
+      connect();
+      mockWebSocketInstance.onopen();
+
+      mockWebSocketInstance.onmessage({ data: JSON.stringify({ type: "log", seq: 0 }) });
+      mockWebSocketInstance.onmessage({ data: JSON.stringify({ type: "log", seq: 1 }) });
+
+      expect(messages.value).toHaveLength(2);
+
+      // Reconnect — seq should reset
+      connect();
+      mockWebSocketInstance.onopen();
+
+      // seq=0 should be accepted again after reconnect
+      mockWebSocketInstance.onmessage({ data: JSON.stringify({ type: "log", seq: 0 }) });
+
+      expect(messages.value).toHaveLength(3);
+    });
+
+    it("should_process_messages_without_seq_field_normally", () => {
+      const { connect, messages } = useWebSocket("/ws/test/");
+      connect();
+      mockWebSocketInstance.onopen();
+
+      mockWebSocketInstance.onmessage({ data: JSON.stringify({ type: "update" }) });
+      mockWebSocketInstance.onmessage({ data: JSON.stringify({ type: "update" }) });
+
+      expect(messages.value).toHaveLength(2);
+    });
+  });
+
   describe("message buffer limit", () => {
     it("should_cap_messages_at_max_limit", () => {
       const { connect, messages } = useWebSocket("/ws/test/");

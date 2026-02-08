@@ -1,7 +1,7 @@
 <template>
   <div class="bg-white rounded-lg shadow-md p-8">
     <h2 class="text-xl font-semibold text-neutral-800 mb-6">
-      Sign in
+      {{ t('auth.signIn') }}
     </h2>
     <form
       class="space-y-4"
@@ -9,7 +9,7 @@
       @submit.prevent="handleLogin"
     >
       <FormField
-        label="Username"
+        :label="t('auth.username')"
         name="username"
         :error="usernameError"
         required
@@ -19,7 +19,7 @@
             :id="id"
             v-model="username"
             class="w-full"
-            placeholder="Enter username"
+            :placeholder="t('auth.enterUsername')"
             :invalid="hasError || !!errorMsg"
             autocomplete="username"
             aria-required="true"
@@ -29,7 +29,7 @@
         </template>
       </FormField>
       <FormField
-        label="Password"
+        :label="t('auth.password')"
         name="password"
         :error="passwordError"
         required
@@ -41,7 +41,7 @@
             class="w-full"
             :feedback="false"
             toggle-mask
-            placeholder="Enter password"
+            :placeholder="t('auth.enterPassword')"
             :invalid="hasError || !!errorMsg"
             autocomplete="current-password"
             aria-required="true"
@@ -60,7 +60,7 @@
       </Message>
       <Button
         type="submit"
-        label="Sign in"
+        :label="t('auth.signIn')"
         :loading="loading"
         class="w-full"
       />
@@ -71,6 +71,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { useRouter, useRoute } from "vue-router";
+import { useI18n } from "vue-i18n";
 import InputText from "primevue/inputtext";
 import Password from "primevue/password";
 import Button from "primevue/button";
@@ -78,6 +79,7 @@ import Message from "primevue/message";
 import { useAuthStore } from "@/stores/auth";
 import FormField from "@/components/common/FormField.vue";
 
+const { t } = useI18n();
 const authStore = useAuthStore();
 const router = useRouter();
 const route = useRoute();
@@ -89,11 +91,11 @@ const usernameError = ref("");
 const passwordError = ref("");
 
 function validateUsername() {
-  usernameError.value = username.value.trim() ? "" : "Username is required";
+  usernameError.value = username.value.trim() ? "" : t('auth.usernameRequired');
 }
 
 function validatePassword() {
-  passwordError.value = password.value ? "" : "Password is required";
+  passwordError.value = password.value ? "" : t('auth.passwordRequired');
 }
 
 async function handleLogin() {
@@ -107,7 +109,7 @@ async function handleLogin() {
     await authStore.login(username.value, password.value);
     router.push((route.query.redirect as string) || "/projects");
   } catch {
-    errorMsg.value = "Invalid username or password";
+    errorMsg.value = t('auth.invalidCredentials');
   } finally {
     loading.value = false;
   }

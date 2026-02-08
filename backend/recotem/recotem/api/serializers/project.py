@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from recotem.api.models import Project, TrainingData
+from recotem.api.models import Project
 
 
 class ProjectSerializer(serializers.ModelSerializer):
@@ -34,17 +34,6 @@ class ProjectSerializer(serializers.ModelSerializer):
                     "A project with this name already exists."
                 )
         return value
-
-
-class TrainingDataForSummarySerializer(serializers.ModelSerializer):
-    n_parameter_tuning_jobs = serializers.IntegerField(
-        source="parametertuningjob_set.count"
-    )
-    n_trained_models = serializers.IntegerField(source="trainedmodel_set.count")
-
-    class Meta:
-        model = TrainingData
-        fields = ["id", "n_parameter_tuning_jobs", "n_trained_models"]
 
 
 class ProjectSummarySerializer(serializers.Serializer):

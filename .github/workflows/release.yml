@@ -92,8 +92,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+      - name: Run Trivy vulnerability scanner (blocking)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: "ghcr.io/codelibs/${{ matrix.image }}:${{ github.ref_name }}"
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+      - name: Run Trivy vulnerability scanner (SARIF report)
+        uses: aquasecurity/trivy-action@0.28.0
+        if: always()
         with:
           image-ref: "ghcr.io/codelibs/${{ matrix.image }}:${{ github.ref_name }}"
           format: 'sarif'
@@ -104,6 +112,61 @@ jobs:
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
+
+  sign-images:
+    needs: [build-backend-worker, build-proxy]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        image: [recotem-backend, recotem-worker, recotem-proxy]
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sign container image
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          IMAGE_REF: ghcr.io/codelibs/${{ matrix.image }}:${{ github.ref_name }}
+        run: cosign sign --yes "${IMAGE_REF}"
+
+  generate-sbom:
+    needs: [build-backend-worker, build-proxy]
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        image: [recotem-backend, recotem-worker, recotem-proxy]
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/codelibs/${{ matrix.image }}:${{ github.ref_name }}
+          format: spdx-json
+          output-file: ${{ matrix.image }}-sbom.spdx.json
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.image }}
+          path: ${{ matrix.image }}-sbom.spdx.json
 
   helm-package:
     runs-on: ubuntu-latest
@@ -132,7 +195,7 @@ jobs:
   upload-release-artifact:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [build-backend-worker, build-proxy, helm-package]
+    needs: [build-backend-worker, build-proxy, helm-package, generate-sbom, scan-images]
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -148,9 +211,17 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: helm-chart
+      - name: Download SBOMs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sbom-*
+          merge-multiple: true
       - name: Release
         env:
           TAG_REF: ${{ github.ref_name }}
         run: |
           gh release upload "${TAG_REF}" "recotem-compose-${TAG_REF}.zip#Docker resources to try out" --clobber
           gh release upload "${TAG_REF}" recotem-*.tgz#"Helm chart" --clobber
+          for sbom in *-sbom.spdx.json; do
+            gh release upload "${TAG_REF}" "${sbom}#SBOM (${sbom%-sbom.spdx.json})" --clobber
+          done

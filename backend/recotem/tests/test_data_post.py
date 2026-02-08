@@ -1,5 +1,4 @@
 import gzip
-import json
 import typing
 from tempfile import NamedTemporaryFile
 
@@ -85,7 +84,10 @@ def test_invalid_compression(client: Client, ml100k: pd.DataFrame):
         dict(project=failing_project_id_item, file=unk_compression_file),
     )
     assert resp.status_code == 400
-    assert resp.json()["error"]["detail"][0] == "Only .gzip or .gz compression are supported."
+    assert (
+        resp.json()["error"]["detail"][0]
+        == "Only .gzip or .gz compression are supported."
+    )
 
     resp = client.post(
         data_url,
@@ -116,7 +118,10 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
         data_url, dict(project=failing_project_id_item, file=no_ext_file)
     )
     assert resp.status_code == 400
-    assert resp.json()["error"]["detail"][0] == "Suffix like .csv or .json.gzip or pickle.gz required."
+    assert (
+        resp.json()["error"]["detail"][0]
+        == "Suffix like .csv or .json.gzip or pickle.gz required."
+    )
 
     unknown_ext_file = NamedTemporaryFile(suffix=".unknown")
     ml100k.to_csv(unknown_ext_file, index=False)
@@ -305,7 +310,10 @@ def test_datetime(
 
     response = client.post(data_url, dict(project=project_id, file=pkl_file))
     assert response.status_code == 400
-    assert response.json()["error"]["detail"][0] == 'Could not interpret "timestamp" as datetime.'
+    assert (
+        response.json()["error"]["detail"][0]
+        == 'Could not interpret "timestamp" as datetime.'
+    )
 
 
 @pytest.mark.django_db

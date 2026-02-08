@@ -33,7 +33,7 @@ class TrainingDataSerializer(serializers.ModelSerializer):
             obj.validate_return_df()
         except exceptions.ValidationError as e:
             obj.delete()
-            raise exceptions.ValidationError({"file": e.detail})
+            raise exceptions.ValidationError({"file": e.detail}) from e
         return obj
 
 
@@ -69,7 +69,7 @@ class ItemMetaDataSerializer(serializers.ModelSerializer):
             df = obj.validate_return_df()
         except exceptions.ValidationError as e:
             obj.delete()
-            raise exceptions.ValidationError({"file": e.detail})
+            raise exceptions.ValidationError({"file": e.detail}) from e
         project: Project = obj.project
         valid_column_names = []
         for c in df.columns:

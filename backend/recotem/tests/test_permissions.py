@@ -1,4 +1,5 @@
 """Tests for permission-based access control across resources."""
+
 from tempfile import NamedTemporaryFile
 
 import pytest
@@ -35,7 +36,9 @@ def test_user_cannot_access_other_users_project(client: Client):
     assert resp.status_code == 404
 
     # User B cannot update User A's project
-    resp = client.patch(detail_url, dict(name="hacked_name"), content_type="application/json")
+    resp = client.patch(
+        detail_url, dict(name="hacked_name"), content_type="application/json"
+    )
     assert resp.status_code == 404
 
     # User B cannot delete User A's project
@@ -124,7 +127,9 @@ def test_user_can_access_own_project(client: Client):
     assert resp.json()["id"] == project_id
 
     # User can update their own project
-    resp = client.patch(detail_url, dict(name="updated_project"), content_type="application/json")
+    resp = client.patch(
+        detail_url, dict(name="updated_project"), content_type="application/json"
+    )
     assert resp.status_code == 200
     assert resp.json()["name"] == "updated_project"
 

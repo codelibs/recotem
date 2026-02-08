@@ -35,7 +35,7 @@ class Command(BaseCommand):
         try:
             user = User.objects.get(username=username)
         except User.DoesNotExist:
-            raise CommandError(f"User '{username}' does not exist.")
+            raise CommandError(f"User '{username}' does not exist.") from None
 
         models_and_fields = [
             (Project, "owner"),
@@ -55,7 +55,8 @@ class Command(BaseCommand):
             if dry_run:
                 self.stdout.write(
                     self.style.WARNING(
-                        f"  {label}: {count} record(s) would be assigned to '{username}'."
+                        f"  {label}: {count} record(s) "
+                        f"would be assigned to '{username}'."
                     )
                 )
             else:

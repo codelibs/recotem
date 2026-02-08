@@ -6,6 +6,8 @@ repos:
     hooks:
       - id: check-merge-conflict
       - id: check-yaml
+        args: [--allow-multiple-documents]
+        exclude: ^helm/
       - id: end-of-file-fixer
       - id: no-commit-to-branch
         args: [--branch, main]

@@ -41,14 +41,16 @@ from recotem.api.utils import PREVIEW_ROW_LIMIT, read_dataframe
 
 from .filemixin import FileDownloadRemoveMixin
 from .mixins import CreatedByResourceMixin, OwnedResourceMixin
-from .model import TrainedModelViewset
+from .model import TrainedModelViewset  # noqa: F401
 from .pagination import StandardPagination
-from .project import ProjectViewSet
+from .project import ProjectViewSet  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 
-class TrainingDataViewset(OwnedResourceMixin, viewsets.ModelViewSet, FileDownloadRemoveMixin):
+class TrainingDataViewset(
+    OwnedResourceMixin, viewsets.ModelViewSet, FileDownloadRemoveMixin
+):
     permission_classes = [IsAuthenticated]
     serializer_class = TrainingDataSerializer
     filterset_fields = ["id", "project"]
@@ -81,9 +83,7 @@ class TrainingDataViewset(OwnedResourceMixin, viewsets.ModelViewSet, FileDownloa
         obj = self.get_object()
         n_rows = min(int(request.query_params.get("n_rows", 50)), PREVIEW_ROW_LIMIT)
         try:
-            preview_df = read_dataframe(
-                Path(obj.file.name), obj.file, nrows=n_rows
-            )
+            preview_df = read_dataframe(Path(obj.file.name), obj.file, nrows=n_rows)
             return Response(
                 {
                     "columns": list(preview_df.columns),
@@ -94,12 +94,19 @@ class TrainingDataViewset(OwnedResourceMixin, viewsets.ModelViewSet, FileDownloa
         except (pd.errors.ParserError, ValueError, OSError) as exc:
             logger.debug("Failed to read training data file %s: %s", pk, exc)
             return Response(
-                {"columns": [], "rows": [], "total_rows": 0, "error": "Unable to read file"},
+                {
+                    "columns": [],
+                    "rows": [],
+                    "total_rows": 0,
+                    "error": "Unable to read file",
+                },
                 status=400,
             )
 
 
-class ItemMetaDataViewset(OwnedResourceMixin, viewsets.ModelViewSet, FileDownloadRemoveMixin):
+class ItemMetaDataViewset(
+    OwnedResourceMixin, viewsets.ModelViewSet, FileDownloadRemoveMixin
+):
     permission_classes = [IsAuthenticated]
     serializer_class = ItemMetaDataSerializer
     filterset_fields = ["id", "project"]
@@ -193,7 +200,12 @@ class ParameterTuningJobViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         return (
             ParameterTuningJob.objects.select_related(
-                "data", "data__project", "split", "evaluation", "best_config", "tuned_model"
+                "data",
+                "data__project",
+                "split",
+                "evaluation",
+                "best_config",
+                "tuned_model",
             )
             .prefetch_related("task_links")
             .filter(self.get_owner_filter())
@@ -234,7 +246,9 @@ class TaskLogViewSet(OwnedResourceMixin, viewsets.ReadOnlyModelViewSet):
             db_models.Q(task__tuning_job_link__job__data__project__owner=user)
             | db_models.Q(task__tuning_job_link__job__data__project__owner__isnull=True)
             | db_models.Q(task__model_link__model__data_loc__project__owner=user)
-            | db_models.Q(task__model_link__model__data_loc__project__owner__isnull=True)
+            | db_models.Q(
+                task__model_link__model__data_loc__project__owner__isnull=True
+            )
         )
 
     def get_queryset(self):
@@ -258,7 +272,7 @@ class PingView(APIView):
             _ = connections["default"]
             return Response(dict(success=True))
         except ConnectionDoesNotExist:
-            raise APIException(detail=dict(success=False), code=400)
+            raise APIException(detail=dict(success=False), code=400) from None
 
 
 class ProjectSummaryView(APIView):

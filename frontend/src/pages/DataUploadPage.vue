@@ -163,3 +163,9 @@ function onError() {
   notify.error(t("data.uploadFailed"));
 }
 </script>
+
+<style scoped>
+:deep(.p-fileupload-file-thumbnail) {
+  display: none;
+}
+</style>

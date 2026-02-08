@@ -242,11 +242,6 @@ const breadcrumbItems = computed(() => {
   return items;
 });
 
-// Fetch current project when route changes
-watch(() => route.params.projectId, async (id) => {
-  if (id) await projectStore.fetchProject(Number(id));
-}, { immediate: true });
-
 async function handleLogout() {
   await authStore.logout();
   router.push("/login");

@@ -370,9 +370,7 @@ class TestParameterTuningJobSerializer:
 
         request = factory.post("/api/v1/parameter_tuning_job/")
         request.user = user
-        serializer = ParameterTuningJobSerializer(
-            data={}, context={"request": request}
-        )
+        serializer = ParameterTuningJobSerializer(data={}, context={"request": request})
         assert not serializer.is_valid()
         assert "data" in serializer.errors
 

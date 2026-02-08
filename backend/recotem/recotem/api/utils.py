@@ -1,12 +1,12 @@
 import gzip
 from collections.abc import Callable
 from pathlib import Path
-from typing import IO, Union
+from typing import IO
 
 import pandas as pd
 from rest_framework.exceptions import ValidationError
 
-INPUT_STREAM_TYPE = Union[IO, gzip.GzipFile]
+INPUT_STREAM_TYPE = IO | gzip.GzipFile
 
 PREVIEW_ROW_LIMIT = 200
 
@@ -43,7 +43,7 @@ def read_dataframe(
         if compression not in (".gz", ".gzip"):
             raise ValidationError("Only .gzip or .gz compression are supported.")
         else:
-            input_stream = gzip.open(file, mode="rb")
+            input_stream = gzip.open(file, mode="rb")  # noqa: SIM115
     elif len(suffixes) == 1:
         suffix = suffixes[0]
     else:
@@ -57,16 +57,18 @@ def read_dataframe(
         except (TypeError, ValueError, pd.errors.ParserError) as e:
             raise ValidationError(
                 f"Failed to parse {filepath.name} as {suffix} file: {e}"
-            )
+            ) from e
     elif suffix in READ_RULES:
         try:
             df = READ_RULES[suffix](input_stream)
         except (TypeError, ValueError, pd.errors.ParserError) as e:
             raise ValidationError(
                 f"Failed to parse {filepath.name} as {suffix} file: {e}"
-            )
+            ) from e
     else:
         raise ValidationError(
-            f"{suffix} file not supported. Supported file formats are {'/'.join(list(READ_RULES.keys()))} with gzip compression (.gz/.gzip)."
+            f"{suffix} file not supported. Supported file formats are"
+            f" {'/'.join(list(READ_RULES.keys()))}"
+            " with gzip compression (.gz/.gzip)."
         )
     return df

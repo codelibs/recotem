@@ -13,7 +13,6 @@ class TaskAndTrainedModelLinkSerializer(serializers.ModelSerializer):
 
 
 class TrainedModelSerializer(serializers.ModelSerializer):
-
     task_links = TaskAndTrainedModelLinkSerializer(many=True, read_only=True)
 
     class Meta:
@@ -40,9 +39,9 @@ class TrainedModelSerializer(serializers.ModelSerializer):
             return attrs
         if data_loc is not None and data_loc.project.owner_id not in (None, user.id):
             raise serializers.ValidationError({"data_loc": ["Data not found."]})
-        if (
-            configuration is not None
-            and configuration.project.owner_id not in (None, user.id)
+        if configuration is not None and configuration.project.owner_id not in (
+            None,
+            user.id,
         ):
             raise serializers.ValidationError(
                 {"configuration": ["Model configuration not found."]}
@@ -53,7 +52,12 @@ class TrainedModelSerializer(serializers.ModelSerializer):
             and data_loc.project_id != configuration.project_id
         ):
             raise serializers.ValidationError(
-                {"configuration": ["Model configuration must belong to the same project as the training data."]}
+                {
+                    "configuration": [
+                        "Model configuration must belong to the same"
+                        " project as the training data."
+                    ]
+                }
             )
         return attrs
 

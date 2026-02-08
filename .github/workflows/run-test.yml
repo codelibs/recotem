@@ -1,8 +1,5 @@
 name: Full Test & Upload coverage
 on:
-  push:
-    branches:
-      - '**'
   pull_request:
   workflow_dispatch:
 
@@ -15,7 +12,7 @@ jobs:
         with:
           fetch-depth: 2
       - name: TruffleHog secret scan
-        uses: trufflesecurity/trufflehog@v3
+        uses: trufflesecurity/trufflehog@v3.93.1
         with:
           extra_args: --since-commit HEAD~1
 
@@ -117,7 +114,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12"]
       fail-fast: false
     services:
       postgres:

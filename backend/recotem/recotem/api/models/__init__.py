@@ -74,7 +74,7 @@ class TrainingData(ModelWithInsDatetime, BaseFileModel):
             except ValueError:
                 raise ValidationError(
                     f'Could not interpret "{time_column}" as datetime.'
-                )
+                ) from None
 
         if user_column not in df:
             raise ValidationError(
@@ -188,7 +188,9 @@ class ModelConfiguration(ModelWithInsDatetime):
 
 
 class TrainedModel(ModelWithInsDatetime, BaseFileModel):
-    configuration = models.ForeignKey(ModelConfiguration, on_delete=models.CASCADE, db_index=True)
+    configuration = models.ForeignKey(
+        ModelConfiguration, on_delete=models.CASCADE, db_index=True
+    )
     data_loc = models.ForeignKey(TrainingData, on_delete=models.CASCADE, db_index=True)
     irspack_version = models.CharField(max_length=16, null=True)
 

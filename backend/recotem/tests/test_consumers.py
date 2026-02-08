@@ -1,12 +1,14 @@
-
 import pytest
 from channels.db import database_sync_to_async
 from channels.testing import WebsocketCommunicator
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django_celery_results.models import TaskResult
+from rest_framework_simplejwt.tokens import AccessToken
 
 from recotem.api.consumers import JobStatusConsumer, TaskLogConsumer
+from recotem.api.middleware import JwtAuthMiddleware
 from recotem.api.models import (
     EvaluationConfig,
     ParameterTuningJob,
@@ -36,8 +38,8 @@ def _create_job(owner):
     )
     split = SplitConfig.objects.create(name="test_split")
     evaluation = EvaluationConfig.objects.create(name="test_eval")
-    # Create a minimal TrainingData (no actual file needed for consumer tests)
-    data = TrainingData.objects.create(project=project, file="dummy.csv")
+    dummy_file = SimpleUploadedFile("dummy.csv", b"user_id,item_id\n1,2\n")
+    data = TrainingData.objects.create(project=project, file=dummy_file)
     job = ParameterTuningJob.objects.create(
         data=data,
         split=split,
@@ -314,7 +316,7 @@ async def test_late_joining_log_consumer_receives_existing_logs():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_late_joining_log_consumer_no_logs():
-    """A late-joining client with no existing logs should not receive any buffered messages."""
+    """Late-joining client with no logs gets no buffered messages."""
     user = await _create_user("latejoin_nolog_user", "pass")
     job = await _create_job(user)
 
@@ -387,4 +389,65 @@ async def test_late_joining_status_consumer_running_job():
     assert response["data"]["buffered"] is True
     assert response["seq"] == 0
 
+    await communicator.disconnect()
+
+
+# --- JWT middleware integration tests ---
+
+
+def _make_jwt_communicator(consumer_class, job_id, token=None):
+    """Build a communicator that goes through JwtAuthMiddleware."""
+    path = (
+        f"/ws/job/{job_id}/status/"
+        if consumer_class is JobStatusConsumer
+        else f"/ws/job/{job_id}/logs/"
+    )
+    if token:
+        path = f"{path}?token={token}"
+    app = JwtAuthMiddleware(consumer_class.as_asgi())
+    communicator = WebsocketCommunicator(app, path)
+    communicator.scope["url_route"] = {"kwargs": {"job_id": str(job_id)}}
+    return communicator
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_jwt_middleware_valid_token_authenticates():
+    """JwtAuthMiddleware should authenticate a user from a valid JWT query param."""
+    user = await _create_user("jwt_user", "pass")
+    job = await _create_job(user)
+
+    token = await database_sync_to_async(lambda: str(AccessToken.for_user(user)))()
+    communicator = _make_jwt_communicator(JobStatusConsumer, job.id, token=token)
+    connected, _ = await communicator.connect()
+    assert connected
+
+    # Consume the buffered status
+    response = await communicator.receive_json_from(timeout=5)
+    assert response["type"] == "status_update"
+
+    await communicator.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_jwt_middleware_no_token_rejected():
+    """JwtAuthMiddleware with no token should result in AnonymousUser -> 4401."""
+    communicator = _make_jwt_communicator(JobStatusConsumer, 99999)
+    connected, code = await communicator.connect()
+    assert not connected
+    assert code == 4401
+    await communicator.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_jwt_middleware_invalid_token_rejected():
+    """Invalid token should result in AnonymousUser -> 4401."""
+    communicator = _make_jwt_communicator(
+        JobStatusConsumer, 99999, token="bad.token.here"
+    )
+    connected, code = await communicator.connect()
+    assert not connected
+    assert code == 4401
     await communicator.disconnect()

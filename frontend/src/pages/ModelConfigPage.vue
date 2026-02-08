@@ -164,17 +164,14 @@ onMounted(async () => {
   }
 });
 
-function truncateJson(json: string) {
-  if (json.length <= 60) return json;
-  return json.substring(0, 57) + "...";
+function truncateJson(value: Record<string, unknown>) {
+  const str = JSON.stringify(value);
+  if (str.length <= 60) return str;
+  return str.substring(0, 57) + "...";
 }
 
-function formatJson(json: string) {
-  try {
-    return JSON.stringify(JSON.parse(json), null, 2);
-  } catch {
-    return json;
-  }
+function formatJson(value: Record<string, unknown>) {
+  return JSON.stringify(value, null, 2);
 }
 
 function openDetail(config: ModelConfiguration) {

@@ -107,7 +107,9 @@ def train_recommender_func(
     task_result, model_id: int, parameter_tuning_job_id: int | None = None
 ):
     model: TrainedModel = TrainedModel.objects.get(id=model_id)
-    TaskAndTrainedModelLink.objects.get_or_create(task=task_result, defaults={"model": model})
+    TaskAndTrainedModelLink.objects.get_or_create(
+        task=task_result, defaults={"model": model}
+    )
 
     try:
         train_and_save_model(model)
@@ -116,7 +118,9 @@ def train_recommender_func(
             ParameterTuningJob.objects.filter(id=parameter_tuning_job_id).update(
                 status=ParameterTuningJob.Status.FAILED
             )
-            _send_ws_status(parameter_tuning_job_id, "error", {"error": "training failed"})
+            _send_ws_status(
+                parameter_tuning_job_id, "error", {"error": "training failed"}
+            )
         raise
 
     if parameter_tuning_job_id is not None:
@@ -159,7 +163,9 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
         )
         evaluation: EvaluationConfig = job.evaluation
 
-        TaskAndParameterJobLink.objects.get_or_create(task=task_result, defaults={"job": job})
+        TaskAndParameterJobLink.objects.get_or_create(
+            task=task_result, defaults={"job": job}
+        )
 
         data: TrainingData = job.data
         project: Project = data.project
@@ -227,7 +233,12 @@ def create_best_config_fun(task_result, parameter_tuning_job_id: int) -> int:
     TaskLog.objects.create(task=task_result, contents=msg_complete)
     _send_ws_log(parameter_tuning_job_id, msg_complete)
 
-    msg_best = f"Found best configuration: {recommender_class_name} / {best_params} with {evaluation.target_metric}@{evaluation.cutoff} = {best_score}"
+    msg_best = (
+        f"Found best configuration: {recommender_class_name}"
+        f" / {best_params} with"
+        f" {evaluation.target_metric}@{evaluation.cutoff}"
+        f" = {best_score}"
+    )
     TaskLog.objects.create(task=task_result, contents=msg_best)
     _send_ws_log(parameter_tuning_job_id, msg_best)
     _send_ws_status(parameter_tuning_job_id, "completed", {"best_score": best_score})
@@ -290,7 +301,9 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
     if index < (job.n_trials % job.n_tasks_parallel):
         n_trials += 1
 
-    TaskAndParameterJobLink.objects.get_or_create(task=task_result, defaults={"job": job})
+    TaskAndParameterJobLink.objects.get_or_create(
+        task=task_result, defaults={"job": job}
+    )
     data: TrainingData = job.data
     project: Project = data.project
     split: SplitConfig = job.split
@@ -348,10 +361,16 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         )
         params.pop("optimizer_name", None)
         if trial.value is None:
-            message = f"Trial {trial.number} with {algo} / {params}: {trial.state.name}."
+            message = (
+                f"Trial {trial.number} with {algo} / {params}: {trial.state.name}."
+            )
         else:
-            message = f"""Trial {trial.number} with {algo} / {params}: {trial.state.name}.
-{evaluator.target_metric.name}@{evaluator.cutoff}={-trial.value}"""
+            message = (
+                f"Trial {trial.number} with {algo}"
+                f" / {params}: {trial.state.name}.\n"
+                f"{evaluator.target_metric.name}"
+                f"@{evaluator.cutoff}={-trial.value}"
+            )
         log_buffer.append(TaskLog(task=task_result, contents=message))
         if len(log_buffer) >= BULK_FLUSH_SIZE:
             TaskLog.objects.bulk_create(log_buffer)
@@ -401,7 +420,9 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         ParameterTuningJob.objects.filter(id=parameter_tuning_job_id).update(
             status=ParameterTuningJob.Status.FAILED
         )
-        msg_timeout = f"Search worker {index} for job {parameter_tuning_job_id} timed out"
+        msg_timeout = (
+            f"Search worker {index} for job {parameter_tuning_job_id} timed out"
+        )
         TaskLog.objects.create(task=task_result, contents=msg_timeout)
         _send_ws_log(parameter_tuning_job_id, msg_timeout)
         _send_ws_status(parameter_tuning_job_id, "error", {"error": "Task timed out"})
@@ -413,7 +434,9 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         ParameterTuningJob.objects.filter(id=parameter_tuning_job_id).update(
             status=ParameterTuningJob.Status.FAILED
         )
-        msg_error = f"Search worker {index} for job {parameter_tuning_job_id} failed: {e}"
+        msg_error = (
+            f"Search worker {index} for job {parameter_tuning_job_id} failed: {e}"
+        )
         TaskLog.objects.create(task=task_result, contents=msg_error)
         _send_ws_log(parameter_tuning_job_id, msg_error)
         _send_ws_status(parameter_tuning_job_id, "error", {"error": str(e)})

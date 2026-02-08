@@ -30,10 +30,14 @@ class AuthenticatedConsumerMixin:
         user = self.scope.get("user")
         if not user or not user.is_authenticated:
             return False
-        return ParameterTuningJob.objects.filter(id=job_id).filter(
-            models.Q(data__project__owner_id=user.id)
-            | models.Q(data__project__owner__isnull=True)
-        ).exists()
+        return (
+            ParameterTuningJob.objects.filter(id=job_id)
+            .filter(
+                models.Q(data__project__owner_id=user.id)
+                | models.Q(data__project__owner__isnull=True)
+            )
+            .exists()
+        )
 
 
 class HeartbeatMixin:
@@ -176,9 +180,7 @@ class TaskLogConsumer(
                 self._seq += 1
                 await self.send(text_data=json.dumps(log_entry))
         except Exception:
-            logger.exception(
-                "Failed to send log buffer for job %d", self.job_id
-            )
+            logger.exception("Failed to send log buffer for job %d", self.job_id)
 
     async def disconnect(self, close_code):
         self.stop_heartbeat()

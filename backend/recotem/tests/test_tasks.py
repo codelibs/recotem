@@ -179,9 +179,12 @@ def test_train_recommender_func_sets_failed_on_error(
     )
     task_result = TaskResult.objects.create(task_id="fake-task-id")
 
-    with patch(
-        "recotem.api.tasks.train_and_save_model", side_effect=RuntimeError("boom")
-    ), pytest.raises(RuntimeError, match="boom"):
+    with (
+        patch(
+            "recotem.api.tasks.train_and_save_model", side_effect=RuntimeError("boom")
+        ),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
         train_recommender_func(task_result, model.id, job.id)
 
     job.refresh_from_db()
@@ -254,9 +257,13 @@ def test_task_timeout_handling(user, project, split_config, eval_config, ml100k)
     )
     task_result = TaskResult.objects.create(task_id="timeout-task-id")
 
-    with patch(
-        "recotem.api.tasks.train_and_save_model", side_effect=SoftTimeLimitExceeded()
-    ), pytest.raises(SoftTimeLimitExceeded):
+    with (
+        patch(
+            "recotem.api.tasks.train_and_save_model",
+            side_effect=SoftTimeLimitExceeded(),
+        ),
+        pytest.raises(SoftTimeLimitExceeded),
+    ):
         train_recommender_func(task_result, model.id, job.id)
 
     job.refresh_from_db()
@@ -296,20 +303,26 @@ def test_job_status_stays_failed_when_task_throws(
     task_result = TaskResult.objects.create(task_id="failed-task-id")
 
     # First failure sets status to FAILED
-    with patch(
-        "recotem.api.tasks.train_and_save_model",
-        side_effect=RuntimeError("first failure"),
-    ), pytest.raises(RuntimeError, match="first failure"):
+    with (
+        patch(
+            "recotem.api.tasks.train_and_save_model",
+            side_effect=RuntimeError("first failure"),
+        ),
+        pytest.raises(RuntimeError, match="first failure"),
+    ):
         train_recommender_func(task_result, model.id, job.id)
 
     job.refresh_from_db()
     assert job.status == ParameterTuningJob.Status.FAILED
 
     # Second attempt should keep status as FAILED
-    with patch(
-        "recotem.api.tasks.train_and_save_model",
-        side_effect=RuntimeError("second failure"),
-    ), pytest.raises(RuntimeError, match="second failure"):
+    with (
+        patch(
+            "recotem.api.tasks.train_and_save_model",
+            side_effect=RuntimeError("second failure"),
+        ),
+        pytest.raises(RuntimeError, match="second failure"),
+    ):
         train_recommender_func(task_result, model.id, job.id)
 
     job.refresh_from_db()

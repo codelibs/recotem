@@ -19,12 +19,10 @@ def _inject_redis_password_if_missing(url: str, password: str) -> str:
 
     host = parsed.hostname or "localhost"
     port = f":{parsed.port}" if parsed.port else ""
-    if parsed.username:
-        auth = f"{parsed.username}:{password}@"
-    else:
-        auth = f":{password}@"
+    auth = f"{parsed.username}:{password}@" if parsed.username else f":{password}@"
     netloc = f"{auth}{host}{port}"
     return urlunparse(parsed._replace(netloc=netloc))
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -50,8 +48,12 @@ if not DEBUG:
         )
     if len(SECRET_KEY) < 50:
         raise RuntimeError(
-            "SECRET_KEY must be at least 50 characters long for production (DEBUG=False). "
-            "Generate a strong random key with: python -c 'from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())'"
+            "SECRET_KEY must be at least 50 characters long for"
+            " production (DEBUG=False). Generate a strong random"
+            " key with: python -c 'from"
+            " django.core.management.utils import"
+            " get_random_secret_key;"
+            " print(get_random_secret_key())'"
         )
     if "*" in ALLOWED_HOSTS:
         raise RuntimeError(
@@ -142,8 +144,8 @@ else:
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "dj_rest_auth.jwt_auth.JWTCookieAuthentication",
-        "rest_framework.authentication.TokenAuthentication",
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
@@ -174,7 +176,8 @@ REST_AUTH = {
     "USER_DETAILS_SERIALIZER": "recotem.api.serializers.UserDetailsSerializer",
     "SESSION_LOGIN": False,
     "USE_JWT": True,
-    "JWT_AUTH_REFRESH_COOKIE": "refresh-token",
+    "JWT_AUTH_COOKIE": None,
+    "JWT_AUTH_REFRESH_COOKIE": None,
 }
 
 ROOT_URLCONF = "recotem.urls"
@@ -201,7 +204,7 @@ WSGI_APPLICATION = "recotem.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
-_DEFAULT_DB_URL = f'sqlite:///{(BASE_DIR / "data" / "db.sqlite3")}'
+_DEFAULT_DB_URL = f"sqlite:///{(BASE_DIR / 'data' / 'db.sqlite3')}"
 DATABASE_URL = env("DATABASE_URL", default=_DEFAULT_DB_URL)
 DATABASES = {"default": env.db("DATABASE_URL", default=_DEFAULT_DB_URL)}
 DATABASES["default"]["CONN_MAX_AGE"] = int(env("CONN_MAX_AGE", default=600))
@@ -212,7 +215,8 @@ DATABASES["default"]["CONN_MAX_AGE"] = int(env("CONN_MAX_AGE", default=600))
 
 AUTH_PASSWORD_VALIDATORS = [
     {
-        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
+        "NAME": "django.contrib.auth.password_validation."
+        "UserAttributeSimilarityValidator",
     },
     {
         "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
@@ -248,7 +252,8 @@ elif _STORAGE_TYPE == "S3":
     AWS_STORAGE_BUCKET_NAME = env("AWS_STORAGE_BUCKET_NAME")
     if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
         raise RuntimeError(
-            "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set when RECOTEM_STORAGE_TYPE=S3"
+            "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"
+            " must be set when RECOTEM_STORAGE_TYPE=S3"
         )
     AWS_LOCATION = env("AWS_LOCATION", default="")
     AWS_S3_ENDPOINT_URL = env("AWS_S3_ENDPOINT_URL", default=None)
@@ -334,9 +339,7 @@ CACHES = {
 }
 
 # Upload size limit (bytes, default 500MB to match nginx client_max_body_size)
-DATA_UPLOAD_MAX_MEMORY_SIZE = int(
-    env("DATA_UPLOAD_MAX_MEMORY_SIZE", default=524288000)
-)
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(env("DATA_UPLOAD_MAX_MEMORY_SIZE", default=524288000))
 
 # Model cache size (number of trained models kept in LRU cache)
 MODEL_CACHE_SIZE = int(env("MODEL_CACHE_SIZE", default=8))
@@ -351,8 +354,8 @@ CELERY_TASK_SOFT_TIME_LIMIT = int(env("CELERY_TASK_SOFT_TIME_LIMIT", default=348
 
 # Logging — structured JSON in production, simple in development
 
-import logging as _logging
-import re as _re
+import logging as _logging  # noqa: E402
+import re as _re  # noqa: E402
 
 
 class _SensitiveDataFilter(_logging.Filter):
@@ -443,8 +446,14 @@ SPECTACULAR_SETTINGS = {
         {"name": "Projects", "description": "Project management"},
         {"name": "Data", "description": "Training data upload and management"},
         {"name": "Tuning", "description": "Parameter tuning job management"},
-        {"name": "Models", "description": "Trained model management and recommendations"},
-        {"name": "Configuration", "description": "Split, evaluation, and model configurations"},
+        {
+            "name": "Models",
+            "description": "Trained model management and recommendations",
+        },
+        {
+            "name": "Configuration",
+            "description": "Split, evaluation, and model configurations",
+        },
         {"name": "Auth", "description": "Authentication and user management"},
     ],
 }

@@ -63,7 +63,7 @@ export interface ModelConfiguration {
   name: string | null;
   project: number;
   recommender_class_name: string;
-  parameters_json: string;
+  parameters_json: Record<string, unknown>;
   tuning_job: number | null;
   ins_datetime: string;
 }

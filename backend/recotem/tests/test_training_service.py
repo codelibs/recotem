@@ -9,7 +9,6 @@ import pickle  # noqa: S403
 import pytest
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import override_settings
 
 from recotem.api.models import (
     ModelConfiguration,
@@ -60,8 +59,11 @@ def model_config(project):
 
 
 @pytest.mark.django_db
-@override_settings(SECRET_KEY="test-secret-key-for-training")
 class TestTrainAndSaveModel:
+    @pytest.fixture(autouse=True)
+    def _override_settings(self, settings):
+        settings.SECRET_KEY = "test-secret-key-for-training"
+
     def test_train_and_save_model_creates_signed_file(
         self, model_config, training_data
     ):

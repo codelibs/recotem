@@ -4,7 +4,7 @@
 FROM node:22-slim AS frontend-build
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts && npm rebuild esbuild
 COPY frontend/ .
 RUN npm run build
 

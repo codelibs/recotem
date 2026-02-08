@@ -1,7 +1,6 @@
 """Tests for the HMAC-SHA256 pickle signing module."""
 
 import pytest
-from django.test import override_settings
 
 from recotem.api.services.pickle_signing import (
     HMAC_SIZE,
@@ -10,8 +9,11 @@ from recotem.api.services.pickle_signing import (
 )
 
 
-@override_settings(SECRET_KEY="test-secret-key-for-hmac")
 class TestPickleSigning:
+    @pytest.fixture(autouse=True)
+    def _override_settings(self, settings):
+        settings.SECRET_KEY = "test-secret-key-for-hmac"
+
     def test_sign_and_verify_roundtrip(self):
         payload = b"test pickle data"
         signed = sign_pickle_bytes(payload)
@@ -43,8 +45,7 @@ class TestPickleSigning:
         signed2 = sign_pickle_bytes(payload)
         assert signed1 == signed2
 
-    @override_settings(SECRET_KEY="different-key")
-    def test_different_key_fails_verification(self):
+    def test_different_key_fails_verification(self, settings):
         """A file signed with a different key should fail or be treated as legacy."""
         import hashlib
         import hmac
@@ -55,7 +56,10 @@ class TestPickleSigning:
         sig = hmac.new(original_key, payload, hashlib.sha256).digest()
         signed = sig + payload
 
-        # verify_and_extract uses "different-key" due to override_settings.
+        # Switch to a different key for verification
+        settings.SECRET_KEY = "different-key"
+
+        # verify_and_extract uses "different-key" due to settings override.
         # The signature won't match. The raw signed blob starts with the HMAC
         # signature bytes (not 0x80), so it won't be treated as legacy — it
         # will try to parse sig + payload, where the "payload" portion after

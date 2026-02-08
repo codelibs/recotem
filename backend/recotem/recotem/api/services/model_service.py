@@ -43,7 +43,7 @@ def fetch_mapped_rec(pk: int) -> IDMappedRecommender:
     try:
         model_record = TrainedModel.objects.get(pk=pk)
     except TrainedModel.DoesNotExist:
-        raise ResourceNotFoundError(detail=f"Trained model {pk} not found.")
+        raise ResourceNotFoundError(detail=f"Trained model {pk} not found.") from None
     try:
         with model_record.file.open("rb") as f:
             raw_data = f.read()
@@ -54,9 +54,9 @@ def fetch_mapped_rec(pk: int) -> IDMappedRecommender:
         cache.set(cache_key, rec, _CACHE_TIMEOUT)
         return rec
     except ValueError as e:
-        raise ModelLoadError(detail=f"Model {pk} integrity check failed: {e}")
+        raise ModelLoadError(detail=f"Model {pk} integrity check failed: {e}") from e
     except (pickle.UnpicklingError, KeyError, EOFError, OSError) as e:
-        raise ModelLoadError(detail=f"Could not load model {pk}: {e}")
+        raise ModelLoadError(detail=f"Could not load model {pk}: {e}") from e
 
 
 def fetch_item_metadata(pk: int) -> pd.DataFrame | None:
@@ -69,7 +69,7 @@ def fetch_item_metadata(pk: int) -> pd.DataFrame | None:
     try:
         model_record: ItemMetaData = ItemMetaData.objects.get(pk=pk)
     except ItemMetaData.DoesNotExist:
-        raise ResourceNotFoundError(detail=f"Item metadata {pk} not found.")
+        raise ResourceNotFoundError(detail=f"Item metadata {pk} not found.") from None
     try:
         project: Project = model_record.project
         item_column: str = project.item_column
@@ -83,7 +83,7 @@ def fetch_item_metadata(pk: int) -> pd.DataFrame | None:
         cache.set(cache_key, result, _CACHE_TIMEOUT)
         return result
     except (TypeError, ValueError, pd.errors.ParserError) as e:
-        raise ModelLoadError(detail=f"Could not load item metadata {pk}: {e}")
+        raise ModelLoadError(detail=f"Could not load item metadata {pk}: {e}") from e
 
 
 @receiver(post_delete, sender=TrainedModel)

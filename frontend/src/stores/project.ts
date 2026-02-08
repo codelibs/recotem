@@ -33,6 +33,7 @@ export const useProjectStore = defineStore("project", () => {
     error.value = null;
     try {
       currentProject.value = await api(`${ENDPOINTS.PROJECT}${id}/`);
+      error.value = null;
     } catch (err) {
       error.value = classifyApiError(err);
     } finally {

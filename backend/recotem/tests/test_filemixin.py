@@ -1,4 +1,5 @@
 """Tests for FileDownloadRemoveMixin access control."""
+
 from tempfile import NamedTemporaryFile
 
 import pytest

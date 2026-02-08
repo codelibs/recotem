@@ -16,7 +16,8 @@ def upload_to(instance, filename: str):
     save_directory_name = re.sub(
         r"(.)([A-Z]+)", r"_\1", instance.__class__.__name__
     ).lower()
-    res = f"{save_directory_name}/{filename_as_path.name}_{random_string}{''.join(suffixes)}"
+    suffix = "".join(suffixes)
+    res = f"{save_directory_name}/{filename_as_path.name}_{random_string}{suffix}"
     return res
 
 

@@ -78,7 +78,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
             timeout_singlestep=5,
         ),
     )
-    job_response_unlinked_data.status_code == 400
+    assert job_response_unlinked_data.status_code == 400
     assert "has been deleted" in job_response_unlinked_data.json()["data"][0]
 
     job_response = client.post(
@@ -93,7 +93,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
             timeout_singlestep=5,
         ),
     )
-    job_response.status_code == 201
+    assert job_response.status_code == 201
     job_id = job_response.json()["id"]
 
     best_config: int | None = None

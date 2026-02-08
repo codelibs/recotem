@@ -1,4 +1,3 @@
-
 from django.contrib.auth.models import AbstractBaseUser
 from django.db.models import Count, Q
 
@@ -6,14 +5,12 @@ from recotem.api.exceptions import ResourceNotFoundError
 from recotem.api.models import Project
 
 
-def get_project_or_404(
-    pk: int, user: AbstractBaseUser | None = None
-) -> Project:
+def get_project_or_404(pk: int, user: AbstractBaseUser | None = None) -> Project:
     """Retrieve a project by primary key and optional user access check."""
     try:
         project = Project.objects.get(pk=pk)
     except Project.DoesNotExist:
-        raise ResourceNotFoundError(detail=f"Project {pk} not found.")
+        raise ResourceNotFoundError(detail=f"Project {pk} not found.") from None
     if user is not None and project.owner_id not in (None, user.id):
         raise ResourceNotFoundError(detail=f"Project {pk} not found.")
     return project

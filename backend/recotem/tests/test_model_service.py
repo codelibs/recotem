@@ -12,7 +12,6 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import override_settings
 
 from recotem.api.exceptions import ModelLoadError, ResourceNotFoundError
 from recotem.api.models import (
@@ -78,8 +77,11 @@ def mock_recommender():
 
 
 @pytest.mark.django_db
-@override_settings(SECRET_KEY="test-secret-key-for-model-service")
 class TestFetchMappedRec:
+    @pytest.fixture(autouse=True)
+    def _override_settings(self, settings):
+        settings.SECRET_KEY = "test-secret-key-for-model-service"
+
     def test_load_model_from_file(self, model_config, training_data, mock_recommender):
         """fetch_mapped_rec should load and return a model from storage."""
         cache.clear()

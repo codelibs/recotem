@@ -57,14 +57,18 @@ def test_different_owners_can_have_same_project_name(client: Client):
 def test_db_constraint_prevents_duplicate_per_owner():
     """Database constraint enforces uniqueness at DB level."""
     user = User.objects.create_user(username="constraint_user", password="pass")
-    Project.objects.create(name="Constrained", owner=user, user_column="u", item_column="i")
+    Project.objects.create(
+        name="Constrained", owner=user, user_column="u", item_column="i"
+    )
     with pytest.raises(IntegrityError):
-        Project.objects.create(name="Constrained", owner=user, user_column="u", item_column="i")
+        Project.objects.create(
+            name="Constrained", owner=user, user_column="u", item_column="i"
+        )
 
 
 @pytest.mark.django_db
 def test_update_project_name_to_existing_fails(client: Client):
-    """Updating a project name to one that already exists for the same owner should fail."""
+    """Updating to an existing name for the same owner should fail."""
     user = User.objects.create_user(username="rename_user", password="pass")
     client.force_login(user)
 

@@ -1,4 +1,5 @@
 """Tests for basic CRUD operations on ViewSets."""
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client

@@ -31,7 +31,7 @@ COPY recotem/ /app
 RUN uv run python -c "from irspack.dataset import MovieLens100KDataManager; MovieLens100KDataManager(force_download=True)"
 
 # Production stage
-FROM base
+FROM base AS production
 COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 

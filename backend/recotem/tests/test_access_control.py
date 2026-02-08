@@ -64,7 +64,11 @@ def test_project_summary_isolated_per_user(client: Client):
     client.force_login(user_a)
     project_id = client.post(
         reverse("project-list"),
-        {"name": "private_summary_project", "user_column": "userId", "item_column": "movieId"},
+        {
+            "name": "private_summary_project",
+            "user_column": "userId",
+            "item_column": "movieId",
+        },
     ).json()["id"]
 
     client.force_login(user_b)
@@ -80,7 +84,11 @@ def test_cannot_create_training_data_for_other_users_project(client: Client, ml1
     client.force_login(user_a)
     project_id = client.post(
         reverse("project-list"),
-        {"name": "private_data_project", "user_column": "userId", "item_column": "movieId"},
+        {
+            "name": "private_data_project",
+            "user_column": "userId",
+            "item_column": "movieId",
+        },
     ).json()["id"]
 
     csv_file = NamedTemporaryFile(suffix=".csv")
@@ -178,7 +186,9 @@ def test_task_logs_are_isolated_per_user(client: Client):
     evaluation = EvaluationConfig.objects.create(
         name="eval_for_logs", target_metric="ndcg", created_by=user_a
     )
-    job = ParameterTuningJob.objects.create(data=data, split=split, evaluation=evaluation)
+    job = ParameterTuningJob.objects.create(
+        data=data, split=split, evaluation=evaluation
+    )
 
     task = TaskResult.objects.create(task_id="task-log-1", status="SUCCESS")
     TaskAndParameterJobLink.objects.create(job=job, task=task)

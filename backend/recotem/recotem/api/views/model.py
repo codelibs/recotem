@@ -43,7 +43,9 @@ class RecommendationWithMetaDataSerializer(serializers.Serializer):
     recommendations = serializers.CharField()
 
 
-class TrainedModelViewset(OwnedResourceMixin, viewsets.ModelViewSet, FileDownloadRemoveMixin):
+class TrainedModelViewset(
+    OwnedResourceMixin, viewsets.ModelViewSet, FileDownloadRemoveMixin
+):
     permission_classes = [IsAuthenticated]
     serializer_class = TrainedModelSerializer
     filterset_fields = ["id", "data_loc", "data_loc__project"]
@@ -73,7 +75,10 @@ class TrainedModelViewset(OwnedResourceMixin, viewsets.ModelViewSet, FileDownloa
     def get_queryset(self):
         return (
             TrainedModel.objects.select_related(
-                "configuration", "configuration__project", "data_loc", "data_loc__project"
+                "configuration",
+                "configuration__project",
+                "data_loc",
+                "data_loc__project",
             )
             .filter(self.get_owner_filter())
             .order_by("-ins_datetime")
@@ -113,7 +118,9 @@ class TrainedModelViewset(OwnedResourceMixin, viewsets.ModelViewSet, FileDownloa
             id=metadata_id,
             project_id=model.data_loc.project_id,
         ).exists():
-            raise ResourceNotFoundError(detail=f"Item metadata {metadata_id} not found.")
+            raise ResourceNotFoundError(
+                detail=f"Item metadata {metadata_id} not found."
+            )
 
         mapped_rec = fetch_mapped_rec(model.id)
         metadata = fetch_item_metadata(metadata_id)

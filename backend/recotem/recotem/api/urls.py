@@ -66,9 +66,7 @@ urlpatterns = [
     ),
     path(
         "schema/redoc/",
-        SpectacularRedocView.as_view(
-            url_name="schema", permission_classes=[AllowAny]
-        ),
+        SpectacularRedocView.as_view(url_name="schema", permission_classes=[AllowAny]),
         name="redoc",
     ),
 ]

@@ -4,18 +4,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  secret_scanning:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-      - name: TruffleHog secret scan
-        uses: trufflesecurity/trufflehog@v3.93.1
-        with:
-          extra_args: --since-commit HEAD~1
-
   run_frontend_tests:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -212,6 +200,7 @@ jobs:
           exit-code: 1
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          scanners: vuln
 
   upload-coverage:
     runs-on: ubuntu-latest

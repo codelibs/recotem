@@ -12,19 +12,19 @@ if __name__ == "__main__":
 
     # Replace build directives with pre-built images
     dc_content["services"]["backend"].pop("build")
-    dc_content["services"]["backend"][
-        "image"
-    ] = f"ghcr.io/codelibs/recotem-backend:{VERSION}"
+    dc_content["services"]["backend"]["image"] = (
+        f"ghcr.io/codelibs/recotem-backend:{VERSION}"
+    )
 
     dc_content["services"]["worker"].pop("build")
-    dc_content["services"]["worker"][
-        "image"
-    ] = f"ghcr.io/codelibs/recotem-worker:{VERSION}"
+    dc_content["services"]["worker"]["image"] = (
+        f"ghcr.io/codelibs/recotem-worker:{VERSION}"
+    )
 
     dc_content["services"]["proxy"].pop("build")
-    dc_content["services"]["proxy"][
-        "image"
-    ] = f"ghcr.io/codelibs/recotem-proxy:{VERSION}"
+    dc_content["services"]["proxy"]["image"] = (
+        f"ghcr.io/codelibs/recotem-proxy:{VERSION}"
+    )
 
     nginx_conf_str = (WORKDIR / "nginx.conf").read_text()
     production_env_str = (WORKDIR / "envs" / "production.env").read_text()

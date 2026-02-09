@@ -65,6 +65,73 @@ describe("useDarkMode", () => {
     expect(localStorage.getItem("dark-mode")).toBe("true");
   });
 
+  it("follows system preference change when no stored preference", async () => {
+    // No localStorage value set → user hasn't stored a preference
+    vi.resetModules();
+    let changeListener: ((e: MediaQueryListEvent) => void) | undefined;
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: vi.fn().mockReturnValue({
+        matches: false,
+        addEventListener: vi.fn((event: string, fn: (e: MediaQueryListEvent) => void) => {
+          if (event === "change") changeListener = fn;
+        }),
+      }),
+    });
+    const mod = await import("@/composables/useDarkMode");
+    const Comp = defineComponent({
+      setup() {
+        const { isDark, toggle } = mod.useDarkMode();
+        return { isDark, toggle };
+      },
+      template: '<div>{{ isDark ? "dark" : "light" }}</div>',
+    });
+    const wrapper = mount(Comp);
+    await flushPromises();
+    expect(wrapper.text()).toBe("light");
+
+    // The watch's immediate callback stores the initial value, so clear localStorage
+    // to simulate the scenario where user hasn't stored a preference
+    localStorage.removeItem("dark-mode");
+
+    // Simulate system preference change
+    expect(changeListener).toBeDefined();
+    changeListener!({ matches: true } as MediaQueryListEvent);
+    await nextTick();
+    expect(wrapper.text()).toBe("dark");
+  });
+
+  it("ignores system preference change when stored preference exists", async () => {
+    localStorage.setItem("dark-mode", "false");
+    vi.resetModules();
+    let changeListener: ((e: MediaQueryListEvent) => void) | undefined;
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: vi.fn().mockReturnValue({
+        matches: false,
+        addEventListener: vi.fn((event: string, fn: (e: MediaQueryListEvent) => void) => {
+          if (event === "change") changeListener = fn;
+        }),
+      }),
+    });
+    const mod = await import("@/composables/useDarkMode");
+    const Comp = defineComponent({
+      setup() {
+        const { isDark, toggle } = mod.useDarkMode();
+        return { isDark, toggle };
+      },
+      template: '<div>{{ isDark ? "dark" : "light" }}</div>',
+    });
+    const wrapper = mount(Comp);
+    await flushPromises();
+    expect(wrapper.text()).toBe("light");
+
+    // Simulate system preference change — should be ignored since stored preference exists
+    changeListener!({ matches: true } as MediaQueryListEvent);
+    await nextTick();
+    expect(wrapper.text()).toBe("light");
+  });
+
   it("applies class to document element", async () => {
     localStorage.setItem("dark-mode", "true");
 

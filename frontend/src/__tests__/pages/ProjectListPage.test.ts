@@ -385,6 +385,40 @@ describe("ProjectListPage", () => {
     );
   });
 
+  describe("menuItems command", () => {
+    it("sets showDeleteConfirm to true when menu command is triggered", async () => {
+      apiMock.mockResolvedValue({ results: mockProjects, count: 3 });
+      const wrapper = mountPage();
+      await flushPromises();
+
+      const vm = wrapper.vm as any;
+      expect(vm.showDeleteConfirm).toBe(false);
+
+      // menuItems is a computed that returns an array with a command function
+      const items = vm.menuItems;
+      items[0].command();
+
+      expect(vm.showDeleteConfirm).toBe(true);
+    });
+  });
+
+  describe("onProjectCreated", () => {
+    it("closes create dialog when project is created", async () => {
+      apiMock.mockResolvedValue({ results: [], count: 0 });
+      const wrapper = mountPage();
+      await flushPromises();
+
+      const vm = wrapper.vm as any;
+      vm.showCreate = true;
+      await nextTick();
+
+      vm.onProjectCreated();
+      await nextTick();
+
+      expect(vm.showCreate).toBe(false);
+    });
+  });
+
   it("shows error toast when deletion fails", async () => {
     apiMock
       .mockResolvedValueOnce({ results: mockProjects, count: 3 })

@@ -1,4 +1,5 @@
 import io
+import logging
 import pickle  # noqa: S403
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from recotem.api.utils import read_dataframe
 # contain complex internal state (scipy sparse matrices, numpy arrays) that
 # cannot be serialized with JSON or other safe formats.
 # HMAC-SHA256 verification is applied before loading.
+
+logger = logging.getLogger(__name__)
 
 _CACHE_TIMEOUT = getattr(settings, "MODEL_CACHE_TIMEOUT", 3600)
 _MODEL_KEY_PREFIX = "recotem:model:"
@@ -54,9 +57,11 @@ def fetch_mapped_rec(pk: int) -> IDMappedRecommender:
         cache.set(cache_key, rec, _CACHE_TIMEOUT)
         return rec
     except ValueError as e:
-        raise ModelLoadError(detail=f"Model {pk} integrity check failed: {e}") from e
+        logger.exception("Model %s integrity check failed.", pk)
+        raise ModelLoadError(detail=f"Model {pk} integrity check failed.") from e
     except (pickle.UnpicklingError, KeyError, EOFError, OSError) as e:
-        raise ModelLoadError(detail=f"Could not load model {pk}: {e}") from e
+        logger.exception("Could not load model %s.", pk)
+        raise ModelLoadError(detail=f"Could not load model {pk}.") from e
 
 
 def fetch_item_metadata(pk: int) -> pd.DataFrame | None:
@@ -83,7 +88,8 @@ def fetch_item_metadata(pk: int) -> pd.DataFrame | None:
         cache.set(cache_key, result, _CACHE_TIMEOUT)
         return result
     except (TypeError, ValueError, pd.errors.ParserError) as e:
-        raise ModelLoadError(detail=f"Could not load item metadata {pk}: {e}") from e
+        logger.exception("Could not load item metadata %s.", pk)
+        raise ModelLoadError(detail=f"Could not load item metadata {pk}.") from e
 
 
 @receiver(post_delete, sender=TrainedModel)

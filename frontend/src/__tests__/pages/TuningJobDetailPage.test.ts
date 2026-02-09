@@ -76,7 +76,7 @@ function mountPage() {
     global: {
       plugins: [PrimeVue, createPinia(), i18n],
       stubs: {
-        Button: { template: '<button @click="$attrs.onClick?.()"><slot />{{ $attrs.label }}</button>', inheritAttrs: false },
+        Button: { template: '<button :aria-label="$attrs[\'aria-label\']" @click="$attrs.onClick?.()"><slot />{{ $attrs.label }}</button>', inheritAttrs: false },
         Message: { template: '<div class="message"><slot /></div>' },
         Skeleton: { template: '<div class="skeleton" />' },
         Tag: { template: '<span class="tag"><slot />{{ $attrs.value }}</span>', inheritAttrs: false },
@@ -337,6 +337,47 @@ describe("TuningJobDetailPage", () => {
 
     // The default mock has best_config: null, so it should connect
     expect(mockConnect).toHaveBeenCalled();
+  });
+
+  describe("downloadLogs", () => {
+    it("creates a downloadable text file with log contents", async () => {
+      const wrapper = mountPage();
+      await flushPromises();
+      await flushPromises();
+
+      // Log entries should be present from the mock
+      expect(wrapper.text()).toContain("Trial 1 complete");
+
+      // Mock URL.createObjectURL and URL.revokeObjectURL
+      const mockUrl = "blob:http://localhost/fake-blob";
+      const createObjectURLSpy = vi.fn().mockReturnValue(mockUrl);
+      const revokeObjectURLSpy = vi.fn();
+      globalThis.URL.createObjectURL = createObjectURLSpy;
+      globalThis.URL.revokeObjectURL = revokeObjectURLSpy;
+
+      // Mock document.createElement for the anchor element
+      const mockClick = vi.fn();
+      const mockAnchor = { href: "", download: "", click: mockClick };
+      const originalCreateElement = document.createElement.bind(document);
+      const createElementSpy = vi
+        .spyOn(document, "createElement")
+        .mockImplementation((tag: string, options?: any) => {
+          if (tag === "a") return mockAnchor as any;
+          return originalCreateElement(tag, options);
+        });
+
+      // Find the download logs button by its aria-label
+      const downloadBtn = wrapper.find('button[aria-label="Download Logs"]');
+      expect(downloadBtn.exists()).toBe(true);
+      await downloadBtn.trigger("click");
+
+      expect(createElementSpy).toHaveBeenCalledWith("a");
+      expect(mockAnchor.download).toBe("tuning-job-5-logs.txt");
+      expect(mockClick).toHaveBeenCalled();
+      expect(revokeObjectURLSpy).toHaveBeenCalledWith(mockUrl);
+
+      createElementSpy.mockRestore();
+    });
   });
 
   it("does not connect to WebSocket when job has best_config", async () => {

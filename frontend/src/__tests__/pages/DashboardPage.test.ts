@@ -266,4 +266,88 @@ describe("DashboardPage", () => {
 
     expect(wrapper.findAll(".skeleton").length).toBe(3);
   });
+
+  it("covers Start Tuning button click handler with real Button", async () => {
+    apiMock.mockResolvedValue({
+      n_data: 3,
+      n_complete_jobs: 1,
+      n_models: 1,
+      ins_datetime: "2025-01-01T00:00:00Z",
+    });
+
+    // Mount with real Button (no Button stub) to cover template @click handler
+    const wrapper = mount(DashboardPage, {
+      global: {
+        plugins: [PrimeVue, createPinia(), i18n],
+        provide: {
+          currentProject: computed(() => null),
+        },
+        stubs: {
+          Message: { template: '<div class="message"><slot /></div>' },
+          Skeleton: { template: '<div class="skeleton" />' },
+          StatCard: { template: '<div class="stat-card" />' },
+          EmptyState: { template: '<div class="empty-state">{{ title }}<slot /></div>', props: ["icon", "title", "description"] },
+        },
+      },
+    });
+    await flushPromises();
+
+    // Find the "Start Tuning" button rendered by real PrimeVue Button
+    const startBtn = wrapper.findAll("button").find(b => b.text().includes("Start Tuning"));
+    expect(startBtn).toBeDefined();
+    await startBtn!.trigger("click");
+    // The click handler calls router.push — mocked, so no error
+  });
+
+  describe("stepClass", () => {
+    it("applies text-success class to completed pipeline steps", async () => {
+      apiMock.mockResolvedValue({
+        n_data: 5,
+        n_complete_jobs: 3,
+        n_models: 2,
+      });
+
+      const wrapper = mountPage();
+      await flushPromises();
+
+      // All three steps are done: Data (n_data > 0), Tuning (n_complete_jobs > 0), Model (n_models > 0)
+      const stepSpans = wrapper.findAll("span.font-semibold.text-success");
+      expect(stepSpans.length).toBe(3);
+    });
+
+    it("applies text-neutral-200 class to incomplete pipeline steps", async () => {
+      apiMock.mockResolvedValue({
+        n_data: 0,
+        n_complete_jobs: 0,
+        n_models: 0,
+      });
+
+      const wrapper = mountPage();
+      await flushPromises();
+
+      // All three steps are not done
+      const incompleteSpans = wrapper.findAll("span.text-neutral-200");
+      // There should be 3 step spans with text-neutral-200
+      expect(incompleteSpans.length).toBeGreaterThanOrEqual(3);
+      // No completed step spans
+      const completedSpans = wrapper.findAll("span.font-semibold.text-success");
+      expect(completedSpans.length).toBe(0);
+    });
+
+    it("applies mixed classes when some steps are complete", async () => {
+      apiMock.mockResolvedValue({
+        n_data: 3,
+        n_complete_jobs: 0,
+        n_models: 0,
+      });
+
+      const wrapper = mountPage();
+      await flushPromises();
+
+      // Only step 1 (Data) is done
+      const completedSpans = wrapper.findAll("span.font-semibold.text-success");
+      expect(completedSpans.length).toBe(1);
+      expect(completedSpans[0].text()).toContain("1. Data");
+    });
+  });
 });

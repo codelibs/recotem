@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mount } from "@vue/test-utils";
-import { createPinia } from "pinia";
+import { mount, flushPromises } from "@vue/test-utils";
+import { createPinia, setActivePinia } from "pinia";
 import LoginPage from "@/pages/LoginPage.vue";
 import PrimeVue from "primevue/config";
 import i18n from "@/i18n";
+import { useAuthStore } from "@/stores/auth";
 
 // Mock vue-router
 const mockPush = vi.fn();
@@ -12,12 +13,16 @@ vi.mock("vue-router", () => ({
   useRoute: () => ({ query: {} }),
 }));
 
+let pinia: ReturnType<typeof createPinia>;
+
 function mountLoginPage() {
+  pinia = createPinia();
+  setActivePinia(pinia);
   return mount(LoginPage, {
     global: {
       plugins: [
         PrimeVue,
-        createPinia(),
+        pinia,
         i18n,
       ],
       stubs: {
@@ -60,5 +65,35 @@ describe("LoginPage", () => {
   it("has novalidate on form for custom validation", () => {
     const wrapper = mountLoginPage();
     expect(wrapper.find("form").attributes("novalidate")).toBeDefined();
+  });
+
+  it("calls authStore.login and redirects on successful login", async () => {
+    const wrapper = mountLoginPage();
+    const store = useAuthStore();
+    vi.spyOn(store, "login").mockResolvedValue(undefined);
+    // Fill in username and password
+    const inputs = wrapper.findAll("input");
+    await inputs[0].setValue("admin");
+    await inputs[1].setValue("password123");
+
+    await wrapper.find("form").trigger("submit");
+    await flushPromises();
+
+    expect(store.login).toHaveBeenCalledWith("admin", "password123");
+    expect(mockPush).toHaveBeenCalledWith("/projects");
+  });
+
+  it("shows error message on failed login", async () => {
+    const wrapper = mountLoginPage();
+    const store = useAuthStore();
+    vi.spyOn(store, "login").mockRejectedValue(new Error("Invalid"));
+    const inputs = wrapper.findAll("input");
+    await inputs[0].setValue("admin");
+    await inputs[1].setValue("wrong");
+
+    await wrapper.find("form").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Invalid");
   });
 });

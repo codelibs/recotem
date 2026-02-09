@@ -73,7 +73,6 @@ def json_to_text_reverse(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("api", "0001_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
@@ -279,7 +278,8 @@ class Migration(migrations.Migration):
                 max_length=128,
                 validators=[
                     django.core.validators.RegexValidator(
-                        message="recommender_class_name must be a valid Python identifier.",
+                        message="recommender_class_name must be a valid"
+                        " Python identifier.",
                         regex="^[A-Za-z_][A-Za-z0-9_]*$",
                     )
                 ],

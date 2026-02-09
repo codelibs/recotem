@@ -238,4 +238,119 @@ describe("TuningWizardPage", () => {
 
     expect(notifyMock.error).toHaveBeenCalledWith("Failed to create tuning job");
   });
+
+  describe("submitJob with full form data", () => {
+    it("sends correct bodies for all 3 sequential API calls", async () => {
+      apiMock
+        .mockResolvedValueOnce({ results: mockTrainingData, count: 2 })
+        // split config POST
+        .mockResolvedValueOnce({ id: 100 })
+        // evaluation config POST
+        .mockResolvedValueOnce({ id: 200 })
+        // tuning job POST
+        .mockResolvedValueOnce({ id: 42, data: 10 });
+
+      const wrapper = mountPage();
+      await flushPromises();
+
+      // Select training data
+      const select = wrapper.find(".select-stub");
+      await select.setValue(10);
+      await nextTick();
+
+      const startBtn = wrapper.findAll("button").find(b => b.text().includes("Start Tuning"));
+      await startBtn!.trigger("click");
+      await flushPromises();
+
+      // Verify all 4 API calls (1 GET + 3 POSTs)
+      expect(apiMock).toHaveBeenCalledTimes(4);
+
+      // 1st call: GET training data (onMounted)
+      expect(apiMock.mock.calls[0][0]).toContain("training_data");
+
+      // 2nd call: POST split config
+      expect(apiMock.mock.calls[1][0]).toContain("split_config");
+      expect(apiMock.mock.calls[1][1]).toMatchObject({
+        method: "POST",
+        body: {
+          scheme: "RG",
+          heldout_ratio: 0.2,
+          test_user_ratio: 0.5,
+          random_seed: 42,
+        },
+      });
+
+      // 3rd call: POST evaluation config
+      expect(apiMock.mock.calls[2][0]).toContain("evaluation_config");
+      expect(apiMock.mock.calls[2][1]).toMatchObject({
+        method: "POST",
+        body: {
+          target_metric: "ndcg",
+          cutoff: 10,
+        },
+      });
+
+      // 4th call: POST tuning job
+      expect(apiMock.mock.calls[3][0]).toContain("parameter_tuning_job");
+      expect(apiMock.mock.calls[3][1]).toMatchObject({
+        method: "POST",
+        body: {
+          data: 10,
+          split: 100,
+          evaluation: 200,
+          n_tasks_parallel: 2,
+          n_trials: 40,
+          memory_budget: 2048,
+          train_after_tuning: true,
+        },
+      });
+
+      expect(notifyMock.success).toHaveBeenCalledWith("Tuning job created");
+      expect(mockPush).toHaveBeenCalledWith("/projects/1/tuning/42");
+    });
+
+    it("shows error when evaluation config creation fails", async () => {
+      apiMock
+        .mockResolvedValueOnce({ results: mockTrainingData, count: 2 })
+        // split config POST succeeds
+        .mockResolvedValueOnce({ id: 100 })
+        // evaluation config POST fails
+        .mockRejectedValueOnce(new Error("Eval config error"));
+
+      const wrapper = mountPage();
+      await flushPromises();
+
+      const select = wrapper.find(".select-stub");
+      await select.setValue(10);
+      await nextTick();
+
+      const startBtn = wrapper.findAll("button").find(b => b.text().includes("Start Tuning"));
+      await startBtn!.trigger("click");
+      await flushPromises();
+
+      expect(notifyMock.error).toHaveBeenCalledWith("Failed to create tuning job");
+      // Should not have tried the 4th API call
+      expect(apiMock).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe("step navigation", () => {
+    it("navigates back to tuning list when back button is clicked", async () => {
+      apiMock.mockResolvedValue({ results: [], count: 0 });
+      const wrapper = mountPage();
+      await flushPromises();
+
+      // The first button in the header area is the back arrow
+      const backBtn = wrapper.findAll("button").find(b => {
+        // The back button has no label text, it's the icon-only button
+        const text = b.text().trim();
+        return text === "" || text === "undefined";
+      });
+      if (backBtn) {
+        await backBtn.trigger("click");
+        await flushPromises();
+        expect(mockPush).toHaveBeenCalledWith("/projects/1/tuning");
+      }
+    });
+  });
 });

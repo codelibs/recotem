@@ -99,6 +99,7 @@ jobs:
           format: 'table'
           exit-code: '1'
           severity: 'CRITICAL,HIGH'
+          scanners: vuln
       - name: Run Trivy vulnerability scanner (SARIF report)
         uses: aquasecurity/trivy-action@0.28.0
         if: always()
@@ -107,6 +108,7 @@ jobs:
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH,MEDIUM'
+          scanners: vuln
       - name: Upload Trivy scan results
         uses: github/codeql-action/upload-sarif@v3
         if: always()

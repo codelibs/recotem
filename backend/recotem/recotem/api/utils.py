@@ -1,10 +1,13 @@
 import gzip
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import IO
 
 import pandas as pd
 from rest_framework.exceptions import ValidationError
+
+logger = logging.getLogger(__name__)
 
 INPUT_STREAM_TYPE = IO | gzip.GzipFile
 
@@ -55,15 +58,17 @@ def read_dataframe(
         try:
             df = _NROWS_FORMATS[suffix](input_stream, nrows)
         except (TypeError, ValueError, pd.errors.ParserError) as e:
+            logger.exception("Failed to parse %s as %s file.", filepath.name, suffix)
             raise ValidationError(
-                f"Failed to parse {filepath.name} as {suffix} file: {e}"
+                f"Failed to parse {filepath.name} as {suffix} file."
             ) from e
     elif suffix in READ_RULES:
         try:
             df = READ_RULES[suffix](input_stream)
         except (TypeError, ValueError, pd.errors.ParserError) as e:
+            logger.exception("Failed to parse %s as %s file.", filepath.name, suffix)
             raise ValidationError(
-                f"Failed to parse {filepath.name} as {suffix} file: {e}"
+                f"Failed to parse {filepath.name} as {suffix} file."
             ) from e
     else:
         raise ValidationError(

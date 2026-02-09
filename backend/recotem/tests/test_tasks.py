@@ -29,7 +29,6 @@ def user(db):
 
 @pytest.fixture
 def project(user):
-
     return Project.objects.create(
         name="task_test_project",
         owner=user,

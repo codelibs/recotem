@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { setActivePinia, createPinia } from "pinia";
 import { useWebSocket } from "@/composables/useWebSocket";
 
 describe("useWebSocket", () => {
@@ -8,6 +9,8 @@ describe("useWebSocket", () => {
   let clearTimeoutSpy: any;
 
   beforeEach(() => {
+    setActivePinia(createPinia());
+
     // Mock WebSocket class
     mockWebSocketInstance = {
       readyState: 0, // CONNECTING

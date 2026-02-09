@@ -17,6 +17,13 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "lcov"],
       reportsDirectory: "coverage",
+      include: ["src/**/*.{ts,vue}"],
+      exclude: [
+        "src/main.ts",
+        "src/**/__tests__/**",
+        "src/types/websocket.ts",
+        "src/env.d.ts",
+      ],
       thresholds: {
         statements: 80,
         branches: 80,

@@ -288,7 +288,6 @@ def task_create_best_config_train_rec(self, parameter_tuning_job_id: int, *args)
     max_retries=3,
 )
 def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
-
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
     logs = [
         dict(message=f"Started the parameter tuning job {parameter_tuning_job_id} ")

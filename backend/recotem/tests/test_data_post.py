@@ -43,16 +43,6 @@ I_O_functions: list[
         lambda df, file: df.to_json(file, lines=True, orient="records"),
         lambda file: pd.read_json(file, lines=True, orient="records"),
     ),
-    (
-        ".pickle",
-        lambda df, file: df.to_pickle(file),
-        lambda file: pd.read_pickle(file),
-    ),
-    (
-        ".pkl",
-        lambda df, file: df.to_pickle(file),
-        lambda file: pd.read_pickle(file),
-    ),
 ]
 
 
@@ -115,10 +105,7 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
         data_url, dict(project=failing_project_id_item, file=no_ext_file)
     )
     assert resp.status_code == 400
-    assert (
-        resp.json()["file"][0]
-        == "Suffix like .csv or .json.gzip or pickle.gz required."
-    )
+    assert resp.json()["file"][0] == "Suffix like .csv or .json.gzip required."
 
     unknown_ext_file = NamedTemporaryFile(suffix=".unknown")
     ml100k.to_csv(unknown_ext_file, index=False)

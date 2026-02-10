@@ -87,7 +87,7 @@ test.describe("Tuning Wizard", () => {
     await expect(page).toHaveURL(
       new RegExp(`/projects/${projectId}/tuning`),
     );
-    await expect(page.getByText("Tuning Jobs")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Tuning Jobs", exact: true })).toBeVisible();
   });
 
   test("should open tuning wizard with stepper", async ({ page }) => {

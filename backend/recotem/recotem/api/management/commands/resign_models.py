@@ -86,7 +86,9 @@ class Command(BaseCommand):
                     f.write(signed_data)
                 signed += 1
                 self.stdout.write(
-                    self.style.SUCCESS(f"  Model {model.pk}: signed ({len(data)} bytes)")
+                    self.style.SUCCESS(
+                        f"  Model {model.pk}: signed ({len(data)} bytes)"
+                    )
                 )
             except OSError as e:
                 self.stderr.write(

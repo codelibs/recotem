@@ -11,6 +11,10 @@ services:
       - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD}
       - DEBUG=true
       - ALLOWED_HOSTS=localhost,127.0.0.1
+      - THROTTLE_ANON_RATE=1000/min
+      - THROTTLE_USER_RATE=1000/min
+      - THROTTLE_LOGIN_RATE=1000/min
+      - THROTTLE_RECOMMENDATION_RATE=1000/min
   worker:
     environment:
       - SECRET_KEY=${SECRET_KEY:-ci-test-secret-key-for-testing-only-not-production}

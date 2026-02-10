@@ -8,7 +8,7 @@ test.describe("Authentication", () => {
   test("should show login page when not authenticated", async ({ page }) => {
     await page.goto("/projects", { waitUntil: "domcontentloaded" });
     await expect(page).toHaveURL(/\/login/);
-    await expect(page.getByText("Sign in")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
   });
 
   test("should login with valid credentials", async ({ page }) => {

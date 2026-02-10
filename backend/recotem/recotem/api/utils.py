@@ -19,8 +19,6 @@ READ_RULES: dict[str, Callable[[INPUT_STREAM_TYPE], pd.DataFrame]] = {
     ".json": lambda f: pd.read_json(f),
     ".ndjson": lambda f: pd.read_json(f, lines=True, orient="records"),
     ".jsonl": lambda f: pd.read_json(f, lines=True, orient="records"),
-    ".pkl": lambda f: pd.read_pickle(f),  # noqa: S301
-    ".pickle": lambda f: pd.read_pickle(f),  # noqa: S301
 }
 
 # Formats that support nrows parameter for partial reads
@@ -50,7 +48,7 @@ def read_dataframe(
     elif len(suffixes) == 1:
         suffix = suffixes[0]
     else:
-        raise ValidationError("Suffix like .csv or .json.gzip or pickle.gz required.")
+        raise ValidationError("Suffix like .csv or .json.gzip required.")
     df: pd.DataFrame
 
     # Use nrows-aware reader when available for memory efficiency

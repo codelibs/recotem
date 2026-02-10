@@ -347,6 +347,10 @@ MODEL_CACHE_SIZE = int(env("MODEL_CACHE_SIZE", default=8))
 # Model cache timeout (seconds)
 MODEL_CACHE_TIMEOUT = int(env("MODEL_CACHE_TIMEOUT", default=3600))
 
+# Pickle signing — allow loading unsigned legacy model files.
+# Set to False to reject unsigned files (recommended after running resign_models).
+PICKLE_ALLOW_LEGACY_UNSIGNED = env.bool("PICKLE_ALLOW_LEGACY_UNSIGNED", default=True)
+
 # Celery task time limits (seconds)
 CELERY_TASK_TIME_LIMIT = int(env("CELERY_TASK_TIME_LIMIT", default=3600))
 CELERY_TASK_SOFT_TIME_LIMIT = int(env("CELERY_TASK_SOFT_TIME_LIMIT", default=3480))

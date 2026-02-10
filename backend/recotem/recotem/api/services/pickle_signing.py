@@ -32,18 +32,31 @@ def sign_pickle_bytes(payload: bytes) -> bytes:
     return signature + payload
 
 
+def _allow_legacy() -> bool:
+    return getattr(settings, "PICKLE_ALLOW_LEGACY_UNSIGNED", True)
+
+
 def verify_and_extract(data: bytes) -> bytes:
     """Verify HMAC signature and return the pickle payload.
 
     For unsigned legacy files (pre-signing migration), the data is returned
-    as-is and a warning is logged. On next save the file will be re-signed.
+    as-is and a warning is logged — but only when PICKLE_ALLOW_LEGACY_UNSIGNED
+    is True. Set it to False after running ``resign_models`` to reject unsigned files.
 
     Raises ValueError if the signature is present but invalid.
     """
     if len(data) <= HMAC_SIZE:
-        # Too short to contain a signature — treat as legacy unsigned file.
-        logger.warning("Loading unsigned pickle file (legacy). Consider re-training.")
-        return data
+        if _allow_legacy():
+            logger.warning(
+                "Loading unsigned pickle file (legacy). "
+                "Run 'manage.py resign_models' and set "
+                "PICKLE_ALLOW_LEGACY_UNSIGNED=false."
+            )
+            return data
+        raise ValueError(
+            "Pickle file too short and legacy unsigned files are not allowed. "
+            "Run 'manage.py resign_models' to sign existing files."
+        )
 
     signature = data[:HMAC_SIZE]
     payload = data[HMAC_SIZE:]
@@ -56,8 +69,18 @@ def verify_and_extract(data: bytes) -> bytes:
     # happen to exist but are not a valid HMAC. Try treating the entire blob
     # as an unsigned pickle (pickle protocol starts with 0x80 for protocol 2+).
     if data[0:1] == b"\x80":
-        logger.warning("Loading unsigned pickle file (legacy). Consider re-training.")
-        return data
+        if _allow_legacy():
+            logger.warning(
+                "Loading unsigned pickle file (legacy). "
+                "Run 'manage.py resign_models' and set "
+                "PICKLE_ALLOW_LEGACY_UNSIGNED=false."
+            )
+            return data
+        raise ValueError(
+            "Unsigned legacy pickle files are not allowed. "
+            "Run 'manage.py resign_models' to sign existing files, "
+            "then set PICKLE_ALLOW_LEGACY_UNSIGNED=false."
+        )
 
     raise ValueError(
         "Pickle file signature verification failed. "

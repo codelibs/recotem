@@ -377,7 +377,7 @@ def test_race_condition_two_workers_set_running(
 def test_run_search_task_sets_pending_to_running_once(
     user, project, split_config, eval_config, ml100k
 ):
-    """run_search task should atomically set PENDING to RUNNING only once."""
+    """Atomic PENDING -> RUNNING transition should only succeed once."""
     import io
 
     from django.core.files.uploadedfile import SimpleUploadedFile
@@ -399,24 +399,26 @@ def test_run_search_task_sets_pending_to_running_once(
         n_tasks_parallel=1,
     )
 
-    # Mock the actual Optuna search to avoid long computation
-    with (
-        patch("recotem.api.tasks.optuna.create_study"),
-        patch("recotem.api.tasks.study.optimize"),
-    ):
-        # Verify PENDING -> RUNNING atomic transition
-        job.refresh_from_db()
-        initial_status = job.status
-        assert initial_status == ParameterTuningJob.Status.PENDING
+    # Verify PENDING -> RUNNING atomic transition
+    job.refresh_from_db()
+    assert job.status == ParameterTuningJob.Status.PENDING
 
-        # Manually update to RUNNING (simulating what the task does)
-        ParameterTuningJob.objects.filter(
-            id=job.id,
-            status=ParameterTuningJob.Status.PENDING,
-        ).update(status=ParameterTuningJob.Status.RUNNING)
+    # First worker succeeds
+    updated = ParameterTuningJob.objects.filter(
+        id=job.id,
+        status=ParameterTuningJob.Status.PENDING,
+    ).update(status=ParameterTuningJob.Status.RUNNING)
+    assert updated == 1
 
-        job.refresh_from_db()
-        assert job.status == ParameterTuningJob.Status.RUNNING
+    # Second worker fails (already RUNNING)
+    updated2 = ParameterTuningJob.objects.filter(
+        id=job.id,
+        status=ParameterTuningJob.Status.PENDING,
+    ).update(status=ParameterTuningJob.Status.RUNNING)
+    assert updated2 == 0
+
+    job.refresh_from_db()
+    assert job.status == ParameterTuningJob.Status.RUNNING
 
 
 @pytest.mark.django_db

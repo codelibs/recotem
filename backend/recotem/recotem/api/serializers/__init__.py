@@ -78,7 +78,7 @@ class ModelConfigurationSerializer(serializers.ModelSerializer):
 
         try:
             get_recommender_class(value)
-        except ValueError:
+        except (ValueError, KeyError):
             raise serializers.ValidationError(
                 f"'{value}' is not a valid irspack recommender class."
             ) from None

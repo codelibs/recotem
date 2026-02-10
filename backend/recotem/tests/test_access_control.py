@@ -134,7 +134,7 @@ def test_cannot_create_tuning_job_with_foreign_resources(client: Client):
         content_type="application/json",
     )
     assert resp.status_code == 400
-    detail = resp.json()["error"]["detail"]
+    detail = resp.json()
     assert "data" in detail
     assert "split" in detail
     assert "evaluation" in detail
@@ -166,7 +166,7 @@ def test_cannot_create_trained_model_with_foreign_resources(client: Client):
         content_type="application/json",
     )
     assert resp.status_code == 400
-    detail = resp.json()["error"]["detail"]
+    detail = resp.json()
     assert "configuration" in detail or "data_loc" in detail
 
 

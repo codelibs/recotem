@@ -124,7 +124,7 @@ class TestTrainAndSaveModel:
             data_loc=training_data,
         )
 
-        with pytest.raises((ImportError, AttributeError, ValueError)):
+        with pytest.raises((ImportError, AttributeError, ValueError, KeyError)):
             train_and_save_model(model)
 
     def test_train_and_save_model_raises_on_invalid_params_type(

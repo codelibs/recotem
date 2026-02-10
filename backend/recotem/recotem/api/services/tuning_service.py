@@ -13,10 +13,11 @@ def get_optuna_storage() -> RDBStorage:
     # Use psycopg3 dialect for SQLAlchemy (Optuna uses SQLAlchemy internally)
     if db_url.startswith("postgresql://"):
         db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
-    return RDBStorage(
-        db_url,
-        engine_kwargs={"pool_size": 5, "max_overflow": 10},
-    )
+    engine_kwargs: dict = {}
+    # SQLite doesn't support connection pooling parameters
+    if not db_url.startswith("sqlite"):
+        engine_kwargs = {"pool_size": 5, "max_overflow": 10}
+    return RDBStorage(db_url, engine_kwargs=engine_kwargs)
 
 
 def create_tuning_study(job: ParameterTuningJob) -> str:

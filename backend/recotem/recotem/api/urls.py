@@ -43,7 +43,7 @@ router.register(r"task_log", TaskLogViewSet, basename="task_log")
 
 urlpatterns = [
     path("", include(router.urls)),
-    path("ping/", PingView.as_view()),
+    path("ping/", PingView.as_view(), name="ping"),
     path("project_summary/<int:pk>/", ProjectSummaryView.as_view()),
     path(
         "auth/login/",

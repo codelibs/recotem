@@ -27,6 +27,11 @@ class TrainingDataSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Project not found.")
         return project
 
+    def validate(self, attrs):
+        if not attrs.get("file"):
+            raise exceptions.ValidationError({"file": ["file is required."]})
+        return attrs
+
     def create(self, validated_data):
         obj: TrainingData = TrainingData.objects.create(**validated_data)
         try:

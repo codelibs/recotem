@@ -6,7 +6,7 @@ the security mechanisms.
 """
 
 import pickle  # noqa: S403
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -21,7 +21,6 @@ from recotem.api.models import (
     TrainedModel,
     TrainingData,
 )
-from recotem.api.services.id_mapper_compat import IDMappedRecommender
 from recotem.api.services.model_service import (
     _METADATA_KEY_PREFIX,
     _MODEL_KEY_PREFIX,
@@ -31,6 +30,14 @@ from recotem.api.services.model_service import (
 from recotem.api.services.pickle_signing import sign_pickle_bytes
 
 User = get_user_model()
+
+
+class _FakeRecommender:
+    """A picklable stand-in for IDMappedRecommender used in tests."""
+
+    def __init__(self):
+        self.n_users = 10
+        self.n_items = 20
 
 
 @pytest.fixture
@@ -69,11 +76,8 @@ def model_config(project):
 
 @pytest.fixture
 def mock_recommender():
-    """Create a mock IDMappedRecommender for testing."""
-    mock_rec = Mock(spec=IDMappedRecommender)
-    mock_rec.n_users = 10
-    mock_rec.n_items = 20
-    return mock_rec
+    """Create a picklable fake recommender for testing."""
+    return _FakeRecommender()
 
 
 @pytest.mark.django_db
@@ -128,8 +132,9 @@ class TestFetchMappedRec:
             rec2 = fetch_mapped_rec(model.pk)
             mock_open.assert_not_called()
 
-        # Should return the same object from cache
-        assert rec2 is rec1
+        # Should return an equivalent object from cache
+        assert rec2.n_users == rec1.n_users
+        assert rec2.n_items == rec1.n_items
 
     def test_load_model_raises_on_tampered_signature(
         self, model_config, training_data, mock_recommender
@@ -270,8 +275,8 @@ class TestFetchItemMetadata:
             df2 = fetch_item_metadata(meta.pk)
             mock_read.assert_not_called()
 
-        # Should be the same cached object
-        assert df2 is df1
+        # Should have identical content (cache may return a copy)
+        assert df2.equals(df1)
 
     def test_load_item_metadata_raises_on_missing(self):
         """Raises ResourceNotFoundError for non-existent metadata."""

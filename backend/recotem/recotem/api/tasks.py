@@ -83,7 +83,7 @@ def _resolve_recommender_class_name(algorithm_name: str) -> str | None:
     for candidate in candidates:
         try:
             get_recommender_class(candidate)
-        except (ImportError, AttributeError, ValueError):
+        except (ImportError, AttributeError, ValueError, KeyError):
             continue
         return candidate
     return None

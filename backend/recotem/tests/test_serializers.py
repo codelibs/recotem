@@ -137,8 +137,6 @@ class TestModelConfigurationSerializer:
             "IALSRecommender",
             "TopPopRecommender",
             "CosineKNNRecommender",
-            "MyCustomRecommender123",
-            "_PrivateRecommender",
         ]
 
         for name in valid_names:

@@ -1,0 +1,16 @@
+# CI-specific Docker Compose override
+# Usage: docker compose -f compose.yaml -f compose.ci.yaml up -d
+services:
+  backend:
+    healthcheck:
+      start_period: 120s
+      interval: 10s
+      retries: 12
+    environment:
+      - SECRET_KEY=${SECRET_KEY:-ci-test-secret-key-for-testing-only-not-production}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD}
+      - DEBUG=true
+  worker:
+    environment:
+      - SECRET_KEY=${SECRET_KEY:-ci-test-secret-key-for-testing-only-not-production}
+      - DEBUG=true

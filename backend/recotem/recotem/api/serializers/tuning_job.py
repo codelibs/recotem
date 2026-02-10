@@ -59,12 +59,15 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
         evaluation = attrs.get("evaluation")
         if user is None:
             return attrs
+        errors: dict[str, list[str]] = {}
         if data is not None and data.project.owner_id not in (None, user.id):
-            raise ValidationError(dict(data=["Data not found."]))
+            errors["data"] = ["Data not found."]
         if split is not None and split.created_by_id not in (None, user.id):
-            raise ValidationError(dict(split=["Split config not found."]))
+            errors["split"] = ["Split config not found."]
         if evaluation is not None and evaluation.created_by_id not in (None, user.id):
-            raise ValidationError(dict(evaluation=["Evaluation config not found."]))
+            errors["evaluation"] = ["Evaluation config not found."]
+        if errors:
+            raise ValidationError(errors)
         return attrs
 
     def create(self, validated_data):

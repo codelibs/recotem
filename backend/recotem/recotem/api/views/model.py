@@ -59,18 +59,9 @@ class TrainedModelViewset(
             "recommendation",
             "recommend_using_profile_interaction",
         ):
+            self.throttle_scope = "recommendation"
             return [ScopedRateThrottle()]
         return super().get_throttles()
-
-    def get_throttle_scope(self):
-        if self.action in (
-            "sample_recommendation_raw",
-            "sample_recommendation_metadata",
-            "recommendation",
-            "recommend_using_profile_interaction",
-        ):
-            return "recommendation"
-        return None
 
     def get_queryset(self):
         return (

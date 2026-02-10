@@ -84,17 +84,14 @@ def test_invalid_compression(client: Client, ml100k: pd.DataFrame):
         dict(project=failing_project_id_item, file=unk_compression_file),
     )
     assert resp.status_code == 400
-    assert (
-        resp.json()["error"]["detail"][0]
-        == "Only .gzip or .gz compression are supported."
-    )
+    assert resp.json()["file"][0] == "Only .gzip or .gz compression are supported."
 
     resp = client.post(
         data_url,
         dict(project=failing_project_id_item),
     )
     assert resp.status_code == 400
-    assert resp.json()["error"]["detail"][0] == "file is required."
+    assert resp.json()["file"][0] == "file is required."
 
 
 @pytest.mark.django_db
@@ -119,7 +116,7 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
     )
     assert resp.status_code == 400
     assert (
-        resp.json()["error"]["detail"][0]
+        resp.json()["file"][0]
         == "Suffix like .csv or .json.gzip or pickle.gz required."
     )
 
@@ -132,7 +129,7 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
     )
     assert resp.status_code == 400
 
-    message: str = resp.json()["error"]["detail"][0]
+    message: str = resp.json()["file"][0]
     assert message.startswith(".unknown file not supported.")
 
     toomany_prefix_file = NamedTemporaryFile(suffix=".csv.json.tgz")
@@ -152,7 +149,7 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
         data_url, dict(project=failing_project_id_item, file=wrong_ext_file)
     )
     assert resp.status_code == 400
-    assert resp.json()["error"]["detail"][0].startswith("Failed to parse")
+    assert resp.json()["file"][0].startswith("Failed to parse")
 
 
 @pytest.mark.django_db
@@ -208,7 +205,7 @@ def test_data_post(client: Client, ml100k: pd.DataFrame):
     )
     assert resp_no_timestamp.status_code == 400
     assert (
-        resp_no_timestamp.json()["error"]["detail"][0]
+        resp_no_timestamp.json()["file"][0]
         == 'Column "timestamp" not found in the upload file.'
     )
 
@@ -310,10 +307,7 @@ def test_datetime(
 
     response = client.post(data_url, dict(project=project_id, file=pkl_file))
     assert response.status_code == 400
-    assert (
-        response.json()["error"]["detail"][0]
-        == 'Could not interpret "timestamp" as datetime.'
-    )
+    assert response.json()["file"][0] == 'Could not interpret "timestamp" as datetime.'
 
 
 @pytest.mark.django_db

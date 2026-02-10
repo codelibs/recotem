@@ -9,6 +9,7 @@ import pytest
 from django.test import Client
 
 from recotem.api.services.id_mapper_compat import IDMappedRecommender
+from recotem.api.services.pickle_signing import verify_and_extract
 
 from .test_data_post import login_client
 
@@ -129,7 +130,9 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         for chunk in download_response.streaming_content:
             temp_ofs.write(chunk)
         temp_ofs.seek(0)
-        download_model = pickle.load(temp_ofs)
+        raw_data = temp_ofs.read()
+        payload = verify_and_extract(raw_data)
+        download_model = pickle.loads(payload)  # noqa: S301
         assert "id_mapped_recommender" in download_model
         assert "irspack_version" in download_model
     mapped_rec: IDMappedRecommender = download_model["id_mapped_recommender"]
@@ -175,7 +178,9 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         for chunk in download_response_tuned_model.streaming_content:
             temp_ofs.write(chunk)
         temp_ofs.seek(0)
-        result = pickle.load(temp_ofs)
+        raw_data_tuned = temp_ofs.read()
+        payload_tuned = verify_and_extract(raw_data_tuned)
+        result = pickle.loads(payload_tuned)  # noqa: S301
         assert "id_mapped_recommender" in result
         assert "irspack_version" in result
 

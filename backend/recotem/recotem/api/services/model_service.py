@@ -8,6 +8,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
+from rest_framework.exceptions import ValidationError
 
 from recotem.api.exceptions import ModelLoadError, ResourceNotFoundError
 from recotem.api.models import ItemMetaData, Project, TrainedModel
@@ -87,7 +88,12 @@ def fetch_item_metadata(pk: int) -> pd.DataFrame | None:
         )
         cache.set(cache_key, result, _CACHE_TIMEOUT)
         return result
-    except (TypeError, ValueError, pd.errors.ParserError) as e:
+    except (
+        TypeError,
+        ValueError,
+        pd.errors.ParserError,
+        ValidationError,
+    ) as e:
         logger.exception("Could not load item metadata %s.", pk)
         raise ModelLoadError(detail=f"Could not load item metadata {pk}.") from e
 

@@ -242,14 +242,17 @@ class TaskLogViewSet(OwnedResourceMixin, viewsets.ReadOnlyModelViewSet):
 
     def get_owner_filter(self) -> db_models.Q:
         user = self.request.user
-        return (
+        via_tuning = db_models.Q(task__tuning_job_link__isnull=False) & (
             db_models.Q(task__tuning_job_link__job__data__project__owner=user)
             | db_models.Q(task__tuning_job_link__job__data__project__owner__isnull=True)
-            | db_models.Q(task__model_link__model__data_loc__project__owner=user)
+        )
+        via_model = db_models.Q(task__model_link__isnull=False) & (
+            db_models.Q(task__model_link__model__data_loc__project__owner=user)
             | db_models.Q(
                 task__model_link__model__data_loc__project__owner__isnull=True
             )
         )
+        return via_tuning | via_model
 
     def get_queryset(self):
         return (

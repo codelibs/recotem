@@ -110,7 +110,7 @@ def save_file_size(
     if not created:
         return
     if not bool(instance.file):
-        raise ValidationError(detail="file is required.")
+        return
     instance.filesize = instance.file.size
     instance.save()
 

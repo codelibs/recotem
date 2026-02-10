@@ -37,11 +37,11 @@ test.describe("Model Management", () => {
     const projectId = await createProject(page, name);
 
     // Navigate to models page
-    await page.locator("nav").getByRole("link", { name: /Models/ }).click();
+    await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Models/ }).click();
     await expect(page).toHaveURL(
       new RegExp(`/projects/${projectId}/models`),
     );
-    await expect(page.getByText("Trained Models")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Trained Models", exact: true })).toBeVisible();
   });
 
   test("should show empty models table", async ({ page }) => {
@@ -49,8 +49,8 @@ test.describe("Model Management", () => {
     await createProject(page, name);
 
     // Navigate to models page
-    await page.locator("nav").getByRole("link", { name: /Models/ }).click();
-    await expect(page.getByText("Trained Models")).toBeVisible();
+    await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Models/ }).click();
+    await expect(page.getByRole("heading", { name: "Trained Models", exact: true })).toBeVisible();
 
     // Should show empty message
     await expect(page.getByText("No trained models yet")).toBeVisible();
@@ -60,7 +60,7 @@ test.describe("Model Management", () => {
     const name = `E2E Model Btn ${Date.now()}`;
     await createProject(page, name);
 
-    await page.locator("nav").getByRole("link", { name: /Models/ }).click();
+    await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Models/ }).click();
     await expect(
       page.getByRole("button", { name: "Train Model" }),
     ).toBeVisible();
@@ -70,7 +70,7 @@ test.describe("Model Management", () => {
     const name = `E2E Model Train ${Date.now()}`;
     const projectId = await createProject(page, name);
 
-    await page.locator("nav").getByRole("link", { name: /Models/ }).click();
+    await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Models/ }).click();
     await page.getByRole("button", { name: "Train Model" }).click();
 
     await expect(page).toHaveURL(
@@ -82,8 +82,8 @@ test.describe("Model Management", () => {
     const name = `E2E Model Cols ${Date.now()}`;
     await createProject(page, name);
 
-    await page.locator("nav").getByRole("link", { name: /Models/ }).click();
-    await expect(page.getByText("Trained Models")).toBeVisible();
+    await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Models/ }).click();
+    await expect(page.getByRole("heading", { name: "Trained Models", exact: true })).toBeVisible();
 
     // New project has no models — verify empty state is shown
     await expect(page.getByText("No trained models yet")).toBeVisible();

@@ -36,7 +36,7 @@ async function createProjectWithData(
   const projectId = match?.[1] ?? "";
 
   // Upload test data
-  await page.locator("nav").getByRole("link", { name: /Data/ }).click();
+  await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Data/ }).click();
   await page.getByRole("button", { name: "Upload Data" }).click();
 
   const csvPath = createTestCsv();
@@ -83,7 +83,7 @@ test.describe("Tuning Wizard", () => {
     const projectId = await createProjectWithData(page, name);
 
     // Navigate to tuning page
-    await page.locator("nav").getByRole("link", { name: /Tuning/ }).click();
+    await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Tuning/ }).click();
     await expect(page).toHaveURL(
       new RegExp(`/projects/${projectId}/tuning`),
     );
@@ -95,7 +95,7 @@ test.describe("Tuning Wizard", () => {
     const projectId = await createProjectWithData(page, name);
 
     // Navigate to new tuning job
-    await page.locator("nav").getByRole("link", { name: /Tuning/ }).click();
+    await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Tuning/ }).click();
     await page.getByRole("button", { name: /New.*Job|Start.*Tuning/ }).click();
 
     await expect(page).toHaveURL(
@@ -115,7 +115,7 @@ test.describe("Tuning Wizard", () => {
     await createProjectWithData(page, name);
 
     // Go to tuning wizard
-    await page.locator("nav").getByRole("link", { name: /Tuning/ }).click();
+    await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Tuning/ }).click();
     await page.getByRole("button", { name: /New.*Job|Start.*Tuning/ }).click();
     await expect(page.getByText("New Tuning Job")).toBeVisible();
 
@@ -162,7 +162,7 @@ test.describe("Tuning Wizard", () => {
     await createProjectWithData(page, name);
 
     // Go to tuning wizard
-    await page.locator("nav").getByRole("link", { name: /Tuning/ }).click();
+    await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Tuning/ }).click();
     await page.getByRole("button", { name: /New.*Job|Start.*Tuning/ }).click();
 
     // Select data and go to step 2
@@ -182,7 +182,7 @@ test.describe("Tuning Wizard", () => {
     const projectId = await createProjectWithData(page, name);
 
     // Go to tuning wizard
-    await page.locator("nav").getByRole("link", { name: /Tuning/ }).click();
+    await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Tuning/ }).click();
     await page.getByRole("button", { name: /New.*Job|Start.*Tuning/ }).click();
 
     // Step 1: Select data

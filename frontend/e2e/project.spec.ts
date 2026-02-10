@@ -61,20 +61,15 @@ test.describe("Project Management", () => {
     await expect(page).toHaveURL(/\/projects\/\d+/);
   });
 
-  test("should show empty state when no projects", async ({ page }) => {
-    // This test verifies the empty state message exists in DOM
-    // (may not be visible if projects already exist)
-    const emptyMsg = page.getByText("No projects yet");
-    const projectCards = page.locator('[class*="cursor-pointer"]');
+  test("should show project list or empty state", async ({ page }) => {
+    // Other parallel tests may create projects, so either state is valid
+    const heading = page.getByRole("heading", { name: "Projects" });
+    await expect(heading).toBeVisible();
 
-    // Either there are projects or the empty state is shown
-    const hasProjects = (await projectCards.count()) > 0;
-    if (!hasProjects) {
-      await expect(emptyMsg).toBeVisible();
-      await expect(
-        page.getByRole("button", { name: "Create Project" }),
-      ).toBeVisible();
-    }
+    // Verify the page loaded successfully with either projects or empty state
+    const projectCards = page.locator(".cursor-pointer");
+    const emptyState = page.getByText("No projects yet");
+    await expect(projectCards.first().or(emptyState)).toBeVisible();
   });
 
   test("should show project details with sidebar navigation", async ({
@@ -95,8 +90,8 @@ test.describe("Project Management", () => {
     await expect(page).toHaveURL(/\/projects\/\d+/);
 
     // Verify sidebar navigation links
-    await expect(page.locator("nav").getByRole("link", { name: /Data/ })).toBeVisible();
-    await expect(page.locator("nav").getByRole("link", { name: /Tuning/ })).toBeVisible();
-    await expect(page.locator("nav").getByRole("link", { name: /Models/ })).toBeVisible();
+    await expect(page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Data/ })).toBeVisible();
+    await expect(page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Tuning/ })).toBeVisible();
+    await expect(page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Models/ })).toBeVisible();
   });
 });

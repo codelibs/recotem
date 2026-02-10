@@ -1,19 +1,19 @@
 import { test, expect } from "@playwright/test";
 
 test("API is reachable", async ({ request }) => {
-  // Poll until the backend is ready (containers may still be starting)
-  const maxAttempts = 30;
-  const interval = 2000;
+  // CI workflow already waits for backend readiness via curl.
+  // This is a quick smoke check with a few retries for safety.
+  const maxAttempts = 5;
+  let lastStatus = 0;
   for (let i = 0; i < maxAttempts; i++) {
-    try {
-      const res = await request.get("/api/ping/");
-      if (res.ok()) return;
-    } catch {
-      // connection refused — backend not up yet
-    }
-    await new Promise((r) => setTimeout(r, interval));
+    const res = await request.get("/api/ping/");
+    lastStatus = res.status();
+    if (res.ok()) return;
+    await new Promise((r) => setTimeout(r, 2000));
   }
-  throw new Error("Backend did not become ready within 60 seconds");
+  throw new Error(
+    `Backend returned HTTP ${lastStatus} after ${maxAttempts} attempts`,
+  );
 });
 
 test("login page renders", async ({ page }) => {

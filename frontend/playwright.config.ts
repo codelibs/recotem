@@ -6,7 +6,7 @@ export default defineConfig({
   globalTimeout: 600_000,
   retries: process.env.CI ? 1 : 0,
   use: {
-    baseURL: process.env.E2E_BASE_URL ?? "http://127.0.0.1:8000",
+    baseURL: process.env.E2E_BASE_URL ?? "http://localhost:8000",
     headless: true,
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
@@ -15,7 +15,7 @@ export default defineConfig({
     {
       name: "setup",
       testMatch: /global-setup\.spec\.ts/,
-      timeout: 90_000,
+      timeout: 30_000,
     },
     {
       name: "chromium",

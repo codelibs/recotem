@@ -10,6 +10,7 @@ services:
       - SECRET_KEY=${SECRET_KEY:-ci-test-secret-key-for-testing-only-not-production}
       - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD}
       - DEBUG=true
+      - ALLOWED_HOSTS=localhost,127.0.0.1
   worker:
     environment:
       - SECRET_KEY=${SECRET_KEY:-ci-test-secret-key-for-testing-only-not-production}

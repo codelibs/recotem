@@ -19,7 +19,7 @@ spec:
             matchLabels:
               {{- include "recotem.proxySelectorLabels" . | nindent 14 }}
       ports:
-        - port: 80
+        - port: 8080
           protocol: TCP
   egress:
     # Allow DNS resolution (kube-system only)
@@ -126,6 +126,6 @@ spec:
             matchLabels:
               {{- include "recotem.backendSelectorLabels" . | nindent 14 }}
       ports:
-        - port: 80
+        - port: 8080
           protocol: TCP
 {{- end }}

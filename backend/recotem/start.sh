@@ -26,4 +26,4 @@ if ! python manage.py collectstatic --noinput; then
   exit 1
 fi
 
-exec daphne recotem.asgi:application -b 0.0.0.0 -p "${BACKEND_PORT:-80}"
+exec daphne recotem.asgi:application -b 0.0.0.0 -p "${BACKEND_PORT:-8080}"

@@ -37,7 +37,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 RUN groupadd -r -g 1000 appuser \
     && useradd -r -u 1000 -g appuser -d /app -s /sbin/nologin appuser \
-    && mkdir -p /app /data \
+    && mkdir -p /app /data /app/dist/static \
     && chown -R appuser:appuser /app /data
 
 WORKDIR /app
@@ -47,8 +47,5 @@ USER appuser
 
 STOPSIGNAL SIGTERM
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:80/api/ping/ || exit 1
-
-EXPOSE 80
+EXPOSE 8080
 CMD ["/app/start.sh"]

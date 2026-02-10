@@ -62,8 +62,16 @@ jobs:
           DEFAULT_ADMIN_PASSWORD: ${{ env.E2E_ADMIN_PASSWORD }}
         run: |
           docker compose -f compose.yaml -f compose.ci.yaml build
-          docker compose -f compose.yaml -f compose.ci.yaml up -d
-          timeout 180 bash -c 'until curl -sf http://localhost:8000/api/ping/; do echo "Waiting for services..."; sleep 5; done'
+          docker compose -f compose.yaml -f compose.ci.yaml up -d || {
+            echo "::error::Docker Compose failed to start services"
+            docker compose -f compose.yaml -f compose.ci.yaml logs --no-color
+            exit 1
+          }
+          timeout 180 bash -c 'until curl -sf http://localhost:8000/api/ping/; do echo "Waiting for services..."; sleep 5; done' || {
+            echo "::error::Services failed to become ready"
+            docker compose -f compose.yaml -f compose.ci.yaml logs --no-color
+            exit 1
+          }
           docker compose -f compose.yaml -f compose.ci.yaml exec -T backend python manage.py create_test_users \
             --user "e2e_user_a:${{ env.E2E_USER_A_PASSWORD }}" \
             --user "e2e_user_b:${{ env.E2E_USER_B_PASSWORD }}"

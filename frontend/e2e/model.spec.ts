@@ -88,7 +88,7 @@ test.describe("Model Management", () => {
     // New project has no models — verify empty state is shown
     await expect(page.getByText("No trained models yet")).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Train Model" }),
+      page.getByRole("button", { name: "Train Model" }).first(),
     ).toBeVisible();
   });
 });

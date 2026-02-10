@@ -101,13 +101,13 @@ test.describe("Tuning Wizard", () => {
     await expect(page).toHaveURL(
       new RegExp(`/projects/${projectId}/tuning/new`),
     );
-    await expect(page.getByText("New Tuning Job")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "New Tuning Job" })).toBeVisible();
 
     // Verify stepper steps are visible
-    await expect(page.getByText("Data")).toBeVisible();
-    await expect(page.getByText("Split")).toBeVisible();
-    await expect(page.getByText("Evaluation")).toBeVisible();
-    await expect(page.getByText("Run")).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Data" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Split" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Evaluation" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Run" })).toBeVisible();
   });
 
   test("should navigate through wizard steps", async ({ page }) => {
@@ -117,7 +117,7 @@ test.describe("Tuning Wizard", () => {
     // Go to tuning wizard
     await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Tuning/ }).click();
     await page.getByRole("button", { name: /New.*Job|Start.*Tuning/ }).click();
-    await expect(page.getByText("New Tuning Job")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "New Tuning Job" })).toBeVisible();
 
     // Step 1: Training Data
     await expect(page.getByText("Training Data")).toBeVisible();

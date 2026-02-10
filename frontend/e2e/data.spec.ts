@@ -138,7 +138,7 @@ test.describe("Data Management", () => {
     // Verify table columns
     await expect(page.getByText("File Name")).toBeVisible();
     await expect(page.getByText("Size")).toBeVisible();
-    await expect(page.getByText("Uploaded")).toBeVisible();
+    await expect(page.getByText("Uploaded", { exact: true })).toBeVisible();
     await expect(page.getByText("Actions")).toBeVisible();
   });
 
@@ -191,7 +191,7 @@ test.describe("Data Management", () => {
     await page.getByRole("alertdialog").getByRole("button", { name: "Delete" }).click();
 
     // Data should be removed
-    await expect(page.getByText("test_data.csv")).not.toBeVisible({
+    await expect(page.getByRole("link", { name: "test_data.csv" })).not.toBeVisible({
       timeout: 10000,
     });
   });

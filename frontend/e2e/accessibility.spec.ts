@@ -15,7 +15,7 @@ async function login(request: any) {
 
 async function setAuthToken(page: any, token: string) {
   await page.evaluate((t: string) => {
-    localStorage.setItem("access_token", t);
+    sessionStorage.setItem("access_token", t);
   }, token);
 }
 

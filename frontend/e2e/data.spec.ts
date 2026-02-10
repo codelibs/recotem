@@ -181,11 +181,11 @@ test.describe("Data Management", () => {
     // Confirm the data is present
     await expect(page.getByText("test_data.csv")).toBeVisible();
 
-    // Handle the confirm dialog
-    page.on("dialog", (dialog) => dialog.accept());
-
     // Click delete button (trash icon)
-    await page.getByRole("button", { name: /pi-trash/ }).first().click();
+    await page.getByRole("button", { name: /Delete/ }).first().click();
+
+    // Confirm in the ConfirmDialog
+    await page.getByRole("alertdialog").getByRole("button", { name: "Delete" }).click();
 
     // Data should be removed
     await expect(page.getByText("test_data.csv")).not.toBeVisible({

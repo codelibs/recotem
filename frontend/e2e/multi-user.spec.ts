@@ -81,8 +81,8 @@ test.describe("Multi-User Isolation", () => {
 
       await contextA.addInitScript(
         ({ access, refresh }) => {
-          localStorage.setItem("access_token", access);
-          localStorage.setItem("refresh_token", refresh);
+          sessionStorage.setItem("access_token", access);
+          sessionStorage.setItem("refresh_token", refresh);
           localStorage.removeItem("lastProjectId");
         },
         { access: authA.access, refresh: authA.refresh ?? "" },
@@ -93,8 +93,8 @@ test.describe("Multi-User Isolation", () => {
 
       await contextB.addInitScript(
         ({ access, refresh }) => {
-          localStorage.setItem("access_token", access);
-          localStorage.setItem("refresh_token", refresh);
+          sessionStorage.setItem("access_token", access);
+          sessionStorage.setItem("refresh_token", refresh);
           localStorage.removeItem("lastProjectId");
         },
         { access: authB.access, refresh: authB.refresh ?? "" },

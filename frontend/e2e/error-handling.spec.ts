@@ -83,7 +83,7 @@ test.describe("Error Handling", () => {
     await page.waitForLoadState("networkidle");
     // Should show the not-found page
     const text = await page.textContent("body");
-    expect(text).toContain("not found");
+    expect(text?.toLowerCase()).toContain("not found");
   });
 
   test("rate limiting shows appropriate message", async ({ page }) => {

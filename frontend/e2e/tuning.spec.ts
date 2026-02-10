@@ -116,8 +116,8 @@ test.describe("Tuning Wizard", () => {
     await page.getByRole("button", { name: /New.*Job|Start.*Tuning/ }).click();
     await expect(page.getByText("New Tuning Job")).toBeVisible();
 
-    // Step 1: Select Training Data
-    await expect(page.getByText("Select Training Data")).toBeVisible();
+    // Step 1: Training Data
+    await expect(page.getByText("Training Data")).toBeVisible();
 
     // Select the uploaded data from dropdown
     const dataSelect = page.locator(".p-select").first();
@@ -171,7 +171,7 @@ test.describe("Tuning Wizard", () => {
 
     // Go back to step 1
     await page.getByRole("button", { name: "Back" }).click();
-    await expect(page.getByText("Select Training Data")).toBeVisible();
+    await expect(page.getByText("Training Data")).toBeVisible();
   });
 
   test("should submit a tuning job", async ({ page }) => {

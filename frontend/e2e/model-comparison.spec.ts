@@ -21,7 +21,7 @@ test.describe("Model Comparison Page", () => {
     if (await projectLink.isVisible({ timeout: 3000 }).catch(() => false)) {
       await projectLink.click();
       await page.goto(page.url().replace(/\/$/, "") + "/model-comparison");
-      await expect(page.getByText("Compare Tuning Jobs")).toBeVisible({
+      await expect(page.getByText("Model Comparison")).toBeVisible({
         timeout: 10000,
       });
     }
@@ -36,7 +36,7 @@ test.describe("Model Comparison Page", () => {
       await page.goto(page.url().replace(/\/$/, "") + "/model-comparison");
       // Should show either jobs or empty message
       await expect(
-        page.getByText("Compare Tuning Jobs")
+        page.getByText("Model Comparison")
       ).toBeVisible({ timeout: 10000 });
     }
   });
@@ -47,7 +47,7 @@ test.describe("Dark Mode", () => {
     await login(page);
 
     // Check if dark mode toggle exists
-    const darkModeToggle = page.locator("[data-testid='dark-mode-toggle'], button:has-text('Dark'), .dark-mode-toggle").first();
+    const darkModeToggle = page.locator("button[aria-label*='Switch to']").first();
     if (await darkModeToggle.isVisible({ timeout: 3000 }).catch(() => false)) {
       // Toggle dark mode on
       await darkModeToggle.click();

@@ -25,10 +25,8 @@ class TestResignModels:
         from django.core.files.base import ContentFile
 
         from recotem.api.models import (
-            EvaluationConfig,
             ModelConfiguration,
             Project,
-            SplitConfig,
             TrainedModel,
             TrainingData,
         )
@@ -39,15 +37,12 @@ class TestResignModels:
             item_column="item",
         )
         td = TrainingData.objects.create(project=project)
-        sc = SplitConfig.objects.create(created_by=None)
-        ec = EvaluationConfig.objects.create(created_by=None)
         mc = ModelConfiguration.objects.create(
             name="cfg",
-            data=td,
-            split=sc,
-            evaluation=ec,
+            project=project,
+            recommender_class_name="IALSRecommender",
         )
-        model = TrainedModel.objects.create(configuration=mc)
+        model = TrainedModel.objects.create(configuration=mc, data_loc=td)
         model.file.save("model.bin", ContentFile(data))
         return model
 
@@ -101,10 +96,8 @@ class TestResignModels:
     def test_empty_file_excluded(self):
         """Models with empty file field are excluded."""
         from recotem.api.models import (
-            EvaluationConfig,
             ModelConfiguration,
             Project,
-            SplitConfig,
             TrainedModel,
             TrainingData,
         )
@@ -113,12 +106,12 @@ class TestResignModels:
             name="resign_empty", user_column="user", item_column="item"
         )
         td = TrainingData.objects.create(project=project)
-        sc = SplitConfig.objects.create(created_by=None)
-        ec = EvaluationConfig.objects.create(created_by=None)
         mc = ModelConfiguration.objects.create(
-            name="cfg_empty", data=td, split=sc, evaluation=ec
+            name="cfg_empty",
+            project=project,
+            recommender_class_name="IALSRecommender",
         )
-        TrainedModel.objects.create(configuration=mc)  # no file
+        TrainedModel.objects.create(configuration=mc, data_loc=td)  # no file
 
         out = io.StringIO()
         call_command("resign_models", stdout=out)

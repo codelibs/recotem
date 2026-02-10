@@ -26,16 +26,6 @@
   --color-neutral-500: #42526E;
   --color-neutral-800: #172B4D;
 
-  /* Atlassian 8px grid spacing scale */
-  --spacing-0_5: 4px;
-  --spacing-1: 8px;
-  --spacing-1_5: 12px;
-  --spacing-2: 16px;
-  --spacing-3: 24px;
-  --spacing-4: 32px;
-  --spacing-5: 40px;
-  --spacing-6: 48px;
-
   /* Shadows (Atlassian elevation) */
   --shadow-sm: 0 1px 1px rgba(9, 30, 66, 0.25), 0 0 1px rgba(9, 30, 66, 0.31);
   --shadow-md: 0 4px 8px -2px rgba(9, 30, 66, 0.25), 0 0 1px rgba(9, 30, 66, 0.31);

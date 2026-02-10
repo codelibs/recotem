@@ -93,7 +93,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Run Trivy vulnerability scanner (blocking)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           image-ref: "ghcr.io/codelibs/${{ matrix.image }}:${{ github.ref_name }}"
           format: 'table'
@@ -101,7 +101,7 @@ jobs:
           severity: 'CRITICAL,HIGH'
           scanners: vuln
       - name: Run Trivy vulnerability scanner (SARIF report)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.33.1
         if: always()
         with:
           image-ref: "ghcr.io/codelibs/${{ matrix.image }}:${{ github.ref_name }}"

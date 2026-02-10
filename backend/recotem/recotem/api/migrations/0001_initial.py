@@ -7,7 +7,6 @@ import recotem.api.models.base_file_model
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = [

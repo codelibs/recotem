@@ -2,17 +2,19 @@ import gzip
 import pickle
 from tempfile import NamedTemporaryFile
 from time import sleep
-from typing import IO, Optional
 
 import numpy as np
 import pandas as pd
 import pytest
 from django.test import Client
-from irspack.utils.id_mapping import IDMappedRecommender
+
+from recotem.api.services.id_mapper_compat import IDMappedRecommender
+from recotem.api.services.pickle_signing import verify_and_extract
 
 from .test_data_post import login_client
 
-RNS = np.random.RandomState(0)
+# Use default_rng instead of deprecated RandomState for NumPy 2.x compatibility
+RNG = np.random.default_rng(seed=0)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -29,7 +31,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
     project_resp = client.post(
         project_url,
         dict(
-            name=f"ml_project",
+            name="ml_project",
             user_column="userId",
             item_column="movieId",
             time_column="timestamp",
@@ -39,7 +41,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         raise RuntimeError(project_resp.json())
 
     project_id = project_resp.json()["id"]
-    pkl_file = NamedTemporaryFile(suffix=f".json.gz")
+    pkl_file = NamedTemporaryFile(suffix=".json.gz")
     pkl_gzip_file = gzip.open(pkl_file, mode="wb")
     ml100k.to_json(pkl_gzip_file)
     pkl_gzip_file.close()
@@ -77,7 +79,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
             timeout_singlestep=5,
         ),
     )
-    job_response_unlinked_data.status_code == 400
+    assert job_response_unlinked_data.status_code == 400
     assert "has been deleted" in job_response_unlinked_data.json()["data"][0]
 
     job_response = client.post(
@@ -92,10 +94,10 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
             timeout_singlestep=5,
         ),
     )
-    job_response.status_code == 201
+    assert job_response.status_code == 201
     job_id = job_response.json()["id"]
 
-    best_config: Optional[int] = None
+    best_config: int | None = None
     for _ in range(30):
         job = client.get(f"{parameter_tuning_job_url}{job_id}/").json()
         best_config = job["best_config"]
@@ -128,12 +130,14 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         for chunk in download_response.streaming_content:
             temp_ofs.write(chunk)
         temp_ofs.seek(0)
-        download_model = pickle.load(temp_ofs)
+        raw_data = temp_ofs.read()
+        payload = verify_and_extract(raw_data)
+        download_model = pickle.loads(payload)  # noqa: S301
         assert "id_mapped_recommender" in download_model
         assert "irspack_version" in download_model
     mapped_rec: IDMappedRecommender = download_model["id_mapped_recommender"]
     for _ in range(5):
-        profile_ids = [str(x) for x in RNS.choice(mapped_rec.item_ids, size=10)]
+        profile_ids = [str(x) for x in RNG.choice(mapped_rec.item_ids, size=10)]
         gt = mapped_rec.get_recommendation_for_new_user(profile_ids, cutoff=10)
         model_response = client.post(
             f"{model_url}{model_id}/recommend_using_profile_interaction/",
@@ -155,7 +159,7 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         ),
     ).json()["id"]
 
-    tuned_model_id: Optional[int] = None
+    tuned_model_id: int | None = None
     for _ in range(20):
         job_ = client.get(
             f"{parameter_tuning_job_url}{job_with_train_afterward_id}/"
@@ -174,7 +178,9 @@ def test_tuning(client: Client, ml100k: pd.DataFrame, celery_worker) -> None:
         for chunk in download_response_tuned_model.streaming_content:
             temp_ofs.write(chunk)
         temp_ofs.seek(0)
-        result = pickle.load(temp_ofs)
+        raw_data_tuned = temp_ofs.read()
+        payload_tuned = verify_and_extract(raw_data_tuned)
+        result = pickle.loads(payload_tuned)  # noqa: S301
         assert "id_mapped_recommender" in result
         assert "irspack_version" in result
 

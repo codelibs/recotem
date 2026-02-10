@@ -1,5 +1,4 @@
 import gzip
-import json
 import typing
 from tempfile import NamedTemporaryFile
 
@@ -12,8 +11,8 @@ from pandas import testing as pd_testing
 
 from recotem.api.models import TrainingData
 
-I_O_functions: typing.List[
-    typing.Tuple[
+I_O_functions: list[
+    tuple[
         str,
         typing.Callable[[pd.DataFrame, typing.IO], None],
         typing.Callable[[typing.IO], pd.DataFrame],
@@ -43,16 +42,6 @@ I_O_functions: typing.List[
         ".jsonl",
         lambda df, file: df.to_json(file, lines=True, orient="records"),
         lambda file: pd.read_json(file, lines=True, orient="records"),
-    ),
-    (
-        ".pickle",
-        lambda df, file: df.to_pickle(file),
-        lambda file: pd.read_pickle(file),
-    ),
-    (
-        ".pkl",
-        lambda df, file: df.to_pickle(file),
-        lambda file: pd.read_pickle(file),
     ),
 ]
 
@@ -85,14 +74,14 @@ def test_invalid_compression(client: Client, ml100k: pd.DataFrame):
         dict(project=failing_project_id_item, file=unk_compression_file),
     )
     assert resp.status_code == 400
-    assert resp.json()[0] == "Only .gzip or .gz compression are supported."
+    assert resp.json()["file"][0] == "Only .gzip or .gz compression are supported."
 
     resp = client.post(
         data_url,
         dict(project=failing_project_id_item),
     )
     assert resp.status_code == 400
-    assert resp.json()[0] == "file is required."
+    assert resp.json()["file"][0] == "file is required."
 
 
 @pytest.mark.django_db
@@ -116,7 +105,7 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
         data_url, dict(project=failing_project_id_item, file=no_ext_file)
     )
     assert resp.status_code == 400
-    assert resp.json()[0] == "Suffix like .csv or .json.gzip or pickle.gz required."
+    assert resp.json()["file"][0] == "Suffix like .csv or .json.gzip required."
 
     unknown_ext_file = NamedTemporaryFile(suffix=".unknown")
     ml100k.to_csv(unknown_ext_file, index=False)
@@ -127,7 +116,7 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
     )
     assert resp.status_code == 400
 
-    message: str = resp.json()[0]
+    message: str = resp.json()["file"][0]
     assert message.startswith(".unknown file not supported.")
 
     toomany_prefix_file = NamedTemporaryFile(suffix=".csv.json.tgz")
@@ -147,7 +136,7 @@ def test_invalid_file_format(client: Client, ml100k: pd.DataFrame):
         data_url, dict(project=failing_project_id_item, file=wrong_ext_file)
     )
     assert resp.status_code == 400
-    assert resp.json()[0].startswith("Failed to parse")
+    assert resp.json()["file"][0].startswith("Failed to parse")
 
 
 @pytest.mark.django_db
@@ -203,7 +192,7 @@ def test_data_post(client: Client, ml100k: pd.DataFrame):
     )
     assert resp_no_timestamp.status_code == 400
     assert (
-        resp_no_timestamp.json()[0]
+        resp_no_timestamp.json()["file"][0]
         == 'Column "timestamp" not found in the upload file.'
     )
 
@@ -287,7 +276,7 @@ def test_datetime(
     project_resp = client.post(
         project_url,
         dict(
-            name=f"ml_project_wrong_timecolumn",
+            name="ml_project_wrong_timecolumn",
             user_column="userId",
             item_column="movieId",
             time_column="timestamp",
@@ -295,7 +284,7 @@ def test_datetime(
     )
 
     project_id = project_resp.json()["id"]
-    pkl_file = NamedTemporaryFile(suffix=f".json.gz")
+    pkl_file = NamedTemporaryFile(suffix=".json.gz")
     pkl_gzip_file = gzip.open(pkl_file, mode="wb")
     ml100k_dummy_ts = ml100k.copy()
     ml100k_dummy_ts["timestamp"] = "This is not a time!"
@@ -305,7 +294,7 @@ def test_datetime(
 
     response = client.post(data_url, dict(project=project_id, file=pkl_file))
     assert response.status_code == 400
-    assert 'Could not interpret "timestamp" as datetime.' == response.json()[0]
+    assert response.json()["file"][0] == 'Could not interpret "timestamp" as datetime.'
 
 
 @pytest.mark.django_db
@@ -320,14 +309,14 @@ def test_metadata_post(
     project_resp = client.post(
         project_url,
         dict(
-            name=f"ml_project_metadata_upload",
+            name="ml_project_metadata_upload",
             user_column="userId",
             item_column="movieId",
         ),
     )
 
     project_id = project_resp.json()["id"]
-    json_file = NamedTemporaryFile(suffix=f".json.gz")
+    json_file = NamedTemporaryFile(suffix=".json.gz")
     json_gzip_file = gzip.open(json_file, mode="wb")
     ml100k_dummy_ts = ml100k_item.copy()
     ml100k_dummy_ts.to_json(json_gzip_file)
@@ -338,7 +327,7 @@ def test_metadata_post(
     assert response.status_code == 201
     j = response.json()
     assert j["filesize"] is not None
-    columns = json.loads(j["valid_columns_list_json"])
+    columns = j["valid_columns_list_json"]
     assert "title" in columns
     assert "release_date" in columns
     assert "video_release_date" in columns

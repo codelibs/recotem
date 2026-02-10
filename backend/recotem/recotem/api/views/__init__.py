@@ -1,12 +1,16 @@
-from typing import Optional
+import logging
+from pathlib import Path
 
+import pandas as pd
 from django.db import connections
+from django.db import models as db_models
 from django.db.utils import ConnectionDoesNotExist
 from django_filters import rest_framework as filters
-from drf_spectacular.utils import extend_schema
-from rest_framework import serializers, viewsets
-from rest_framework.exceptions import APIException, NotFound
-from rest_framework.pagination import PageNumberPagination
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers as drf_serializers
+from rest_framework import viewsets
+from rest_framework.decorators import action
+from rest_framework.exceptions import APIException
 from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -17,10 +21,8 @@ from recotem.api.models import (
     ItemMetaData,
     ModelConfiguration,
     ParameterTuningJob,
-    Project,
     SplitConfig,
     TaskLog,
-    TrainedModel,
     TrainingData,
 )
 from recotem.api.serializers import (
@@ -34,56 +36,106 @@ from recotem.api.serializers import (
     TrainingDataSerializer,
 )
 from recotem.api.serializers.data import ItemMetaDataSerializer
+from recotem.api.services.project_service import get_project_or_404, get_project_summary
+from recotem.api.utils import PREVIEW_ROW_LIMIT, read_dataframe
 
 from .filemixin import FileDownloadRemoveMixin
-from .model import TrainedModelViewset
-from .project import ProjectViewSet
+from .mixins import CreatedByResourceMixin, OwnedResourceMixin
+from .model import TrainedModelViewset  # noqa: F401
+from .pagination import StandardPagination
+from .project import ProjectViewSet  # noqa: F401
+
+logger = logging.getLogger(__name__)
 
 
-class TrainingDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
+class TrainingDataViewset(
+    OwnedResourceMixin, viewsets.ModelViewSet, FileDownloadRemoveMixin
+):
     permission_classes = [IsAuthenticated]
-
-    queryset = (
-        TrainingData.objects.all()
-        .filter(filesize__isnull=False)
-        .order_by("-ins_datetime")
-    )
     serializer_class = TrainingDataSerializer
     filterset_fields = ["id", "project"]
     parser_classes = [MultiPartParser]
+    pagination_class = StandardPagination
+    owner_lookup = "project__owner"
 
-    class pagination_class(PageNumberPagination):
-        page_size = 10
-        page_size_query_param = "page_size"
+    def get_queryset(self):
+        return (
+            TrainingData.objects.select_related("project")
+            .filter(filesize__isnull=False)
+            .filter(self.get_owner_filter())
+            .order_by("-ins_datetime")
+        )
 
-
-class ItemMetaDataViewset(viewsets.ModelViewSet, FileDownloadRemoveMixin):
-    permission_classes = [IsAuthenticated]
-
-    queryset = (
-        ItemMetaData.objects.all()
-        .filter(filesize__isnull=False)
-        .order_by("-ins_datetime")
+    @extend_schema(
+        parameters=[
+            inline_serializer(
+                "DataPreviewParams",
+                fields={
+                    "n_rows": drf_serializers.IntegerField(default=50),
+                },
+            )
+        ],
+        responses={200: dict},
     )
+    @action(detail=True, methods=["get"], url_path="preview")
+    def preview(self, request, pk=None):
+        """Return the first N rows of the training data as JSON."""
+        obj = self.get_object()
+        n_rows = min(int(request.query_params.get("n_rows", 50)), PREVIEW_ROW_LIMIT)
+        try:
+            preview_df = read_dataframe(Path(obj.file.name), obj.file, nrows=n_rows)
+            return Response(
+                {
+                    "columns": list(preview_df.columns),
+                    "rows": preview_df.values.tolist(),
+                    "total_rows": len(preview_df),
+                }
+            )
+        except (pd.errors.ParserError, ValueError, OSError) as exc:
+            logger.debug("Failed to read training data file %s: %s", pk, exc)
+            return Response(
+                {
+                    "columns": [],
+                    "rows": [],
+                    "total_rows": 0,
+                    "error": "Unable to read file",
+                },
+                status=400,
+            )
+
+
+class ItemMetaDataViewset(
+    OwnedResourceMixin, viewsets.ModelViewSet, FileDownloadRemoveMixin
+):
+    permission_classes = [IsAuthenticated]
     serializer_class = ItemMetaDataSerializer
     filterset_fields = ["id", "project"]
     parser_classes = [MultiPartParser]
+    pagination_class = StandardPagination
+    owner_lookup = "project__owner"
 
-    class pagination_class(PageNumberPagination):
-        page_size = 5
-        page_size_query_param = "page_size"
+    def get_queryset(self):
+        return (
+            ItemMetaData.objects.select_related("project")
+            .filter(filesize__isnull=False)
+            .filter(self.get_owner_filter())
+            .order_by("-ins_datetime")
+        )
 
 
-class ModelConfigurationViewset(viewsets.ModelViewSet):
+class ModelConfigurationViewset(OwnedResourceMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
-
-    queryset = ModelConfiguration.objects.all().order_by("-id")
     serializer_class = ModelConfigurationSerializer
     filterset_fields = ["id", "project"]
+    pagination_class = StandardPagination
+    owner_lookup = "project__owner"
 
-    class pagination_class(PageNumberPagination):
-        page_size = 10
-        page_size_query_param = "page_size"
+    def get_queryset(self):
+        return (
+            ModelConfiguration.objects.select_related("project")
+            .filter(self.get_owner_filter())
+            .order_by("-id")
+        )
 
 
 class SplitConfigFilter(filters.FilterSet):
@@ -94,13 +146,22 @@ class SplitConfigFilter(filters.FilterSet):
         fields = ["name", "id", "unnamed"]
 
 
-class SplitConfigViewSet(viewsets.ModelViewSet):
+class SplitConfigViewSet(CreatedByResourceMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
-
-    queryset = SplitConfig.objects.all()
     serializer_class = SplitConfigSerializer
     filter_backends = (filters.DjangoFilterBackend,)
     filterset_class = SplitConfigFilter
+    pagination_class = StandardPagination
+
+    def get_queryset(self):
+        return (
+            SplitConfig.objects.filter(self.get_owner_filter())
+            .select_related("created_by")
+            .order_by("-ins_datetime")
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
 
 
 class EvaluationConfigFilter(filters.FilterSet):
@@ -111,25 +172,45 @@ class EvaluationConfigFilter(filters.FilterSet):
         fields = ["name", "id", "unnamed"]
 
 
-class EvaluationConfigViewSet(viewsets.ModelViewSet):
+class EvaluationConfigViewSet(CreatedByResourceMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
-
-    queryset = EvaluationConfig.objects.all().filter()
     serializer_class = EvaluationConfigSerializer
     filter_backends = (filters.DjangoFilterBackend,)
     filterset_class = EvaluationConfigFilter
+    pagination_class = StandardPagination
+
+    def get_queryset(self):
+        return (
+            EvaluationConfig.objects.filter(self.get_owner_filter())
+            .select_related("created_by")
+            .order_by("-ins_datetime")
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
 
 
-class ParameterTuningJobViewSet(viewsets.ModelViewSet):
+class ParameterTuningJobViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
-
-    queryset = ParameterTuningJob.objects.all().order_by("-ins_datetime")
     serializer_class = ParameterTuningJobSerializer
-    filterset_fields = ["id", "data__project", "data"]
+    filterset_fields = ["id", "data__project", "data", "status"]
+    pagination_class = StandardPagination
+    owner_lookup = "data__project__owner"
 
-    class pagination_class(PageNumberPagination):
-        page_size = 10
-        page_size_query_param = "page_size"
+    def get_queryset(self):
+        return (
+            ParameterTuningJob.objects.select_related(
+                "data",
+                "data__project",
+                "split",
+                "evaluation",
+                "best_config",
+                "tuned_model",
+            )
+            .prefetch_related("task_links")
+            .filter(self.get_owner_filter())
+            .order_by("-ins_datetime")
+        )
 
 
 class TaskLogFilter(filters.FilterSet):
@@ -147,15 +228,44 @@ class TaskLogFilter(filters.FilterSet):
         ]
 
 
-class TaskLogViewSet(viewsets.ReadOnlyModelViewSet):
-    permission_classes = [IsAuthenticated]
+class TaskLogViewSet(OwnedResourceMixin, viewsets.ReadOnlyModelViewSet):
+    """Task logs filtered by ownership through the tuning job / model chain.
 
-    queryset = TaskLog.objects.all()
+    Uses a custom owner filter because TaskLog connects to the project owner
+    through two distinct FK paths (tuning_job_link and model_link).
+    """
+
+    permission_classes = [IsAuthenticated]
     serializer_class = TaskLogSerializer
     filterset_class = TaskLogFilter
+    pagination_class = StandardPagination
+
+    def get_owner_filter(self) -> db_models.Q:
+        user = self.request.user
+        via_tuning = db_models.Q(task__tuning_job_link__isnull=False) & (
+            db_models.Q(task__tuning_job_link__job__data__project__owner=user)
+            | db_models.Q(task__tuning_job_link__job__data__project__owner__isnull=True)
+        )
+        via_model = db_models.Q(task__model_link__isnull=False) & (
+            db_models.Q(task__model_link__model__data_loc__project__owner=user)
+            | db_models.Q(
+                task__model_link__model__data_loc__project__owner__isnull=True
+            )
+        )
+        return via_tuning | via_model
+
+    def get_queryset(self):
+        return (
+            TaskLog.objects.select_related("task")
+            .filter(self.get_owner_filter())
+            .distinct()
+            .order_by("-id")
+        )
 
 
 class PingView(APIView):
+    """Unauthenticated health-check endpoint for load balancer probes."""
+
     authentication_classes = []
     permission_classes = []
 
@@ -165,31 +275,13 @@ class PingView(APIView):
             _ = connections["default"]
             return Response(dict(success=True))
         except ConnectionDoesNotExist:
-            raise APIException(detail=dict(success=False), code=400)
+            raise APIException(detail=dict(success=False), code=400) from None
 
 
 class ProjectSummaryView(APIView):
     @extend_schema(responses={200: ProjectSummarySerializer})
-    def get(self, request, pk: int, format: Optional[str] = None):
-        try:
-            project_obj: Project = Project.objects.get(pk=pk)
-        except Project.DoesNotExist:
-            raise NotFound(detail=f"project {pk} not found.")
-        n_data = TrainingData.objects.filter(
-            project=project_obj, filesize__isnull=False
-        ).count()
-        n_complete_jobs = ModelConfiguration.objects.filter(
-            project=project_obj, tuning_job__isnull=False
-        ).count()
-        n_models = TrainedModel.objects.filter(
-            data_loc__project=project_obj, filesize__isnull=False
-        ).count()
-        serializer = ProjectSummarySerializer(
-            dict(
-                n_data=n_data,
-                n_complete_jobs=n_complete_jobs,
-                n_models=n_models,
-                ins_datetime=project_obj.ins_datetime,
-            )
-        )
+    def get(self, request, pk: int, format=None):
+        project_obj = get_project_or_404(pk, user=request.user)
+        summary = get_project_summary(project_obj)
+        serializer = ProjectSummarySerializer(summary)
         return Response(serializer.data)

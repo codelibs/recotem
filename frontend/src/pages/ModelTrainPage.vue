@@ -1,0 +1,101 @@
+<template>
+  <div>
+    <div class="flex items-center gap-3 mb-6">
+      <Button
+        icon="pi pi-arrow-left"
+        text
+        rounded
+        @click="router.push(`/projects/${projectId}/models`)"
+      />
+      <h2 class="text-xl font-bold text-neutral-800">
+        {{ $t('models.trainModel') }}
+      </h2>
+    </div>
+
+    <div class="bg-white rounded-lg shadow-sm border border-neutral-30 p-6 max-w-xl">
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">{{ $t('models.trainingData') }}</label>
+          <Select
+            v-model="form.data"
+            :options="dataOptions"
+            option-label="basename"
+            option-value="id"
+            :placeholder="$t('models.selectData')"
+            class="w-full"
+          />
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">{{ $t('models.configuration') }}</label>
+          <Select
+            v-model="form.config"
+            :options="configOptions"
+            option-label="label"
+            option-value="id"
+            :placeholder="$t('models.selectConfiguration')"
+            class="w-full"
+          />
+        </div>
+      </div>
+      <div class="mt-6">
+        <Button
+          :label="$t('models.startTraining')"
+          icon="pi pi-play"
+          :loading="submitting"
+          :disabled="!form.data || !form.config"
+          @click="submitTraining"
+        />
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, reactive, onMounted } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
+import Select from "primevue/select";
+import Button from "primevue/button";
+import { api, unwrapResults } from "@/api/client";
+import { ENDPOINTS } from "@/api/endpoints";
+import { useNotification } from "@/composables/useNotification";
+import type { TrainingData, ModelConfiguration } from "@/types";
+
+const { t } = useI18n();
+const route = useRoute();
+const router = useRouter();
+const notify = useNotification();
+const projectId = route.params.projectId as string;
+const submitting = ref(false);
+const dataOptions = ref<TrainingData[]>([]);
+const configOptions = ref<{ id: number; label: string }[]>([]);
+
+const form = reactive({ data: null as number | null, config: null as number | null });
+
+onMounted(async () => {
+  const [dataRes, configRes] = await Promise.all([
+    api(ENDPOINTS.TRAINING_DATA, { params: { project: projectId } }),
+    api(ENDPOINTS.MODEL_CONFIGURATION, { params: { project: projectId } }),
+  ]);
+  dataOptions.value = unwrapResults(dataRes);
+  const configs: ModelConfiguration[] = unwrapResults(configRes);
+  configOptions.value = configs.map(c => ({ id: c.id, label: c.name || `${c.recommender_class_name} #${c.id}` }));
+});
+
+async function submitTraining() {
+  if (!form.data || !form.config) return;
+  submitting.value = true;
+  try {
+    const model = await api(ENDPOINTS.TRAINED_MODEL, {
+      method: "POST",
+      body: { data_loc: form.data, configuration: form.config },
+    });
+    notify.success(t("models.trainingStarted"));
+    router.push(`/projects/${projectId}/models/${model.id}`);
+  } catch {
+    notify.error(t("models.failedToStartTraining"));
+  } finally {
+    submitting.value = false;
+  }
+}
+</script>

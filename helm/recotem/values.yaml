@@ -1,0 +1,179 @@
+# Default values for recotem
+# Override in values-production.yaml for production deployments
+
+# Container image configuration
+image:
+  backend:
+    repository: recotem/backend
+    tag: ""
+    pullPolicy: IfNotPresent
+  proxy:
+    repository: recotem/proxy
+    tag: ""
+    pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# Backend (Django/Daphne) configuration
+backend:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilization: 70
+
+# Celery worker configuration
+worker:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilization: 70
+    targetMemoryUtilization: 80
+
+# Nginx proxy configuration
+proxy:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 8000
+
+# Ingress configuration
+ingress:
+  enabled: false
+  # Ingress class name (e.g. "nginx" for nginx-ingress-controller)
+  className: ""
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: recotem.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: recotem-tls
+  #    hosts:
+  #      - recotem.example.com
+
+# Persistent volume claims
+persistence:
+  data:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+  staticFiles:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi
+
+# External dependencies
+# Set these if using external managed services instead of in-cluster
+postgresql:
+  # If external is true, use the host/port below instead of deploying PostgreSQL
+  external: false
+  host: ""
+  port: 5432
+  database: recotem
+  username: recotem_user
+  # Pod selector labels for NetworkPolicy (in-cluster PostgreSQL only)
+  podLabels:
+    app.kubernetes.io/name: postgresql
+
+redis:
+  external: false
+  host: ""
+  port: 6379
+  # Memory limits for in-cluster Redis
+  maxmemory: "256mb"
+  maxmemoryPolicy: "allkeys-lru"
+  # Pod selector labels for NetworkPolicy (in-cluster Redis only)
+  podLabels:
+    app.kubernetes.io/name: redis
+
+# Django configuration (non-secret values go in ConfigMap)
+config:
+  debug: "false"
+  allowedHosts: "localhost"
+  celeryBrokerDb: "0"
+  cacheRedisDb: "2"
+  cacheKeyPrefix: "recotem"
+  modelCacheSize: "8"
+  celeryTaskTimeLimit: "3600"
+  celeryTaskSoftTimeLimit: "3480"
+  throttleAnonRate: "20/min"
+  throttleUserRate: "100/min"
+  throttleLoginRate: "5/min"
+  logLevel: "INFO"
+  djangoLogLevel: "WARNING"
+  celeryLogLevel: "INFO"
+
+# Network policy (restrict pod-to-pod and egress traffic)
+# Recommended: enable in production for defense-in-depth
+networkPolicy:
+  enabled: true
+
+# Pod disruption budget (ensure availability during node maintenance)
+# Recommended: enable in production to avoid downtime during rolling updates
+podDisruptionBudget:
+  enabled: true
+  backend:
+    minAvailable: 1
+  worker:
+    minAvailable: 1
+  proxy:
+    minAvailable: 1
+
+# ServiceAccount configuration
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+    # eks.amazonaws.com/role-arn: arn:aws:iam::123456789:role/recotem
+    # iam.gke.io/gcp-service-account: recotem@project.iam.gserviceaccount.com
+
+# Pod Security Standards labels (applied to the namespace)
+podSecurityStandards:
+  enforce: baseline
+  warn: restricted
+
+# Secret values (provide via --set or external secret management)
+# For production, use one of:
+#   - helm secrets plugin: https://github.com/jkroepke/helm-secrets
+#   - External Secrets Operator (ESO): https://external-secrets.io
+#   - Sealed Secrets: https://sealed-secrets.netlify.app
+# Never commit actual secret values to version control.
+secrets:
+  # REQUIRED: set these for deployment
+  secretKey: ""
+  databaseUrl: ""
+  defaultAdminPassword: ""
+  # Optional
+  redisPassword: ""

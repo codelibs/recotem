@@ -1,136 +1,155 @@
-import Vue from "vue";
-import VueRouter, { RouteConfig } from "vue-router";
-import Login from "../views/Login.vue";
+import { createRouter, createWebHistory } from "vue-router";
+import type { RouteRecordRaw } from "vue-router";
+import { useAuthStore } from "@/stores/auth";
 
-Vue.use(VueRouter);
-
-const routes: Array<RouteConfig> = [
+const routes: RouteRecordRaw[] = [
+  {
+    path: "/login",
+    component: () => import("@/layouts/AuthLayout.vue"),
+    meta: { requiresAuth: false },
+    children: [
+      {
+        path: "",
+        name: "login",
+        component: () => import("@/pages/LoginPage.vue"),
+      },
+    ],
+  },
   {
     path: "/",
-    component: () => import("../views/Main.vue"),
+    component: () => import("@/layouts/MainLayout.vue"),
+    meta: { requiresAuth: true },
     children: [
       {
         path: "",
         redirect: () => {
-          const projectId = parseInt(
-            window.localStorage.getItem("projectId") || ""
-          );
-          if (!isNaN(projectId)) {
-            return { name: "project", params: { projectId: `${projectId}` } };
-          } else {
-            return { name: "project-list" };
+          // Redirect to last visited project or project list
+          const lastProjectId = localStorage.getItem("lastProjectId");
+          if (lastProjectId) {
+            return `/projects/${lastProjectId}`;
           }
+          return "/projects";
         },
       },
       {
-        path: "login/",
-        name: "login",
-        component: Login,
-      },
-      {
-        path: "project-list/",
+        path: "projects",
         name: "project-list",
-        component: () => import("../views/ProjectList.vue"),
+        component: () => import("@/pages/ProjectListPage.vue"),
       },
       {
-        path: "project/:projectId/",
-        component: () => import("../views/project/ProjectTop.vue"),
+        path: "projects/:projectId",
+        component: () => import("@/layouts/ProjectLayout.vue"),
         children: [
           {
-            path: "/",
-            name: "project",
-            component: () => import("../views/project/Dashboard.vue"),
+            path: "",
+            name: "project-dashboard",
+            component: () => import("@/pages/DashboardPage.vue"),
           },
           {
-            path: "first-tuning",
-            name: "first-tuning",
-            component: () =>
-              import("../views/project/tuningjobs/StartTuning.vue"),
-            props: { upload: true },
+            path: "data",
+            name: "data-list",
+            component: () => import("@/pages/DataListPage.vue"),
           },
           {
-            path: "data/",
-            component: () => import("../views/project/Data.vue"),
-            children: [
-              {
-                path: ":dataId/",
-                component: () => import("../views/project/data/DataTop.vue"),
-                children: [
-                  {
-                    path: "",
-                    name: "data-detail",
-                    component: () => import("../views/project/data/Detail.vue"),
-                  },
-                  {
-                    path: "start-tuning-with",
-                    name: "start-tuning-with-data",
-                    component: () =>
-                      import("../views/project/data/StartTuningWithData.vue"),
-                  },
-                ],
-              },
-              {
-                path: "",
-                name: "data-list",
-                component: () => import("../views/project/data/List.vue"),
-              },
-            ],
+            path: "data/upload",
+            name: "data-upload",
+            component: () => import("@/pages/DataUploadPage.vue"),
           },
           {
-            path: "tuning-job/",
-            component: () => import("../views/project/Data.vue"),
-            children: [
-              {
-                path: "start-tuning",
-                name: "start-tuning",
-                component: () =>
-                  import("../views/project/tuningjobs/StartTuning.vue"),
-              },
-              {
-                path: ":parameterTuningJobId/",
-                name: "tuning-job-detail",
-                component: () =>
-                  import("../views/project/tuningjobs/TuningJobTop.vue"),
-              },
-              {
-                path: "",
-                name: "tuning-job-list",
-                component: () => import("../views/project/tuningjobs/List.vue"),
-              },
-            ],
+            path: "data/:dataId",
+            name: "data-detail",
+            component: () => import("@/pages/DataDetailPage.vue"),
           },
           {
-            path: "trained-model/",
-            component: () => import("../views/project/Data.vue"),
-            children: [
-              {
-                path: "start-training",
-                name: "start-training",
-                component: () =>
-                  import("../views/project/models/StartTraining.vue"),
-              },
-              {
-                path: ":trainedModelId/",
-                name: "trained-model-detail",
-                component: () => import("../views/project/models/ModelTop.vue"),
-              },
-              {
-                path: "",
-                name: "trained-model-list",
-                component: () => import("../views/project/models/List.vue"),
-              },
-            ],
+            path: "tuning",
+            name: "tuning-list",
+            component: () => import("@/pages/TuningJobListPage.vue"),
+          },
+          {
+            path: "tuning/new",
+            name: "tuning-new",
+            component: () => import("@/pages/TuningWizardPage.vue"),
+          },
+          {
+            path: "tuning/:jobId",
+            name: "tuning-detail",
+            component: () => import("@/pages/TuningJobDetailPage.vue"),
+          },
+          {
+            path: "model-configs",
+            name: "model-configs",
+            component: () => import("@/pages/ModelConfigPage.vue"),
+          },
+          {
+            path: "model-comparison",
+            name: "model-comparison",
+            component: () => import("@/pages/ModelComparisonPage.vue"),
+          },
+          {
+            path: "models",
+            name: "model-list",
+            component: () => import("@/pages/ModelListPage.vue"),
+          },
+          {
+            path: "models/train",
+            name: "model-train",
+            component: () => import("@/pages/ModelTrainPage.vue"),
+          },
+          {
+            path: "models/:modelId",
+            name: "model-detail",
+            component: () => import("@/pages/ModelDetailPage.vue"),
           },
         ],
       },
     ],
   },
+  {
+    path: "/:pathMatch(.*)*",
+    name: "not-found",
+    component: () => import("@/pages/NotFoundPage.vue"),
+    meta: { requiresAuth: false },
+  },
 ];
 
-const router = new VueRouter({
-  // mode: "history",
-  base: process.env.BASE_URL,
+const router = createRouter({
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes,
+});
+
+// Navigation guard for authentication and param validation
+router.beforeEach((to, _from, next) => {
+  const authStore = useAuthStore();
+  // A route is public if any matched record explicitly sets requiresAuth: false
+  const isPublic = to.matched.some((record) => record.meta.requiresAuth === false);
+
+  if (!isPublic && !authStore.isAuthenticated) {
+    next({ path: "/login", query: { redirect: to.fullPath } });
+    return;
+  }
+  if (to.path === "/login" && authStore.isAuthenticated) {
+    next("/");
+    return;
+  }
+
+  // Validate numeric route params
+  const { projectId, dataId, jobId, modelId } = to.params;
+  for (const [, val] of Object.entries({ projectId, dataId, jobId, modelId })) {
+    if (val !== undefined && !/^\d+$/.test(val as string)) {
+      next({ name: "not-found" });
+      return;
+    }
+  }
+
+  next();
+});
+
+// Save last visited project ID
+router.afterEach((to) => {
+  const projectId = to.params.projectId as string | undefined;
+  if (projectId) {
+    localStorage.setItem("lastProjectId", projectId);
+  }
 });
 
 export default router;

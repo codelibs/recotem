@@ -1,104 +1,89 @@
-<style scoped></style>
 <template>
-  <v-app>
-    <v-app-bar app toolbar v-if="$route.name !== 'login'" flat clipped-left>
-      <router-link :to="{ name: 'project-list' }">
-        <v-img
-          src="@/assets/logo.png"
-          max-height="32"
-          max-width="32"
-          contain
-          class="mx-4"
-        >
-        </v-img>
-      </router-link>
-      <v-toolbar-title>
-        Recotem
-        <span class="text-caption"> ver {{ version }} </span></v-toolbar-title
-      >
-      <v-spacer></v-spacer>
-      <CurrentUser />
-    </v-app-bar>
-    <v-navigation-drawer
-      app
-      v-if="project !== null"
-      expand-on-hover
-      permanent
-      clipped
-    >
-      <v-list nav flat>
-        <v-list-item
-          link
-          :to="{ name: 'project', params: { projectId: project.id } }"
-        >
-          <v-list-item-icon>
-            <v-icon color="primary"> mdi-home</v-icon>
-          </v-list-item-icon>
-          <v-list-item-title>
-            <span class="text-caption"> Project </span><br />
-            {{ project.name }}
-          </v-list-item-title>
-        </v-list-item>
-      </v-list>
-      <v-list nav>
-        <v-divider></v-divider>
-        <v-list-item
-          :to="{ name: 'data-list', params: { projectId: project.id } }"
-          link
-          :ripple="false"
-          data-nav-link-name="data"
-        >
-          <v-list-item-icon>
-            <v-icon> mdi-folder</v-icon>
-          </v-list-item-icon>
-          <v-list-item-title> Data </v-list-item-title>
-        </v-list-item>
-        <v-list-item
-          :to="{ name: 'tuning-job-list', params: { projectId: project.id } }"
-          link
-          :ripple="false"
-          data-nav-link-name="tuning"
-        >
-          <v-list-item-icon>
-            <v-icon> mdi-tune</v-icon>
-          </v-list-item-icon>
-          <v-list-item-title> Tuning </v-list-item-title>
-        </v-list-item>
-        <v-list-item
-          link
-          :ripple="false"
-          :to="{
-            name: 'trained-model-list',
-            params: { projectId: project.id },
-          }"
-          data-nav-link-name="models"
-        >
-          <v-list-item-icon>
-            <v-icon> mdi-calculator</v-icon>
-          </v-list-item-icon>
-          <v-list-item-title> Models </v-list-item-title>
-        </v-list-item>
-        <v-spacer> </v-spacer>
-      </v-list>
-    </v-navigation-drawer>
-
-    <v-main>
-      <router-view />
-    </v-main>
-  </v-app>
+  <div
+    v-if="loading"
+    class="route-loading-bar"
+    :style="{ width: loadingProgress + '%' }"
+  />
+  <div
+    v-if="hasError"
+    class="min-h-screen flex items-center justify-center bg-neutral-10"
+  >
+    <div class="text-center p-8 max-w-md">
+      <i class="pi pi-exclamation-triangle text-5xl text-orange-500 mb-4" />
+      <h2 class="text-xl font-semibold text-neutral-800 mb-2">
+        Something went wrong
+      </h2>
+      <p class="text-neutral-200 mb-6">
+        An unexpected error occurred. Please try refreshing the page.
+      </p>
+      <Button
+        label="Refresh Page"
+        icon="pi pi-refresh"
+        @click="handleRefresh"
+      />
+    </div>
+  </div>
+  <template v-else>
+    <router-view />
+  </template>
+  <Toast position="top-right" />
 </template>
-<script lang="ts">
-import Vue from "vue";
-import CurrentUser from "@/components/CurrentUser.vue";
-import { AuthModule } from "./store/auth";
-export default Vue.extend({
-  computed: {
-    version: () => AuthModule.recotemVersion,
-    project: () => AuthModule.currentProjectDetail,
-    errors: () => AuthModule.errors,
-  },
-  components: {
-    CurrentUser,
-  },
+
+<script setup lang="ts">
+import { ref, onUnmounted, onErrorCaptured } from "vue";
+import Toast from "primevue/toast";
+import Button from "primevue/button";
+import router from "./router";
+
+const loading = ref(false);
+const loadingProgress = ref(0);
+const hasError = ref(false);
+let loadingTimer: ReturnType<typeof setInterval> | null = null;
+
+onErrorCaptured((err) => {
+  console.error("Uncaught error:", err);
+  hasError.value = true;
+  return false;
+});
+
+function handleRefresh() {
+  window.location.reload();
+}
+
+function startLoading() {
+  loading.value = true;
+  loadingProgress.value = 20;
+  loadingTimer = setInterval(() => {
+    if (loadingProgress.value < 90) {
+      loadingProgress.value += 10;
+    }
+  }, 150);
+}
+
+function stopLoading() {
+  if (loadingTimer) {
+    clearInterval(loadingTimer);
+    loadingTimer = null;
+  }
+  loadingProgress.value = 100;
+  setTimeout(() => {
+    loading.value = false;
+    loadingProgress.value = 0;
+  }, 200);
+}
+
+const removeBeforeEach = router.beforeEach((_to, _from, next) => {
+  startLoading();
+  next();
+});
+
+const removeAfterEach = router.afterEach(() => {
+  stopLoading();
+});
+
+onUnmounted(() => {
+  removeBeforeEach();
+  removeAfterEach();
+  if (loadingTimer) clearInterval(loadingTimer);
 });
 </script>

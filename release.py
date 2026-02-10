@@ -9,18 +9,22 @@ if __name__ == "__main__":
     VERSION = re.split(r"\/", os.environ["GITHUB_REF"])[-1]
     WORKDIR = Path(__file__).resolve().parent
     dc_content = yaml.load((WORKDIR / "compose.yaml").open(), Loader=yaml.SafeLoader)
+
+    # Replace build directives with pre-built images
     dc_content["services"]["backend"].pop("build")
-    dc_content["services"]["backend"][
-        "image"
-    ] = f"ghcr.io/codelibs/recotem-backend:{VERSION}"
-    dc_content["services"]["celery_worker"].pop("build")
-    dc_content["services"]["celery_worker"][
-        "image"
-    ] = f"ghcr.io/codelibs/recotem-worker:{VERSION}"
-    dc_content["services"]["frontend"].pop("build")
-    dc_content["services"]["frontend"][
-        "image"
-    ] = f"ghcr.io/codelibs/recotem-frontend:{VERSION}"
+    dc_content["services"]["backend"]["image"] = (
+        f"ghcr.io/codelibs/recotem-backend:{VERSION}"
+    )
+
+    dc_content["services"]["worker"].pop("build")
+    dc_content["services"]["worker"]["image"] = (
+        f"ghcr.io/codelibs/recotem-worker:{VERSION}"
+    )
+
+    dc_content["services"]["proxy"].pop("build")
+    dc_content["services"]["proxy"]["image"] = (
+        f"ghcr.io/codelibs/recotem-proxy:{VERSION}"
+    )
 
     nginx_conf_str = (WORKDIR / "nginx.conf").read_text()
     production_env_str = (WORKDIR / "envs" / "production.env").read_text()

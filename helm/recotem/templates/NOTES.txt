@@ -1,0 +1,25 @@
+Recotem has been deployed!
+
+{{- if .Values.ingress.enabled }}
+Access your application at:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+Get the application URL by running:
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "recotem.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=proxy" -o jsonpath="{.items[0].metadata.name}")
+  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8000:8000
+  Open http://localhost:8000
+{{- end }}
+
+Components deployed:
+  - Backend (Django/Daphne): {{ .Values.backend.replicaCount }} replica(s)
+  - Worker (Celery): {{ .Values.worker.replicaCount }} replica(s)
+  - Proxy (nginx): {{ .Values.proxy.replicaCount }} replica(s)
+
+{{- if .Values.backend.autoscaling.enabled }}
+Backend autoscaling: {{ .Values.backend.autoscaling.minReplicas }}-{{ .Values.backend.autoscaling.maxReplicas }} replicas
+{{- end }}
+{{- if .Values.worker.autoscaling.enabled }}
+Worker autoscaling: {{ .Values.worker.autoscaling.minReplicas }}-{{ .Values.worker.autoscaling.maxReplicas }} replicas
+{{- end }}

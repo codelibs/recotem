@@ -1,3 +1,4 @@
+from django.db import transaction
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
@@ -23,6 +24,7 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
             "data",
             "split",
             "evaluation",
+            "status",
             "n_tasks_parallel",
             "n_trials",
             "memory_budget",
@@ -38,7 +40,35 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
             "ins_datetime",
             "task_links",
         ]
-        read_only_fields = ["ins_datetime", "task_links"]
+        read_only_fields = ["ins_datetime", "task_links", "status"]
+
+    def validate_tried_algorithms_json(self, value):
+        if value is None:
+            return value
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise serializers.ValidationError("Must be a JSON array of strings.")
+        return value
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        data = attrs.get("data")
+        split = attrs.get("split")
+        evaluation = attrs.get("evaluation")
+        if user is None:
+            return attrs
+        errors: dict[str, list[str]] = {}
+        if data is not None and data.project.owner_id not in (None, user.id):
+            errors["data"] = ["Data not found."]
+        if split is not None and split.created_by_id not in (None, user.id):
+            errors["split"] = ["Split config not found."]
+        if evaluation is not None and evaluation.created_by_id not in (None, user.id):
+            errors["evaluation"] = ["Evaluation config not found."]
+        if errors:
+            raise ValidationError(errors)
+        return attrs
 
     def create(self, validated_data):
         data: TrainingData = validated_data["data"]
@@ -47,5 +77,5 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
         obj: ParameterTuningJob = ParameterTuningJob.objects.create(**validated_data)
         from recotem.api.tasks import start_tuning_job
 
-        start_tuning_job(obj)
+        transaction.on_commit(lambda: start_tuning_job(obj))
         return obj

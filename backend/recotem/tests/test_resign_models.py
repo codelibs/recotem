@@ -5,7 +5,10 @@ import io
 import pytest
 from django.core.management import call_command
 
-from recotem.api.services.pickle_signing import HMAC_SIZE, sign_pickle_bytes, verify_and_extract
+from recotem.api.services.pickle_signing import (
+    sign_pickle_bytes,
+    verify_and_extract,
+)
 
 
 @pytest.fixture()

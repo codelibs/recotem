@@ -23,7 +23,7 @@ async function createProjectWithData(
   await page.getByPlaceholder("My Project").fill(name);
   await page.getByPlaceholder("user_id").fill("userId");
   await page.getByPlaceholder("item_id").fill("movieId");
-  await page.getByRole("button", { name: "Create" }).click();
+  await page.getByRole("button", { name: "Create", exact: true }).click();
   await expect(page.getByText(name)).toBeVisible({ timeout: 10000 });
   await page.getByText(name).click();
   await expect(page).toHaveURL(/\/projects\/(\d+)/);

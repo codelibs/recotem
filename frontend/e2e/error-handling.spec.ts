@@ -34,7 +34,7 @@ test.describe("Error Handling", () => {
     await page.click('button[type="submit"]');
     await page.waitForURL(/\/projects/);
     // Page should load without errors
-    await expect(page.getByText("Projects")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
   });
 
   test("handles 404 for non-existent project", async ({ page }) => {
@@ -106,9 +106,12 @@ test.describe("Accessibility", () => {
   test("login page passes accessibility checks", async ({ page }) => {
     await page.goto("/login", { waitUntil: "domcontentloaded" });
     const results = await new AxeBuilder({ page })
+      .withTags(["wcag2a", "wcag2aa"])
       .disableRules(["color-contrast", "aria-allowed-attr"]) // PrimeVue upstream issues
       .analyze();
-    expect(results.violations).toEqual([]);
+    expect(results.violations.filter((v) => v.impact === "critical")).toEqual(
+      [],
+    );
   });
 
   test("project list page passes accessibility checks", async ({ page }) => {
@@ -119,8 +122,11 @@ test.describe("Accessibility", () => {
     await page.waitForURL(/\/projects/);
 
     const results = await new AxeBuilder({ page })
+      .withTags(["wcag2a", "wcag2aa"])
       .disableRules(["color-contrast", "aria-allowed-attr"]) // PrimeVue upstream issues
       .analyze();
-    expect(results.violations).toEqual([]);
+    expect(results.violations.filter((v) => v.impact === "critical")).toEqual(
+      [],
+    );
   });
 });

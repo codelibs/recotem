@@ -18,7 +18,7 @@ test.describe("Project Management", () => {
   });
 
   test("should display project list page", async ({ page }) => {
-    await expect(page.getByText("Projects")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
     await expect(
       page.getByRole("button", { name: "New Project" }),
     ).toBeVisible();
@@ -29,7 +29,7 @@ test.describe("Project Management", () => {
 
     // Open create dialog
     await page.getByRole("button", { name: "New Project" }).click();
-    await expect(page.getByText("Create Project")).toBeVisible();
+    await expect(page.getByRole("dialog").getByText("Create Project")).toBeVisible();
 
     // Fill in the form
     await page.getByPlaceholder("My Project").fill(projectName);
@@ -37,7 +37,7 @@ test.describe("Project Management", () => {
     await page.getByPlaceholder("item_id").fill("movieId");
 
     // Submit
-    await page.getByRole("button", { name: "Create" }).click();
+    await page.getByRole("button", { name: "Create", exact: true }).click();
 
     // Verify project appears in the list
     await expect(page.getByText(projectName)).toBeVisible({ timeout: 10000 });
@@ -51,7 +51,7 @@ test.describe("Project Management", () => {
     await page.getByPlaceholder("My Project").fill(projectName);
     await page.getByPlaceholder("user_id").fill("userId");
     await page.getByPlaceholder("item_id").fill("movieId");
-    await page.getByRole("button", { name: "Create" }).click();
+    await page.getByRole("button", { name: "Create", exact: true }).click();
     await expect(page.getByText(projectName)).toBeVisible({ timeout: 10000 });
 
     // Click on the project card to navigate
@@ -87,7 +87,7 @@ test.describe("Project Management", () => {
     await page.getByPlaceholder("My Project").fill(projectName);
     await page.getByPlaceholder("user_id").fill("userId");
     await page.getByPlaceholder("item_id").fill("movieId");
-    await page.getByRole("button", { name: "Create" }).click();
+    await page.getByRole("button", { name: "Create", exact: true }).click();
     await expect(page.getByText(projectName)).toBeVisible({ timeout: 10000 });
 
     // Navigate to project

@@ -8,6 +8,27 @@ from django.test import Client
 from django.urls import reverse
 
 from recotem.api.models import TrainingData
+from recotem.api.views.filemixin import _sanitize_filename
+
+
+class TestSanitizeFilename:
+    def test_normal_filename_unchanged(self):
+        assert _sanitize_filename("data.csv") == "data.csv"
+
+    def test_strips_control_characters(self):
+        assert _sanitize_filename("file\x00name.csv") == "file_name.csv"
+        assert _sanitize_filename("file\nname.csv") == "file_name.csv"
+        assert _sanitize_filename("file\rname.csv") == "file_name.csv"
+
+    def test_strips_quotes_and_semicolons(self):
+        assert _sanitize_filename('fi"le;na\\me.csv') == "fi_le_na_me.csv"
+
+    def test_unicode_preserved(self):
+        assert _sanitize_filename("データ.csv") == "データ.csv"
+
+    def test_del_character_stripped(self):
+        assert _sanitize_filename("file\x7fname.csv") == "file_name.csv"
+
 
 User = get_user_model()
 

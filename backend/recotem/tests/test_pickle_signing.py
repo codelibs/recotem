@@ -39,6 +39,18 @@ class TestPickleSigning:
         result = verify_and_extract(short_data)
         assert result == short_data
 
+    def test_legacy_rejected_when_disabled(self, settings):
+        """Unsigned legacy files rejected when disabled."""
+        settings.PICKLE_ALLOW_LEGACY_UNSIGNED = False
+        legacy_data = b"\x80\x04\x95" + b"x" * 100
+        with pytest.raises(ValueError, match="not allowed"):
+            verify_and_extract(legacy_data)
+
+    def test_too_short_rejected_when_disabled(self, settings):
+        settings.PICKLE_ALLOW_LEGACY_UNSIGNED = False
+        with pytest.raises(ValueError, match="not allowed"):
+            verify_and_extract(b"tiny")
+
     def test_signature_is_deterministic(self):
         payload = b"deterministic test"
         signed1 = sign_pickle_bytes(payload)

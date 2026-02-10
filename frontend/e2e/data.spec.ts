@@ -1,6 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
 import path from "path";
 import fs from "fs";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const ADMIN_USERNAME = process.env.E2E_ADMIN_USERNAME ?? "admin";
 const ADMIN_PASSWORD =
@@ -62,7 +65,7 @@ test.describe("Data Management", () => {
     projectId = await createProject(page, name);
 
     // Navigate to data page
-    await page.getByRole("link", { name: /Data/ }).click();
+    await page.locator("nav").getByRole("link", { name: /Data/ }).click();
     await expect(page).toHaveURL(
       new RegExp(`/projects/${projectId}/data`),
     );
@@ -74,7 +77,7 @@ test.describe("Data Management", () => {
     projectId = await createProject(page, name);
 
     // Go to data page
-    await page.getByRole("link", { name: /Data/ }).click();
+    await page.locator("nav").getByRole("link", { name: /Data/ }).click();
     await expect(page.getByText("Training Data")).toBeVisible();
 
     // Click upload button
@@ -90,7 +93,7 @@ test.describe("Data Management", () => {
     projectId = await createProject(page, name);
 
     // Navigate to upload page
-    await page.getByRole("link", { name: /Data/ }).click();
+    await page.locator("nav").getByRole("link", { name: /Data/ }).click();
     await page.getByRole("button", { name: "Upload Data" }).click();
     await expect(page.getByText("Upload Training Data")).toBeVisible();
 
@@ -121,7 +124,7 @@ test.describe("Data Management", () => {
     projectId = await createProject(page, name);
 
     // Upload a file first
-    await page.getByRole("link", { name: /Data/ }).click();
+    await page.locator("nav").getByRole("link", { name: /Data/ }).click();
     await page.getByRole("button", { name: "Upload Data" }).click();
     const csvPath = createTestCsv();
     const fileInput = page.locator('input[type="file"]');
@@ -144,7 +147,7 @@ test.describe("Data Management", () => {
     projectId = await createProject(page, name);
 
     // Upload a file
-    await page.getByRole("link", { name: /Data/ }).click();
+    await page.locator("nav").getByRole("link", { name: /Data/ }).click();
     await page.getByRole("button", { name: "Upload Data" }).click();
     const csvPath = createTestCsv();
     const fileInput = page.locator('input[type="file"]');
@@ -167,7 +170,7 @@ test.describe("Data Management", () => {
     projectId = await createProject(page, name);
 
     // Upload a file
-    await page.getByRole("link", { name: /Data/ }).click();
+    await page.locator("nav").getByRole("link", { name: /Data/ }).click();
     await page.getByRole("button", { name: "Upload Data" }).click();
     const csvPath = createTestCsv();
     const fileInput = page.locator('input[type="file"]');

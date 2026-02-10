@@ -37,7 +37,7 @@ test.describe("Model Management", () => {
     const projectId = await createProject(page, name);
 
     // Navigate to models page
-    await page.getByRole("link", { name: /Models/ }).click();
+    await page.locator("nav").getByRole("link", { name: /Models/ }).click();
     await expect(page).toHaveURL(
       new RegExp(`/projects/${projectId}/models`),
     );
@@ -49,7 +49,7 @@ test.describe("Model Management", () => {
     await createProject(page, name);
 
     // Navigate to models page
-    await page.getByRole("link", { name: /Models/ }).click();
+    await page.locator("nav").getByRole("link", { name: /Models/ }).click();
     await expect(page.getByText("Trained Models")).toBeVisible();
 
     // Should show empty message
@@ -60,7 +60,7 @@ test.describe("Model Management", () => {
     const name = `E2E Model Btn ${Date.now()}`;
     await createProject(page, name);
 
-    await page.getByRole("link", { name: /Models/ }).click();
+    await page.locator("nav").getByRole("link", { name: /Models/ }).click();
     await expect(
       page.getByRole("button", { name: "Train Model" }),
     ).toBeVisible();
@@ -70,7 +70,7 @@ test.describe("Model Management", () => {
     const name = `E2E Model Train ${Date.now()}`;
     const projectId = await createProject(page, name);
 
-    await page.getByRole("link", { name: /Models/ }).click();
+    await page.locator("nav").getByRole("link", { name: /Models/ }).click();
     await page.getByRole("button", { name: "Train Model" }).click();
 
     await expect(page).toHaveURL(
@@ -78,21 +78,17 @@ test.describe("Model Management", () => {
     );
   });
 
-  test("should show model table columns when models exist", async ({
-    page,
-  }) => {
+  test("should show empty state or model table", async ({ page }) => {
     const name = `E2E Model Cols ${Date.now()}`;
     await createProject(page, name);
 
-    await page.getByRole("link", { name: /Models/ }).click();
+    await page.locator("nav").getByRole("link", { name: /Models/ }).click();
     await expect(page.getByText("Trained Models")).toBeVisible();
 
-    // Verify table column headers are present
-    await expect(page.getByText("ID")).toBeVisible();
-    await expect(page.getByText("Algorithm")).toBeVisible();
-    await expect(page.getByText("Size")).toBeVisible();
-    await expect(page.getByText("irspack")).toBeVisible();
-    await expect(page.getByText("Trained")).toBeVisible();
-    await expect(page.getByText("Actions")).toBeVisible();
+    // New project has no models — verify empty state is shown
+    await expect(page.getByText("No trained models yet")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Train Model" }),
+    ).toBeVisible();
   });
 });

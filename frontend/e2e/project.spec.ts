@@ -95,8 +95,8 @@ test.describe("Project Management", () => {
     await expect(page).toHaveURL(/\/projects\/\d+/);
 
     // Verify sidebar navigation links
-    await expect(page.getByRole("link", { name: /Data/ })).toBeVisible();
-    await expect(page.getByRole("link", { name: /Tuning/ })).toBeVisible();
-    await expect(page.getByRole("link", { name: /Models/ })).toBeVisible();
+    await expect(page.locator("nav").getByRole("link", { name: /Data/ })).toBeVisible();
+    await expect(page.locator("nav").getByRole("link", { name: /Tuning/ })).toBeVisible();
+    await expect(page.locator("nav").getByRole("link", { name: /Models/ })).toBeVisible();
   });
 });

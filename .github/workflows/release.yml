@@ -110,7 +110,7 @@ jobs:
           severity: 'CRITICAL,HIGH,MEDIUM'
           scanners: vuln
       - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'

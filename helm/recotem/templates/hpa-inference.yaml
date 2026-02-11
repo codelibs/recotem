@@ -1,0 +1,31 @@
+{{- if .Values.inference.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "recotem.fullname" . }}-inference
+  labels:
+    {{- include "recotem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: inference
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "recotem.fullname" . }}-inference
+  minReplicas: {{ .Values.inference.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.inference.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.inference.autoscaling.targetCPUUtilization }}
+    {{- if .Values.inference.autoscaling.targetMemoryUtilization }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.inference.autoscaling.targetMemoryUtilization }}
+    {{- end }}
+{{- end }}

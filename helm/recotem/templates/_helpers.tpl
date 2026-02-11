@@ -71,6 +71,22 @@ app.kubernetes.io/component: proxy
 {{- end }}
 
 {{/*
+Inference selector labels
+*/}}
+{{- define "recotem.inferenceSelectorLabels" -}}
+{{ include "recotem.selectorLabels" . }}
+app.kubernetes.io/component: inference
+{{- end }}
+
+{{/*
+Beat selector labels
+*/}}
+{{- define "recotem.beatSelectorLabels" -}}
+{{ include "recotem.selectorLabels" . }}
+app.kubernetes.io/component: beat
+{{- end }}
+
+{{/*
 Database URL: external or in-cluster
 */}}
 {{- define "recotem.databaseUrl" -}}

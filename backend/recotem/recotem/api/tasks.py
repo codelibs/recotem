@@ -13,6 +13,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from channels.layers import get_channel_layer
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 from django_celery_results.models import TaskResult
 from irspack import Evaluator, split_dataframe_partial_user_holdout
 from irspack import __version__ as irspack_version
@@ -26,6 +27,8 @@ from recotem.api.models import (
     ModelConfiguration,
     ParameterTuningJob,
     Project,
+    RetrainingRun,
+    RetrainingSchedule,
     SplitConfig,
     TaskAndParameterJobLink,
     TaskAndTrainedModelLink,
@@ -490,3 +493,87 @@ def start_tuning_job(job: ParameterTuningJob) -> None:
         job.status = ParameterTuningJob.Status.FAILED
         job.save(update_fields=["status"])
         raise
+
+
+@app.task(
+    bind=True,
+    time_limit=settings.CELERY_TASK_TIME_LIMIT,
+    soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+    autoretry_for=(ConnectionError, OSError),
+    retry_backoff=True,
+    max_retries=3,
+)
+def task_scheduled_retrain(self, schedule_id: int) -> None:
+    """Execute a scheduled retraining run."""
+    try:
+        schedule = RetrainingSchedule.objects.select_related(
+            "project",
+            "training_data",
+            "model_configuration",
+            "split_config",
+            "evaluation_config",
+        ).get(id=schedule_id)
+    except RetrainingSchedule.DoesNotExist:
+        logger.error("Retraining schedule %d not found", schedule_id)
+        return
+
+    if not schedule.is_enabled:
+        logger.info("Schedule %d is disabled, skipping", schedule_id)
+        return
+
+    # Determine training data
+    training_data = schedule.training_data
+    if training_data is None:
+        training_data = (
+            TrainingData.objects.filter(project=schedule.project)
+            .order_by("-ins_datetime")
+            .first()
+        )
+    if training_data is None:
+        logger.warning("No training data for schedule %d", schedule_id)
+        return
+
+    # Create run record
+    run = RetrainingRun.objects.create(
+        schedule=schedule,
+        status=RetrainingRun.Status.RUNNING,
+        data_rows_at_trigger=training_data.filesize,
+    )
+
+    try:
+        if schedule.retune and schedule.split_config and schedule.evaluation_config:
+            # Re-tune: create and start a tuning job
+            job = ParameterTuningJob.objects.create(
+                data=training_data,
+                split=schedule.split_config,
+                evaluation=schedule.evaluation_config,
+                train_after_tuning=True,
+            )
+            start_tuning_job(job)
+            run.tuning_job = job
+            run.status = RetrainingRun.Status.COMPLETED
+        elif schedule.model_configuration:
+            # Train with existing config
+            model = TrainedModel.objects.create(
+                configuration=schedule.model_configuration,
+                data_loc=training_data,
+            )
+            train_and_save_model(model)
+            run.trained_model = model
+            run.status = RetrainingRun.Status.COMPLETED
+        else:
+            run.status = RetrainingRun.Status.SKIPPED
+            run.error_message = "No model configuration or retune settings"
+
+    except Exception as e:
+        logger.exception("Scheduled retraining failed for schedule %d", schedule_id)
+        run.status = RetrainingRun.Status.FAILED
+        run.error_message = str(e)
+
+    run.completed_at = timezone.now()
+    run.save()
+
+    # Update schedule metadata
+    schedule.last_run_at = timezone.now()
+    schedule.last_run_status = run.status
+    schedule.save(update_fields=["last_run_at", "last_run_status", "updated_at"])

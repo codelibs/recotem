@@ -22,6 +22,11 @@ from recotem.api.views import (
     TrainedModelViewset,
     TrainingDataViewset,
 )
+from recotem.api.views.ab_test import ABTestViewSet
+from recotem.api.views.api_key import ApiKeyViewSet
+from recotem.api.views.deployment import DeploymentSlotViewSet
+from recotem.api.views.events import ConversionEventViewSet
+from recotem.api.views.retraining import RetrainingRunViewSet, RetrainingScheduleViewSet
 
 router = DefaultRouter()
 router.register(r"project", ProjectViewSet, basename="project")
@@ -39,6 +44,16 @@ router.register(
 )
 router.register(r"trained_model", TrainedModelViewset, basename="trained_model")
 router.register(r"task_log", TaskLogViewSet, basename="task_log")
+router.register(r"api_keys", ApiKeyViewSet, basename="api_key")
+router.register(
+    r"retraining_schedule", RetrainingScheduleViewSet, basename="retraining_schedule"
+)
+router.register(r"retraining_run", RetrainingRunViewSet, basename="retraining_run")
+router.register(r"deployment_slot", DeploymentSlotViewSet, basename="deployment_slot")
+router.register(r"ab_test", ABTestViewSet, basename="ab_test")
+router.register(
+    r"conversion_event", ConversionEventViewSet, basename="conversion_event"
+)
 
 
 urlpatterns = [

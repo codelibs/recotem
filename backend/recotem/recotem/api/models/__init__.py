@@ -254,6 +254,183 @@ class TaskAndTrainedModelLink(ModelWithInsDatetime):
     )
 
 
+class ApiKey(ModelWithInsDatetime):
+    """API key for programmatic access to project resources."""
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name="api_keys"
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="api_keys",
+    )
+    name = models.CharField(max_length=256)
+    key_prefix = models.CharField(max_length=16, db_index=True)
+    hashed_key = models.CharField(max_length=256)
+    scopes = models.JSONField(default=list)
+    is_active = models.BooleanField(default=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "name"],
+                name="unique_api_key_name_per_project",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.key_prefix}...)"
+
+
 class TaskLog(ModelWithInsDatetime):
     task = models.ForeignKey(TaskResult, on_delete=models.CASCADE)
     contents = models.TextField(blank=True)
+
+
+class RetrainingSchedule(ModelWithInsDatetime):
+    """Schedule for periodic model retraining."""
+
+    class RunStatus(models.TextChoices):
+        SUCCESS = "SUCCESS", _("Success")
+        FAILED = "FAILED", _("Failed")
+        SKIPPED = "SKIPPED", _("Skipped")
+
+    project = models.OneToOneField(
+        Project, on_delete=models.CASCADE, related_name="retraining_schedule"
+    )
+    is_enabled = models.BooleanField(default=False)
+    cron_expression = models.CharField(max_length=100, default="0 2 * * 0")
+    training_data = models.ForeignKey(
+        TrainingData, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    model_configuration = models.ForeignKey(
+        ModelConfiguration, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    retune = models.BooleanField(default=False)
+    split_config = models.ForeignKey(
+        SplitConfig, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    evaluation_config = models.ForeignKey(
+        EvaluationConfig, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    max_retries = models.IntegerField(default=3)
+    notify_on_failure = models.BooleanField(default=True)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    last_run_status = models.CharField(
+        max_length=10,
+        choices=RunStatus.choices,
+        null=True,
+        blank=True,
+    )
+    next_run_at = models.DateTimeField(null=True, blank=True)
+    auto_deploy = models.BooleanField(default=False)
+
+
+class RetrainingRun(ModelWithInsDatetime):
+    """Record of a single retraining execution."""
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", _("Pending")
+        RUNNING = "RUNNING", _("Running")
+        COMPLETED = "COMPLETED", _("Completed")
+        FAILED = "FAILED", _("Failed")
+        SKIPPED = "SKIPPED", _("Skipped")
+
+    schedule = models.ForeignKey(
+        RetrainingSchedule, on_delete=models.CASCADE, related_name="runs"
+    )
+    status = models.CharField(
+        max_length=10, choices=Status.choices, default=Status.PENDING
+    )
+    trained_model = models.ForeignKey(
+        TrainedModel, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    tuning_job = models.ForeignKey(
+        ParameterTuningJob, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    error_message = models.TextField(blank=True, default="")
+    completed_at = models.DateTimeField(null=True, blank=True)
+    data_rows_at_trigger = models.IntegerField(null=True, blank=True)
+
+
+class DeploymentSlot(ModelWithInsDatetime):
+    """A deployment slot with a traffic weight for A/B testing."""
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name="deployment_slots"
+    )
+    name = models.CharField(max_length=256)
+    trained_model = models.ForeignKey(TrainedModel, on_delete=models.CASCADE)
+    weight = models.FloatField(
+        default=100,
+        validators=[MinValueValidator(0.0), MaxValueValidator(100.0)],
+    )
+    is_active = models.BooleanField(default=True)
+
+
+class ABTest(ModelWithInsDatetime):
+    """A/B test comparing two deployment slots."""
+
+    class Status(models.TextChoices):
+        DRAFT = "DRAFT", _("Draft")
+        RUNNING = "RUNNING", _("Running")
+        COMPLETED = "COMPLETED", _("Completed")
+        CANCELLED = "CANCELLED", _("Cancelled")
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name="ab_tests"
+    )
+    name = models.CharField(max_length=256)
+    status = models.CharField(
+        max_length=10, choices=Status.choices, default=Status.DRAFT
+    )
+    control_slot = models.ForeignKey(
+        DeploymentSlot, on_delete=models.CASCADE, related_name="control_tests"
+    )
+    variant_slot = models.ForeignKey(
+        DeploymentSlot, on_delete=models.CASCADE, related_name="variant_tests"
+    )
+    target_metric_name = models.CharField(max_length=50, default="ctr")
+    min_sample_size = models.IntegerField(default=1000)
+    confidence_level = models.FloatField(
+        default=0.95,
+        validators=[MinValueValidator(0.5), MaxValueValidator(0.99)],
+    )
+    started_at = models.DateTimeField(null=True, blank=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    winner_slot = models.ForeignKey(
+        DeploymentSlot,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="won_tests",
+    )
+
+
+class ConversionEvent(models.Model):
+    """Tracking event for A/B test analysis (impression, click, purchase)."""
+
+    class EventType(models.TextChoices):
+        IMPRESSION = "impression", _("Impression")
+        CLICK = "click", _("Click")
+        PURCHASE = "purchase", _("Purchase")
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE)
+    deployment_slot = models.ForeignKey(DeploymentSlot, on_delete=models.CASCADE)
+    user_id = models.CharField(max_length=256)
+    item_id = models.CharField(max_length=256, blank=True, default="")
+    event_type = models.CharField(max_length=20, choices=EventType.choices)
+    recommendation_request_id = models.UUIDField(null=True, blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["project", "deployment_slot", "event_type", "timestamp"],
+                name="idx_conversion_event_lookup",
+            ),
+        ]

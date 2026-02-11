@@ -110,6 +110,37 @@
             :label="$t('nav.compare')"
             :collapsed="collapsed"
           />
+          <div
+            v-show="!collapsed"
+            class="px-4 py-2 text-xs font-medium text-neutral-100 uppercase tracking-wider mt-2"
+            aria-hidden="true"
+          >
+            Production
+          </div>
+          <SidebarLink
+            :to="`/projects/${projectStore.currentProject.id}/api-keys`"
+            icon="pi-key"
+            :label="$t('nav.apiKeys')"
+            :collapsed="collapsed"
+          />
+          <SidebarLink
+            :to="`/projects/${projectStore.currentProject.id}/retraining`"
+            icon="pi-clock"
+            :label="$t('nav.retraining')"
+            :collapsed="collapsed"
+          />
+          <SidebarLink
+            :to="`/projects/${projectStore.currentProject.id}/deployments`"
+            icon="pi-server"
+            :label="$t('nav.deployments')"
+            :collapsed="collapsed"
+          />
+          <SidebarLink
+            :to="`/projects/${projectStore.currentProject.id}/ab-tests`"
+            icon="pi-chart-line"
+            :label="$t('nav.abTests')"
+            :collapsed="collapsed"
+          />
         </template>
       </nav>
 
@@ -236,6 +267,10 @@ const breadcrumbItems = computed(() => {
     if (route.path.includes("/data")) items.push({ label: t("nav.data") });
     if (route.path.includes("/tuning")) items.push({ label: t("nav.tuning") });
     if (route.path.includes("/models")) items.push({ label: t("nav.models") });
+    if (route.path.includes("/api-keys")) items.push({ label: t("nav.apiKeys") });
+    if (route.path.includes("/retraining")) items.push({ label: t("nav.retraining") });
+    if (route.path.includes("/deployments")) items.push({ label: t("nav.deployments") });
+    if (route.path.includes("/ab-tests")) items.push({ label: t("nav.abTests") });
   } else if (route.path.includes("/projects")) {
     items.push({ label: t("nav.projects") });
   }

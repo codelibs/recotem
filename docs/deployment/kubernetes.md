@@ -14,8 +14,10 @@
 
 ```bash
 docker build -t your-registry/recotem-backend:latest -f backend/Dockerfile backend/
+docker build -t your-registry/recotem-inference:latest -f inference/Dockerfile inference/
 docker build -t your-registry/recotem-proxy:latest -f proxy.dockerfile .
 docker push your-registry/recotem-backend:latest
+docker push your-registry/recotem-inference:latest
 docker push your-registry/recotem-proxy:latest
 ```
 
@@ -24,6 +26,7 @@ docker push your-registry/recotem-proxy:latest
 ```bash
 helm install recotem ./helm/recotem \
   --set image.backend.repository=your-registry/recotem-backend \
+  --set image.inference.repository=your-registry/recotem-inference \
   --set image.proxy.repository=your-registry/recotem-proxy \
   --set postgresql.external=true \
   --set redis.external=true \
@@ -64,6 +67,9 @@ Create a `values-myenv.yaml`:
 image:
   backend:
     repository: your-registry/recotem-backend
+    tag: "v1.0.0"
+  inference:
+    repository: your-registry/recotem-inference
     tag: "v1.0.0"
   proxy:
     repository: your-registry/recotem-proxy
@@ -107,6 +113,15 @@ worker:
     enabled: true
     minReplicas: 2
     maxReplicas: 10
+
+inference:
+  replicaCount: 2
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilization: 60
+    targetMemoryUtilization: 70
 ```
 
 Deploy:
@@ -239,13 +254,31 @@ spec:
         listLength: "5"
 ```
 
+### Inference HPA
+
+The inference service handles prediction requests. Scale based on CPU and memory (model loading is memory-intensive):
+
+```yaml
+inference:
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilization: 60
+    targetMemoryUtilization: 70
+```
+
+Each inference replica independently loads models into memory and subscribes to Redis Pub/Sub for hot-swap events. Replicas are distributed across nodes via `podAntiAffinity`.
+
 ### Resource Recommendations
 
 | Component | CPU Request | CPU Limit | Memory Request | Memory Limit |
 |-----------|-----------|----------|---------------|-------------|
 | Backend | 250m | 1000m | 512Mi | 2Gi |
 | Worker | 500m | 2000m | 1Gi | 4Gi |
-| Proxy | 100m | 500m | 128Mi | 256Mi |
+| Inference | 500m | 2000m | 1Gi | 4Gi |
+| Beat | 100m | 500m | 128Mi | 512Mi |
+| Proxy | 100m | 500m | 64Mi | 256Mi |
 
 ## Upgrade
 

@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "recotem.fullname" . }}-inference
+  labels:
+    {{- include "recotem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: inference
+spec:
+  {{- if not .Values.inference.autoscaling.enabled }}
+  replicas: {{ .Values.inference.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "recotem.inferenceSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "recotem.inferenceSelectorLabels" . | nindent 8 }}
+    spec:
+      {{- include "recotem.imagePullSecrets" . | nindent 6 }}
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ .Values.serviceAccount.name | default (include "recotem.fullname" .) }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "recotem.inferenceSelectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: inference
+          image: "{{ .Values.image.inference.repository }}:{{ .Values.image.inference.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.inference.pullPolicy }}
+          ports:
+            - containerPort: 8081
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "recotem.fullname" . }}-config
+            - secretRef:
+                name: {{ include "recotem.fullname" . }}-secret
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.inference.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              readOnly: true
+      volumes:
+        - name: data
+          {{- if .Values.persistence.data.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "recotem.fullname" . }}-data
+            readOnly: true
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

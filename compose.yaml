@@ -118,9 +118,72 @@ services:
     networks:
       - backend-net
 
+  beat:
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A recotem beat --loglevel=INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    volumes:
+      - data-location:/data
+    env_file:
+      - envs/production.env
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - backend-net
+
+  inference:
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    build:
+      context: ./inference
+      dockerfile: Dockerfile
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    volumes:
+      - data-location:/data:ro
+    env_file:
+      - envs/production.env
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - backend-net
+
   proxy:
     depends_on:
       backend:
+        condition: service_healthy
+      inference:
         condition: service_healthy
     restart: unless-stopped
     build:

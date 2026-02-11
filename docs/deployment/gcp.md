@@ -8,7 +8,9 @@ Deploy Recotem on Google Cloud using GKE or Cloud Run with managed services.
 [Cloud DNS] → [Cloud Load Balancer (HTTPS)] → [GKE/Cloud Run]
                                                   ├── proxy (nginx + SPA)
                                                   ├── backend (daphne)
-                                                  └── worker (celery)
+                                                  ├── inference (FastAPI)
+                                                  ├── worker (celery)
+                                                  └── beat (celery beat)
                                                        ├── [Cloud SQL PostgreSQL]
                                                        ├── [Memorystore Redis]
                                                        └── [Cloud Storage]
@@ -59,10 +61,11 @@ Note the host IP for Redis configuration:
 redis://host-ip:6379/0
 ```
 
-Redis is used for three purposes (different databases):
+Redis is used for four purposes (different databases):
 - db 0: Celery broker
 - db 1: Django Channels
 - db 2: Django cache
+- db 3: Model event Pub/Sub (inference hot-swap)
 
 ### Cloud Storage (Optional)
 

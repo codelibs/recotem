@@ -39,11 +39,16 @@ from recotem.api.serializers.data import ItemMetaDataSerializer
 from recotem.api.services.project_service import get_project_or_404, get_project_summary
 from recotem.api.utils import PREVIEW_ROW_LIMIT, read_dataframe
 
+from .ab_test import ABTestViewSet  # noqa: F401
+from .api_key import ApiKeyViewSet  # noqa: F401
+from .deployment import DeploymentSlotViewSet  # noqa: F401
+from .events import ConversionEventViewSet  # noqa: F401
 from .filemixin import FileDownloadRemoveMixin
 from .mixins import CreatedByResourceMixin, OwnedResourceMixin
 from .model import TrainedModelViewset  # noqa: F401
 from .pagination import StandardPagination
 from .project import ProjectViewSet  # noqa: F401
+from .retraining import RetrainingRunViewSet, RetrainingScheduleViewSet  # noqa: F401
 
 logger = logging.getLogger(__name__)
 

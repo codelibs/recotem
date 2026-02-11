@@ -1,103 +1,159 @@
 # Recotem
 
-## Overview
-
-Recotem is an easy-to-use interface to recommender systems.
-Recotem can be launched on any platform with Docker.
-It ships with a web-based UI, and you can train and evaluate recommendation engines entirely through the UI.
+Recotem is an open-source recommendation system platform. Build, tune, train, deploy, and monitor recommendation models — all from a web UI or REST API.
 
 Recotem is licensed under Apache 2.0.
 
-## Website
+## Features
 
-[recotem.org](https://recotem.org)
+- **Hyperparameter Tuning** — Automated search using Optuna + irspack with real-time progress via WebSocket
+- **Model Training** — Train recommendation models from uploaded interaction data with HMAC-signed serialization
+- **Inference API** — Low-latency FastAPI service for real-time recommendations with hot-swap model loading
+- **API Key Authentication** — Project-scoped API keys with granular permissions (`read`, `write`, `predict`)
+- **Scheduled Retraining** — Cron-based automatic retraining with django-celery-beat
+- **A/B Testing** — Weighted traffic splitting across deployment slots with statistical analysis
 
-## Issues / Questions
+## Architecture
 
-[discuss.codelibs.org](https://discuss.codelibs.org/c/recotemen/11)
+```
+                    ┌──────────────────┐
+                    │  Clients         │
+                    │  (Browser / API) │
+                    └────────┬─────────┘
+                             │ X-API-Key or JWT
+                    ┌────────▼─────────┐
+                    │  nginx (proxy)   │ :8000
+                    └──┬─────┬─────┬───┘
+                       │     │     │
+         /api/ /ws/    │     │     │  /inference/
+         /admin/       │     │     │
+            ┌──────────▼┐  ┌▼─────▼──────────┐
+            │  Backend  │  │  Inference       │
+            │  Django 5 │  │  FastAPI         │
+            │  (daphne) │  │  :8081           │
+            └──┬────┬───┘  └──┬────┬─────────┘
+               │    │         │    │ read-only
+          ┌────▼┐  ┌▼────┐   │  ┌─▼──────────┐
+          │Redis│  │Celery│   │  │ PostgreSQL  │
+          │     │  │Worker│   │  │ :5432       │
+          │db0-3│  └──────┘   │  └─────────────┘
+          └──┬──┘             │
+             │    ┌───────────┘
+          ┌──▼────▼──┐
+          │  Celery  │
+          │  Beat    │
+          └──────────┘
 
-## Getting Started
+Redis databases:
+  db0 = Celery broker    db2 = Django cache
+  db1 = Channels (WS)    db3 = Model event Pub/Sub
+```
 
-### Quick Start with Docker
+**7 services**: PostgreSQL, Redis, Backend (Django), Worker (Celery), Beat (Celery Beat), Inference (FastAPI), Proxy (nginx + SPA)
 
-```sh
+## Quick Start
+
+### Docker Compose
+
+```bash
 docker compose up
 ```
 
-This starts 5 services (PostgreSQL, Redis, backend, worker, proxy) and the app is available at `http://localhost:8000`.
+The app is available at `http://localhost:8000`. Default admin credentials are configured via environment variables.
 
-> **Important:** Before starting in production, copy `envs/production.env` and change all `CHANGE_ME_*` values to secure passwords and a random secret key.
+> **Production:** Copy `envs/.env.example` to `envs/production.env` and change all `CHANGE_ME_*` values before deploying.
 
-### Using pre-built images
+### Pre-built Images
 
 1. Visit the [latest release](https://github.com/codelibs/recotem/releases/latest)
 2. Download "Docker resources to try out" from Assets
 3. Unzip and run `docker compose up`
 
-See the [installation guide](https://recotem.org/guide/installation.html) for more details.
+## Usage Workflow
 
-## Architecture
+1. **Create a Project** — Define user/item/time column names
+2. **Upload Training Data** — CSV file with interaction records
+3. **Tune Hyperparameters** — Run Optuna-based search across irspack algorithms
+4. **Train a Model** — Use the best configuration (auto or manual)
+5. **Create an API Key** — Generate a `rctm_`-prefixed key with `predict` scope
+6. **Deploy to Inference** — Create a deployment slot pointing to a trained model
+7. **Get Recommendations** — Call the inference API with your API key
 
+```bash
+# Example: get recommendations
+curl -X POST http://localhost:8000/inference/predict/project/1 \
+  -H "X-API-Key: rctm_your_api_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "42", "cutoff": 10}'
 ```
-proxy (nginx + SPA) --> backend (daphne/ASGI) --> PostgreSQL 17
-                                               --> Redis 7 <-- worker (celery)
-                                                 (broker + cache + channels)
-```
-
-- **5 services**: postgres, redis, backend, worker, proxy
-- **Backend**: Django REST Framework + daphne (HTTP + WebSocket)
-- **Frontend**: Vue 3 + Vite + PrimeVue 4 + Tailwind CSS 4
-- **Task queue**: Celery with Redis broker
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for full setup instructions.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full developer guide.
 
-### Quick setup
+### Prerequisites
 
-```sh
-# Start infrastructure (PostgreSQL + Redis)
+- Python 3.12+, [uv](https://docs.astral.sh/uv/)
+- Node.js 22+
+- Docker and Docker Compose
+
+### Quick Setup
+
+```bash
+# Infrastructure (PostgreSQL + Redis)
 docker compose -f compose-dev.yaml up -d
 
 # Backend
-cd backend/recotem
-pip install -r ../requirements.txt
-python manage.py migrate
-python manage.py createsuperuser
-python manage.py runserver 8000
+cd backend && uv sync
+cd recotem
+uv run python manage.py migrate
+uv run python manage.py createsuperuser
+uv run daphne recotem.asgi:application -b 0.0.0.0 -p 8000
 
 # Celery worker (separate terminal)
 cd backend/recotem
-celery -A recotem worker --loglevel=INFO
+uv run celery -A recotem worker --loglevel=INFO
+
+# Celery beat (separate terminal)
+cd backend/recotem
+uv run celery -A recotem beat --loglevel=INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler
 
 # Frontend (separate terminal)
-cd frontend
-npm install
-npm run dev
+cd frontend && npm install && npm run dev
 ```
-
-The frontend dev server runs at http://localhost:5173 with API proxy to the backend.
 
 ### Testing
 
-```sh
-# Backend tests
-cd backend/recotem
-pytest --cov
+```bash
+# Backend
+cd backend && uv run pytest recotem/tests/ -v
 
-# Frontend unit tests
-cd frontend
-npm run test:unit
-
-# Frontend E2E tests
-cd frontend
-npm run test:e2e
+# Frontend
+cd frontend && npm run test:unit      # Vitest
+cd frontend && npm run test:e2e       # Playwright
+cd frontend && npm run type-check     # vue-tsc
 ```
 
-## Command-line tool
+## Documentation
 
-[recotem-cli](https://github.com/codelibs/recotem-cli) allows you to tune, train, and get recommendations via the command line.
+| Topic | Link |
+|-------|------|
+| Inference API | [docs/guides/inference-api.md](docs/guides/inference-api.md) |
+| API Key Authentication | [docs/guides/api-keys.md](docs/guides/api-keys.md) |
+| Scheduled Retraining | [docs/guides/retraining.md](docs/guides/retraining.md) |
+| A/B Testing | [docs/guides/ab-testing.md](docs/guides/ab-testing.md) |
+| Standalone Inference | [docs/guides/standalone-inference.md](docs/guides/standalone-inference.md) |
+| Docker Compose Deployment | [docs/deployment/docker-compose.md](docs/deployment/docker-compose.md) |
+| Kubernetes Deployment | [docs/deployment/kubernetes.md](docs/deployment/kubernetes.md) |
+| AWS Deployment | [docs/deployment/aws.md](docs/deployment/aws.md) |
+| GCP Deployment | [docs/deployment/gcp.md](docs/deployment/gcp.md) |
+| Environment Variables | [docs/deployment/environment-variables.md](docs/deployment/environment-variables.md) |
+| Separate Frontend | [docs/deployment/separate-frontend.md](docs/deployment/separate-frontend.md) |
+| Contributing | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
-## Batch execution on ECS
+## Links
 
-See the [example project](https://github.com/codelibs/recotem-batch-example) for batch execution on Amazon ECS.
+- Website: [recotem.org](https://recotem.org)
+- CLI tool: [recotem-cli](https://github.com/codelibs/recotem-cli)
+- Batch on ECS: [recotem-batch-example](https://github.com/codelibs/recotem-batch-example)
+- Issues / Questions: [discuss.codelibs.org](https://discuss.codelibs.org/c/recotemen/11)

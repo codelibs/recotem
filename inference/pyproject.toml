@@ -1,0 +1,33 @@
+[project]
+name = "recotem-inference"
+version = "2.0.0"
+description = "Recotem inference service"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.32,<1",
+    "sqlalchemy>=2.0,<3",
+    "psycopg[binary]>=3.1,<4",
+    "redis>=5.0,<6",
+    "passlib>=1.7,<2",
+    "slowapi>=0.1.9,<1",
+    "pydantic-settings>=2.0,<3",
+    "irspack==0.4.0",
+    "numpy>=2.1,<3",
+    "scipy>=1.14,<2",
+    "scikit-learn>=1.6,<2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0,<9",
+    "pytest-asyncio>=0.24,<1",
+    "httpx>=0.27,<1",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM"]

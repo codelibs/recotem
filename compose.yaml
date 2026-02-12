@@ -120,7 +120,7 @@ services:
 
   beat:
     depends_on:
-      db:
+      backend:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -150,6 +150,8 @@ services:
   inference:
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     build:

@@ -62,7 +62,7 @@ test.describe("Model Management", () => {
 
     await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Models/ }).click();
     await expect(
-      page.getByRole("button", { name: "Train Model" }),
+      page.getByRole("button", { name: "Train Model" }).first(),
     ).toBeVisible();
   });
 
@@ -71,7 +71,7 @@ test.describe("Model Management", () => {
     const projectId = await createProject(page, name);
 
     await page.locator("nav[aria-label='Sidebar']").getByRole("link", { name: /Models/ }).click();
-    await page.getByRole("button", { name: "Train Model" }).click();
+    await page.getByRole("button", { name: "Train Model" }).first().click();
 
     await expect(page).toHaveURL(
       new RegExp(`/projects/${projectId}/models/train`),

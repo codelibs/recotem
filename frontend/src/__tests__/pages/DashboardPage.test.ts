@@ -19,6 +19,13 @@ const apiMock = vi.fn();
 vi.mock("@/api/client", () => ({
   api: (...args: unknown[]) => apiMock(...args),
   classifyApiError: (err: any) => ({ kind: "unknown", status: undefined, message: err?.message ?? "Unknown error", fieldErrors: undefined }),
+  unwrapResults: (res: any) => (Array.isArray(res) ? res : res.results),
+}));
+
+vi.mock("@/api/production", () => ({
+  getRetrainingSchedules: vi.fn().mockResolvedValue({ results: [] }),
+  getDeploymentSlots: vi.fn().mockResolvedValue({ results: [] }),
+  getABTests: vi.fn().mockResolvedValue({ results: [] }),
 }));
 
 function mountPage() {

@@ -5,8 +5,16 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .config import settings
 
+
+def _normalize_url(url: str) -> str:
+    """Ensure SQLAlchemy uses the psycopg (v3) driver."""
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return url
+
+
 engine = create_engine(
-    settings.database_url,
+    _normalize_url(settings.database_url),
     pool_size=5,
     max_overflow=10,
     pool_pre_ping=True,

@@ -33,7 +33,10 @@ def project(user):
 @pytest.fixture
 def slot(project):
     mc = ModelConfiguration.objects.create(
-        name="cfg", project=project, recommender_class_name="IALSRecommender", parameters_json={}
+        name="cfg",
+        project=project,
+        recommender_class_name="IALSRecommender",
+        parameters_json={},
     )
     td = TrainingData.objects.create(project=project)
     td.file.save("data.csv", ContentFile(b"u,i\n1,2\n"))

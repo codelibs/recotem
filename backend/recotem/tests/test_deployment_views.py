@@ -36,8 +36,9 @@ def trained_model(project, tmp_path):
         parameters_json={},
     )
     # TrainedModel needs a data_loc — create a minimal one
-    from recotem.api.models import TrainingData
     from django.core.files.base import ContentFile
+
+    from recotem.api.models import TrainingData
 
     td = TrainingData.objects.create(project=project)
     td.file.save("data.csv", ContentFile(b"u,i\n1,2\n"))
@@ -77,12 +78,22 @@ class TestDeploymentSlotViewSet:
         url = reverse("deployment_slot-list")
         auth_client.post(
             url,
-            {"project": project.id, "name": "s1", "trained_model": trained_model.id, "weight": 60},
+            {
+                "project": project.id,
+                "name": "s1",
+                "trained_model": trained_model.id,
+                "weight": 60,
+            },
             content_type="application/json",
         )
         auth_client.post(
             url,
-            {"project": project.id, "name": "s2", "trained_model": trained_model.id, "weight": 40},
+            {
+                "project": project.id,
+                "name": "s2",
+                "trained_model": trained_model.id,
+                "weight": 40,
+            },
             content_type="application/json",
         )
         resp = auth_client.get(url)
@@ -95,7 +106,12 @@ class TestDeploymentSlotViewSet:
         url = reverse("deployment_slot-list")
         create_resp = auth_client.post(
             url,
-            {"project": project.id, "name": "update-me", "trained_model": trained_model.id, "weight": 50},
+            {
+                "project": project.id,
+                "name": "update-me",
+                "trained_model": trained_model.id,
+                "weight": 50,
+            },
             content_type="application/json",
         )
         slot_id = create_resp.json()["id"]
@@ -113,7 +129,12 @@ class TestDeploymentSlotViewSet:
         url = reverse("deployment_slot-list")
         create_resp = auth_client.post(
             url,
-            {"project": project.id, "name": "del-me", "trained_model": trained_model.id, "weight": 50},
+            {
+                "project": project.id,
+                "name": "del-me",
+                "trained_model": trained_model.id,
+                "weight": 50,
+            },
             content_type="application/json",
         )
         slot_id = create_resp.json()["id"]
@@ -123,12 +144,18 @@ class TestDeploymentSlotViewSet:
         assert not DeploymentSlot.objects.filter(id=slot_id).exists()
 
     def test_filter_by_project(self, auth_client, user, trained_model):
-        p2 = Project.objects.create(name="p2", user_column="u", item_column="i", owner=user)
-        mc2 = ModelConfiguration.objects.create(
-            name="cfg2", project=p2, recommender_class_name="IALSRecommender", parameters_json={}
+        p2 = Project.objects.create(
+            name="p2", user_column="u", item_column="i", owner=user
         )
-        from recotem.api.models import TrainingData
+        mc2 = ModelConfiguration.objects.create(
+            name="cfg2",
+            project=p2,
+            recommender_class_name="IALSRecommender",
+            parameters_json={},
+        )
         from django.core.files.base import ContentFile
+
+        from recotem.api.models import TrainingData
 
         td2 = TrainingData.objects.create(project=p2)
         td2.file.save("d2.csv", ContentFile(b"u,i\n1,2\n"))
@@ -137,7 +164,12 @@ class TestDeploymentSlotViewSet:
         url = reverse("deployment_slot-list")
         auth_client.post(
             url,
-            {"project": trained_model.configuration.project.id, "name": "s-orig", "trained_model": trained_model.id, "weight": 50},
+            {
+                "project": trained_model.configuration.project.id,
+                "name": "s-orig",
+                "trained_model": trained_model.id,
+                "weight": 50,
+            },
             content_type="application/json",
         )
         auth_client.post(

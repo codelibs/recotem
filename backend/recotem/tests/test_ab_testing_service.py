@@ -2,7 +2,10 @@
 
 import pytest
 
-from recotem.api.services.ab_testing_service import compute_ab_results, select_slot_by_weight
+from recotem.api.services.ab_testing_service import (
+    compute_ab_results,
+    select_slot_by_weight,
+)
 
 
 class TestComputeABResults:

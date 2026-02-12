@@ -1,7 +1,8 @@
 """Tests for schedule_service (sync with django-celery-beat)."""
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from recotem.api.services.schedule_service import _parse_cron, sync_schedule_to_beat
 

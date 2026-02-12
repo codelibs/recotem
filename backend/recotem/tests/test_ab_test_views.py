@@ -83,10 +83,16 @@ class TestABTestViewSet:
 
     def test_list_ab_tests(self, auth_client, project, control_slot, variant_slot):
         ABTest.objects.create(
-            project=project, name="t1", control_slot=control_slot, variant_slot=variant_slot
+            project=project,
+            name="t1",
+            control_slot=control_slot,
+            variant_slot=variant_slot,
         )
         ABTest.objects.create(
-            project=project, name="t2", control_slot=control_slot, variant_slot=variant_slot
+            project=project,
+            name="t2",
+            control_slot=control_slot,
+            variant_slot=variant_slot,
         )
         url = reverse("ab_test-list")
         resp = auth_client.get(url)
@@ -97,7 +103,10 @@ class TestABTestViewSet:
 
     def test_start_ab_test(self, auth_client, project, control_slot, variant_slot):
         test = ABTest.objects.create(
-            project=project, name="start-me", control_slot=control_slot, variant_slot=variant_slot
+            project=project,
+            name="start-me",
+            control_slot=control_slot,
+            variant_slot=variant_slot,
         )
         url = reverse("ab_test-start", args=[test.id])
         resp = auth_client.post(url)
@@ -106,7 +115,9 @@ class TestABTestViewSet:
         assert data["status"] == "RUNNING"
         assert data["started_at"] is not None
 
-    def test_start_non_draft_fails(self, auth_client, project, control_slot, variant_slot):
+    def test_start_non_draft_fails(
+        self, auth_client, project, control_slot, variant_slot
+    ):
         test = ABTest.objects.create(
             project=project,
             name="running",
@@ -133,7 +144,9 @@ class TestABTestViewSet:
         assert data["status"] == "COMPLETED"
         assert data["ended_at"] is not None
 
-    def test_stop_non_running_fails(self, auth_client, project, control_slot, variant_slot):
+    def test_stop_non_running_fails(
+        self, auth_client, project, control_slot, variant_slot
+    ):
         test = ABTest.objects.create(
             project=project,
             name="draft",
@@ -147,7 +160,10 @@ class TestABTestViewSet:
 
     def test_results_no_events(self, auth_client, project, control_slot, variant_slot):
         test = ABTest.objects.create(
-            project=project, name="no-events", control_slot=control_slot, variant_slot=variant_slot
+            project=project,
+            name="no-events",
+            control_slot=control_slot,
+            variant_slot=variant_slot,
         )
         url = reverse("ab_test-results", args=[test.id])
         resp = auth_client.get(url)
@@ -157,7 +173,9 @@ class TestABTestViewSet:
         assert data["variant_impressions"] == 0
         assert data["significant"] is False
 
-    def test_results_with_events(self, auth_client, project, control_slot, variant_slot):
+    def test_results_with_events(
+        self, auth_client, project, control_slot, variant_slot
+    ):
         test = ABTest.objects.create(
             project=project,
             name="with-events",
@@ -214,7 +232,7 @@ class TestABTestViewSet:
             variant_slot=variant_slot,
             status=ABTest.Status.COMPLETED,
         )
-        url = reverse("ab_test-promote_winner", args=[test.id])
+        url = reverse("ab_test-promote-winner", args=[test.id])
         resp = auth_client.post(
             url, {"slot_id": control_slot.id}, content_type="application/json"
         )
@@ -238,7 +256,7 @@ class TestABTestViewSet:
             variant_slot=variant_slot,
             status=ABTest.Status.RUNNING,
         )
-        url = reverse("ab_test-promote_winner", args=[test.id])
+        url = reverse("ab_test-promote-winner", args=[test.id])
         resp = auth_client.post(
             url, {"slot_id": control_slot.id}, content_type="application/json"
         )
@@ -254,7 +272,7 @@ class TestABTestViewSet:
             variant_slot=variant_slot,
             status=ABTest.Status.COMPLETED,
         )
-        url = reverse("ab_test-promote_winner", args=[test.id])
+        url = reverse("ab_test-promote-winner", args=[test.id])
         resp = auth_client.post(
             url, {"slot_id": 99999}, content_type="application/json"
         )
@@ -271,10 +289,14 @@ class TestABTestOwnershipIsolation:
     def test_user_cannot_see_other_users_tests(self, client: Client):
         user_a = User.objects.create_user(username="a", password="pass")
         user_b = User.objects.create_user(username="b", password="pass")
-        proj_a = Project.objects.create(name="pa", user_column="u", item_column="i", owner=user_a)
+        proj_a = Project.objects.create(
+            name="pa", user_column="u", item_column="i", owner=user_a
+        )
         c = _make_slot(proj_a, "c-a")
         v = _make_slot(proj_a, "v-a")
-        ABTest.objects.create(project=proj_a, name="secret-test", control_slot=c, variant_slot=v)
+        ABTest.objects.create(
+            project=proj_a, name="secret-test", control_slot=c, variant_slot=v
+        )
 
         url = reverse("ab_test-list")
         client.force_login(user_b)

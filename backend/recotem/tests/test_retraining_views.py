@@ -1,10 +1,11 @@
 """Tests for RetrainingScheduleViewSet and RetrainingRunViewSet."""
 
+from unittest.mock import patch
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 from django.urls import reverse
-from unittest.mock import patch
 
 from recotem.api.models import Project, RetrainingRun, RetrainingSchedule
 
@@ -114,7 +115,9 @@ class TestRetrainingRunViewSet:
             project=project, cron_expression="0 2 * * 0"
         )
         RetrainingRun.objects.create(schedule=sched, status="COMPLETED")
-        RetrainingRun.objects.create(schedule=sched, status="FAILED", error_message="oops")
+        RetrainingRun.objects.create(
+            schedule=sched, status="FAILED", error_message="oops"
+        )
 
         url = reverse("retraining_run-list")
         resp = auth_client.get(url, {"schedule": sched.id})
@@ -148,7 +151,9 @@ class TestRetrainingOwnershipIsolation:
     def test_user_cannot_see_other_users_schedules(self, client: Client):
         user_a = User.objects.create_user(username="a", password="pass")
         user_b = User.objects.create_user(username="b", password="pass")
-        proj_a = Project.objects.create(name="pa", user_column="u", item_column="i", owner=user_a)
+        proj_a = Project.objects.create(
+            name="pa", user_column="u", item_column="i", owner=user_a
+        )
         RetrainingSchedule.objects.create(project=proj_a, cron_expression="0 2 * * 0")
 
         url = reverse("retraining_schedule-list")

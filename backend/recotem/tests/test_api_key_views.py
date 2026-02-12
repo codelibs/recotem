@@ -122,8 +122,12 @@ class TestApiKeyViewSet:
         assert resp.status_code == 401
 
     def test_filter_by_project(self, auth_client, user):
-        p1 = Project.objects.create(name="p1", user_column="u", item_column="i", owner=user)
-        p2 = Project.objects.create(name="p2", user_column="u", item_column="i", owner=user)
+        p1 = Project.objects.create(
+            name="p1", user_column="u", item_column="i", owner=user
+        )
+        p2 = Project.objects.create(
+            name="p2", user_column="u", item_column="i", owner=user
+        )
 
         url = reverse("api_key-list")
         auth_client.post(

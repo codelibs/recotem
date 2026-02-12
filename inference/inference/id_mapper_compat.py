@@ -4,7 +4,24 @@ This is a copy of the backend's id_mapper_compat module, needed because
 pickle deserialization requires the class to be importable at the same path.
 """
 
+from __future__ import annotations
+
+import sys
 from collections.abc import Iterable
+from types import ModuleType
+
+# Provide a minimal IPython stub for fastprogress (transitive dep of irspack).
+# fastprogress imports IPython.display at module level, but IPython is not
+# needed for the inference service's use of irspack's IDMapper.
+if "IPython" not in sys.modules:
+    _ipython = ModuleType("IPython")
+    _display = ModuleType("IPython.display")
+    _display.display = lambda *a, **kw: None  # type: ignore[attr-defined]
+    _display.HTML = str  # type: ignore[attr-defined]
+    _display.Markdown = str  # type: ignore[attr-defined]
+    _ipython.display = _display  # type: ignore[attr-defined]
+    sys.modules["IPython"] = _ipython
+    sys.modules["IPython.display"] = _display
 
 from irspack.utils.id_mapping import IDMapper
 

@@ -111,9 +111,10 @@ class TestApiKeyAuthentication:
             auth.authenticate(request)
 
     def test_expired_key_fails(self, api_key_data):
-        from rest_framework.exceptions import AuthenticationFailed
-        from django.utils import timezone
         from datetime import timedelta
+
+        from django.utils import timezone
+        from rest_framework.exceptions import AuthenticationFailed
 
         full_key, key_obj = api_key_data
         key_obj.expires_at = timezone.now() - timedelta(hours=1)

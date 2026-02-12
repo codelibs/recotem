@@ -25,6 +25,9 @@ class TrainingDataSerializer(serializers.ModelSerializer):
         user = getattr(request, "user", None)
         if user is not None and project.owner_id not in (None, user.id):
             raise serializers.ValidationError("Project not found.")
+        api_key = getattr(request, "api_key", None)
+        if api_key is not None and api_key.project_id != project.id:
+            raise serializers.ValidationError("Project not found.")
         return project
 
     def validate(self, attrs):
@@ -65,6 +68,9 @@ class ItemMetaDataSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = getattr(request, "user", None)
         if user is not None and project.owner_id not in (None, user.id):
+            raise serializers.ValidationError("Project not found.")
+        api_key = getattr(request, "api_key", None)
+        if api_key is not None and api_key.project_id != project.id:
             raise serializers.ValidationError("Project not found.")
         return project
 

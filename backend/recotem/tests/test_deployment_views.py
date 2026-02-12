@@ -186,3 +186,36 @@ class TestDeploymentSlotViewSet:
         url = reverse("deployment_slot-list")
         resp = client.get(url)
         assert resp.status_code == 401
+
+    def test_cross_project_trained_model_rejected(self, auth_client, user, project):
+        """Cannot attach a trained_model from another project to a slot."""
+        other_project = Project.objects.create(
+            name="other", user_column="u", item_column="i", owner=user
+        )
+        mc = ModelConfiguration.objects.create(
+            name="cfg-other",
+            project=other_project,
+            recommender_class_name="IALSRecommender",
+            parameters_json={},
+        )
+        from django.core.files.base import ContentFile
+
+        from recotem.api.models import TrainingData
+
+        td = TrainingData.objects.create(project=other_project)
+        td.file.save("other.csv", ContentFile(b"u,i\n1,2\n"))
+        other_model = TrainedModel.objects.create(configuration=mc, data_loc=td)
+
+        url = reverse("deployment_slot-list")
+        resp = auth_client.post(
+            url,
+            {
+                "project": project.id,
+                "name": "cross-proj-slot",
+                "trained_model": other_model.id,
+                "weight": 50,
+            },
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+        assert "trained_model" in resp.json()

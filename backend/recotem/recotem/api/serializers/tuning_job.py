@@ -66,6 +66,14 @@ class ParameterTuningJobSerializer(serializers.ModelSerializer):
             errors["split"] = ["Split config not found."]
         if evaluation is not None and evaluation.created_by_id not in (None, user.id):
             errors["evaluation"] = ["Evaluation config not found."]
+        # Enforce API key project scope
+        api_key = getattr(request, "api_key", None)
+        if (
+            api_key is not None
+            and data is not None
+            and data.project_id != api_key.project_id
+        ):
+            errors["data"] = ["Data not found."]
         if errors:
             raise ValidationError(errors)
         return attrs

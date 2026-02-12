@@ -6,6 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from recotem.api.authentication import RequireManagementScope
 from recotem.api.models import ABTest, ConversionEvent
 from recotem.api.serializers.ab_test import ABTestResultSerializer, ABTestSerializer
 from recotem.api.services.ab_testing_service import compute_ab_results
@@ -14,9 +15,19 @@ from recotem.api.views.pagination import StandardPagination
 
 logger = logging.getLogger(__name__)
 
+# Maps target_metric_name to the event types that count as conversions
+METRIC_CONVERSION_TYPES = {
+    "ctr": [ConversionEvent.EventType.CLICK],
+    "purchase_rate": [ConversionEvent.EventType.PURCHASE],
+    "conversion_rate": [
+        ConversionEvent.EventType.CLICK,
+        ConversionEvent.EventType.PURCHASE,
+    ],
+}
+
 
 class ABTestViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     serializer_class = ABTestSerializer
     filterset_fields = ["project", "status"]
     pagination_class = StandardPagination
@@ -78,12 +89,19 @@ class ABTestViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
             impressions = events.filter(
                 event_type=ConversionEvent.EventType.IMPRESSION
             ).count()
-            conversions = events.filter(
-                event_type__in=[
+            conversion_types = METRIC_CONVERSION_TYPES.get(test.target_metric_name)
+            if conversion_types is None:
+                logger.warning(
+                    "Unknown target_metric_name '%s' for ABTest %s, "
+                    "falling back to click+purchase",
+                    test.target_metric_name,
+                    test.id,
+                )
+                conversion_types = [
                     ConversionEvent.EventType.CLICK,
                     ConversionEvent.EventType.PURCHASE,
                 ]
-            ).count()
+            conversions = events.filter(event_type__in=conversion_types).count()
             return impressions, conversions
 
         ctrl_imp, ctrl_conv = _get_counts(test.control_slot_id)
@@ -96,6 +114,11 @@ class ABTestViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
         results["control_conversions"] = ctrl_conv
         results["variant_impressions"] = var_imp
         results["variant_conversions"] = var_conv
+
+        # min_sample_size enforcement
+        total_impressions = ctrl_imp + var_imp
+        results["min_sample_size"] = test.min_sample_size
+        results["sufficient_data"] = total_impressions >= test.min_sample_size
 
         serializer = ABTestResultSerializer(results)
         return Response(serializer.data)

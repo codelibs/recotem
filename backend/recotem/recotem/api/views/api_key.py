@@ -5,7 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from recotem.api.authentication import generate_api_key
+from recotem.api.authentication import RequireManagementScope, generate_api_key
 from recotem.api.models import ApiKey
 from recotem.api.serializers.api_key import ApiKeyCreateSerializer, ApiKeySerializer
 from recotem.api.views.mixins import OwnedResourceMixin
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class ApiKeyViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
     """Manage API keys for project access."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     filterset_fields = ["project"]
     pagination_class = StandardPagination
     owner_lookup = "project__owner"

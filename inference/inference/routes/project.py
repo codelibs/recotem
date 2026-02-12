@@ -4,14 +4,16 @@ import logging
 import random
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..auth import ApiKey, require_scope
+from ..config import settings
 from ..db import get_db
 from ..model_loader import get_or_load_model
 from ..models import DeploymentSlot, TrainedModel
+from ..rate_limit import limiter
 from .predict import RecommendationItem
 
 logger = logging.getLogger(__name__)
@@ -39,7 +41,9 @@ def _select_slot_by_weight(slots: list[DeploymentSlot]) -> DeploymentSlot:
 
 
 @router.post("/predict/project/{project_id}", response_model=ProjectPredictResponse)
+@limiter.limit(settings.inference_rate_limit)
 def predict_by_project(
+    request: Request,
     project_id: int,
     body: ProjectPredictRequest,
     api_key: ApiKey = Depends(require_scope("predict")),  # noqa: B008

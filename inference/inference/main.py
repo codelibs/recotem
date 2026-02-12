@@ -4,21 +4,19 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 
 from .config import settings
 from .db import SessionLocal
 from .hot_swap import start_listener
 from .model_loader import get_or_load_model
 from .models import TrainedModel
+from .rate_limit import limiter
 from .routes import health, predict, project
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-limiter = Limiter(key_func=get_remote_address)
 
 
 @asynccontextmanager

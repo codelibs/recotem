@@ -285,6 +285,144 @@ class TestABTestViewSet:
 
 
 @pytest.mark.django_db
+class TestABTestTargetMetric:
+    """Tests that target_metric_name controls which events count as conversions."""
+
+    def _create_events(self, project, slot, n_impressions, n_clicks, n_purchases):
+        for i in range(n_impressions):
+            ConversionEvent.objects.create(
+                project=project,
+                deployment_slot=slot,
+                user_id=f"u{i}",
+                event_type="impression",
+            )
+        for i in range(n_clicks):
+            ConversionEvent.objects.create(
+                project=project,
+                deployment_slot=slot,
+                user_id=f"u{i}",
+                event_type="click",
+            )
+        for i in range(n_purchases):
+            ConversionEvent.objects.create(
+                project=project,
+                deployment_slot=slot,
+                user_id=f"u{i}",
+                event_type="purchase",
+            )
+
+    def test_ctr_metric_counts_only_clicks(
+        self, auth_client, project, control_slot, variant_slot
+    ):
+        test = ABTest.objects.create(
+            project=project,
+            name="ctr-test",
+            control_slot=control_slot,
+            variant_slot=variant_slot,
+            target_metric_name="ctr",
+            status=ABTest.Status.RUNNING,
+        )
+        self._create_events(project, control_slot, 100, 10, 5)
+        self._create_events(project, variant_slot, 100, 20, 8)
+
+        url = reverse("ab_test-results", args=[test.id])
+        resp = auth_client.get(url)
+        assert resp.status_code == 200
+        data = resp.json()
+        # Only clicks count as conversions for "ctr"
+        assert data["control_conversions"] == 10
+        assert data["variant_conversions"] == 20
+
+    def test_purchase_rate_counts_only_purchases(
+        self, auth_client, project, control_slot, variant_slot
+    ):
+        test = ABTest.objects.create(
+            project=project,
+            name="purchase-test",
+            control_slot=control_slot,
+            variant_slot=variant_slot,
+            target_metric_name="purchase_rate",
+            status=ABTest.Status.RUNNING,
+        )
+        self._create_events(project, control_slot, 100, 10, 5)
+        self._create_events(project, variant_slot, 100, 20, 8)
+
+        url = reverse("ab_test-results", args=[test.id])
+        resp = auth_client.get(url)
+        assert resp.status_code == 200
+        data = resp.json()
+        # Only purchases count as conversions for "purchase_rate"
+        assert data["control_conversions"] == 5
+        assert data["variant_conversions"] == 8
+
+    def test_conversion_rate_counts_clicks_and_purchases(
+        self, auth_client, project, control_slot, variant_slot
+    ):
+        test = ABTest.objects.create(
+            project=project,
+            name="conversion-test",
+            control_slot=control_slot,
+            variant_slot=variant_slot,
+            target_metric_name="conversion_rate",
+            status=ABTest.Status.RUNNING,
+        )
+        self._create_events(project, control_slot, 100, 10, 5)
+        self._create_events(project, variant_slot, 100, 20, 8)
+
+        url = reverse("ab_test-results", args=[test.id])
+        resp = auth_client.get(url)
+        assert resp.status_code == 200
+        data = resp.json()
+        # Both clicks and purchases count for "conversion_rate"
+        assert data["control_conversions"] == 15
+        assert data["variant_conversions"] == 28
+
+
+@pytest.mark.django_db
+class TestABTestSlotProjectIntegrity:
+    """Reject A/B tests whose slots belong to a different project."""
+
+    def test_create_with_cross_project_slots_rejected(
+        self, auth_client, user, project, control_slot
+    ):
+        other_project = Project.objects.create(
+            name="other", user_column="u", item_column="i", owner=user
+        )
+        other_slot = _make_slot(other_project, "other-slot")
+        url = reverse("ab_test-list")
+        resp = auth_client.post(
+            url,
+            {
+                "project": project.id,
+                "name": "cross-proj",
+                "control_slot": control_slot.id,
+                "variant_slot": other_slot.id,
+            },
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+        assert "variant_slot" in resp.json()
+
+    def test_invalid_target_metric_rejected(
+        self, auth_client, project, control_slot, variant_slot
+    ):
+        url = reverse("ab_test-list")
+        resp = auth_client.post(
+            url,
+            {
+                "project": project.id,
+                "name": "bad-metric",
+                "control_slot": control_slot.id,
+                "variant_slot": variant_slot.id,
+                "target_metric_name": "typo_metric",
+            },
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+        assert "target_metric_name" in resp.json()
+
+
+@pytest.mark.django_db
 class TestABTestOwnershipIsolation:
     def test_user_cannot_see_other_users_tests(self, client: Client):
         user_a = User.objects.create_user(username="a", password="pass")

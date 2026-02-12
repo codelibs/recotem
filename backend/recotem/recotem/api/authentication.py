@@ -7,10 +7,34 @@ from django.contrib.auth.hashers import check_password, make_password
 from django.utils import timezone
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.permissions import BasePermission
 
 logger = logging.getLogger(__name__)
 
 API_KEY_PREFIX = "rctm_"
+
+
+SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+class RequireManagementScope(BasePermission):
+    """Enforce API key scopes on management endpoints.
+
+    - JWT/session users are always allowed (no api_key attribute).
+    - API key users need 'read' scope for safe methods (GET/HEAD/OPTIONS).
+    - API key users need 'write' scope for unsafe methods (POST/PUT/PATCH/DELETE).
+    """
+
+    def has_permission(self, request, view):
+        api_key = getattr(request, "api_key", None)
+        if api_key is None:
+            return True  # JWT/session — no scope restriction
+        scopes = api_key.scopes or []
+        if request.method in SAFE_METHODS:
+            return "read" in scopes
+        return "write" in scopes
+
+
 API_KEY_RANDOM_LENGTH = 48  # Characters after prefix
 
 

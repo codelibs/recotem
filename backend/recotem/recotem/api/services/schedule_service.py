@@ -46,3 +46,12 @@ def sync_schedule_to_beat(schedule) -> None:
         },
     )
     logger.info("Synced periodic task for schedule %d", schedule.id)
+
+
+def delete_beat_task(schedule) -> None:
+    """Delete the PeriodicTask for a schedule, regardless of is_enabled."""
+    task_name = f"{TASK_NAME_PREFIX}{schedule.id}"
+    PeriodicTask.objects.filter(name=task_name).delete()
+    logger.info(
+        "Deleted periodic task for schedule %d (schedule destroyed)", schedule.id
+    )

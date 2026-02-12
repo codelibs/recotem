@@ -3,14 +3,16 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..auth import ApiKey, require_scope
+from ..config import settings
 from ..db import get_db
 from ..model_loader import get_or_load_model
-from ..models import TrainedModel
+from ..models import TrainedModel, TrainingData
+from ..rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,9 @@ class PredictBatchResponse(BaseModel):
 
 
 @router.post("/predict/{model_id}", response_model=PredictResponse)
+@limiter.limit(settings.inference_rate_limit)
 def predict(
+    request: Request,
     model_id: int,
     body: PredictRequest,
     api_key: ApiKey = Depends(require_scope("predict")),  # noqa: B008
@@ -53,6 +57,16 @@ def predict(
     model_record = db.query(TrainedModel).filter(TrainedModel.id == model_id).first()
     if model_record is None:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+
+    training_data = (
+        db.query(TrainingData)
+        .filter(TrainingData.id == model_record.data_loc_id)
+        .first()
+    )
+    if training_data is None or training_data.project_id != api_key.project_id:
+        raise HTTPException(
+            status_code=403, detail="API key not authorized for this model's project"
+        )
 
     try:
         rec = get_or_load_model(model_id, model_record.file)
@@ -75,7 +89,9 @@ def predict(
 
 
 @router.post("/predict/{model_id}/batch", response_model=PredictBatchResponse)
+@limiter.limit(settings.inference_rate_limit)
 def predict_batch(
+    request: Request,
     model_id: int,
     body: PredictBatchRequest,
     api_key: ApiKey = Depends(require_scope("predict")),  # noqa: B008
@@ -88,6 +104,16 @@ def predict_batch(
     model_record = db.query(TrainedModel).filter(TrainedModel.id == model_id).first()
     if model_record is None:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+
+    training_data = (
+        db.query(TrainingData)
+        .filter(TrainingData.id == model_record.data_loc_id)
+        .first()
+    )
+    if training_data is None or training_data.project_id != api_key.project_id:
+        raise HTTPException(
+            status_code=403, detail="API key not authorized for this model's project"
+        )
 
     try:
         rec = get_or_load_model(model_id, model_record.file)

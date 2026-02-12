@@ -65,6 +65,14 @@ class Command(BaseCommand):
         if not scopes:
             raise CommandError("At least one scope is required.")
 
+        # Validate owner matches project owner
+        if project.owner_id is not None and project.owner_id != owner.id:
+            raise CommandError(
+                f"Owner '{owner.username}' does not match project owner "
+                f"'{project.owner.username}'. API key owner must match the "
+                f"project owner for management API access to work correctly."
+            )
+
         # Check for duplicate name
         if ApiKey.objects.filter(project=project, name=options["name"]).exists():
             raise CommandError(

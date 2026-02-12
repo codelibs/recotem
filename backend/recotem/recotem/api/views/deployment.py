@@ -1,6 +1,7 @@
 from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated
 
+from recotem.api.authentication import RequireManagementScope
 from recotem.api.models import DeploymentSlot
 from recotem.api.serializers.deployment import DeploymentSlotSerializer
 from recotem.api.views.mixins import OwnedResourceMixin
@@ -8,7 +9,7 @@ from recotem.api.views.pagination import StandardPagination
 
 
 class DeploymentSlotViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     serializer_class = DeploymentSlotSerializer
     filterset_fields = ["project", "is_active"]
     pagination_class = StandardPagination

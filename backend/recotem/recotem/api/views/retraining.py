@@ -6,12 +6,16 @@ from rest_framework.mixins import ListModelMixin, RetrieveModelMixin
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from recotem.api.authentication import RequireManagementScope
 from recotem.api.models import RetrainingRun, RetrainingSchedule
 from recotem.api.serializers.retraining import (
     RetrainingRunSerializer,
     RetrainingScheduleSerializer,
 )
-from recotem.api.services.schedule_service import sync_schedule_to_beat
+from recotem.api.services.schedule_service import (
+    delete_beat_task,
+    sync_schedule_to_beat,
+)
 from recotem.api.views.mixins import OwnedResourceMixin
 from recotem.api.views.pagination import StandardPagination
 
@@ -19,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class RetrainingScheduleViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     serializer_class = RetrainingScheduleSerializer
     filterset_fields = ["project"]
     pagination_class = StandardPagination
@@ -41,7 +45,7 @@ class RetrainingScheduleViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
         sync_schedule_to_beat(instance)
 
     def perform_destroy(self, instance):
-        sync_schedule_to_beat(instance)  # Will delete the periodic task
+        delete_beat_task(instance)  # Always delete, don't sync
         instance.delete()
 
     @action(detail=True, methods=["post"])
@@ -57,7 +61,7 @@ class RetrainingScheduleViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
 class RetrainingRunViewSet(
     OwnedResourceMixin, ListModelMixin, RetrieveModelMixin, viewsets.GenericViewSet
 ):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     serializer_class = RetrainingRunSerializer
     filterset_fields = ["schedule", "status"]
     pagination_class = StandardPagination

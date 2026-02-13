@@ -7,6 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
+from recotem.api.authentication import RequireManagementScope
 from recotem.api.exceptions import ResourceNotFoundError
 from recotem.api.models import ItemMetaData, TrainedModel
 from recotem.api.serializers import TrainedModelSerializer
@@ -46,7 +47,7 @@ class RecommendationWithMetaDataSerializer(serializers.Serializer):
 class TrainedModelViewset(
     OwnedResourceMixin, viewsets.ModelViewSet, FileDownloadRemoveMixin
 ):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     serializer_class = TrainedModelSerializer
     filterset_fields = ["id", "data_loc", "data_loc__project"]
     pagination_class = StandardPagination

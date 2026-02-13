@@ -34,16 +34,18 @@
 | `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis URL for Celery broker (db 0) |
 | `CHANNELS_REDIS_URL` | `redis://localhost:6379/1` | Redis URL for Django Channels WebSocket layer (db 1) |
 | `CACHE_REDIS_URL` | `redis://localhost:6379/2` | Redis URL for cache (db 2) |
+| `MODEL_EVENTS_REDIS_URL` | `redis://localhost:6379/3` | Redis URL for model event Pub/Sub (db 3) |
 | `CACHE_KEY_PREFIX` | `recotem` | Cache key prefix |
 | `REDIS_PASSWORD` | (empty) | Redis password (optional, see below) |
 
 ### Redis password injection
 
-When `REDIS_PASSWORD` is set, Recotem automatically injects the password into any `redis://` or `rediss://` URL that does not already contain credentials. This applies to all three Redis URLs:
+When `REDIS_PASSWORD` is set, Recotem automatically injects the password into any `redis://` or `rediss://` URL that does not already contain credentials. This applies to all Redis URLs:
 
 - `CELERY_BROKER_URL`
 - `CHANNELS_REDIS_URL`
 - `CACHE_REDIS_URL`
+- `MODEL_EVENTS_REDIS_URL`
 
 For example, if you set:
 
@@ -98,6 +100,28 @@ URLs that already contain a password (e.g. `redis://:existingpass@redis:6379/0`)
 | `CELERY_LOG_LEVEL` | `INFO` | Celery worker log level |
 
 In production (`DEBUG=false`), logs are output as structured JSON using `python-json-logger`. In development, a simple text format is used.
+
+## Inference Service
+
+These variables configure the standalone FastAPI inference service.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_PORT` | `8081` | Port the inference service listens on |
+| `INFERENCE_MAX_LOADED_MODELS` | `10` | Maximum number of models in the LRU cache |
+| `INFERENCE_RATE_LIMIT` | `100/minute` | Rate limit per API key |
+| `INFERENCE_PRELOAD_MODEL_IDS` | (empty) | Comma-separated model IDs to pre-load on startup (e.g., `1,2,3`) |
+| `DATABASE_URL` | (required) | PostgreSQL connection string (shared with backend) |
+| `SECRET_KEY` | (required) | Must match the backend's secret for HMAC model verification |
+| `MODEL_EVENTS_REDIS_URL` | `redis://localhost:6379/3` | Redis Pub/Sub for model update notifications |
+
+## Scheduled Retraining
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CELERY_BEAT_SCHEDULER` | `django_celery_beat.schedulers:DatabaseScheduler` | Celery Beat scheduler class |
+
+The `beat` service must be running for scheduled retraining. Schedules are configured per-project through the UI or API, not through environment variables.
 
 ## Security (HTTPS)
 

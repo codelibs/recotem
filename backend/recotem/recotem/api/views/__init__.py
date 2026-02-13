@@ -16,6 +16,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from recotem.api.authentication import RequireManagementScope
+from recotem.api.exceptions import ResourceNotFoundError
 from recotem.api.models import (
     EvaluationConfig,
     ItemMetaData,
@@ -39,11 +41,16 @@ from recotem.api.serializers.data import ItemMetaDataSerializer
 from recotem.api.services.project_service import get_project_or_404, get_project_summary
 from recotem.api.utils import PREVIEW_ROW_LIMIT, read_dataframe
 
+from .ab_test import ABTestViewSet  # noqa: F401
+from .api_key import ApiKeyViewSet  # noqa: F401
+from .deployment import DeploymentSlotViewSet  # noqa: F401
+from .events import ConversionEventViewSet  # noqa: F401
 from .filemixin import FileDownloadRemoveMixin
 from .mixins import CreatedByResourceMixin, OwnedResourceMixin
 from .model import TrainedModelViewset  # noqa: F401
 from .pagination import StandardPagination
 from .project import ProjectViewSet  # noqa: F401
+from .retraining import RetrainingRunViewSet, RetrainingScheduleViewSet  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +58,7 @@ logger = logging.getLogger(__name__)
 class TrainingDataViewset(
     OwnedResourceMixin, viewsets.ModelViewSet, FileDownloadRemoveMixin
 ):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     serializer_class = TrainingDataSerializer
     filterset_fields = ["id", "project"]
     parser_classes = [MultiPartParser]
@@ -107,7 +114,7 @@ class TrainingDataViewset(
 class ItemMetaDataViewset(
     OwnedResourceMixin, viewsets.ModelViewSet, FileDownloadRemoveMixin
 ):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     serializer_class = ItemMetaDataSerializer
     filterset_fields = ["id", "project"]
     parser_classes = [MultiPartParser]
@@ -124,7 +131,7 @@ class ItemMetaDataViewset(
 
 
 class ModelConfigurationViewset(OwnedResourceMixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     serializer_class = ModelConfigurationSerializer
     filterset_fields = ["id", "project"]
     pagination_class = StandardPagination
@@ -147,7 +154,7 @@ class SplitConfigFilter(filters.FilterSet):
 
 
 class SplitConfigViewSet(CreatedByResourceMixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     serializer_class = SplitConfigSerializer
     filter_backends = (filters.DjangoFilterBackend,)
     filterset_class = SplitConfigFilter
@@ -173,7 +180,7 @@ class EvaluationConfigFilter(filters.FilterSet):
 
 
 class EvaluationConfigViewSet(CreatedByResourceMixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     serializer_class = EvaluationConfigSerializer
     filter_backends = (filters.DjangoFilterBackend,)
     filterset_class = EvaluationConfigFilter
@@ -191,7 +198,7 @@ class EvaluationConfigViewSet(CreatedByResourceMixin, viewsets.ModelViewSet):
 
 
 class ParameterTuningJobViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     serializer_class = ParameterTuningJobSerializer
     filterset_fields = ["id", "data__project", "data", "status"]
     pagination_class = StandardPagination
@@ -235,7 +242,7 @@ class TaskLogViewSet(OwnedResourceMixin, viewsets.ReadOnlyModelViewSet):
     through two distinct FK paths (tuning_job_link and model_link).
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequireManagementScope]
     serializer_class = TaskLogSerializer
     filterset_class = TaskLogFilter
     pagination_class = StandardPagination
@@ -252,7 +259,16 @@ class TaskLogViewSet(OwnedResourceMixin, viewsets.ReadOnlyModelViewSet):
                 task__model_link__model__data_loc__project__owner__isnull=True
             )
         )
-        return via_tuning | via_model
+        q = via_tuning | via_model
+        # Enforce API key project scope
+        api_key = getattr(self.request, "api_key", None)
+        if api_key is not None:
+            q &= db_models.Q(
+                task__tuning_job_link__job__data__project=api_key.project_id
+            ) | db_models.Q(
+                task__model_link__model__data_loc__project=api_key.project_id
+            )
+        return q
 
     def get_queryset(self):
         return (
@@ -279,8 +295,14 @@ class PingView(APIView):
 
 
 class ProjectSummaryView(APIView):
+    permission_classes = [IsAuthenticated, RequireManagementScope]
+
     @extend_schema(responses={200: ProjectSummarySerializer})
     def get(self, request, pk: int, format=None):
+        # Enforce API key project scope
+        api_key = getattr(request, "api_key", None)
+        if api_key is not None and api_key.project_id != pk:
+            raise ResourceNotFoundError(detail=f"Project {pk} not found.")
         project_obj = get_project_or_404(pk, user=request.user)
         summary = get_project_summary(project_obj)
         serializer = ProjectSummarySerializer(summary)

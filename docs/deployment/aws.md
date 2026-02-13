@@ -8,7 +8,9 @@ Deploy Recotem on AWS using ECS (Fargate) or EKS with managed services.
 [Route 53] → [ALB (HTTPS)] → [ECS/EKS]
                                  ├── proxy (nginx + SPA)
                                  ├── backend (daphne)
-                                 └── worker (celery)
+                                 ├── inference (FastAPI)
+                                 ├── worker (celery)
+                                 └── beat (celery beat)
                                       ├── [RDS PostgreSQL]
                                       ├── [ElastiCache Redis]
                                       └── [S3 bucket]
@@ -48,10 +50,11 @@ postgresql://recotem_user:password@your-rds-endpoint.rds.amazonaws.com:5432/reco
 redis://:auth-token@your-cache-endpoint.cache.amazonaws.com:6379/0
 ```
 
-Redis is used for three purposes (different databases):
+Redis is used for four purposes (different databases):
 - db 0: Celery broker
 - db 1: Django Channels
 - db 2: Django cache
+- db 3: Model event Pub/Sub (inference hot-swap)
 
 ### S3 Storage (Optional)
 

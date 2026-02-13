@@ -100,6 +100,31 @@ const routes: RouteRecordRaw[] = [
             name: "model-detail",
             component: () => import("@/pages/ModelDetailPage.vue"),
           },
+          {
+            path: "api-keys",
+            name: "api-keys",
+            component: () => import("@/pages/ApiKeyPage.vue"),
+          },
+          {
+            path: "retraining",
+            name: "retraining",
+            component: () => import("@/pages/RetrainingSchedulePage.vue"),
+          },
+          {
+            path: "deployments",
+            name: "deployments",
+            component: () => import("@/pages/DeploymentSlotPage.vue"),
+          },
+          {
+            path: "ab-tests",
+            name: "ab-test-list",
+            component: () => import("@/pages/ABTestListPage.vue"),
+          },
+          {
+            path: "ab-tests/:testId",
+            name: "ab-test-detail",
+            component: () => import("@/pages/ABTestDetailPage.vue"),
+          },
         ],
       },
     ],
@@ -133,8 +158,8 @@ router.beforeEach((to, _from, next) => {
   }
 
   // Validate numeric route params
-  const { projectId, dataId, jobId, modelId } = to.params;
-  for (const [, val] of Object.entries({ projectId, dataId, jobId, modelId })) {
+  const { projectId, dataId, jobId, modelId, testId } = to.params;
+  for (const [, val] of Object.entries({ projectId, dataId, jobId, modelId, testId })) {
     if (val !== undefined && !/^\d+$/.test(val as string)) {
       next({ name: "not-found" });
       return;

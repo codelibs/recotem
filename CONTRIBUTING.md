@@ -11,28 +11,32 @@ Recotem is a recommendation system platform built with:
 │                     Clients                          │
 │              (Browser / API consumers)               │
 └────────────────────────┬─────────────────────────────┘
-                         │
+                         │ X-API-Key or JWT
                    ┌─────▼─────┐
                    │   nginx   │ :8000
-                   │  (proxy)  │ Static SPA + reverse proxy
+                   │  (proxy)  │ SPA + reverse proxy
                    └──┬────┬───┘
                       │    │
-          ┌───────────▼┐  ┌▼───────────┐
-          │  Frontend  │  │  Backend   │
-          │  Vue 3 SPA │  │  Django 5  │
-          │  (static)  │  │  (daphne)  │
-          └────────────┘  └──┬────┬────┘
-                             │    │
-                    ┌────────▼┐  ┌▼────────┐
-                    │ Celery  │  │PostgreSQL│
-                    │ Worker  │  │   :5432  │
-                    └────┬────┘  └──────────┘
-                         │
-                    ┌────▼────┐
-                    │  Redis  │
-                    │ :6379   │
-                    │ db0=broker, db1=channels, db2=cache
-                    └─────────┘
+          ┌───────────▼┐  ┌▼───────────┐  ┌───────────┐
+          │  Frontend  │  │  Backend   │  │ Inference │
+          │  Vue 3 SPA │  │  Django 5  │  │ FastAPI   │
+          │  (static)  │  │  (daphne)  │  │ :8081     │
+          └────────────┘  └──┬──┬──┬───┘  └──┬────┬───┘
+                             │  │  │         │    │ read-only
+                    ┌────────▼┐ │ ┌▼─────────▼┐  │
+                    │ Celery  │ │ │ PostgreSQL │  │
+                    │ Worker  │ │ │   :5432    │  │
+                    └────┬────┘ │ └────────────┘  │
+                         │     │                  │
+                    ┌────▼─────▼──────────────────▼┐
+                    │          Redis :6379          │
+                    │ db0=broker  db1=channels      │
+                    │ db2=cache   db3=model events  │
+                    └──────────┬───────────────────┘
+                          ┌────▼────┐
+                          │ Celery  │
+                          │  Beat   │
+                          └─────────┘
 ```
 
 ### Services (Docker Compose)
@@ -40,10 +44,12 @@ Recotem is a recommendation system platform built with:
 | Service | Image/Build | Role |
 |---------|------------|------|
 | `db` | postgres:17-alpine | Primary data store |
-| `redis` | redis:7-alpine | Celery broker (db 0), Channels (db 1), Cache (db 2) |
+| `redis` | redis:7-alpine | Broker (db 0), Channels (db 1), Cache (db 2), Model events (db 3) |
 | `backend` | `backend/Dockerfile` | Django ASGI server (daphne), REST API + WebSocket |
 | `worker` | `backend/Dockerfile` | Celery worker for async tuning/training tasks |
-| `proxy` | `proxy.dockerfile` | nginx serving Vue SPA + reverse proxy to backend |
+| `beat` | `backend/Dockerfile` | Celery Beat for scheduled retraining |
+| `inference` | `inference/Dockerfile` | FastAPI inference service for real-time recommendations |
+| `proxy` | `proxy.dockerfile` | nginx serving Vue SPA + reverse proxy to backend + inference |
 
 ### Data Flow
 
@@ -122,18 +128,29 @@ recotem/
     recotem/              # Django project
       recotem/
         api/
-          consumers.py    # WebSocket consumers
-          models/         # Django models
-          serializers.py  # DRF serializers
-          services/       # Business logic (training, model serving)
-          tasks.py        # Celery tasks (tuning, training)
-          views/          # DRF viewsets
+          authentication.py  # API key authentication
+          consumers.py       # WebSocket consumers
+          models/            # Django models
+          serializers/       # DRF serializers (api_key, retraining, ab_test, etc.)
+          services/          # Business logic (training, model, scheduling, A/B testing)
+          tasks.py           # Celery tasks (tuning, training, retraining)
+          views/             # DRF viewsets
         settings.py
       manage.py
       tests/              # pytest tests
     pyproject.toml        # Dependencies + tool config (uv)
     uv.lock               # Locked dependency versions
-    Dockerfile            # Multi-stage (backend + worker)
+    Dockerfile            # Multi-stage (backend + worker + beat)
+  inference/              # Standalone FastAPI inference service
+    inference/
+      routes/             # Prediction, project-level, health endpoints
+      auth.py             # API key verification (Django-compatible)
+      config.py           # Pydantic Settings
+      model_loader.py     # LRU model cache with hot-swap
+      hot_swap.py         # Redis Pub/Sub listener
+      models.py           # SQLAlchemy models (read-only)
+    Dockerfile
+    pyproject.toml
   frontend/
     src/
       api/                # API client (ofetch), generated types
@@ -146,12 +163,14 @@ recotem/
       stores/             # Pinia stores (auth, project)
       types/              # TypeScript type definitions + WebSocket types
     e2e/                  # Playwright E2E tests
-  compose.yaml            # Production Docker Compose (5 services)
+  compose.yaml            # Production Docker Compose (7 services)
   compose-dev.yaml        # Development Docker Compose (db + redis)
   proxy.dockerfile        # nginx + frontend SPA build
-  nginx.conf              # Unified SPA + API + WS + Admin proxy
+  nginx.conf              # SPA + API + WS + Admin + Inference proxy
   helm/recotem/           # Helm chart for Kubernetes deployment
-  docs/deployment/        # Deployment documentation
+  docs/
+    guides/               # Feature guides (inference API, API keys, etc.)
+    deployment/           # Deployment documentation
 ```
 
 ## API Development Guide

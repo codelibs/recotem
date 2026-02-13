@@ -37,4 +37,27 @@ export const ENDPOINTS = {
 
   // Health
   PING: "/ping/",
+
+  // API Keys
+  API_KEYS: "/api_keys/",
+  API_KEY_DETAIL: (id: number) => `/api_keys/${id}/`,
+  API_KEY_REVOKE: (id: number) => `/api_keys/${id}/revoke/`,
+
+  // Retraining
+  RETRAINING_SCHEDULE: "/retraining_schedule/",
+  RETRAINING_SCHEDULE_DETAIL: (id: number) => `/retraining_schedule/${id}/`,
+  RETRAINING_SCHEDULE_TRIGGER: (id: number) => `/retraining_schedule/${id}/trigger/`,
+  RETRAINING_RUN: "/retraining_run/",
+
+  // Deployment Slots
+  DEPLOYMENT_SLOT: "/deployment_slot/",
+  DEPLOYMENT_SLOT_DETAIL: (id: number) => `/deployment_slot/${id}/`,
+
+  // A/B Tests
+  AB_TEST: "/ab_test/",
+  AB_TEST_DETAIL: (id: number) => `/ab_test/${id}/`,
+  AB_TEST_START: (id: number) => `/ab_test/${id}/start/`,
+  AB_TEST_STOP: (id: number) => `/ab_test/${id}/stop/`,
+  AB_TEST_RESULTS: (id: number) => `/ab_test/${id}/results/`,
+  AB_TEST_PROMOTE_WINNER: (id: number) => `/ab_test/${id}/promote_winner/`,
 } as const;

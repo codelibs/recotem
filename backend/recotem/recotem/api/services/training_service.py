@@ -1,7 +1,11 @@
+import json
+import logging
 import pickle  # noqa: S403
 import tempfile
 from pathlib import Path
 
+import redis
+from django.conf import settings
 from django.core.files.storage import default_storage
 from irspack import __version__ as irspack_version
 from irspack.recommenders.base import get_recommender_class
@@ -15,6 +19,8 @@ from recotem.api.models import (
 from recotem.api.services.id_mapper_compat import IDMappedRecommender
 from recotem.api.services.pickle_signing import sign_pickle_bytes
 from recotem.api.utils import read_dataframe
+
+logger = logging.getLogger(__name__)
 
 # NOTE: pickle is required for irspack model serialization.
 # IDMappedRecommender contains scipy sparse matrices and numpy arrays.
@@ -63,4 +69,23 @@ def train_and_save_model(model: TrainedModel) -> TrainedModel:
     model.filesize = model.file.size
     model.save()
 
+    _publish_model_event(model)
+
     return model
+
+
+def _publish_model_event(model: TrainedModel) -> None:
+    """Publish a model_trained event via Redis Pub/Sub for the inference service."""
+    try:
+        r = redis.from_url(settings.MODEL_EVENTS_REDIS_URL)
+        event = json.dumps(
+            {
+                "event": "model_trained",
+                "model_id": model.id,
+                "project_id": model.data_loc.project_id,
+            }
+        )
+        r.publish("recotem:model_events", event)
+        r.close()
+    except Exception:
+        logger.warning("Failed to publish model event for model %d", model.id)

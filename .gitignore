@@ -16,6 +16,7 @@ __pycache__/
 *.pyo
 .python-version
 .venv/
+venv/
 .coverage
 **/coverage.xml
 .ruff_cache/

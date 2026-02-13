@@ -31,14 +31,12 @@ docker compose up -d
 ## Architecture
 
 ```
-[Browser] → :8000 → [nginx/proxy]
-                       ├── /           → SPA (static files)
-                       ├── /api/       → [backend (daphne)]
-                       ├── /ws/        → [backend (WebSocket)]
-                       └── /admin/     → [backend (Django admin)]
-                                           ├── [PostgreSQL]
-                                           ├── [Redis]
-                                           └── [Celery worker]
+[Browser / API clients] → :8000 → [nginx/proxy]
+                                    ├── /              → SPA (static files)
+                                    ├── /api/          → [backend (daphne)]
+                                    ├── /ws/           → [backend (WebSocket)]
+                                    ├── /admin/        → [backend (Django admin)]
+                                    └── /inference/    → [inference (FastAPI)]
 ```
 
 ## Services
@@ -46,10 +44,12 @@ docker compose up -d
 | Service | Image | Port | Description |
 |---------|-------|------|-------------|
 | db | postgres:17-alpine | 5432 (internal) | PostgreSQL database |
-| redis | redis:7-alpine | 6379 (internal) | Celery broker, channels, cache |
+| redis | redis:7-alpine | 6379 (internal) | Broker (db0), Channels (db1), Cache (db2), Model events (db3) |
 | backend | recotem/backend | 80 (internal) | Django + Daphne ASGI |
-| worker | recotem/backend | — | Celery worker |
-| proxy | recotem/proxy | 8000 (exposed) | nginx + Vue SPA |
+| worker | recotem/backend | — | Celery worker for tuning/training |
+| beat | recotem/backend | — | Celery Beat for scheduled retraining |
+| inference | recotem/inference | 8081 (internal) | FastAPI inference service |
+| proxy | recotem/proxy | 8000 (exposed) | nginx + Vue SPA + reverse proxy |
 
 ## Production Checklist
 
@@ -86,8 +86,29 @@ Default limits in `compose.yaml`:
 |---------|-------------|-------------------|
 | backend | 2GB | 512MB |
 | worker | 4GB | 1GB |
+| inference | 4GB | 1GB |
+| beat | 512MB | 128MB |
 
 Adjust via `deploy.resources` in `compose.yaml`.
+
+## Inference-Only Mode
+
+If you only need the prediction API (no UI, training, or tuning), use the inference-only compose file:
+
+```bash
+docker compose -f compose-inference.yaml up -d
+```
+
+This starts only 3 services (db + inference + proxy) with a minimal nginx config that routes `/inference/` endpoints. This is useful for the "batch-train, then serve" pattern where models are trained periodically on a separate machine.
+
+Pre-load models on startup to avoid cold-start latency:
+
+```env
+# In envs/production.env
+INFERENCE_PRELOAD_MODEL_IDS=1,2,3
+```
+
+See [Standalone Inference Guide](../guides/standalone-inference.md) for the full workflow.
 
 ## Logs
 

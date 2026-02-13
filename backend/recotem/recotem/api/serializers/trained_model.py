@@ -46,10 +46,31 @@ class TrainedModelSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"configuration": ["Model configuration not found."]}
             )
+        # Enforce API key project scope
+        api_key = getattr(request, "api_key", None)
         if (
-            data_loc is not None
+            api_key is not None
+            and data_loc is not None
+            and data_loc.project_id != api_key.project_id
+        ):
+            raise serializers.ValidationError({"data_loc": ["Data not found."]})
+        if (
+            api_key is not None
             and configuration is not None
-            and data_loc.project_id != configuration.project_id
+            and configuration.project_id != api_key.project_id
+        ):
+            raise serializers.ValidationError(
+                {"configuration": ["Model configuration not found."]}
+            )
+        # Cross-project integrity: check against instance for partial updates
+        effective_data_loc = data_loc or getattr(self.instance, "data_loc", None)
+        effective_config = configuration or getattr(
+            self.instance, "configuration", None
+        )
+        if (
+            effective_data_loc is not None
+            and effective_config is not None
+            and effective_data_loc.project_id != effective_config.project_id
         ):
             raise serializers.ValidationError(
                 {

@@ -102,6 +102,7 @@ INSTALLED_APPS = [
     "recotem.api",
     "django_celery_results",
     "drf_spectacular",
+    "django_celery_beat",
     "django_cleanup.apps.CleanupConfig",  # always the last one
 ]
 
@@ -144,6 +145,7 @@ else:
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
+        "recotem.api.authentication.ApiKeyAuthentication",
         "rest_framework_simplejwt.authentication.JWTAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
@@ -296,6 +298,7 @@ CELERY_RESULT_BACKEND = "django-db"
 CELERY_RESULT_EXPIRES = int(env("CELERY_RESULT_EXPIRES", default=86400 * 7))  # 7 days
 CELERY_CACHE_BACKEND = "default"
 CELERY_TASK_SERIALIZER = "json"
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
 
 SIMPLE_JWT = {
@@ -337,6 +340,12 @@ CACHES = {
         "KEY_PREFIX": env("CACHE_KEY_PREFIX", default="recotem"),
     },
 }
+
+# Model events Redis Pub/Sub (Redis db 3)
+MODEL_EVENTS_REDIS_URL = _inject_redis_password_if_missing(
+    env("MODEL_EVENTS_REDIS_URL", default="redis://localhost:6379/3"),
+    REDIS_PASSWORD,
+)
 
 # Upload size limit (bytes, default 500MB to match nginx client_max_body_size)
 DATA_UPLOAD_MAX_MEMORY_SIZE = int(env("DATA_UPLOAD_MAX_MEMORY_SIZE", default=524288000))

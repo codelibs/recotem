@@ -37,4 +37,17 @@ spec:
   selector:
     matchLabels:
       {{- include "recotem.proxySelectorLabels" . | nindent 6 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "recotem.fullname" . }}-inference
+  labels:
+    {{- include "recotem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: inference
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.inference.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "recotem.inferenceSelectorLabels" . | nindent 6 }}
 {{- end }}

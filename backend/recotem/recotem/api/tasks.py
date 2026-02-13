@@ -13,6 +13,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from channels.layers import get_channel_layer
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 from django_celery_results.models import TaskResult
 from irspack import Evaluator, split_dataframe_partial_user_holdout
 from irspack import __version__ as irspack_version
@@ -22,10 +23,13 @@ from optuna.samplers import TPESampler
 from optuna.trial import FrozenTrial
 
 from recotem.api.models import (
+    DeploymentSlot,
     EvaluationConfig,
     ModelConfiguration,
     ParameterTuningJob,
     Project,
+    RetrainingRun,
+    RetrainingSchedule,
     SplitConfig,
     TaskAndParameterJobLink,
     TaskAndTrainedModelLink,
@@ -101,6 +105,60 @@ def _get_search_recommender_classes(raw_algorithms_json: list[str] | None) -> li
     if resolved:
         return resolved
     return DEFAULT_SEARCH_RECOMMENDERS.copy()
+
+
+def _finalize_retraining_run(job: "ParameterTuningJob", model: "TrainedModel") -> None:
+    """Update RetrainingRun linked to this tuning job to COMPLETED.
+
+    Called after async retune + train completes. Also handles auto_deploy
+    for the schedule that triggered this run.
+    """
+    run = (
+        RetrainingRun.objects.filter(tuning_job=job)
+        .select_related("schedule", "schedule__project")
+        .first()
+    )
+    if run is None:
+        return  # Not triggered by a retraining schedule
+
+    run.trained_model = model
+    run.status = RetrainingRun.Status.COMPLETED
+    run.completed_at = timezone.now()
+    run.save()
+
+    schedule = run.schedule
+    schedule.last_run_status = run.status
+    schedule.save(update_fields=["last_run_status", "updated_at"])
+
+    if schedule.auto_deploy:
+        _auto_deploy_model(schedule, model)
+
+    logger.info(
+        "Finalized retraining run %d (schedule %d) as COMPLETED",
+        run.id,
+        schedule.id,
+    )
+
+
+def _fail_retraining_run_for_job(parameter_tuning_job_id: int) -> None:
+    """Mark any RetrainingRun linked to this tuning job as FAILED."""
+    try:
+        run = RetrainingRun.objects.filter(
+            tuning_job_id=parameter_tuning_job_id
+        ).first()
+        if run and run.status == RetrainingRun.Status.RUNNING:
+            run.status = RetrainingRun.Status.FAILED
+            run.completed_at = timezone.now()
+            run.error_message = "Tuning or training task failed"
+            run.save()
+            RetrainingSchedule.objects.filter(id=run.schedule_id).update(
+                last_run_status="FAILED"
+            )
+            logger.info("Marked retraining run %d as FAILED", run.id)
+    except Exception:
+        logger.exception(
+            "Failed to update retraining run for job %d", parameter_tuning_job_id
+        )
 
 
 def train_recommender_func(
@@ -271,12 +329,21 @@ def task_create_best_config(self, parameter_tuning_job_id: int, *args) -> int:
 def task_create_best_config_train_rec(self, parameter_tuning_job_id: int, *args) -> int:
     task_result, _ = TaskResult.objects.get_or_create(task_id=self.request.id)
     self.update_state(state="STARTED", meta=[])
-    config_id = create_best_config_fun(task_result, parameter_tuning_job_id)
-    job: ParameterTuningJob = ParameterTuningJob.objects.get(id=parameter_tuning_job_id)
-    config: ModelConfiguration = ModelConfiguration.objects.get(id=config_id)
-    model = TrainedModel.objects.create(configuration=config, data_loc=job.data)
+    try:
+        config_id = create_best_config_fun(task_result, parameter_tuning_job_id)
+        job: ParameterTuningJob = ParameterTuningJob.objects.get(
+            id=parameter_tuning_job_id
+        )
+        config: ModelConfiguration = ModelConfiguration.objects.get(id=config_id)
+        model = TrainedModel.objects.create(configuration=config, data_loc=job.data)
+        train_recommender_func(task_result, model.id, parameter_tuning_job_id)
+    except Exception:
+        # Mark any linked RetrainingRun as FAILED
+        _fail_retraining_run_for_job(parameter_tuning_job_id)
+        raise
 
-    train_recommender_func(task_result, model.id, parameter_tuning_job_id)
+    # Update any linked RetrainingRun to COMPLETED
+    _finalize_retraining_run(job, model)
 
 
 @app.task(
@@ -425,6 +492,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         TaskLog.objects.create(task=task_result, contents=msg_timeout)
         _send_ws_log(parameter_tuning_job_id, msg_timeout)
         _send_ws_status(parameter_tuning_job_id, "error", {"error": "Task timed out"})
+        _fail_retraining_run_for_job(parameter_tuning_job_id)
         raise
     except Exception as e:
         logger.exception(
@@ -439,6 +507,7 @@ def run_search(self, parameter_tuning_job_id: int, index: int) -> None:
         TaskLog.objects.create(task=task_result, contents=msg_error)
         _send_ws_log(parameter_tuning_job_id, msg_error)
         _send_ws_status(parameter_tuning_job_id, "error", {"error": str(e)})
+        _fail_retraining_run_for_job(parameter_tuning_job_id)
         raise
     finally:
         # Flush any remaining buffered log entries so they are never lost,
@@ -490,3 +559,119 @@ def start_tuning_job(job: ParameterTuningJob) -> None:
         job.status = ParameterTuningJob.Status.FAILED
         job.save(update_fields=["status"])
         raise
+
+
+def _auto_deploy_model(schedule: "RetrainingSchedule", model: "TrainedModel") -> None:
+    """Create or update a deployment slot for the auto-deployed model."""
+    slot_name = f"auto-deploy-{schedule.project.name}"
+    slot, created = DeploymentSlot.objects.update_or_create(
+        project=schedule.project,
+        name=slot_name,
+        defaults={
+            "trained_model": model,
+            "weight": 100,
+            "is_active": True,
+        },
+    )
+    if created:
+        logger.info(
+            "Created deployment slot '%s' for schedule %d", slot_name, schedule.id
+        )
+    else:
+        logger.info(
+            "Updated deployment slot '%s' for schedule %d", slot_name, schedule.id
+        )
+
+
+@app.task(
+    bind=True,
+    time_limit=settings.CELERY_TASK_TIME_LIMIT,
+    soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+    autoretry_for=(ConnectionError, OSError),
+    retry_backoff=True,
+    max_retries=3,
+)
+def task_scheduled_retrain(self, schedule_id: int) -> None:
+    """Execute a scheduled retraining run."""
+    try:
+        schedule = RetrainingSchedule.objects.select_related(
+            "project",
+            "training_data",
+            "model_configuration",
+            "split_config",
+            "evaluation_config",
+        ).get(id=schedule_id)
+    except RetrainingSchedule.DoesNotExist:
+        logger.error("Retraining schedule %d not found", schedule_id)
+        return
+
+    if not schedule.is_enabled:
+        logger.info("Schedule %d is disabled, skipping", schedule_id)
+        return
+
+    # Determine training data
+    training_data = schedule.training_data
+    if training_data is None:
+        training_data = (
+            TrainingData.objects.filter(project=schedule.project)
+            .order_by("-ins_datetime")
+            .first()
+        )
+    if training_data is None:
+        logger.warning("No training data for schedule %d", schedule_id)
+        return
+
+    # Create run record
+    run = RetrainingRun.objects.create(
+        schedule=schedule,
+        status=RetrainingRun.Status.RUNNING,
+        data_rows_at_trigger=training_data.filesize,
+    )
+
+    try:
+        if schedule.retune and schedule.split_config and schedule.evaluation_config:
+            # Re-tune: create and start a tuning job (async).
+            # Leave run as RUNNING — tuning completion will be tracked via the job.
+            job = ParameterTuningJob.objects.create(
+                data=training_data,
+                split=schedule.split_config,
+                evaluation=schedule.evaluation_config,
+                train_after_tuning=True,
+            )
+            start_tuning_job(job)
+            run.tuning_job = job
+            run.save()
+            schedule.last_run_at = timezone.now()
+            schedule.last_run_status = "RUNNING"
+            schedule.save(
+                update_fields=["last_run_at", "last_run_status", "updated_at"]
+            )
+            return  # Async process — status updated when tuning completes
+        elif schedule.model_configuration:
+            # Train with existing config
+            model = TrainedModel.objects.create(
+                configuration=schedule.model_configuration,
+                data_loc=training_data,
+            )
+            train_and_save_model(model)
+            run.trained_model = model
+            run.status = RetrainingRun.Status.COMPLETED
+
+            if schedule.auto_deploy:
+                _auto_deploy_model(schedule, model)
+        else:
+            run.status = RetrainingRun.Status.SKIPPED
+            run.error_message = "No model configuration or retune settings"
+
+    except Exception as e:
+        logger.exception("Scheduled retraining failed for schedule %d", schedule_id)
+        run.status = RetrainingRun.Status.FAILED
+        run.error_message = str(e)
+
+    run.completed_at = timezone.now()
+    run.save()
+
+    # Update schedule metadata
+    schedule.last_run_at = timezone.now()
+    schedule.last_run_status = run.status
+    schedule.save(update_fields=["last_run_at", "last_run_status", "updated_at"])

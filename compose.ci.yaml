@@ -19,6 +19,13 @@ services:
     environment:
       - SECRET_KEY=${SECRET_KEY:-ci-test-secret-key-for-testing-only-not-production}
       - DEBUG=true
+  beat:
+    environment:
+      - SECRET_KEY=${SECRET_KEY:-ci-test-secret-key-for-testing-only-not-production}
+      - DEBUG=true
+  inference:
+    environment:
+      - SECRET_KEY=${SECRET_KEY:-ci-test-secret-key-for-testing-only-not-production}
   proxy:
     volumes:
       - ./nginx.ci.conf:/etc/nginx/conf.d/default.conf:ro

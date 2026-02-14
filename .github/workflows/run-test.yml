@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - uses: actions/setup-node@v4
@@ -135,7 +135,7 @@ jobs:
       SECRET_KEY: ci-test-secret-key-not-for-production
       RECOTEM_TESTING: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v7
@@ -190,7 +190,7 @@ jobs:
     timeout-minutes: 15
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build backend image
         run: docker build -t recotem-backend:pr --target production backend/
       - name: Run Trivy vulnerability scanner
@@ -208,7 +208,7 @@ jobs:
     timeout-minutes: 5
     needs: [run_pytest, run_frontend_tests]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Download backend coverage

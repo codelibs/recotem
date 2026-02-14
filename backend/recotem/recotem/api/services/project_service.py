@@ -11,7 +11,11 @@ def get_project_or_404(pk: int, user: AbstractBaseUser | None = None) -> Project
         project = Project.objects.get(pk=pk)
     except Project.DoesNotExist:
         raise ResourceNotFoundError(detail=f"Project {pk} not found.") from None
-    if user is not None and project.owner_id not in (None, user.id):
+    if (
+        user is not None
+        and not user.is_staff
+        and project.owner_id not in (None, user.id)
+    ):
         raise ResourceNotFoundError(detail=f"Project {pk} not found.")
     return project
 

@@ -157,6 +157,30 @@ export interface User {
   pk: number;
   username: string;
   email: string;
+  is_staff?: boolean;
+}
+
+export interface ManagedUser {
+  id: number;
+  username: string;
+  email: string;
+  is_staff: boolean;
+  is_active: boolean;
+  date_joined: string;
+  last_login: string | null;
+}
+
+export interface UserCreatePayload {
+  username: string;
+  email: string;
+  password: string;
+  is_staff: boolean;
+}
+
+export interface UserUpdatePayload {
+  email?: string;
+  is_staff?: boolean;
+  is_active?: boolean;
 }
 
 /** Standard DRF error response body. */

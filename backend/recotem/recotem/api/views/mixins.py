@@ -36,9 +36,12 @@ class OwnedResourceMixin:
 
     def get_owner_filter(self):
         user = self.request.user
-        q = db_models.Q(**{self.owner_lookup: user}) | db_models.Q(
-            **{f"{self.owner_lookup}__isnull": True}
-        )
+        if user.is_staff:
+            q = db_models.Q()
+        else:
+            q = db_models.Q(**{self.owner_lookup: user}) | db_models.Q(
+                **{f"{self.owner_lookup}__isnull": True}
+            )
         # Enforce API key project scope
         api_key = getattr(self.request, "api_key", None)
         if api_key is not None:
@@ -62,6 +65,8 @@ class CreatedByResourceMixin:
 
     def get_owner_filter(self):
         user = self.request.user
+        if user.is_staff:
+            return db_models.Q()
         return db_models.Q(**{self.created_by_lookup: user}) | db_models.Q(
             **{f"{self.created_by_lookup}__isnull": True}
         )

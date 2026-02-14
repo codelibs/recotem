@@ -37,6 +37,17 @@ const routes: RouteRecordRaw[] = [
         component: () => import("@/pages/ProjectListPage.vue"),
       },
       {
+        path: "users",
+        name: "user-management",
+        component: () => import("@/pages/UserManagementPage.vue"),
+        meta: { requiresAdmin: true },
+      },
+      {
+        path: "password",
+        name: "password-change",
+        component: () => import("@/pages/PasswordChangePage.vue"),
+      },
+      {
         path: "projects/:projectId",
         component: () => import("@/layouts/ProjectLayout.vue"),
         children: [
@@ -143,7 +154,7 @@ const router = createRouter({
 });
 
 // Navigation guard for authentication and param validation
-router.beforeEach((to, _from, next) => {
+router.beforeEach(async (to, _from, next) => {
   const authStore = useAuthStore();
   // A route is public if any matched record explicitly sets requiresAuth: false
   const isPublic = to.matched.some((record) => record.meta.requiresAuth === false);
@@ -154,6 +165,15 @@ router.beforeEach((to, _from, next) => {
   }
   if (to.path === "/login" && authStore.isAuthenticated) {
     next("/");
+    return;
+  }
+  // Ensure user profile is loaded before checking admin routes
+  if (authStore.isAuthenticated && !authStore.user) {
+    await authStore.fetchUser();
+  }
+  // Admin-only route guard
+  if (to.matched.some((record) => record.meta.requiresAdmin) && !authStore.user?.is_staff) {
+    next({ name: "project-list" });
     return;
   }
 

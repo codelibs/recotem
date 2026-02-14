@@ -51,6 +51,7 @@ from .model import TrainedModelViewset  # noqa: F401
 from .pagination import StandardPagination
 from .project import ProjectViewSet  # noqa: F401
 from .retraining import RetrainingRunViewSet, RetrainingScheduleViewSet  # noqa: F401
+from .user import UserViewSet  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -249,17 +250,22 @@ class TaskLogViewSet(OwnedResourceMixin, viewsets.ReadOnlyModelViewSet):
 
     def get_owner_filter(self) -> db_models.Q:
         user = self.request.user
-        via_tuning = db_models.Q(task__tuning_job_link__isnull=False) & (
-            db_models.Q(task__tuning_job_link__job__data__project__owner=user)
-            | db_models.Q(task__tuning_job_link__job__data__project__owner__isnull=True)
-        )
-        via_model = db_models.Q(task__model_link__isnull=False) & (
-            db_models.Q(task__model_link__model__data_loc__project__owner=user)
-            | db_models.Q(
-                task__model_link__model__data_loc__project__owner__isnull=True
+        if user.is_staff:
+            q = db_models.Q()
+        else:
+            via_tuning = db_models.Q(task__tuning_job_link__isnull=False) & (
+                db_models.Q(task__tuning_job_link__job__data__project__owner=user)
+                | db_models.Q(
+                    task__tuning_job_link__job__data__project__owner__isnull=True
+                )
             )
-        )
-        q = via_tuning | via_model
+            via_model = db_models.Q(task__model_link__isnull=False) & (
+                db_models.Q(task__model_link__model__data_loc__project__owner=user)
+                | db_models.Q(
+                    task__model_link__model__data_loc__project__owner__isnull=True
+                )
+            )
+            q = via_tuning | via_model
         # Enforce API key project scope
         api_key = getattr(self.request, "api_key", None)
         if api_key is not None:

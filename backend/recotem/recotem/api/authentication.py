@@ -35,6 +35,18 @@ class RequireManagementScope(BasePermission):
         return "write" in scopes
 
 
+class DenyApiKeyAccess(BasePermission):
+    """Unconditionally deny requests authenticated via API key.
+
+    Use this on endpoints that must only be accessed with JWT/session auth
+    (e.g. user management).  JWT/session requests (no ``api_key`` attribute)
+    are always allowed through.
+    """
+
+    def has_permission(self, request, view):
+        return getattr(request, "api_key", None) is None
+
+
 API_KEY_RANDOM_LENGTH = 48  # Characters after prefix
 
 

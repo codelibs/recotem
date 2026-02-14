@@ -50,7 +50,10 @@
     "logout": "Logout",
     "switchToLight": "Switch to light mode",
     "switchToDark": "Switch to dark mode",
-    "language": "Language"
+    "language": "Language",
+    "admin": "Admin",
+    "users": "Users",
+    "changePassword": "Change Password"
   },
   "auth": {
     "signIn": "Sign in",
@@ -289,6 +292,36 @@
     "memoryBudget": "Memory Budget",
     "noCompletedJobs": "No completed tuning jobs available.",
     "selectAtLeast2": "Select at least 2 jobs to compare."
+  },
+  "users": {
+    "title": "User Management",
+    "newUser": "New User",
+    "username": "Username",
+    "email": "Email",
+    "password": "Password",
+    "role": "Role",
+    "admin": "Admin",
+    "user": "User",
+    "active": "Active",
+    "inactive": "Inactive",
+    "joined": "Joined",
+    "lastLogin": "Last Login",
+    "deactivate": "Deactivate",
+    "activate": "Activate",
+    "resetPassword": "Reset Password",
+    "resetPasswordFor": "Reset password for {username}",
+    "deactivateConfirm": "Are you sure you want to deactivate {username}? They will no longer be able to log in.",
+    "failedToLoad": "Failed to load users."
+  },
+  "password": {
+    "changeTitle": "Change Password",
+    "currentPassword": "Current Password",
+    "newPassword": "New Password",
+    "confirmNewPassword": "Confirm New Password",
+    "changeSuccess": "Password changed successfully.",
+    "changeFailed": "Failed to change password.",
+    "currentPasswordIncorrect": "Current password is incorrect.",
+    "passwordMismatch": "New passwords do not match."
   },
   "errors": {
     "validation": "Please check the form for errors.",

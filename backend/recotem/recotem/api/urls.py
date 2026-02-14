@@ -21,6 +21,7 @@ from recotem.api.views import (
     TaskLogViewSet,
     TrainedModelViewset,
     TrainingDataViewset,
+    UserViewSet,
 )
 from recotem.api.views.ab_test import ABTestViewSet
 from recotem.api.views.api_key import ApiKeyViewSet
@@ -54,6 +55,7 @@ router.register(r"ab_test", ABTestViewSet, basename="ab_test")
 router.register(
     r"conversion_event", ConversionEventViewSet, basename="conversion_event"
 )
+router.register(r"users", UserViewSet, basename="user")
 
 
 urlpatterns = [

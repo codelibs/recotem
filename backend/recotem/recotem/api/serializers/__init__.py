@@ -13,6 +13,13 @@ from .ping import PingSerializer
 from .project import ProjectSerializer, ProjectSummarySerializer
 from .trained_model import TrainedModelSerializer
 from .tuning_job import ParameterTuningJobSerializer
+from .user import (
+    AdminPasswordResetSerializer,
+    SelfPasswordChangeSerializer,
+    UserCreateSerializer,
+    UserListSerializer,
+    UserUpdateSerializer,
+)
 
 
 class SplitConfigSerializer(serializers.ModelSerializer):
@@ -87,7 +94,11 @@ class ModelConfigurationSerializer(serializers.ModelSerializer):
     def validate_project(self, project):
         request = self.context.get("request")
         user = getattr(request, "user", None)
-        if user is not None and project.owner_id not in (None, user.id):
+        if (
+            user is not None
+            and not user.is_staff
+            and project.owner_id not in (None, user.id)
+        ):
             raise serializers.ValidationError("Project not found.")
         api_key = getattr(request, "api_key", None)
         if api_key is not None and api_key.project_id != project.id:
@@ -106,5 +117,10 @@ __all__ = (
     "TaskLogSerializer",
     "ModelConfigurationSerializer",
     "UserDetailsSerializer",
+    "UserListSerializer",
+    "UserCreateSerializer",
+    "UserUpdateSerializer",
+    "AdminPasswordResetSerializer",
+    "SelfPasswordChangeSerializer",
     "PingSerializer",
 )

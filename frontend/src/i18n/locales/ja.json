@@ -50,7 +50,10 @@
     "logout": "ログアウト",
     "switchToLight": "ライトモードに切り替え",
     "switchToDark": "ダークモードに切り替え",
-    "language": "言語"
+    "language": "言語",
+    "admin": "管理",
+    "users": "ユーザー",
+    "changePassword": "パスワード変更"
   },
   "auth": {
     "signIn": "ログイン",
@@ -289,6 +292,36 @@
     "memoryBudget": "メモリバジェット",
     "noCompletedJobs": "完了したチューニングジョブがありません。",
     "selectAtLeast2": "比較するジョブを2つ以上選択してください。"
+  },
+  "users": {
+    "title": "ユーザー管理",
+    "newUser": "新規ユーザー",
+    "username": "ユーザー名",
+    "email": "メールアドレス",
+    "password": "パスワード",
+    "role": "ロール",
+    "admin": "管理者",
+    "user": "一般ユーザー",
+    "active": "有効",
+    "inactive": "無効",
+    "joined": "登録日",
+    "lastLogin": "最終ログイン",
+    "deactivate": "無効化",
+    "activate": "有効化",
+    "resetPassword": "パスワードリセット",
+    "resetPasswordFor": "{username} のパスワードをリセット",
+    "deactivateConfirm": "{username} を無効化してもよろしいですか？ログインできなくなります。",
+    "failedToLoad": "ユーザーの読み込みに失敗しました。"
+  },
+  "password": {
+    "changeTitle": "パスワード変更",
+    "currentPassword": "現在のパスワード",
+    "newPassword": "新しいパスワード",
+    "confirmNewPassword": "新しいパスワード（確認）",
+    "changeSuccess": "パスワードを変更しました。",
+    "changeFailed": "パスワードの変更に失敗しました。",
+    "currentPasswordIncorrect": "現在のパスワードが正しくありません。",
+    "passwordMismatch": "新しいパスワードが一致しません。"
   },
   "errors": {
     "validation": "フォームにエラーがあります。確認してください。",

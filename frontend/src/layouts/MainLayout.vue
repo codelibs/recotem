@@ -142,6 +142,23 @@
             :collapsed="collapsed"
           />
         </template>
+
+        <!-- Admin section -->
+        <template v-if="authStore.user?.is_staff">
+          <div
+            v-show="!collapsed"
+            class="px-4 py-2 text-xs font-medium text-neutral-100 uppercase tracking-wider mt-2"
+            aria-hidden="true"
+          >
+            {{ $t('nav.admin') }}
+          </div>
+          <SidebarLink
+            to="/users"
+            icon="pi-users"
+            :label="$t('nav.users')"
+            :collapsed="collapsed"
+          />
+        </template>
       </nav>
 
       <!-- User -->
@@ -160,6 +177,17 @@
           <button
             v-show="!collapsed"
             class="ml-auto p-1 rounded hover:bg-neutral-30 focus-visible:outline-2 focus-visible:outline-primary"
+            :aria-label="$t('nav.changePassword')"
+            @click="router.push('/password')"
+          >
+            <i
+              class="pi pi-lock text-sm text-neutral-200"
+              aria-hidden="true"
+            />
+          </button>
+          <button
+            v-show="!collapsed"
+            class="ml-1 p-1 rounded hover:bg-neutral-30 focus-visible:outline-2 focus-visible:outline-primary"
             :aria-label="$t('nav.language')"
             @click="toggleLocale"
           >
@@ -271,6 +299,10 @@ const breadcrumbItems = computed(() => {
     if (route.path.includes("/retraining")) items.push({ label: t("nav.retraining") });
     if (route.path.includes("/deployments")) items.push({ label: t("nav.deployments") });
     if (route.path.includes("/ab-tests")) items.push({ label: t("nav.abTests") });
+  } else if (route.path.includes("/users")) {
+    items.push({ label: t("nav.users") });
+  } else if (route.path.includes("/password")) {
+    items.push({ label: t("nav.changePassword") });
   } else if (route.path.includes("/projects")) {
     items.push({ label: t("nav.projects") });
   }

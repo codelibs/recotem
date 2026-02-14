@@ -22,6 +22,8 @@ class UserDetailsSerializer(dj_serializers.UserDetailsSerializer):
             extra_fields.append("last_name")
         if hasattr(UserModel, "is_superuser"):
             extra_fields.append("is_superuser")
+        if hasattr(UserModel, "is_staff"):
+            extra_fields.append("is_staff")
         model = UserModel
         fields = ("pk", *extra_fields)
-        read_only_fields = ("email", "is_superuser")
+        read_only_fields = ("email", "is_superuser", "is_staff")

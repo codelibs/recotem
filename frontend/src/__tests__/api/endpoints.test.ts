@@ -117,6 +117,12 @@ describe("ENDPOINTS", () => {
         "AB_TEST_STOP",
         "AB_TEST_RESULTS",
         "AB_TEST_PROMOTE_WINNER",
+        "USERS",
+        "USER_DETAIL",
+        "USER_DEACTIVATE",
+        "USER_ACTIVATE",
+        "USER_RESET_PASSWORD",
+        "USER_CHANGE_PASSWORD",
       ];
       for (const key of expectedKeys) {
         expect(ENDPOINTS).toHaveProperty(key);
@@ -160,6 +166,12 @@ describe("ENDPOINTS", () => {
         "AB_TEST_STOP",
         "AB_TEST_RESULTS",
         "AB_TEST_PROMOTE_WINNER",
+        "USERS",
+        "USER_DETAIL",
+        "USER_DEACTIVATE",
+        "USER_ACTIVATE",
+        "USER_RESET_PASSWORD",
+        "USER_CHANGE_PASSWORD",
       ];
       const actualKeys = Object.keys(ENDPOINTS);
       expect(actualKeys.sort()).toEqual(knownKeys.sort());

@@ -60,4 +60,11 @@ export const ENDPOINTS = {
   AB_TEST_STOP: (id: number) => `/ab_test/${id}/stop/`,
   AB_TEST_RESULTS: (id: number) => `/ab_test/${id}/results/`,
   AB_TEST_PROMOTE_WINNER: (id: number) => `/ab_test/${id}/promote_winner/`,
+  // User management
+  USERS: "/users/",
+  USER_DETAIL: (id: number) => `/users/${id}/`,
+  USER_DEACTIVATE: (id: number) => `/users/${id}/deactivate/`,
+  USER_ACTIVATE: (id: number) => `/users/${id}/activate/`,
+  USER_RESET_PASSWORD: (id: number) => `/users/${id}/reset_password/`,
+  USER_CHANGE_PASSWORD: "/users/change_password/",
 } as const;

@@ -169,8 +169,9 @@ recotem/
   nginx.conf              # SPA + API + WS + Admin + Inference proxy
   helm/recotem/           # Helm chart for Kubernetes deployment
   docs/
-    guides/               # Feature guides (inference API, API keys, etc.)
-    deployment/           # Deployment documentation
+    guide/                # User-facing guides (getting started, tuning, training, etc.)
+    specification/        # Developer-facing specs (architecture, data model, API, security)
+    deployment/           # Deployment and operations documentation
 ```
 
 ## API Development Guide

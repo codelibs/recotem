@@ -4,6 +4,18 @@ Recotem supports A/B testing of recommendation models through deployment slots w
 
 ## Concepts
 
+### What is A/B Testing?
+
+A/B testing is a method for comparing two options to figure out which one works better. Imagine you have two recommendation models and you want to know which one leads to more clicks from your users. Instead of guessing, you split your traffic so that some users get recommendations from Model A and others get recommendations from Model B. After collecting enough data, you use statistics to determine which model actually performed better.
+
+**Why use A/B testing with recommendations?**
+
+- **Make data-driven decisions** -- instead of assuming a new model is better, prove it with real user behavior.
+- **Reduce risk** -- roll out a new model gradually rather than switching all traffic at once.
+- **Measure impact** -- quantify exactly how much a new model improves (or hurts) key metrics like click-through rate or purchase rate.
+
+In Recotem, A/B testing is built into the deployment system. You assign different models to deployment slots, split traffic between them, and Recotem tracks how each model performs.
+
 ### Deployment Slots
 
 A deployment slot assigns a trained model to a project with a traffic weight. When the inference API receives a project-level prediction request, it selects a slot based on weights.

@@ -23,7 +23,7 @@ Start the full stack and train your models:
 docker compose up -d
 
 # Upload data, tune hyperparameters, and train models via the UI
-# or use the REST API (see docs/guides/inference-api.md)
+# or use the REST API (see docs/guide/inference.md)
 ```
 
 ## Step 2: Create an API Key

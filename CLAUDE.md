@@ -69,8 +69,9 @@ helm/recotem/             # Helm chart (ServiceAccount, PDB, NetworkPolicy, HPA)
 envs/                     # Environment files (dev.env, production.env)
 nginx.conf                # Proxy config: SPA + /api/ + /ws/ + /admin/ + /inference/ + /static/
 docs/
-  guides/                 # Feature guides (inference-api, api-keys, retraining, ab-testing)
-  deployment/             # Deployment guides (docker-compose, kubernetes, aws, gcp, env vars)
+  guide/                  # User-facing guides (getting started, tuning, training, etc.)
+  specification/          # Developer-facing specs (architecture, data model, API, security)
+  deployment/             # Deployment and operations documentation
 ```
 
 ## Development Setup

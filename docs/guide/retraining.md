@@ -2,6 +2,16 @@
 
 Recotem supports automatic periodic retraining of recommendation models using cron-based schedules powered by django-celery-beat.
 
+## When to Set Up Retraining
+
+Scheduled retraining is useful when:
+
+- **Your product gets new user interaction data regularly** -- as users click, purchase, and browse, the underlying data changes. Models trained on old data gradually become less accurate. Automatic retraining keeps your recommendations fresh.
+- **You want models to stay up-to-date without manual intervention** -- instead of remembering to retrain models yourself, set a schedule and let Recotem handle it automatically.
+- **You want to retrain on a regular cadence** -- for example, retrain every night so that today's user activity is reflected in tomorrow's recommendations, or retrain weekly if your data changes more slowly.
+
+If your training data rarely changes or you prefer to retrain manually after each data upload, you may not need scheduled retraining.
+
 ## Overview
 
 Each project can have one retraining schedule. When enabled, Celery Beat triggers a retraining task at the specified interval. The task can either:
@@ -46,14 +56,30 @@ curl -X POST http://localhost:8000/api/v1/retraining_schedule/1/trigger/ \
 
 ## Cron Expression Format
 
-Standard 5-field cron syntax: `minute hour day_of_month month day_of_week`
+Cron expressions tell Recotem when to run retraining. They use 5 fields separated by spaces:
 
-| Expression | Schedule |
+```
+minute  hour  day_of_month  month  day_of_week
+  0       2       *           *         0
+```
+
+- **minute** (0-59) -- which minute of the hour
+- **hour** (0-23) -- which hour of the day (24-hour format)
+- **day_of_month** (1-31) -- which day of the month
+- **month** (1-12) -- which month
+- **day_of_week** (0-6) -- which day of the week (0 = Sunday, 1 = Monday, ..., 6 = Saturday)
+
+Use `*` to mean "every" and `*/N` to mean "every N units."
+
+Here are common schedules you can copy directly:
+
+| Expression | What it means |
 |-----------|---------|
-| `0 2 * * 0` | Every Sunday at 2:00 AM |
-| `0 3 * * *` | Every day at 3:00 AM |
-| `0 */6 * * *` | Every 6 hours |
-| `0 2 1 * *` | First day of each month at 2:00 AM |
+| `0 2 * * 0` | Every Sunday at 2:00 AM -- good for weekly retraining |
+| `0 3 * * *` | Every day at 3:00 AM -- good for daily retraining |
+| `0 */6 * * *` | Every 6 hours (at 0:00, 6:00, 12:00, 18:00) -- for frequently changing data |
+| `0 2 1 * *` | First day of each month at 2:00 AM -- for monthly retraining |
+| `30 1 * * 1-5` | Weekdays at 1:30 AM -- skip weekends |
 
 ## Retraining Logic
 

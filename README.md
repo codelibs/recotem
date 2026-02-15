@@ -136,19 +136,46 @@ cd frontend && npm run type-check     # vue-tsc
 
 ## Documentation
 
+### User Guide
+
 | Topic | Link |
 |-------|------|
-| Inference API | [docs/guides/inference-api.md](docs/guides/inference-api.md) |
-| API Key Authentication | [docs/guides/api-keys.md](docs/guides/api-keys.md) |
-| Scheduled Retraining | [docs/guides/retraining.md](docs/guides/retraining.md) |
-| A/B Testing | [docs/guides/ab-testing.md](docs/guides/ab-testing.md) |
-| Standalone Inference | [docs/guides/standalone-inference.md](docs/guides/standalone-inference.md) |
-| Docker Compose Deployment | [docs/deployment/docker-compose.md](docs/deployment/docker-compose.md) |
-| Kubernetes Deployment | [docs/deployment/kubernetes.md](docs/deployment/kubernetes.md) |
-| AWS Deployment | [docs/deployment/aws.md](docs/deployment/aws.md) |
-| GCP Deployment | [docs/deployment/gcp.md](docs/deployment/gcp.md) |
+| Getting Started | [docs/guide/getting-started.md](docs/guide/getting-started.md) |
+| Projects | [docs/guide/projects.md](docs/guide/projects.md) |
+| Data Management | [docs/guide/data-management.md](docs/guide/data-management.md) |
+| Hyperparameter Tuning | [docs/guide/tuning.md](docs/guide/tuning.md) |
+| Model Training | [docs/guide/training.md](docs/guide/training.md) |
+| API Keys | [docs/guide/api-keys.md](docs/guide/api-keys.md) |
+| Inference API | [docs/guide/inference.md](docs/guide/inference.md) |
+| Deployment Slots | [docs/guide/deployment-slots.md](docs/guide/deployment-slots.md) |
+| A/B Testing | [docs/guide/ab-testing.md](docs/guide/ab-testing.md) |
+| Scheduled Retraining | [docs/guide/retraining.md](docs/guide/retraining.md) |
+| User Management | [docs/guide/user-management.md](docs/guide/user-management.md) |
+
+### Specification
+
+| Topic | Link |
+|-------|------|
+| Architecture | [docs/specification/architecture.md](docs/specification/architecture.md) |
+| Data Model | [docs/specification/data-model.md](docs/specification/data-model.md) |
+| API Reference | [docs/specification/api-reference.md](docs/specification/api-reference.md) |
+| WebSocket Protocol | [docs/specification/websocket-protocol.md](docs/specification/websocket-protocol.md) |
+| Security Design | [docs/specification/security-design.md](docs/specification/security-design.md) |
+| Inference Service | [docs/specification/inference-service.md](docs/specification/inference-service.md) |
+| Task System | [docs/specification/task-system.md](docs/specification/task-system.md) |
+
+### Deployment
+
+| Topic | Link |
+|-------|------|
+| Docker Compose | [docs/deployment/docker-compose.md](docs/deployment/docker-compose.md) |
+| Kubernetes | [docs/deployment/kubernetes.md](docs/deployment/kubernetes.md) |
+| AWS | [docs/deployment/aws.md](docs/deployment/aws.md) |
+| GCP | [docs/deployment/gcp.md](docs/deployment/gcp.md) |
 | Environment Variables | [docs/deployment/environment-variables.md](docs/deployment/environment-variables.md) |
+| Standalone Inference | [docs/deployment/standalone-inference.md](docs/deployment/standalone-inference.md) |
 | Separate Frontend | [docs/deployment/separate-frontend.md](docs/deployment/separate-frontend.md) |
+| Management Commands | [docs/deployment/management-commands.md](docs/deployment/management-commands.md) |
 | Contributing | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
 ## Links

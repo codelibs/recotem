@@ -1,6 +1,17 @@
 # Inference API
 
-The inference service is a standalone FastAPI application that serves real-time recommendations. It runs independently from the Django backend and connects directly to PostgreSQL (read-only) and Redis.
+The inference API is how your application gets recommendations from Recotem. After you have trained a recommendation model, the inference API is the endpoint your app calls to ask "what items should I recommend to this user?" and get an answer back in milliseconds.
+
+## Where Inference Fits in the Workflow
+
+The inference API is the final step in the recommendation pipeline:
+
+1. **Upload data** -- you provide user interaction data (e.g., clicks, purchases) to Recotem.
+2. **Tune and train** -- Recotem finds the best algorithm settings and trains a model.
+3. **Deploy** -- you assign the trained model to a deployment slot so it can serve predictions.
+4. **Get recommendations (you are here)** -- your application calls the inference API with a user ID and gets back a ranked list of recommended items.
+
+The inference service is a standalone FastAPI application that serves real-time recommendations. It runs independently from the Django backend and connects directly to PostgreSQL (read-only) and Redis. This separation means the inference service can be scaled independently to handle high prediction traffic without affecting the management interface.
 
 ## Base URL
 
@@ -18,13 +29,13 @@ All prediction endpoints require an API key with `predict` scope. Pass it via th
 curl -H "X-API-Key: rctm_your_key_here" ...
 ```
 
-See [API Keys](api-keys.md) for how to create and manage keys.
+You need to create an API key before you can call the inference API. See the [API Keys guide](api-keys.md) for how to create and manage keys.
 
 ## Endpoints
 
 ### POST /inference/predict/{model_id}
 
-Get top-K recommendations for a single user from a specific model.
+Get top-K recommendations for a single user from a specific model. This is the simplest endpoint -- use it when you know exactly which trained model you want to query.
 
 **Request:**
 
@@ -64,7 +75,7 @@ Get top-K recommendations for a single user from a specific model.
 
 ### POST /inference/predict/{model_id}/batch
 
-Get recommendations for multiple users in a single request (max 100 users).
+Get recommendations for multiple users in a single request (max 100 users). This is more efficient than making individual calls when you need to generate recommendations for a batch of users at once, such as for email campaigns or pre-computed recommendation feeds.
 
 **Request:**
 
@@ -103,7 +114,7 @@ Users not found in the model return an empty `items` list (no error).
 
 ### POST /inference/predict/project/{project_id}
 
-Get recommendations using the project's deployment slots. The inference service selects a model based on deployment slot weights, enabling A/B testing.
+Get recommendations using the project's deployment slots. Instead of specifying a model directly, you point to a project and Recotem automatically selects which model to use based on your deployment slot weights. This is the recommended endpoint for production use, as it enables A/B testing and seamless model updates without changing your application code. See the [A/B Testing guide](ab-testing.md) for details on setting up experiments.
 
 **Request:**
 
@@ -161,13 +172,15 @@ List currently loaded models (no authentication required).
 
 ## Model Hot-Swap
 
-When a new model is trained via the backend, the training service publishes a `model_trained` event to Redis Pub/Sub (channel `recotem:model_events` on db 3). Each inference service replica independently receives the event and loads the new model in a background thread.
+When you train a new model, you do not need to restart the inference service. Recotem automatically pushes model updates to the inference service in the background.
+
+Here is how it works: the backend publishes a `model_trained` event to Redis Pub/Sub (channel `recotem:model_events` on db 3). Each inference service replica independently receives the event and loads the new model in a background thread.
 
 This means:
 - No restart needed when models are updated
 - All replicas update independently
-- Model loading happens in the background without blocking requests
-- Old models remain available until replaced in the LRU cache
+- Model loading happens in the background without blocking ongoing requests
+- Old models remain available until they are evicted from the LRU cache
 
 ## Configuration
 

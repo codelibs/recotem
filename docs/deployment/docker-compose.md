@@ -108,7 +108,7 @@ Pre-load models on startup to avoid cold-start latency:
 INFERENCE_PRELOAD_MODEL_IDS=1,2,3
 ```
 
-See [Standalone Inference Guide](../guides/standalone-inference.md) for the full workflow.
+See [Standalone Inference Guide](standalone-inference.md) for the full workflow.
 
 ## Logs
 

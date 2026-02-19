@@ -29,7 +29,6 @@ def _use_locmem_cache(settings):
     }
 
 
-
 @pytest.fixture
 def user(db):
     return User.objects.create_user(username="owner", password="OwnerPass123!")

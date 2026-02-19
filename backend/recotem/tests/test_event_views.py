@@ -30,7 +30,6 @@ def _use_locmem_cache(settings):
     }
 
 
-
 @pytest.fixture
 def user(db):
     return User.objects.create_user(username="event_user", password="pass")
@@ -222,9 +221,7 @@ class TestConversionEventAccessControl:
         )
         assert resp.status_code == 403
 
-    def test_jwt_non_owner_rejected(
-        self, client: Client, other_user, project, slot
-    ):
+    def test_jwt_non_owner_rejected(self, client: Client, other_user, project, slot):
         """JWT user who doesn't own project gets 403."""
         client.force_login(other_user)
         url = reverse("conversion_event-list")
@@ -240,9 +237,7 @@ class TestConversionEventAccessControl:
         )
         assert resp.status_code == 403
 
-    def test_slot_project_mismatch_rejected(
-        self, auth_client, project, other_slot
-    ):
+    def test_slot_project_mismatch_rejected(self, auth_client, project, other_slot):
         """Slot from other_project used with project should be rejected."""
         url = reverse("conversion_event-list")
         resp = auth_client.post(

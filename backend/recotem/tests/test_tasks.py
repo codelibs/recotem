@@ -633,8 +633,13 @@ class TestFinalizeRetrainingRun:
         _finalize_retraining_run(job, model)
 
     def test_marks_completed(
-        self, user, project, split_config, eval_config,
-        training_data, schedule,
+        self,
+        user,
+        project,
+        split_config,
+        eval_config,
+        training_data,
+        schedule,
     ):
         """Sets run status to COMPLETED, assigns model, sets completed_at."""
         job = ParameterTuningJob.objects.create(
@@ -720,8 +725,13 @@ class TestFinalizeRetrainingRun:
 @pytest.mark.django_db
 class TestFailRetrainingRunForJob:
     def test_marks_failed(
-        self, user, project, split_config, eval_config,
-        training_data, schedule,
+        self,
+        user,
+        project,
+        split_config,
+        eval_config,
+        training_data,
+        schedule,
     ):
         """Sets RUNNING run to FAILED and updates schedule."""
         job = ParameterTuningJob.objects.create(
@@ -747,8 +757,13 @@ class TestFailRetrainingRunForJob:
         assert schedule.last_run_status == "FAILED"
 
     def test_non_running_not_changed(
-        self, user, project, split_config, eval_config,
-        training_data, schedule,
+        self,
+        user,
+        project,
+        split_config,
+        eval_config,
+        training_data,
+        schedule,
     ):
         """A COMPLETED run is not modified."""
         job = ParameterTuningJob.objects.create(

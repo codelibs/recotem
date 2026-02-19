@@ -136,6 +136,6 @@ class TestCreateApiKeyCommand:
         assert key.expires_at is not None
         from datetime import timedelta
 
-        assert before + timedelta(days=30) <= key.expires_at <= after + timedelta(
-            days=30
+        assert (
+            before + timedelta(days=30) <= key.expires_at <= after + timedelta(days=30)
         )

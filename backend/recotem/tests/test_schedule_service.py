@@ -4,7 +4,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from recotem.api.services.schedule_service import _parse_cron, sync_schedule_to_beat
+from recotem.api.services.schedule_service import (
+    _parse_cron,
+    delete_beat_task,
+    sync_schedule_to_beat,
+)
 
 
 class TestParseCron:
@@ -69,3 +73,24 @@ class TestSyncScheduleToBeat:
         mock_periodic.objects.update_or_create.assert_called_once()
         call_kwargs = mock_periodic.objects.update_or_create.call_args
         assert "recotem_retrain_schedule_42" in str(call_kwargs)
+
+
+@pytest.mark.django_db
+class TestDeleteBeatTask:
+    @patch("recotem.api.services.schedule_service.PeriodicTask")
+    def test_deletes_existing_task(self, mock_periodic):
+        schedule = MagicMock()
+        schedule.id = 5
+        delete_beat_task(schedule)
+        mock_periodic.objects.filter.assert_called_once_with(
+            name="recotem_retrain_schedule_5"
+        )
+        mock_periodic.objects.filter.return_value.delete.assert_called_once()
+
+    @patch("recotem.api.services.schedule_service.PeriodicTask")
+    def test_no_task_no_error(self, mock_periodic):
+        """Missing task -> no error (filter returns empty qs, delete does nothing)."""
+        schedule = MagicMock()
+        schedule.id = 999
+        mock_periodic.objects.filter.return_value.delete.return_value = 0
+        delete_beat_task(schedule)  # Should not raise

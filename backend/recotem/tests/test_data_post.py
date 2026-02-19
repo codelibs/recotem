@@ -11,6 +11,17 @@ from pandas import testing as pd_testing
 
 from recotem.api.models import TrainingData
 
+
+@pytest.fixture(autouse=True)
+def _use_locmem_cache(settings):
+    """Use in-memory cache so tests work without Redis."""
+    settings.CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        }
+    }
+
+
 I_O_functions: list[
     tuple[
         str,
@@ -334,3 +345,93 @@ def test_metadata_post(
     assert "URL" in columns
     assert "movieId" not in columns
     json_file.close()
+
+
+@pytest.mark.django_db
+class TestTrainingDataPreview:
+    # These tests need a project and training data with an actual file
+
+    def test_preview_returns_data(self, client, ml100k):
+        """Preview returns columns, rows, total_rows."""
+        login_client(client)
+        project_url = reverse("project-list")
+        resp = client.post(
+            project_url,
+            dict(name="preview_project", user_column="userId", item_column="movieId"),
+        )
+        project_id = resp.json()["id"]
+
+        data_url = reverse("training_data-list")
+        csv_file = NamedTemporaryFile(suffix=".csv")
+        ml100k.to_csv(csv_file, index=False)
+        csv_file.seek(0)
+        resp = client.post(data_url, dict(project=project_id, file=csv_file))
+        assert resp.status_code == 201
+        data_id = resp.json()["id"]
+
+        preview_url = reverse("training_data-preview", args=[data_id])
+        resp = client.get(preview_url)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "columns" in data
+        assert "rows" in data
+        assert "total_rows" in data
+        assert len(data["columns"]) > 0
+        assert data["total_rows"] > 0
+
+    def test_preview_n_rows_param(self, client, ml100k):
+        """n_rows limits returned rows."""
+        login_client(client)
+        project_url = reverse("project-list")
+        resp = client.post(
+            project_url,
+            dict(name="preview_nrows", user_column="userId", item_column="movieId"),
+        )
+        project_id = resp.json()["id"]
+
+        data_url = reverse("training_data-list")
+        csv_file = NamedTemporaryFile(suffix=".csv")
+        ml100k.to_csv(csv_file, index=False)
+        csv_file.seek(0)
+        resp = client.post(data_url, dict(project=project_id, file=csv_file))
+        data_id = resp.json()["id"]
+
+        preview_url = reverse("training_data-preview", args=[data_id])
+        resp = client.get(preview_url, {"n_rows": 5})
+        assert resp.status_code == 200
+        assert resp.json()["total_rows"] <= 5
+
+    def test_preview_unauthenticated_401(self, client):
+        """Unauthenticated -> 401."""
+        # Try accessing any preview URL without login
+        # Use a fake ID since we want auth to fail first
+        resp = client.get("/api/v1/training_data/99999/preview/")
+        assert resp.status_code in (401, 403)
+
+    def test_preview_cross_owner_denied(self, client, ml100k):
+        """User B can't preview User A's data."""
+        login_client(client)  # logs in as "admin"
+        project_url = reverse("project-list")
+        resp = client.post(
+            project_url,
+            dict(name="preview_cross", user_column="userId", item_column="movieId"),
+        )
+        project_id = resp.json()["id"]
+
+        data_url = reverse("training_data-list")
+        csv_file = NamedTemporaryFile(suffix=".csv")
+        ml100k.to_csv(csv_file, index=False)
+        csv_file.seek(0)
+        resp = client.post(data_url, dict(project=project_id, file=csv_file))
+        data_id = resp.json()["id"]
+
+        # Login as different user
+        User = get_user_model()
+        other = User.objects.create_user(
+            username="other_preview_user", password="pass"
+        )
+        client.force_login(other)
+
+        preview_url = reverse("training_data-preview", args=[data_id])
+        resp = client.get(preview_url)
+        assert resp.status_code == 404  # OwnedResourceMixin filters it out

@@ -110,7 +110,7 @@ describe("DataUploadPage", () => {
     xhrInstances = [];
     vi.stubGlobal(
       "XMLHttpRequest",
-      vi.fn(() => {
+      vi.fn(function () {
         const instance = new MockXHR();
         xhrInstances.push(instance);
         return instance;

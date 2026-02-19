@@ -1789,7 +1789,7 @@ requires-dist = [
     { name = "django", specifier = ">=5.1,<5.2" },
     { name = "django-celery-beat", specifier = ">=2.7,<3" },
     { name = "django-celery-results", specifier = ">=2.5,<3" },
-    { name = "django-cleanup", specifier = ">=6.0,<7" },
+    { name = "django-cleanup", specifier = ">=6.0,<10" },
     { name = "django-cors-headers", specifier = ">=4.6,<5" },
     { name = "django-environ", specifier = ">=0.11,<1" },
     { name = "django-extensions", specifier = ">=3.2,<4" },
@@ -1802,11 +1802,11 @@ requires-dist = [
     { name = "irspack", specifier = "==0.4.0" },
     { name = "numpy", specifier = ">=2.1,<3" },
     { name = "optuna", specifier = ">=4.1,<5" },
-    { name = "pandas", specifier = ">=2.2,<3" },
+    { name = "pandas", specifier = ">=2.2,<4" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.1,<4" },
     { name = "pyjwt", specifier = ">=2.9,<3" },
     { name = "python-json-logger", specifier = ">=3.2,<5" },
-    { name = "redis", specifier = ">=5.0,<6" },
+    { name = "redis", specifier = ">=5.0,<8" },
     { name = "scikit-learn", specifier = ">=1.6,<2" },
     { name = "whitenoise", specifier = ">=6.8,<7" },
 ]
@@ -1814,7 +1814,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest", specifier = ">=8.0,<9" },
-    { name = "pytest-asyncio", specifier = ">=0.24,<1" },
+    { name = "pytest-asyncio", specifier = ">=0.24,<2" },
     { name = "pytest-celery", specifier = ">=1.0,<2" },
     { name = "pytest-cov", specifier = ">=6.0,<7" },
     { name = "pytest-django", specifier = ">=4.9,<5" },

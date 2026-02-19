@@ -2,6 +2,7 @@
 
 import pytest
 from django.contrib.auth import get_user_model
+from rest_framework import serializers
 from rest_framework.test import APIRequestFactory
 
 from recotem.api.models import (
@@ -9,6 +10,9 @@ from recotem.api.models import (
     Project,
     SplitConfig,
 )
+from recotem.api.serializers.ab_test import ABTestSerializer
+from recotem.api.serializers.deployment import DeploymentSlotSerializer
+from recotem.api.serializers.events import ConversionEventSerializer
 from recotem.api.serializers.project import ProjectSerializer
 
 User = get_user_model()
@@ -519,3 +523,64 @@ class TestProjectSerializerValidation:
         serializer = ProjectSerializer(data=data, context={"request": request})
         assert not serializer.is_valid()
         assert "item_column" in serializer.errors
+
+
+@pytest.mark.django_db
+class TestDeploymentSlotSerializer:
+    def test_weight_below_zero_rejected(self, user, factory):
+        p = Project.objects.create(
+            name="DeployWeight", user_column="u", item_column="i", owner=user
+        )
+        request = factory.post("/")
+        request.user = user
+        s = DeploymentSlotSerializer(
+            data={"project": p.id, "name": "s", "weight": -1, "trained_model": 1},
+            context={"request": request},
+        )
+        s.is_valid()
+        assert "weight" in s.errors
+
+    def test_weight_above_100_rejected(self, user, factory):
+        p = Project.objects.create(
+            name="DeployOver", user_column="u", item_column="i", owner=user
+        )
+        request = factory.post("/")
+        request.user = user
+        s = DeploymentSlotSerializer(
+            data={"project": p.id, "name": "s", "weight": 101, "trained_model": 1},
+            context={"request": request},
+        )
+        s.is_valid()
+        assert "weight" in s.errors
+
+    def test_weight_boundary_values(self, user, factory):
+        """0 and 100 should be accepted (weight validation only)."""
+        s0 = DeploymentSlotSerializer()
+        assert s0.validate_weight(0) == 0
+        assert s0.validate_weight(100) == 100
+
+
+@pytest.mark.django_db
+class TestABTestSerializerValidation:
+    def test_confidence_below_0_5_rejected(self):
+        s = ABTestSerializer()
+        with pytest.raises(serializers.ValidationError):
+            s.validate_confidence_level(0.4)
+
+    def test_confidence_above_0_99_rejected(self):
+        s = ABTestSerializer()
+        with pytest.raises(serializers.ValidationError):
+            s.validate_confidence_level(1.0)
+
+    def test_invalid_target_metric_rejected(self):
+        s = ABTestSerializer()
+        with pytest.raises(serializers.ValidationError):
+            s.validate_target_metric_name("invalid_metric")
+
+
+@pytest.mark.django_db
+class TestConversionEventSerializerValidation:
+    def test_invalid_event_type_rejected(self):
+        s = ConversionEventSerializer()
+        with pytest.raises(serializers.ValidationError):
+            s.validate_event_type("invalid_type")

@@ -2,7 +2,9 @@
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import make_password
 from django.test import RequestFactory
+from rest_framework.exceptions import AuthenticationFailed
 
 from recotem.api.authentication import (
     API_KEY_PREFIX,
@@ -143,3 +145,76 @@ class TestApiKeyAuthentication:
         factory = RequestFactory()
         request = factory.get("/")
         assert auth.authenticate_header(request) == "X-API-Key"
+
+
+@pytest.mark.django_db
+class TestRequireManagementScope:
+    """Test RequireManagementScope permission class."""
+
+    def test_read_scope_for_get(self, api_key_data, user):
+        """GET requires 'read' scope."""
+        from recotem.api.authentication import RequireManagementScope
+
+        full_key, key_obj = api_key_data
+        # key_obj has scopes=["read", "predict"]
+        factory = RequestFactory()
+        request = factory.get("/")
+        request.api_key = key_obj
+        request.user = user
+        perm = RequireManagementScope()
+        assert perm.has_permission(request, None) is True
+
+    def test_write_scope_for_post(self, api_key_data, user):
+        """POST requires 'write' scope -- key only has read+predict, should fail."""
+        from recotem.api.authentication import RequireManagementScope
+
+        full_key, key_obj = api_key_data
+        factory = RequestFactory()
+        request = factory.post("/")
+        request.api_key = key_obj
+        request.user = user
+        perm = RequireManagementScope()
+        assert perm.has_permission(request, None) is False
+
+    def test_jwt_always_allowed(self, user):
+        """JWT user (no api_key attr) passes all scope checks."""
+        from recotem.api.authentication import RequireManagementScope
+
+        factory = RequestFactory()
+        request = factory.post("/")
+        request.user = user
+        # No api_key attribute -> JWT
+        perm = RequireManagementScope()
+        assert perm.has_permission(request, None) is True
+
+
+@pytest.mark.django_db
+class TestAmbiguousApiKeyPrefix:
+    def test_ambiguous_prefix(self, user, project):
+        """Two keys with same prefix -> 'Ambiguous API key prefix'."""
+        # Create two keys with the same prefix
+        prefix = "SAMEPRFX"
+        ApiKey.objects.create(
+            project=project,
+            owner=user,
+            name="key1",
+            key_prefix=prefix,
+            hashed_key=make_password("dummy1"),
+            scopes=["read"],
+        )
+        ApiKey.objects.create(
+            project=project,
+            owner=user,
+            name="key2",
+            key_prefix=prefix,
+            hashed_key=make_password("dummy2"),
+            scopes=["read"],
+        )
+
+        factory = RequestFactory()
+        request = factory.get(
+            "/", HTTP_X_API_KEY=f"{API_KEY_PREFIX}{prefix}longenoughkey"
+        )
+        auth = ApiKeyAuthentication()
+        with pytest.raises(AuthenticationFailed, match="Ambiguous"):
+            auth.authenticate(request)

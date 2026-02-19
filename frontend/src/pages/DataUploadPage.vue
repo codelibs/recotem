@@ -115,7 +115,9 @@ function uploadWithProgress(file: File): Promise<void> {
             detail = body.detail ?? body.file?.[0] ?? body.project?.[0] ?? detail;
           }
         } catch { /* ignore parse errors */ }
-        reject(new Error(detail));
+        const err = new Error(detail) as Error & { status: number };
+        err.status = xhr.status;
+        reject(err);
       }
     });
 
@@ -135,10 +137,25 @@ async function doUpload(file: File) {
   lastFile.value = file;
 
   try {
+    await authStore.ensureFreshToken();
     await uploadWithProgress(file);
     notify.success(t("data.uploadSuccess"));
     setTimeout(() => router.push(`/projects/${projectId}/data`), 500);
   } catch (e) {
+    if ((e as any).status === 401) {
+      // Token expired during upload — refresh and retry once
+      try {
+        await authStore.refreshAccessToken();
+        if (!authStore.accessToken) throw e;
+        progress.value = 0;
+        await uploadWithProgress(file);
+        notify.success(t("data.uploadSuccess"));
+        setTimeout(() => router.push(`/projects/${projectId}/data`), 500);
+        return;
+      } catch {
+        // Retry also failed
+      }
+    }
     uploadError.value = (e as Error).message || t("data.uploadFailed");
   } finally {
     uploading.value = false;

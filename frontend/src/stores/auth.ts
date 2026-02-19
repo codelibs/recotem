@@ -137,6 +137,23 @@ export const useAuthStore = defineStore("auth", () => {
     }
   }
 
+  async function ensureFreshToken(): Promise<boolean> {
+    if (!accessToken.value || !refreshToken.value) return false;
+    const exp = getTokenExpiry(accessToken.value);
+    if (exp !== null && exp - Date.now() < 60_000) {
+      await refreshAccessToken();
+      return !!accessToken.value;
+    }
+    return true;
+  }
+
+  function handleVisibilityChange() {
+    if (document.visibilityState === "visible" && accessToken.value) {
+      scheduleProactiveRefresh();
+    }
+  }
+  document.addEventListener("visibilitychange", handleVisibilityChange);
+
   // Schedule initial proactive refresh if already authenticated
   scheduleProactiveRefresh();
 
@@ -149,5 +166,6 @@ export const useAuthStore = defineStore("auth", () => {
     logout,
     fetchUser,
     refreshAccessToken,
+    ensureFreshToken,
   };
 });

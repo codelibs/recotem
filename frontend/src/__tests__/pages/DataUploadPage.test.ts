@@ -160,7 +160,7 @@ describe("DataUploadPage", () => {
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
 
       // Should show progress bar while uploading
       expect(wrapper.find(".progress-bar").exists()).toBe(true);
@@ -187,7 +187,7 @@ describe("DataUploadPage", () => {
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
 
       xhrInstances[0].triggerUploadProgress(50, 100);
       await nextTick();
@@ -205,7 +205,7 @@ describe("DataUploadPage", () => {
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
 
       xhrInstances[0].triggerLoad(200);
       await flushPromises();
@@ -223,7 +223,7 @@ describe("DataUploadPage", () => {
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
       expect(wrapper.find(".progress-bar").exists()).toBe(true);
 
       xhrInstances[0].triggerLoad(200);
@@ -239,7 +239,7 @@ describe("DataUploadPage", () => {
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
 
       xhrInstances[0].triggerLoad(400, JSON.stringify({ detail: "Invalid CSV format" }));
       await flushPromises();
@@ -253,7 +253,7 @@ describe("DataUploadPage", () => {
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
 
       xhrInstances[0].triggerLoad(400, JSON.stringify(["File too large"]));
       await flushPromises();
@@ -266,7 +266,7 @@ describe("DataUploadPage", () => {
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
 
       xhrInstances[0].triggerLoad(400, JSON.stringify({ file: ["This field is required."] }));
       await flushPromises();
@@ -279,7 +279,7 @@ describe("DataUploadPage", () => {
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
 
       xhrInstances[0].triggerLoad(500, "Internal Server Error");
       await flushPromises();
@@ -292,7 +292,7 @@ describe("DataUploadPage", () => {
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
 
       xhrInstances[0].triggerError();
       await flushPromises();
@@ -305,7 +305,7 @@ describe("DataUploadPage", () => {
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
 
       xhrInstances[0].triggerAbort();
       await flushPromises();
@@ -318,7 +318,7 @@ describe("DataUploadPage", () => {
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
       expect(wrapper.find(".progress-bar").exists()).toBe(true);
 
       xhrInstances[0].triggerLoad(400, JSON.stringify({ detail: "Bad request" }));
@@ -335,7 +335,7 @@ describe("DataUploadPage", () => {
 
       // Trigger first upload that fails
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
       xhrInstances[0].triggerLoad(500, "error");
       await flushPromises();
 
@@ -345,7 +345,7 @@ describe("DataUploadPage", () => {
 
       // Click retry
       await retryBtn!.trigger("click");
-      await nextTick();
+      await flushPromises();
 
       // A new XHR should be created
       expect(xhrInstances.length).toBe(2);
@@ -377,12 +377,311 @@ describe("DataUploadPage", () => {
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
-      await nextTick();
+      await flushPromises();
 
       expect(xhrInstances[0].setRequestHeader).toHaveBeenCalledWith(
         "Authorization",
         expect.stringMatching(/^Bearer /),
       );
+    });
+  });
+
+  describe("pre-upload token refresh", () => {
+    it("calls ensureFreshToken before creating XHR", async () => {
+      const wrapper = mountPage();
+      const { useAuthStore } = await import("@/stores/auth");
+      const authStore = useAuthStore();
+      const spy = vi.spyOn(authStore, "ensureFreshToken").mockResolvedValue(true);
+
+      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
+      emitUploader(wrapper, mockFile);
+      await flushPromises();
+
+      expect(spy).toHaveBeenCalled();
+      // XHR should still be created after ensureFreshToken
+      expect(xhrInstances.length).toBe(1);
+      expect(xhrInstances[0].send).toHaveBeenCalled();
+      spy.mockRestore();
+    });
+
+    it("proceeds with upload even when ensureFreshToken returns false", async () => {
+      const wrapper = mountPage();
+      const { useAuthStore } = await import("@/stores/auth");
+      const authStore = useAuthStore();
+      // ensureFreshToken returns false (no tokens) but upload should still attempt
+      const spy = vi.spyOn(authStore, "ensureFreshToken").mockResolvedValue(false);
+
+      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
+      emitUploader(wrapper, mockFile);
+      await flushPromises();
+
+      // XHR is still created — the server will reject it with 401
+      expect(xhrInstances.length).toBe(1);
+      expect(xhrInstances[0].send).toHaveBeenCalled();
+      spy.mockRestore();
+    });
+  });
+
+  describe("401 retry logic", () => {
+    it("retries upload after refreshing token on 401 response", async () => {
+      const wrapper = mountPage();
+      const { useAuthStore } = await import("@/stores/auth");
+      const authStore = useAuthStore();
+      authStore.accessToken = "old-token";
+      authStore.refreshToken = "valid-refresh";
+
+      const refreshSpy = vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
+        authStore.accessToken = "new-token";
+      });
+
+      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
+      emitUploader(wrapper, mockFile);
+      await flushPromises();
+
+      // First XHR returns 401
+      expect(xhrInstances.length).toBe(1);
+      xhrInstances[0].triggerLoad(401, JSON.stringify({ detail: "Given token not valid for any token type" }));
+      await flushPromises();
+
+      // Should have called refreshAccessToken and created a second XHR
+      expect(refreshSpy).toHaveBeenCalled();
+      expect(xhrInstances.length).toBe(2);
+      expect(xhrInstances[1].send).toHaveBeenCalled();
+
+      // Complete the retry successfully
+      xhrInstances[1].triggerLoad(200);
+      await flushPromises();
+
+      expect(notifyMock.success).toHaveBeenCalled();
+      expect(wrapper.find(".message").exists()).toBe(false);
+      refreshSpy.mockRestore();
+    });
+
+    it("uses refreshed token in retry XHR", async () => {
+      const wrapper = mountPage();
+      const { useAuthStore } = await import("@/stores/auth");
+      const authStore = useAuthStore();
+      authStore.accessToken = "old-token";
+      authStore.refreshToken = "valid-refresh";
+
+      vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
+        authStore.accessToken = "fresh-new-token";
+      });
+
+      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
+      emitUploader(wrapper, mockFile);
+      await flushPromises();
+
+      // First XHR used old token
+      expect(xhrInstances[0].setRequestHeader).toHaveBeenCalledWith(
+        "Authorization",
+        "Bearer old-token",
+      );
+
+      // Trigger 401
+      xhrInstances[0].triggerLoad(401, JSON.stringify({ detail: "Token expired" }));
+      await flushPromises();
+
+      // Retry XHR should use the new token
+      expect(xhrInstances[1].setRequestHeader).toHaveBeenCalledWith(
+        "Authorization",
+        "Bearer fresh-new-token",
+      );
+    });
+
+    it("shows error when retry also fails with non-401", async () => {
+      const wrapper = mountPage();
+      const { useAuthStore } = await import("@/stores/auth");
+      const authStore = useAuthStore();
+      authStore.accessToken = "old-token";
+      authStore.refreshToken = "valid-refresh";
+
+      vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
+        authStore.accessToken = "new-token";
+      });
+
+      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
+      emitUploader(wrapper, mockFile);
+      await flushPromises();
+
+      // First XHR returns 401
+      xhrInstances[0].triggerLoad(401, JSON.stringify({ detail: "Token expired" }));
+      await flushPromises();
+
+      // Retry XHR returns 500
+      xhrInstances[1].triggerLoad(500, JSON.stringify({ detail: "Server error" }));
+      await flushPromises();
+
+      // Should show error
+      expect(wrapper.find(".message").exists()).toBe(true);
+    });
+
+    it("shows error when token refresh fails during 401 retry", async () => {
+      const wrapper = mountPage();
+      const { useAuthStore } = await import("@/stores/auth");
+      const authStore = useAuthStore();
+      authStore.accessToken = "old-token";
+      authStore.refreshToken = "valid-refresh";
+
+      // refreshAccessToken fails → sets accessToken to null
+      vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
+        authStore.accessToken = null;
+        authStore.refreshToken = null;
+      });
+
+      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
+      emitUploader(wrapper, mockFile);
+      await flushPromises();
+
+      // First XHR returns 401
+      xhrInstances[0].triggerLoad(401, JSON.stringify({ detail: "Token expired" }));
+      await flushPromises();
+
+      // Refresh failed — should show original error, no retry XHR created
+      expect(xhrInstances.length).toBe(1);
+      expect(wrapper.find(".message").exists()).toBe(true);
+    });
+
+    it("does not retry on non-401 errors", async () => {
+      const wrapper = mountPage();
+      const { useAuthStore } = await import("@/stores/auth");
+      const authStore = useAuthStore();
+      const refreshSpy = vi.spyOn(authStore, "refreshAccessToken");
+
+      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
+      emitUploader(wrapper, mockFile);
+      await flushPromises();
+
+      // 400 Bad Request — should NOT trigger retry
+      xhrInstances[0].triggerLoad(400, JSON.stringify({ detail: "Invalid CSV" }));
+      await flushPromises();
+
+      expect(refreshSpy).not.toHaveBeenCalled();
+      expect(xhrInstances.length).toBe(1);
+      expect(wrapper.find(".message").exists()).toBe(true);
+      expect(wrapper.text()).toContain("Invalid CSV");
+      refreshSpy.mockRestore();
+    });
+
+    it("does not retry on 500 errors", async () => {
+      const wrapper = mountPage();
+      const { useAuthStore } = await import("@/stores/auth");
+      const authStore = useAuthStore();
+      const refreshSpy = vi.spyOn(authStore, "refreshAccessToken");
+
+      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
+      emitUploader(wrapper, mockFile);
+      await flushPromises();
+
+      xhrInstances[0].triggerLoad(500, "Internal Server Error");
+      await flushPromises();
+
+      expect(refreshSpy).not.toHaveBeenCalled();
+      expect(xhrInstances.length).toBe(1);
+      refreshSpy.mockRestore();
+    });
+
+    it("resets progress to 0 before retry upload", async () => {
+      const wrapper = mountPage();
+      const { useAuthStore } = await import("@/stores/auth");
+      const authStore = useAuthStore();
+      authStore.accessToken = "old-token";
+      authStore.refreshToken = "valid-refresh";
+
+      vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
+        authStore.accessToken = "new-token";
+      });
+
+      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
+      emitUploader(wrapper, mockFile);
+      await flushPromises();
+
+      // Simulate progress reaching 80%
+      xhrInstances[0].triggerUploadProgress(80, 100);
+      await nextTick();
+      expect(wrapper.find(".progress-bar").attributes("data-value")).toBe("80");
+
+      // 401 triggers retry
+      xhrInstances[0].triggerLoad(401, JSON.stringify({ detail: "Token expired" }));
+      await flushPromises();
+
+      // Progress should be reset to 0 for the retry
+      expect(wrapper.find(".progress-bar").attributes("data-value")).toBe("0");
+    });
+
+    it("hides progress bar after successful retry", async () => {
+      vi.useFakeTimers();
+      const wrapper = mountPage();
+      const { useAuthStore } = await import("@/stores/auth");
+      const authStore = useAuthStore();
+      authStore.accessToken = "old-token";
+      authStore.refreshToken = "valid-refresh";
+
+      vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
+        authStore.accessToken = "new-token";
+      });
+
+      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
+      emitUploader(wrapper, mockFile);
+      await flushPromises();
+
+      // 401 → retry
+      xhrInstances[0].triggerLoad(401, JSON.stringify({ detail: "Token expired" }));
+      await flushPromises();
+
+      // Retry succeeds
+      xhrInstances[1].triggerLoad(200);
+      await flushPromises();
+
+      expect(wrapper.find(".progress-bar").exists()).toBe(false);
+      expect(notifyMock.success).toHaveBeenCalled();
+      vi.advanceTimersByTime(500);
+      expect(mockPush).toHaveBeenCalledWith("/projects/1/data");
+
+      vi.useRealTimers();
+    });
+  });
+
+  describe("error status property", () => {
+    it("attaches HTTP status to error on non-2xx response", async () => {
+      const wrapper = mountPage();
+      const { useAuthStore } = await import("@/stores/auth");
+      const authStore = useAuthStore();
+      // Spy on refreshAccessToken to verify 401 detection works via status
+      const refreshSpy = vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
+        authStore.accessToken = null;
+      });
+
+      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
+      emitUploader(wrapper, mockFile);
+      await flushPromises();
+
+      // 401 should be detected by the retry logic (proves .status is set)
+      xhrInstances[0].triggerLoad(401, JSON.stringify({ detail: "Unauthorized" }));
+      await flushPromises();
+
+      expect(refreshSpy).toHaveBeenCalled();
+      refreshSpy.mockRestore();
+    });
+
+    it("does not trigger 401 retry for 403 forbidden", async () => {
+      const wrapper = mountPage();
+      const { useAuthStore } = await import("@/stores/auth");
+      const authStore = useAuthStore();
+      const refreshSpy = vi.spyOn(authStore, "refreshAccessToken");
+
+      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
+      emitUploader(wrapper, mockFile);
+      await flushPromises();
+
+      // 403 is different from 401
+      xhrInstances[0].triggerLoad(403, JSON.stringify({ detail: "Forbidden" }));
+      await flushPromises();
+
+      expect(refreshSpy).not.toHaveBeenCalled();
+      expect(xhrInstances.length).toBe(1);
+      expect(wrapper.text()).toContain("Forbidden");
+      refreshSpy.mockRestore();
     });
   });
 });

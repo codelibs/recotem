@@ -194,7 +194,7 @@ jobs:
       - name: Build backend image
         run: docker build -t recotem-backend:pr --target production backend/
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@0.34.0
         with:
           image-ref: recotem-backend:pr
           format: table

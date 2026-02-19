@@ -155,7 +155,9 @@ describe("useWebSocket", () => {
         onclose: null,
         onerror: null,
       };
-      mockWebSocket.mockReturnValue(mockWebSocketInstance);
+      mockWebSocket.mockImplementation(function (this: any) {
+        return mockWebSocketInstance;
+      });
 
       connect();
       mockWebSocketInstance.onopen();

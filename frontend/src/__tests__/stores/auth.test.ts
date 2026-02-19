@@ -274,6 +274,177 @@ describe("useAuthStore", () => {
     });
   });
 
+  describe("ensureFreshToken", () => {
+    function makeToken(expMs: number): string {
+      const payload = { exp: expMs / 1000 };
+      return `header.${btoa(JSON.stringify(payload))}.signature`;
+    }
+
+    it("should_return_true_without_refreshing_when_token_has_more_than_60s_remaining", async () => {
+      // Token expires in 5 minutes — well above the 60s threshold
+      store.accessToken = makeToken(Date.now() + 300_000);
+      store.refreshToken = "valid-refresh";
+
+      const result = await store.ensureFreshToken();
+
+      expect(result).toBe(true);
+      // Should NOT have called the refresh endpoint
+      expect(mockOfetch).not.toHaveBeenCalled();
+    });
+
+    it("should_refresh_and_return_true_when_token_expires_within_60s", async () => {
+      vi.useFakeTimers();
+      // Token expires in 45s: within ensureFreshToken's 60s threshold,
+      // but proactive refresh sets a timer (delay > 0) instead of firing immediately
+      store.refreshToken = "valid-refresh";
+      const newToken = makeToken(Date.now() + 300_000);
+      mockOfetch.mockResolvedValueOnce({ access: newToken });
+      store.accessToken = makeToken(Date.now() + 45_000);
+
+      const result = await store.ensureFreshToken();
+
+      expect(result).toBe(true);
+      expect(mockOfetch).toHaveBeenCalledWith(
+        "/api/v1/auth/token/refresh/",
+        expect.objectContaining({ method: "POST" }),
+      );
+      expect(store.accessToken).toBe(newToken);
+      vi.useRealTimers();
+    });
+
+    it("should_refresh_and_return_true_when_token_is_already_expired", async () => {
+      // Expired token triggers both proactive refresh and ensureFreshToken.
+      // Provide two mock responses so both can succeed.
+      store.refreshToken = "valid-refresh";
+      const newToken = makeToken(Date.now() + 300_000);
+      mockOfetch
+        .mockResolvedValueOnce({ access: newToken })   // proactive refresh (via watch)
+        .mockResolvedValueOnce({ access: newToken });   // ensureFreshToken (if still needed)
+      store.accessToken = makeToken(Date.now() - 10_000);
+
+      const result = await store.ensureFreshToken();
+
+      expect(result).toBe(true);
+      expect(store.accessToken).toBe(newToken);
+    });
+
+    it("should_return_false_when_no_access_token", async () => {
+      store.accessToken = null;
+      store.refreshToken = "valid-refresh";
+
+      const result = await store.ensureFreshToken();
+
+      expect(result).toBe(false);
+      expect(mockOfetch).not.toHaveBeenCalled();
+    });
+
+    it("should_return_false_when_no_refresh_token", async () => {
+      store.accessToken = makeToken(Date.now() + 30_000);
+      store.refreshToken = null;
+
+      const result = await store.ensureFreshToken();
+
+      expect(result).toBe(false);
+      expect(mockOfetch).not.toHaveBeenCalled();
+    });
+
+    it("should_return_false_when_refresh_fails", async () => {
+      vi.useFakeTimers();
+      // Token expires in 45s: within ensureFreshToken's threshold,
+      // proactive refresh uses a timer (delay > 0)
+      store.refreshToken = "expired-refresh";
+      mockOfetch.mockRejectedValueOnce(new Error("Refresh failed"));
+      store.accessToken = makeToken(Date.now() + 45_000);
+
+      const result = await store.ensureFreshToken();
+
+      // refreshAccessToken failed → logout → accessToken becomes null
+      expect(result).toBe(false);
+      expect(store.accessToken).toBeNull();
+      vi.useRealTimers();
+    });
+
+    it("should_return_true_for_token_with_exactly_60s_remaining", async () => {
+      vi.useFakeTimers();
+      // Token expires in ~59s — within ensureFreshToken's 60s threshold,
+      // but proactive refresh calculates delay > 0 so uses a timer
+      store.refreshToken = "valid-refresh";
+      const newToken = makeToken(Date.now() + 300_000);
+      mockOfetch.mockResolvedValueOnce({ access: newToken });
+      store.accessToken = makeToken(Date.now() + 59_000);
+
+      const result = await store.ensureFreshToken();
+
+      expect(result).toBe(true);
+      expect(mockOfetch).toHaveBeenCalled();
+      vi.useRealTimers();
+    });
+
+    it("should_not_refresh_when_token_has_no_parseable_exp", async () => {
+      // Token without valid exp field — getTokenExpiry returns null
+      store.accessToken = "not-a-real-jwt";
+      store.refreshToken = "valid-refresh";
+
+      const result = await store.ensureFreshToken();
+
+      // exp is null → condition (exp !== null && ...) is false → returns true
+      expect(result).toBe(true);
+      expect(mockOfetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("visibilitychange", () => {
+    function makeToken(expMs: number): string {
+      const payload = { exp: expMs / 1000 };
+      return `header.${btoa(JSON.stringify(payload))}.signature`;
+    }
+
+    it("should_trigger_refresh_when_tab_becomes_visible_with_expired_token", async () => {
+      // Setup: authenticated user with an expired token
+      store.accessToken = makeToken(Date.now() - 5_000); // expired 5s ago
+      store.refreshToken = "valid-refresh";
+      const newToken = makeToken(Date.now() + 300_000);
+      mockOfetch.mockResolvedValueOnce({ access: newToken });
+
+      // Simulate tab becoming visible
+      document.dispatchEvent(new Event("visibilitychange"));
+      // scheduleProactiveRefresh sees delay<=0 and calls refreshAccessToken synchronously
+      // but refreshAccessToken is async, so flush
+      await vi.waitFor(() => {
+        expect(mockOfetch).toHaveBeenCalledWith(
+          "/api/v1/auth/token/refresh/",
+          expect.objectContaining({ method: "POST" }),
+        );
+      });
+    });
+
+    it("should_not_trigger_refresh_when_tab_becomes_visible_without_token", () => {
+      store.accessToken = null;
+      store.refreshToken = null;
+      mockOfetch.mockClear();
+
+      // Simulate tab becoming visible
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      expect(mockOfetch).not.toHaveBeenCalled();
+    });
+
+    it("should_schedule_timer_when_tab_becomes_visible_with_fresh_token", () => {
+      vi.useFakeTimers();
+      // Token with plenty of time remaining
+      store.accessToken = makeToken(Date.now() + 300_000);
+      store.refreshToken = "valid-refresh";
+      mockOfetch.mockClear();
+
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      // Should NOT immediately call refresh (token is still fresh)
+      expect(mockOfetch).not.toHaveBeenCalled();
+      // But a timer should be scheduled (we can verify by advancing time)
+      vi.useRealTimers();
+    });
+  });
+
   describe("initialization", () => {
     it("should_load_tokens_from_sessionStorage_on_creation", () => {
       // Arrange

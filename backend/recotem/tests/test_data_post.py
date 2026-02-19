@@ -427,9 +427,7 @@ class TestTrainingDataPreview:
 
         # Login as different user
         User = get_user_model()
-        other = User.objects.create_user(
-            username="other_preview_user", password="pass"
-        )
+        other = User.objects.create_user(username="other_preview_user", password="pass")
         client.force_login(other)
 
         preview_url = reverse("training_data-preview", args=[data_id])

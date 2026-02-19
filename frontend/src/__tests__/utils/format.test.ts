@@ -6,6 +6,11 @@ describe("formatDate", () => {
     const result = formatDate("2024-01-15T10:30:00Z");
     expect(result).toBe(new Date("2024-01-15T10:30:00Z").toLocaleString());
   });
+
+  it("returns a locale string for a date-only string", () => {
+    const result = formatDate("2024-06-15");
+    expect(result).toBe(new Date("2024-06-15").toLocaleString());
+  });
 });
 
 describe("formatFileSize", () => {
@@ -39,6 +44,18 @@ describe("formatFileSize", () => {
 
   it('returns "1.0 GB" for 1073741824', () => {
     expect(formatFileSize(1073741824)).toBe("1.0 GB");
+  });
+
+  it("returns correct value for 1023 B (just under 1 KB)", () => {
+    expect(formatFileSize(1023)).toBe("1023 B");
+  });
+
+  it("returns correct value for 1047552 bytes (just under 1 MB)", () => {
+    expect(formatFileSize(1047552)).toBe(`${(1047552 / 1024).toFixed(1)} KB`);
+  });
+
+  it("returns correct value for 1073741823 bytes (just under 1 GB)", () => {
+    expect(formatFileSize(1073741823)).toBe(`${(1073741823 / 1048576).toFixed(1)} MB`);
   });
 });
 

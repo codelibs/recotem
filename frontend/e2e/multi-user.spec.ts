@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 const USER_A_USERNAME = process.env.E2E_USER_A_USERNAME ?? "e2e_user_a";
 const USER_A_PASSWORD = process.env.E2E_USER_A_PASSWORD ?? "e2e_password_a";
@@ -6,60 +6,12 @@ const USER_B_USERNAME = process.env.E2E_USER_B_USERNAME ?? "e2e_user_b";
 const USER_B_PASSWORD = process.env.E2E_USER_B_PASSWORD ?? "e2e_password_b";
 const API_BASE_URL = process.env.E2E_API_BASE_URL ?? "http://localhost:8000/api/v1";
 
-type AuthResponse = {
-  access: string;
-  refresh?: string;
-};
-
-async function postJson(
-  url: string,
-  payload: unknown,
-  headers: Record<string, string> = {},
-) {
-  return fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...headers,
-    },
-    body: JSON.stringify(payload),
-  });
-}
-
-async function loginViaApi(username: string, password: string): Promise<AuthResponse> {
-  const response = await postJson(`${API_BASE_URL}/auth/login/`, {
-    username,
-    password,
-  });
-  if (!response.ok) {
-    throw new Error(
-      `Failed to login user '${username}': ${response.status} ${await response.text()}`,
-    );
-  }
-  return (await response.json()) as AuthResponse;
-}
-
-async function createProjectViaApi(
-  token: string,
-  name: string,
-) {
-  const response = await postJson(
-    `${API_BASE_URL}/project/`,
-    {
-      name,
-      user_column: "userId",
-      item_column: "itemId",
-      time_column: null,
-    },
-    {
-      Authorization: `Bearer ${token}`,
-    },
-  );
-  if (!response.ok) {
-    throw new Error(
-      `Failed to create project '${name}': ${response.status} ${await response.text()}`,
-    );
-  }
+async function loginInPage(page: Page, username: string, password: string) {
+  await page.goto("/login", { waitUntil: "domcontentloaded" });
+  await page.getByPlaceholder("Enter username").fill(username);
+  await page.getByPlaceholder("Enter password").fill(password);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page).toHaveURL(/\/projects/);
 }
 
 test.describe("Multi-User Isolation", () => {
@@ -73,32 +25,33 @@ test.describe("Multi-User Isolation", () => {
     const userBProject = `E2E UserB Private ${Date.now()}`;
 
     try {
-      const authA = await loginViaApi(USER_A_USERNAME, USER_A_PASSWORD);
-      const authB = await loginViaApi(USER_B_USERNAME, USER_B_PASSWORD);
+      // Login via real browser flow so httpOnly cookies are set
+      await loginInPage(pageA, USER_A_USERNAME, USER_A_PASSWORD);
+      await loginInPage(pageB, USER_B_USERNAME, USER_B_PASSWORD);
 
-      await createProjectViaApi(authA.access, userAProject);
-      await createProjectViaApi(authB.access, userBProject);
-
-      await contextA.addInitScript(
-        ({ access, refresh }) => {
-          sessionStorage.setItem("access_token", access);
-          sessionStorage.setItem("refresh_token", refresh);
-          localStorage.removeItem("lastProjectId");
+      // Create projects using page.request (shares cookies with browser context)
+      await pageA.request.post(`${API_BASE_URL}/project/`, {
+        data: {
+          name: userAProject,
+          user_column: "userId",
+          item_column: "itemId",
+          time_column: null,
         },
-        { access: authA.access, refresh: authA.refresh ?? "" },
-      );
+      });
+      await pageB.request.post(`${API_BASE_URL}/project/`, {
+        data: {
+          name: userBProject,
+          user_column: "userId",
+          item_column: "itemId",
+          time_column: null,
+        },
+      });
+
+      // Reload to see newly created projects
       await pageA.goto("/projects", { waitUntil: "domcontentloaded" });
       await expect(pageA.getByText(userAProject)).toBeVisible();
       await expect(pageA.getByText(userBProject)).toHaveCount(0);
 
-      await contextB.addInitScript(
-        ({ access, refresh }) => {
-          sessionStorage.setItem("access_token", access);
-          sessionStorage.setItem("refresh_token", refresh);
-          localStorage.removeItem("lastProjectId");
-        },
-        { access: authB.access, refresh: authB.refresh ?? "" },
-      );
       await pageB.goto("/projects", { waitUntil: "domcontentloaded" });
       await expect(pageB.getByText(userAProject)).toHaveCount(0);
       await expect(pageB.getByText(userBProject)).toBeVisible();

@@ -1,6 +1,5 @@
 import { type Ref, getCurrentInstance, onUnmounted, ref } from "vue";
 
-import { useAuthStore } from "@/stores/auth";
 
 const MAX_RECONNECT_ATTEMPTS = 10;
 const BASE_DELAY_MS = 1000;
@@ -20,15 +19,10 @@ export function useWebSocket<T = unknown>(path: string) {
   let lastSeq = -1;
 
   function buildUrl(): string {
-    const auth = useAuthStore();
     const wsBase = import.meta.env.VITE_WS_BASE_URL;
-    const base = wsBase
+    return wsBase
       ? `${wsBase}${path}`
       : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${path}`;
-    if (auth.accessToken) {
-      return `${base}?token=${encodeURIComponent(auth.accessToken)}`;
-    }
-    return base;
   }
 
   function scheduleReconnect() {

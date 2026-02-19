@@ -16,7 +16,7 @@ async function attemptRefresh(): Promise<boolean> {
     try {
       const authStore = useAuthStore();
       await authStore.refreshAccessToken();
-      return !!authStore.accessToken;
+      return authStore.isAuthenticated;
     } finally {
       isRefreshing = false;
       refreshPromise = null;
@@ -40,14 +40,6 @@ export const api = ofetch.create({
     "Content-Type": "application/json",
   },
   retry: false,
-  onRequest({ options }) {
-    const authStore = useAuthStore();
-    if (authStore.accessToken) {
-      const headers = new Headers(options.headers as HeadersInit);
-      headers.set("Authorization", `Bearer ${authStore.accessToken}`);
-      options.headers = headers;
-    }
-  },
   async onResponseError({ request, response, options }) {
     if (response.status === 401) {
       const authStore = useAuthStore();
@@ -60,12 +52,9 @@ export const api = ofetch.create({
 
       const refreshed = await attemptRefresh();
       if (refreshed) {
-        // Retry the original request with new token
-        const headers = new Headers(options.headers as HeadersInit);
-        headers.set("Authorization", `Bearer ${authStore.accessToken}`);
+        // Retry the original request after cookie refresh
         return ofetch(request, {
           ...(options as FetchOptions),
-          headers,
         }) as unknown as Promise<void>;
       }
       await authStore.logout();

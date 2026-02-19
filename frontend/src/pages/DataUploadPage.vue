@@ -125,7 +125,6 @@ function uploadWithProgress(file: File): Promise<void> {
     xhr.addEventListener("abort", () => reject(new Error(t("data.uploadCancelled"))));
 
     xhr.open("POST", toApiUrl("/training_data/"));
-    xhr.setRequestHeader("Authorization", `Bearer ${authStore.accessToken}`);
     xhr.send(formData);
   });
 }
@@ -146,7 +145,7 @@ async function doUpload(file: File) {
       // Token expired during upload — refresh and retry once
       try {
         await authStore.refreshAccessToken();
-        if (!authStore.accessToken) throw e;
+        if (!authStore.isAuthenticated) throw e;
         progress.value = 0;
         await uploadWithProgress(file);
         notify.success(t("data.uploadSuccess"));

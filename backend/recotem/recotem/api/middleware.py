@@ -1,9 +1,11 @@
 """JWT authentication middleware for Django Channels WebSocket connections.
 
-Browsers cannot send custom HTTP headers on WebSocket upgrade requests,
-so JWT tokens are passed as a ``?token=<access_token>`` query parameter.
+Reads the JWT access token from the ``jwt-access`` httpOnly cookie sent
+automatically by the browser on WebSocket upgrade. Falls back to the legacy
+``?token=`` query parameter for backward compatibility.
 """
 
+from http.cookies import SimpleCookie
 from urllib.parse import parse_qs
 
 from channels.db import database_sync_to_async
@@ -25,14 +27,21 @@ def get_user_from_token(token_str):
 
 
 class JwtAuthMiddleware(BaseMiddleware):
-    """Authenticate WebSocket connections via a JWT query-string parameter."""
+    """Authenticate WebSocket connections via the jwt-access httpOnly cookie."""
 
     async def __call__(self, scope, receive, send):
-        query_string = scope.get("query_string", b"").decode()
-        params = parse_qs(query_string)
-        token_list = params.get("token", [])
-        if token_list:
-            scope["user"] = await get_user_from_token(token_list[0])
-        else:
-            scope["user"] = AnonymousUser()
+        headers = dict(scope.get("headers", []))
+        cookie_header = headers.get(b"cookie", b"").decode()
+        cookie = SimpleCookie()
+        cookie.load(cookie_header)
+        jwt_morsel = cookie.get("jwt-access")
+        token = jwt_morsel.value if jwt_morsel else None
+
+        if not token:
+            query_string = scope.get("query_string", b"").decode()
+            params = parse_qs(query_string)
+            token_list = params.get("token", [])
+            token = token_list[0] if token_list else None
+
+        scope["user"] = await get_user_from_token(token) if token else AnonymousUser()
         return await super().__call__(scope, receive, send)

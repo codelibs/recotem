@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     recotem_storage_type: str = ""
 
     # Allow unsigned legacy pickle files
-    pickle_allow_legacy_unsigned: bool = True
+    pickle_allow_legacy_unsigned: bool = False
 
     model_config = {"env_prefix": "", "case_sensitive": False}
 

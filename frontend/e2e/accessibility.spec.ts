@@ -1,25 +1,18 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
-const BASE_URL = process.env.E2E_API_BASE_URL || "http://localhost:8000/api/v1";
 const USERNAME = process.env.E2E_USER_A_USERNAME || "e2e_user_a";
 const PASSWORD = process.env.E2E_USER_A_PASSWORD || "e2e_password_a";
 
-async function login(request: any) {
-  const loginRes = await request.post(`${BASE_URL}/auth/login/`, {
-    data: { username: USERNAME, password: PASSWORD },
-  });
-  const body = await loginRes.json();
-  return body.access;
+async function login(page: Page) {
+  await page.goto("/login", { waitUntil: "domcontentloaded" });
+  await page.getByPlaceholder("Enter username").fill(USERNAME);
+  await page.getByPlaceholder("Enter password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page).toHaveURL(/\/projects/);
 }
 
-async function setAuthToken(page: any, token: string) {
-  await page.evaluate((t: string) => {
-    sessionStorage.setItem("access_token", t);
-  }, token);
-}
-
-async function getProjectId(page: any): Promise<string | null> {
+async function getProjectId(page: Page): Promise<string | null> {
   // Navigate to projects page and grab the first project link
   const projectLink = page.locator("a[href*='/projects/']").first();
   if (await projectLink.isVisible({ timeout: 5000 }).catch(() => false)) {
@@ -39,12 +32,6 @@ async function getProjectId(page: any): Promise<string | null> {
 }
 
 test.describe("Accessibility", () => {
-  let token: string;
-
-  test.beforeAll(async ({ request }) => {
-    token = await login(request);
-  });
-
   test("Login page has no critical a11y violations", async ({ page }) => {
     await page.goto("/login");
     await page.waitForSelector("form");
@@ -58,9 +45,7 @@ test.describe("Accessibility", () => {
   });
 
   test("Projects page has no critical a11y violations", async ({ page }) => {
-    await page.goto("/projects");
-    await setAuthToken(page, token);
-    await page.reload();
+    await login(page);
     await page.waitForSelector("[role='navigation']");
 
     const results = await new AxeBuilder({ page })
@@ -71,9 +56,7 @@ test.describe("Accessibility", () => {
   });
 
   test("Tuning Job List page has no critical a11y violations", async ({ page }) => {
-    await page.goto("/projects");
-    await setAuthToken(page, token);
-    await page.reload();
+    await login(page);
     await page.waitForSelector("[role='navigation']");
 
     const projectId = await getProjectId(page);
@@ -91,9 +74,7 @@ test.describe("Accessibility", () => {
   });
 
   test("Model List page has no critical a11y violations", async ({ page }) => {
-    await page.goto("/projects");
-    await setAuthToken(page, token);
-    await page.reload();
+    await login(page);
     await page.waitForSelector("[role='navigation']");
 
     const projectId = await getProjectId(page);
@@ -111,9 +92,7 @@ test.describe("Accessibility", () => {
   });
 
   test("Model Comparison page has no critical a11y violations", async ({ page }) => {
-    await page.goto("/projects");
-    await setAuthToken(page, token);
-    await page.reload();
+    await login(page);
     await page.waitForSelector("[role='navigation']");
 
     const projectId = await getProjectId(page);

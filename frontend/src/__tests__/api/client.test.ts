@@ -27,8 +27,12 @@ vi.mock("ofetch", () => {
   };
 });
 
+function makeJwt(expSeconds: number): string {
+  const payload = Buffer.from(JSON.stringify({ exp: expSeconds })).toString("base64");
+  return `h.${payload}.s`;
+}
+
 describe("api client", () => {
-  let onRequestCallback: any;
   let onResponseErrorCallback: any;
   let authStore: ReturnType<typeof useAuthStore>;
   let mockOfetchCreate: any;
@@ -56,7 +60,7 @@ describe("api client", () => {
       }),
     });
 
-    // Mock sessionStorage (auth store uses sessionStorage for tokens)
+    // Mock sessionStorage (auth store uses sessionStorage for expiry)
     const sessionStorageMock: Record<string, string> = {};
     vi.stubGlobal("sessionStorage", {
       getItem: vi.fn((key: string) => sessionStorageMock[key] || null),
@@ -66,31 +70,6 @@ describe("api client", () => {
       removeItem: vi.fn((key: string) => {
         delete sessionStorageMock[key];
       }),
-    });
-
-    // Mock Headers in global scope
-    vi.stubGlobal("Headers", class MockHeaders {
-      private headers: Map<string, string> = new Map();
-
-      constructor(init?: any) {
-        if (init && typeof init === 'object') {
-          Object.entries(init).forEach(([key, value]) => {
-            this.headers.set(key.toLowerCase(), String(value));
-          });
-        }
-      }
-
-      get(name: string): string | null {
-        return this.headers.get(name.toLowerCase()) || null;
-      }
-
-      set(name: string, value: string): void {
-        this.headers.set(name.toLowerCase(), value);
-      }
-
-      has(name: string): boolean {
-        return this.headers.has(name.toLowerCase());
-      }
     });
 
     // Reset mocks
@@ -103,7 +82,6 @@ describe("api client", () => {
 
     // Capture the callbacks passed to ofetch.create
     mockOfetchCreate.mockImplementation((config: any) => {
-      onRequestCallback = config.onRequest;
       onResponseErrorCallback = config.onResponseError;
       return mockOfetch;
     });
@@ -128,62 +106,29 @@ describe("api client", () => {
         })
       );
     });
-  });
 
-  describe("onRequest - auth header injection", () => {
-    it("should_add_authorization_header_when_access_token_exists", () => {
-      // Arrange
-      authStore.accessToken = "test-access-token";
-      const options: FetchOptions = { headers: {} };
-
-      // Act
-      onRequestCallback({ options });
-
-      // Assert
-      const headers = options.headers as any;
-      expect(headers.get("authorization")).toBe("Bearer test-access-token");
+    it("does not include Authorization header in default config", () => {
+      const config = mockOfetchCreate.mock.calls[0][0];
+      expect(config.headers).not.toHaveProperty("Authorization");
     });
 
-    it("should_not_add_authorization_header_when_no_token", () => {
-      // Arrange
-      authStore.accessToken = null;
-      const options: FetchOptions = { headers: {} };
-
-      // Act
-      onRequestCallback({ options });
-
-      // Assert - headers should remain as plain object without Authorization
-      const headers = options.headers as any;
-      // When no token, headers stay as plain object (no Headers constructor called)
-      expect(headers.authorization).toBeUndefined();
-    });
-
-    it("should_update_token_when_it_changes", () => {
-      // Arrange
-      authStore.accessToken = "old-token";
-      const options1: FetchOptions = { headers: {} };
-      onRequestCallback({ options: options1 });
-      const headers1 = options1.headers as any;
-      expect(headers1.get("authorization")).toBe("Bearer old-token");
-
-      // Act - change token
-      authStore.accessToken = "new-token";
-      const options2: FetchOptions = { headers: {} };
-      onRequestCallback({ options: options2 });
-
-      // Assert
-      const headers2 = options2.headers as any;
-      expect(headers2.get("authorization")).toBe("Bearer new-token");
+    it("does not include Bearer token in default headers", () => {
+      const config = mockOfetchCreate.mock.calls[0][0];
+      const headerValues = Object.values(config.headers || {});
+      const hasBearerHeader = headerValues.some(
+        (v: any) => typeof v === "string" && v.startsWith("Bearer "),
+      );
+      expect(hasBearerHeader).toBe(false);
     });
   });
 
   describe("onResponseError - 401 handling", () => {
     it("should_trigger_token_refresh_and_retry_on_401", async () => {
       // Arrange
-      authStore.refreshToken = "refresh-token";
-      authStore.accessToken = "old-access-token";
+      authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
 
-      const mockRefreshResponse = { access: "new-access-token" };
+      const expSeconds = Math.floor(Date.now() / 1000) + 300;
+      const mockRefreshResponse = { access: makeJwt(expSeconds) };
       mockOfetch.mockResolvedValueOnce(mockRefreshResponse);
       mockOfetch.mockResolvedValueOnce({ data: "success" });
 
@@ -194,26 +139,22 @@ describe("api client", () => {
       // Act
       await onResponseErrorCallback({ request, response, options });
 
-      // Assert - refresh was called (with timeout from auth store)
+      // Assert - refresh was called
       expect(mockOfetch).toHaveBeenCalledWith("/api/v1/auth/token/refresh/", {
         method: "POST",
-        body: { refresh: "refresh-token" },
         timeout: 5000,
       });
 
       // Assert - original request was retried
       expect(mockOfetch).toHaveBeenCalledWith(
         request,
-        expect.objectContaining({
-          headers: expect.anything(),
-        })
+        expect.objectContaining({})
       );
     });
 
     it("should_logout_on_401_for_auth_endpoints", async () => {
       // Arrange
-      authStore.accessToken = "token";
-      authStore.refreshToken = "refresh";
+      authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
       authStore.user = { pk: 1, username: "test", email: "test@example.com" };
 
       const request = "/api/v1/auth/login/";
@@ -223,12 +164,10 @@ describe("api client", () => {
       // Act
       await onResponseErrorCallback({ request, response, options });
 
-      // Assert - logout was called (tokens cleared)
-      expect(authStore.accessToken).toBeNull();
-      expect(authStore.refreshToken).toBeNull();
+      // Assert - logout was called
+      expect(authStore.tokenExpiry).toBeNull();
       expect(authStore.user).toBeNull();
 
-      // Assert - refresh was NOT called (only server-side logout call if any)
       const refreshCalls = mockOfetch.mock.calls.filter(
         (c: any[]) => String(c[0]).includes("token/refresh"),
       );
@@ -237,8 +176,7 @@ describe("api client", () => {
 
     it("should_logout_on_401_for_token_refresh_endpoint", async () => {
       // Arrange
-      authStore.accessToken = "token";
-      authStore.refreshToken = "refresh";
+      authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
 
       const request = "/api/v1/auth/token/refresh/";
       const response = { status: 401 };
@@ -248,10 +186,8 @@ describe("api client", () => {
       await onResponseErrorCallback({ request, response, options });
 
       // Assert
-      expect(authStore.accessToken).toBeNull();
-      expect(authStore.refreshToken).toBeNull();
+      expect(authStore.tokenExpiry).toBeNull();
 
-      // Assert - refresh was NOT called (only server-side logout call if any)
       const refreshCalls = mockOfetch.mock.calls.filter(
         (c: any[]) => String(c[0]).includes("token/refresh"),
       );
@@ -260,8 +196,7 @@ describe("api client", () => {
 
     it("should_logout_when_refresh_token_fails", async () => {
       // Arrange
-      authStore.refreshToken = "invalid-refresh-token";
-      authStore.accessToken = "old-token";
+      authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
       authStore.user = { pk: 1, username: "test", email: "test@example.com" };
 
       mockOfetch.mockRejectedValueOnce(new Error("Refresh failed"));
@@ -274,15 +209,13 @@ describe("api client", () => {
       await onResponseErrorCallback({ request, response, options });
 
       // Assert
-      expect(authStore.accessToken).toBeNull();
-      expect(authStore.refreshToken).toBeNull();
+      expect(authStore.tokenExpiry).toBeNull();
       expect(authStore.user).toBeNull();
     });
 
     it("should_logout_when_refresh_succeeds_but_returns_no_token", async () => {
       // Arrange
-      authStore.refreshToken = "refresh-token";
-      authStore.accessToken = "old-token";
+      authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
 
       mockOfetch.mockResolvedValueOnce({ access: null });
 
@@ -294,13 +227,11 @@ describe("api client", () => {
       await onResponseErrorCallback({ request, response, options });
 
       // Assert
-      expect(authStore.accessToken).toBeNull();
-      expect(authStore.refreshToken).toBeNull();
+      expect(authStore.tokenExpiry).toBeNull();
     });
 
     it("should_not_interfere_with_non_5xx_non_401_errors", async () => {
       // Arrange
-      authStore.accessToken = "token";
       const request = "/api/v1/projects/";
       const response = { status: 403 };
       const options: FetchOptions = {};
@@ -315,7 +246,6 @@ describe("api client", () => {
 
     it("should_retry_on_5xx_errors_with_backoff", async () => {
       // Arrange
-      authStore.accessToken = "token";
       const request = "/api/v1/projects/";
       const response = { status: 500 };
       const options: FetchOptions = {};
@@ -335,7 +265,7 @@ describe("api client", () => {
 
     it("should_handle_request_as_string", async () => {
       // Arrange
-      authStore.refreshToken = "refresh-token";
+      authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
       const request = "/auth/login/";
       const response = { status: 401 };
       const options: FetchOptions = {};
@@ -344,12 +274,12 @@ describe("api client", () => {
       await onResponseErrorCallback({ request, response, options });
 
       // Assert - should logout (login endpoint)
-      expect(authStore.accessToken).toBeNull();
+      expect(authStore.tokenExpiry).toBeNull();
     });
 
     it("should_handle_request_as_object_with_toString", async () => {
       // Arrange
-      authStore.refreshToken = "refresh-token";
+      authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
       const request = {
         toString: () => "/auth/token/refresh/",
       };
@@ -360,63 +290,75 @@ describe("api client", () => {
       await onResponseErrorCallback({ request, response, options });
 
       // Assert - should logout (refresh endpoint)
-      expect(authStore.accessToken).toBeNull();
-    });
-
-    it("should_include_new_token_in_retry_request", async () => {
-      // Arrange
-      authStore.refreshToken = "refresh-token";
-      authStore.accessToken = "old-token";
-
-      const mockRefreshResponse = { access: "shiny-new-token" };
-      mockOfetch.mockResolvedValueOnce(mockRefreshResponse);
-      mockOfetch.mockResolvedValueOnce({ data: "success" });
-
-      const request = "/api/v1/projects/";
-      const response = { status: 401 };
-      const options: FetchOptions = { headers: {} };
-
-      // Act
-      await onResponseErrorCallback({ request, response, options });
-
-      // Assert - check the retry call has the new token
-      expect(mockOfetch).toHaveBeenCalledTimes(2);
-      const retryCall = mockOfetch.mock.calls[1];
-      expect(retryCall[0]).toBe(request);
-
-      const retryOptions = retryCall[1] as any;
-      expect(retryOptions.headers.get("authorization")).toBe("Bearer shiny-new-token");
+      expect(authStore.tokenExpiry).toBeNull();
     });
   });
 
-  describe("request flow integration", () => {
-    it("should_add_auth_header_and_handle_401_in_sequence", async () => {
-      // Arrange
-      authStore.accessToken = "expired-token";
-      authStore.refreshToken = "valid-refresh";
-
-      const mockRefreshResponse = { access: "fresh-token" };
-      const mockDataResponse = { id: 1, name: "Project" };
-
-      mockOfetch.mockResolvedValueOnce(mockRefreshResponse);
-      mockOfetch.mockResolvedValueOnce(mockDataResponse);
-
-      const options: FetchOptions = { headers: {} };
-      onRequestCallback({ options });
-
-      // Verify initial auth header
-      let headers = options.headers as any;
-      expect(headers.get("authorization")).toBe("Bearer expired-token");
-
-      // Simulate 401 response
+  describe("onResponseError - 5xx retry behaviour", () => {
+    it("does not retry POST requests on 500", async () => {
       const request = "/api/v1/projects/";
-      const response = { status: 401 };
+      const response = { status: 500 };
+      const options: FetchOptions = { method: "POST" };
 
-      // Act
+      await onResponseErrorCallback({ request, response, options });
+      expect(mockOfetch).not.toHaveBeenCalled();
+    });
+
+    it("does not retry PUT requests on 500", async () => {
+      const request = "/api/v1/projects/1/";
+      const response = { status: 500 };
+      const options: FetchOptions = { method: "PUT" };
+
+      await onResponseErrorCallback({ request, response, options });
+      expect(mockOfetch).not.toHaveBeenCalled();
+    });
+
+    it("retries GET requests on 502", async () => {
+      const request = "/api/v1/projects/";
+      const response = { status: 502 };
+      const options: FetchOptions = {};
+      mockOfetch.mockResolvedValueOnce({ data: "ok" });
+
       await onResponseErrorCallback({ request, response, options });
 
-      // Assert - token was refreshed and stored
-      expect(authStore.accessToken).toBe("fresh-token");
+      expect(mockOfetch).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({ _retryCount: 1 }),
+      );
+    });
+
+    it("stops retrying after MAX_RETRIES (3)", async () => {
+      const request = "/api/v1/projects/";
+      const response = { status: 500 };
+      const options: FetchOptions = { _retryCount: 3 } as any;
+
+      const result = await onResponseErrorCallback({
+        request,
+        response,
+        options,
+      });
+
+      expect(result).toBeUndefined();
+      expect(mockOfetch).not.toHaveBeenCalled();
+    });
+
+    it("stops retrying when total elapsed exceeds 5s", async () => {
+      const request = "/api/v1/projects/";
+      const response = { status: 500 };
+      // Already 4s elapsed, next backoff 2s -> total 6s > 5s
+      const options: FetchOptions = {
+        _retryCount: 1,
+        _retryElapsed: 4000,
+      } as any;
+
+      const result = await onResponseErrorCallback({
+        request,
+        response,
+        options,
+      });
+
+      expect(result).toBeUndefined();
+      expect(mockOfetch).not.toHaveBeenCalled();
     });
   });
 });

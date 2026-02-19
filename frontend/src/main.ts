@@ -14,7 +14,7 @@ import "primeicons/primeicons.css";
 const app = createApp(App);
 
 app.config.errorHandler = (err, _instance, info) => {
-  console.error(`[Vue Error] ${info}:`, err);
+  if (import.meta.env.DEV) console.error(`[Vue Error] ${info}:`, err);
   const toast = app.config.globalProperties.$toast;
   if (toast) {
     const message = err instanceof Error ? err.message : String(err);

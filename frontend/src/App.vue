@@ -41,7 +41,7 @@ const hasError = ref(false);
 let loadingTimer: ReturnType<typeof setInterval> | null = null;
 
 onErrorCaptured((err) => {
-  console.error("Uncaught error:", err);
+  if (import.meta.env.DEV) console.error("Uncaught error:", err);
   hasError.value = true;
   return false;
 });

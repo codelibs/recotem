@@ -78,6 +78,7 @@ import Button from "primevue/button";
 import Message from "primevue/message";
 import { useAuthStore } from "@/stores/auth";
 import FormField from "@/components/common/FormField.vue";
+import { isSafeRedirect } from "@/router/index";
 
 const { t } = useI18n();
 const authStore = useAuthStore();
@@ -107,7 +108,8 @@ async function handleLogin() {
   errorMsg.value = "";
   try {
     await authStore.login(username.value, password.value);
-    router.push((route.query.redirect as string) || "/projects");
+    const redirect = route.query.redirect as string;
+    router.push(isSafeRedirect(redirect) ? redirect : "/projects");
   } catch {
     errorMsg.value = t('auth.invalidCredentials');
   } finally {

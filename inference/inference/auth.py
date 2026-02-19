@@ -48,7 +48,7 @@ def get_api_key(
 
     key_obj = (
         db.query(ApiKey)
-        .filter(ApiKey.key_prefix == prefix, ApiKey.is_active == True)  # noqa: E712
+        .filter(ApiKey.key_prefix == prefix, ApiKey.is_active.is_(True))
         .first()
     )
 

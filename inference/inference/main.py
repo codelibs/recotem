@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Start background services on startup."""
     logger.info("Starting inference service on port %d", settings.inference_port)
+    _DEFAULT_SECRET_KEY = "VeryBadSecret@ChangeThis"
+    if settings.secret_key == _DEFAULT_SECRET_KEY:
+        logger.warning(
+            "SECRET_KEY is set to the default insecure value. "
+            "Change it before exposing this service to a network."
+        )
     start_listener()
     logger.info("Model event listener started")
 

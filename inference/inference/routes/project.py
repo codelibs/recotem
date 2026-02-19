@@ -60,7 +60,7 @@ def predict_by_project(
         db.query(DeploymentSlot)
         .filter(
             DeploymentSlot.project_id == project_id,
-            DeploymentSlot.is_active == True,  # noqa: E712
+            DeploymentSlot.is_active.is_(True),
         )
         .all()
     )

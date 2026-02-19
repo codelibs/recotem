@@ -119,6 +119,45 @@ describe("App", () => {
     expect(wrapper.find(".pi-exclamation-triangle").exists()).toBe(true);
   });
 
+  it("does not log errors to console in production", async () => {
+    const originalDev = import.meta.env.DEV;
+    import.meta.env.DEV = false;
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const ErrorChild = defineComponent({
+        setup() { throw new Error("test error"); },
+        template: "<div />",
+      });
+
+      const wrapper = mount(App, {
+        global: {
+          plugins: [PrimeVue, createPinia(), i18n],
+          stubs: {
+            Button: {
+              template: '<button @click="$attrs.onClick?.()">{{ $attrs.label }}</button>',
+              inheritAttrs: false,
+            },
+            Toast: { template: "<div />" },
+            RouterView: ErrorChild,
+          },
+        },
+      });
+      await nextTick();
+
+      expect(wrapper.find(".pi-exclamation-triangle").exists()).toBe(true);
+      // Our onErrorCaptured guard should NOT log when DEV is false.
+      // Filter out any Vue internal warnings — only check for our prefix.
+      const ourCalls = consoleSpy.mock.calls.filter(
+        (args) => typeof args[0] === "string" && args[0].includes("Uncaught error:"),
+      );
+      expect(ourCalls).toHaveLength(0);
+    } finally {
+      import.meta.env.DEV = originalDev;
+      consoleSpy.mockRestore();
+    }
+  });
+
   it("calls window.location.reload when refresh button is clicked in error state", async () => {
     const ErrorChild = defineComponent({
       setup() { throw new Error("test error"); },

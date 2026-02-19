@@ -6,12 +6,12 @@ import type { User } from "@/types";
 
 const MIN_REFRESH_MARGIN_MS = 30 * 1000; // Never refresh less than 30s before expiry
 
-function getTokenExpiry(token: string): number | null {
+function parseJwtExpirySeconds(token: string): number {
   try {
     const payload = JSON.parse(atob(token.split(".")[1]));
-    return typeof payload.exp === "number" ? payload.exp * 1000 : null;
+    return typeof payload.exp === "number" ? payload.exp : 0;
   } catch {
-    return null;
+    return 0;
   }
 }
 
@@ -32,20 +32,17 @@ export function calcRefreshDelay(expMs: number, nowMs: number = Date.now()): num
 }
 
 export const useAuthStore = defineStore("auth", () => {
-  const accessToken = ref<string | null>(
-    sessionStorage.getItem("access_token"),
-  );
-  const refreshToken = ref<string | null>(
-    sessionStorage.getItem("refresh_token"),
+  const tokenExpiry = ref<number | null>(
+    sessionStorage.getItem("token_expiry")
+      ? parseInt(sessionStorage.getItem("token_expiry")!, 10)
+      : null,
   );
   const user = ref<User | null>(null);
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   const isAuthenticated = computed(() => {
-    if (!accessToken.value) return false;
-    const exp = getTokenExpiry(accessToken.value);
-    if (exp !== null && exp < Date.now()) return false;
-    return true;
+    if (!tokenExpiry.value) return false;
+    return tokenExpiry.value > Math.floor(Date.now() / 1000);
   });
 
   function scheduleProactiveRefresh() {
@@ -53,10 +50,9 @@ export const useAuthStore = defineStore("auth", () => {
       clearTimeout(refreshTimer);
       refreshTimer = null;
     }
-    if (!accessToken.value) return;
-    const exp = getTokenExpiry(accessToken.value);
-    if (exp === null) return;
-    const delay = calcRefreshDelay(exp);
+    if (!tokenExpiry.value) return;
+    const expMs = tokenExpiry.value * 1000;
+    const delay = calcRefreshDelay(expMs);
     if (delay <= 0) {
       refreshAccessToken();
       return;
@@ -66,7 +62,7 @@ export const useAuthStore = defineStore("auth", () => {
     }, delay);
   }
 
-  watch(accessToken, () => {
+  watch(tokenExpiry, () => {
     scheduleProactiveRefresh();
   });
 
@@ -75,19 +71,16 @@ export const useAuthStore = defineStore("auth", () => {
       method: "POST",
       body: { username, password },
     });
-    accessToken.value = response.access;
-    refreshToken.value = response.refresh;
-    sessionStorage.setItem("access_token", response.access);
-    sessionStorage.setItem("refresh_token", response.refresh);
+    const expiry = parseJwtExpirySeconds(response.access);
+    tokenExpiry.value = expiry;
+    sessionStorage.setItem("token_expiry", String(expiry));
     await fetchUser();
   }
 
   async function fetchUser() {
-    if (!accessToken.value) return;
+    if (!tokenExpiry.value) return;
     try {
-      user.value = await ofetch(toApiUrl("/auth/user/"), {
-        headers: { Authorization: `Bearer ${accessToken.value}` },
-      });
+      user.value = await ofetch(toApiUrl("/auth/user/"));
     } catch {
       await logout();
     }
@@ -95,60 +88,52 @@ export const useAuthStore = defineStore("auth", () => {
 
   async function logout() {
     try {
-      if (refreshToken.value) {
-        await ofetch(toApiUrl("/auth/logout/"), {
-          method: "POST",
-          headers: accessToken.value
-            ? { Authorization: `Bearer ${accessToken.value}` }
-            : undefined,
-          body: { refresh: refreshToken.value },
-        }).catch(() => {
-          // Best-effort server-side logout; ignore errors
-        });
-      }
+      await ofetch(toApiUrl("/auth/logout/"), {
+        method: "POST",
+      }).catch(() => {
+        // Best-effort server-side logout; ignore errors
+      });
     } finally {
       if (refreshTimer) {
         clearTimeout(refreshTimer);
         refreshTimer = null;
       }
-      accessToken.value = null;
-      refreshToken.value = null;
+      tokenExpiry.value = null;
       user.value = null;
-      sessionStorage.removeItem("access_token");
-      sessionStorage.removeItem("refresh_token");
+      sessionStorage.removeItem("token_expiry");
     }
   }
 
   async function refreshAccessToken() {
-    if (!refreshToken.value) {
+    if (!tokenExpiry.value) {
       await logout();
       return;
     }
     try {
       const response = await ofetch(toApiUrl("/auth/token/refresh/"), {
         method: "POST",
-        body: { refresh: refreshToken.value },
         timeout: 5000,
       });
-      accessToken.value = response.access;
-      sessionStorage.setItem("access_token", response.access);
+      const expiry = parseJwtExpirySeconds(response.access);
+      tokenExpiry.value = expiry;
+      sessionStorage.setItem("token_expiry", String(expiry));
     } catch {
       await logout();
     }
   }
 
   async function ensureFreshToken(): Promise<boolean> {
-    if (!accessToken.value || !refreshToken.value) return false;
-    const exp = getTokenExpiry(accessToken.value);
-    if (exp !== null && exp - Date.now() < 60_000) {
+    if (!tokenExpiry.value) return false;
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (tokenExpiry.value - nowSeconds < 60) {
       await refreshAccessToken();
-      return !!accessToken.value;
+      return !!tokenExpiry.value;
     }
     return true;
   }
 
   function handleVisibilityChange() {
-    if (document.visibilityState === "visible" && accessToken.value) {
+    if (document.visibilityState === "visible" && tokenExpiry.value) {
       scheduleProactiveRefresh();
     }
   }
@@ -158,8 +143,7 @@ export const useAuthStore = defineStore("auth", () => {
   scheduleProactiveRefresh();
 
   return {
-    accessToken,
-    refreshToken,
+    tokenExpiry,
     user,
     isAuthenticated,
     login,

@@ -2,6 +2,11 @@ import { createRouter, createWebHistory } from "vue-router";
 import type { RouteRecordRaw } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 
+export function isSafeRedirect(url: string | null | undefined): boolean {
+  if (!url) return false;
+  return url.startsWith("/") && !url.startsWith("//");
+}
+
 const routes: RouteRecordRaw[] = [
   {
     path: "/login",
@@ -160,7 +165,8 @@ router.beforeEach(async (to, _from, next) => {
   const isPublic = to.matched.some((record) => record.meta.requiresAuth === false);
 
   if (!isPublic && !authStore.isAuthenticated) {
-    next({ path: "/login", query: { redirect: to.fullPath } });
+    const redirect = isSafeRedirect(to.fullPath) ? to.fullPath : "/projects";
+    next({ path: "/login", query: { redirect } });
     return;
   }
   if (to.path === "/login" && authStore.isAuthenticated) {

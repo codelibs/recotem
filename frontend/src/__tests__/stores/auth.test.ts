@@ -8,32 +8,24 @@ vi.mock("ofetch", () => ({
   ofetch: vi.fn(),
 }));
 
+function makeJwt(expSeconds: number): string {
+  const payload = Buffer.from(JSON.stringify({ exp: expSeconds })).toString("base64");
+  return `header.${payload}.signature`;
+}
+
 describe("useAuthStore", () => {
   let store: ReturnType<typeof useAuthStore>;
   let mockOfetch: any;
   let sessionStorageMock: Record<string, string>;
 
   beforeEach(async () => {
-    // Reset and setup ofetch mock first
     const { ofetch } = await import("ofetch");
     mockOfetch = ofetch as any;
     vi.clearAllMocks();
-
-    // Default: resolve to undefined (prevents .catch() on undefined errors)
     mockOfetch.mockResolvedValue(undefined);
 
-    // Setup Pinia - create fresh instance for each test
     setActivePinia(createPinia());
 
-    // Create store after clearing mocks and setting up Pinia
-    store = useAuthStore();
-
-    // Ensure clean state
-    store.accessToken = null;
-    store.refreshToken = null;
-    store.user = null;
-
-    // Mock sessionStorage
     sessionStorageMock = {};
     vi.stubGlobal("sessionStorage", {
       getItem: vi.fn((key: string) => sessionStorageMock[key] || null),
@@ -47,15 +39,16 @@ describe("useAuthStore", () => {
         sessionStorageMock = {};
       }),
     });
+
+    store = useAuthStore();
+    store.tokenExpiry = null;
+    store.user = null;
   });
 
   describe("login", () => {
-    it("should_store_tokens_in_state_and_sessionStorage_when_login_succeeds", async () => {
-      // Arrange
-      const mockTokens = {
-        access: "mock-access-token",
-        refresh: "mock-refresh-token",
-      };
+    it("stores only expiry in sessionStorage on login, not the token", async () => {
+      const expSeconds = Math.floor(Date.now() / 1000) + 300;
+      const fakeJwt = makeJwt(expSeconds);
       const mockUser: User = {
         pk: 1,
         username: "testuser",
@@ -63,99 +56,65 @@ describe("useAuthStore", () => {
       };
 
       mockOfetch
-        .mockResolvedValueOnce(mockTokens) // login response
-        .mockResolvedValueOnce(mockUser); // fetchUser response
+        .mockResolvedValueOnce({ access: fakeJwt, refresh: "ignored" })
+        .mockResolvedValueOnce(mockUser);
 
-      // Act
       await store.login("testuser", "password123");
 
-      // Assert - verify ofetch calls
-      expect(mockOfetch).toHaveBeenCalledTimes(2);
-      expect(mockOfetch).toHaveBeenNthCalledWith(1, "/api/v1/auth/login/", {
+      expect(mockOfetch).toHaveBeenCalledWith("/api/v1/auth/login/", {
         method: "POST",
         body: { username: "testuser", password: "password123" },
       });
-      expect(mockOfetch).toHaveBeenNthCalledWith(2, "/api/v1/auth/user/", {
-        headers: { Authorization: "Bearer mock-access-token" },
-      });
+      expect(mockOfetch).toHaveBeenCalledWith("/api/v1/auth/user/");
 
-      // Assert - verify state
-      expect(store.accessToken).toBe("mock-access-token");
-      expect(store.refreshToken).toBe("mock-refresh-token");
+      expect(store.tokenExpiry).toBe(expSeconds);
       expect(store.user).toEqual(mockUser);
       expect(store.isAuthenticated).toBe(true);
 
-      // Assert - verify sessionStorage
       expect(sessionStorage.setItem).toHaveBeenCalledWith(
-        "access_token",
-        "mock-access-token"
+        "token_expiry",
+        String(expSeconds)
       );
-      expect(sessionStorage.setItem).toHaveBeenCalledWith(
-        "refresh_token",
-        "mock-refresh-token"
-      );
+      expect(sessionStorageMock["access_token"]).toBeUndefined();
+      expect(sessionStorageMock["refresh_token"]).toBeUndefined();
     });
 
-    it("should_throw_error_when_login_fails", async () => {
-      // Arrange
-      const loginError = new Error("Invalid credentials");
-      mockOfetch.mockRejectedValueOnce(loginError);
+    it("throws error when login fails", async () => {
+      mockOfetch.mockRejectedValueOnce(new Error("Invalid credentials"));
 
-      // Ensure store starts in clean state
-      expect(store.accessToken).toBeNull();
-
-      // Act & Assert
       await expect(store.login("testuser", "wrongpass")).rejects.toThrow(
         "Invalid credentials"
       );
-      expect(store.accessToken).toBeNull();
-      expect(store.refreshToken).toBeNull();
+      expect(store.tokenExpiry).toBeNull();
       expect(store.user).toBeNull();
       expect(store.isAuthenticated).toBe(false);
     });
   });
 
   describe("logout", () => {
-    it("should_clear_tokens_and_user_from_state_and_sessionStorage", async () => {
-      // Arrange - setup authenticated state
-      store.accessToken = "access-token";
-      store.refreshToken = "refresh-token";
+    it("clears expiry and user from state and sessionStorage", async () => {
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 300;
       store.user = { pk: 1, username: "testuser", email: "test@example.com" };
-      sessionStorageMock["access_token"] = "access-token";
-      sessionStorageMock["refresh_token"] = "refresh-token";
+      sessionStorageMock["token_expiry"] = String(store.tokenExpiry);
 
-      // Act
       await store.logout();
 
-      // Assert - verify state cleared
-      expect(store.accessToken).toBeNull();
-      expect(store.refreshToken).toBeNull();
+      expect(store.tokenExpiry).toBeNull();
       expect(store.user).toBeNull();
       expect(store.isAuthenticated).toBe(false);
-
-      // Assert - verify sessionStorage cleared
-      expect(sessionStorage.removeItem).toHaveBeenCalledWith("access_token");
-      expect(sessionStorage.removeItem).toHaveBeenCalledWith("refresh_token");
+      expect(sessionStorage.removeItem).toHaveBeenCalledWith("token_expiry");
     });
 
-    it("should_handle_logout_when_already_logged_out", async () => {
-      // Arrange - ensure clean state
-      expect(store.accessToken).toBeNull();
-
-      // Act
+    it("handles logout when already logged out", async () => {
       await store.logout();
-
-      // Assert - should not throw and state remains null
-      expect(store.accessToken).toBeNull();
-      expect(store.refreshToken).toBeNull();
+      expect(store.tokenExpiry).toBeNull();
       expect(store.user).toBeNull();
     });
   });
 
   describe("fetchUser", () => {
-    it("should_fetch_and_store_user_data_when_access_token_exists", async () => {
-      // Arrange
-      store.accessToken = "valid-access-token";
+    it("fetches and stores user data when tokenExpiry exists", async () => {
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 300;
       const mockUser: User = {
         pk: 1,
         username: "testuser",
@@ -163,143 +122,106 @@ describe("useAuthStore", () => {
       };
       mockOfetch.mockResolvedValueOnce(mockUser);
 
-      // Act
       await store.fetchUser();
 
-      // Assert
-      expect(mockOfetch).toHaveBeenCalledWith("/api/v1/auth/user/", {
-        headers: { Authorization: "Bearer valid-access-token" },
-      });
+      expect(mockOfetch).toHaveBeenCalledWith("/api/v1/auth/user/");
       expect(store.user).toEqual(mockUser);
     });
 
-    it("should_not_fetch_user_when_no_access_token", async () => {
-      // Arrange
-      store.accessToken = null;
+    it("does not fetch user when no tokenExpiry", async () => {
+      store.tokenExpiry = null;
 
-      // Act
       await store.fetchUser();
 
-      // Assert
       expect(mockOfetch).not.toHaveBeenCalled();
       expect(store.user).toBeNull();
     });
 
-    it("should_logout_when_fetch_user_fails", async () => {
-      // Arrange
-      store.accessToken = "invalid-token";
-      store.refreshToken = "some-refresh-token";
+    it("logs out when fetch user fails", async () => {
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 300;
       store.user = { pk: 1, username: "testuser", email: "test@example.com" };
       mockOfetch.mockRejectedValueOnce(new Error("Unauthorized"));
 
-      // Act
       await store.fetchUser();
 
-      // Assert - verify logout was called
-      expect(store.accessToken).toBeNull();
-      expect(store.refreshToken).toBeNull();
+      expect(store.tokenExpiry).toBeNull();
       expect(store.user).toBeNull();
     });
   });
 
   describe("refreshAccessToken", () => {
-    it("should_update_access_token_when_refresh_succeeds", async () => {
-      // Arrange
-      store.refreshToken = "valid-refresh-token";
-      const mockResponse = { access: "new-access-token" };
-      mockOfetch.mockResolvedValueOnce(mockResponse);
+    it("updates tokenExpiry when refresh succeeds", async () => {
+      // Use a long-lived expiry so the proactive refresh watcher
+      // schedules a setTimeout rather than calling refresh immediately.
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 600;
+      vi.clearAllMocks();
 
-      // Act
+      const expSeconds = Math.floor(Date.now() / 1000) + 300;
+      mockOfetch.mockResolvedValueOnce({ access: makeJwt(expSeconds) });
+
       await store.refreshAccessToken();
 
-      // Assert
       expect(mockOfetch).toHaveBeenCalledWith("/api/v1/auth/token/refresh/", {
         method: "POST",
-        body: { refresh: "valid-refresh-token" },
         timeout: 5000,
       });
-      expect(store.accessToken).toBe("new-access-token");
+      expect(store.tokenExpiry).toBe(expSeconds);
       expect(sessionStorage.setItem).toHaveBeenCalledWith(
-        "access_token",
-        "new-access-token"
+        "token_expiry",
+        String(expSeconds)
       );
     });
 
-    it("should_logout_when_refresh_token_is_missing", async () => {
-      // Arrange
-      store.refreshToken = null;
-      store.accessToken = "some-token";
+    it("logs out when tokenExpiry is missing", async () => {
+      store.tokenExpiry = null;
 
-      // Act
       await store.refreshAccessToken();
 
-      // Assert
-      expect(mockOfetch).not.toHaveBeenCalled();
-      expect(store.accessToken).toBeNull();
-      expect(store.refreshToken).toBeNull();
+      // No refresh request — only the logout POST is allowed
+      const refreshCalls = mockOfetch.mock.calls.filter(
+        (c: any[]) => String(c[0]).includes("token/refresh"),
+      );
+      expect(refreshCalls).toHaveLength(0);
+      expect(store.tokenExpiry).toBeNull();
     });
 
-    it("should_logout_when_refresh_fails", async () => {
-      // Arrange
-      store.refreshToken = "expired-refresh-token";
-      store.accessToken = "old-access-token";
+    it("logs out when refresh fails", async () => {
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 10;
       mockOfetch.mockRejectedValueOnce(new Error("Refresh token expired"));
 
-      // Act
       await store.refreshAccessToken();
 
-      // Assert
-      expect(store.accessToken).toBeNull();
-      expect(store.refreshToken).toBeNull();
-      expect(sessionStorage.removeItem).toHaveBeenCalledWith("access_token");
-      expect(sessionStorage.removeItem).toHaveBeenCalledWith("refresh_token");
+      expect(store.tokenExpiry).toBeNull();
+      expect(sessionStorage.removeItem).toHaveBeenCalledWith("token_expiry");
     });
   });
 
   describe("isAuthenticated", () => {
-    it("should_return_true_when_access_token_exists", () => {
-      // Arrange
-      store.accessToken = "some-token";
-
-      // Assert
+    it("returns true when tokenExpiry is in the future", () => {
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
       expect(store.isAuthenticated).toBe(true);
     });
 
-    it("should_return_false_when_access_token_is_null", () => {
-      // Arrange
-      store.accessToken = null;
-
-      // Assert
+    it("returns false when tokenExpiry is null", () => {
+      store.tokenExpiry = null;
       expect(store.isAuthenticated).toBe(false);
     });
   });
 
   describe("ensureFreshToken", () => {
-    function makeToken(expMs: number): string {
-      const payload = { exp: expMs / 1000 };
-      return `header.${btoa(JSON.stringify(payload))}.signature`;
-    }
-
-    it("should_return_true_without_refreshing_when_token_has_more_than_60s_remaining", async () => {
-      // Token expires in 5 minutes — well above the 60s threshold
-      store.accessToken = makeToken(Date.now() + 300_000);
-      store.refreshToken = "valid-refresh";
+    it("returns true when token has more than 60s remaining", async () => {
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 300;
 
       const result = await store.ensureFreshToken();
 
       expect(result).toBe(true);
-      // Should NOT have called the refresh endpoint
       expect(mockOfetch).not.toHaveBeenCalled();
     });
 
-    it("should_refresh_and_return_true_when_token_expires_within_60s", async () => {
-      vi.useFakeTimers();
-      // Token expires in 45s: within ensureFreshToken's 60s threshold,
-      // but proactive refresh sets a timer (delay > 0) instead of firing immediately
-      store.refreshToken = "valid-refresh";
-      const newToken = makeToken(Date.now() + 300_000);
-      mockOfetch.mockResolvedValueOnce({ access: newToken });
-      store.accessToken = makeToken(Date.now() + 45_000);
+    it("refreshes and returns true when token expires within 60s", async () => {
+      const expSeconds = Math.floor(Date.now() / 1000) + 300;
+      mockOfetch.mockResolvedValueOnce({ access: makeJwt(expSeconds) });
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 45;
 
       const result = await store.ensureFreshToken();
 
@@ -308,29 +230,11 @@ describe("useAuthStore", () => {
         "/api/v1/auth/token/refresh/",
         expect.objectContaining({ method: "POST" }),
       );
-      expect(store.accessToken).toBe(newToken);
-      vi.useRealTimers();
+      expect(store.tokenExpiry).toBe(expSeconds);
     });
 
-    it("should_refresh_and_return_true_when_token_is_already_expired", async () => {
-      // Expired token triggers both proactive refresh and ensureFreshToken.
-      // Provide two mock responses so both can succeed.
-      store.refreshToken = "valid-refresh";
-      const newToken = makeToken(Date.now() + 300_000);
-      mockOfetch
-        .mockResolvedValueOnce({ access: newToken })   // proactive refresh (via watch)
-        .mockResolvedValueOnce({ access: newToken });   // ensureFreshToken (if still needed)
-      store.accessToken = makeToken(Date.now() - 10_000);
-
-      const result = await store.ensureFreshToken();
-
-      expect(result).toBe(true);
-      expect(store.accessToken).toBe(newToken);
-    });
-
-    it("should_return_false_when_no_access_token", async () => {
-      store.accessToken = null;
-      store.refreshToken = "valid-refresh";
+    it("returns false when no tokenExpiry", async () => {
+      store.tokenExpiry = null;
 
       const result = await store.ensureFreshToken();
 
@@ -338,78 +242,25 @@ describe("useAuthStore", () => {
       expect(mockOfetch).not.toHaveBeenCalled();
     });
 
-    it("should_return_false_when_no_refresh_token", async () => {
-      store.accessToken = makeToken(Date.now() + 30_000);
-      store.refreshToken = null;
-
-      const result = await store.ensureFreshToken();
-
-      expect(result).toBe(false);
-      expect(mockOfetch).not.toHaveBeenCalled();
-    });
-
-    it("should_return_false_when_refresh_fails", async () => {
-      vi.useFakeTimers();
-      // Token expires in 45s: within ensureFreshToken's threshold,
-      // proactive refresh uses a timer (delay > 0)
-      store.refreshToken = "expired-refresh";
+    it("returns false when refresh fails", async () => {
       mockOfetch.mockRejectedValueOnce(new Error("Refresh failed"));
-      store.accessToken = makeToken(Date.now() + 45_000);
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 45;
 
       const result = await store.ensureFreshToken();
 
-      // refreshAccessToken failed → logout → accessToken becomes null
       expect(result).toBe(false);
-      expect(store.accessToken).toBeNull();
-      vi.useRealTimers();
-    });
-
-    it("should_return_true_for_token_with_exactly_60s_remaining", async () => {
-      vi.useFakeTimers();
-      // Token expires in ~59s — within ensureFreshToken's 60s threshold,
-      // but proactive refresh calculates delay > 0 so uses a timer
-      store.refreshToken = "valid-refresh";
-      const newToken = makeToken(Date.now() + 300_000);
-      mockOfetch.mockResolvedValueOnce({ access: newToken });
-      store.accessToken = makeToken(Date.now() + 59_000);
-
-      const result = await store.ensureFreshToken();
-
-      expect(result).toBe(true);
-      expect(mockOfetch).toHaveBeenCalled();
-      vi.useRealTimers();
-    });
-
-    it("should_not_refresh_when_token_has_no_parseable_exp", async () => {
-      // Token without valid exp field — getTokenExpiry returns null
-      store.accessToken = "not-a-real-jwt";
-      store.refreshToken = "valid-refresh";
-
-      const result = await store.ensureFreshToken();
-
-      // exp is null → condition (exp !== null && ...) is false → returns true
-      expect(result).toBe(true);
-      expect(mockOfetch).not.toHaveBeenCalled();
+      expect(store.tokenExpiry).toBeNull();
     });
   });
 
   describe("visibilitychange", () => {
-    function makeToken(expMs: number): string {
-      const payload = { exp: expMs / 1000 };
-      return `header.${btoa(JSON.stringify(payload))}.signature`;
-    }
+    it("triggers refresh when tab becomes visible with expired token", async () => {
+      store.tokenExpiry = Math.floor(Date.now() / 1000) - 5;
+      const expSeconds = Math.floor(Date.now() / 1000) + 300;
+      mockOfetch.mockResolvedValueOnce({ access: makeJwt(expSeconds) });
 
-    it("should_trigger_refresh_when_tab_becomes_visible_with_expired_token", async () => {
-      // Setup: authenticated user with an expired token
-      store.accessToken = makeToken(Date.now() - 5_000); // expired 5s ago
-      store.refreshToken = "valid-refresh";
-      const newToken = makeToken(Date.now() + 300_000);
-      mockOfetch.mockResolvedValueOnce({ access: newToken });
-
-      // Simulate tab becoming visible
       document.dispatchEvent(new Event("visibilitychange"));
-      // scheduleProactiveRefresh sees delay<=0 and calls refreshAccessToken synchronously
-      // but refreshAccessToken is async, so flush
+
       await vi.waitFor(() => {
         expect(mockOfetch).toHaveBeenCalledWith(
           "/api/v1/auth/token/refresh/",
@@ -418,46 +269,156 @@ describe("useAuthStore", () => {
       });
     });
 
-    it("should_not_trigger_refresh_when_tab_becomes_visible_without_token", () => {
-      store.accessToken = null;
-      store.refreshToken = null;
-      mockOfetch.mockClear();
-
-      // Simulate tab becoming visible
-      document.dispatchEvent(new Event("visibilitychange"));
-
-      expect(mockOfetch).not.toHaveBeenCalled();
-    });
-
-    it("should_schedule_timer_when_tab_becomes_visible_with_fresh_token", () => {
-      vi.useFakeTimers();
-      // Token with plenty of time remaining
-      store.accessToken = makeToken(Date.now() + 300_000);
-      store.refreshToken = "valid-refresh";
+    it("does not trigger refresh when tab becomes visible without token", () => {
+      store.tokenExpiry = null;
       mockOfetch.mockClear();
 
       document.dispatchEvent(new Event("visibilitychange"));
 
-      // Should NOT immediately call refresh (token is still fresh)
       expect(mockOfetch).not.toHaveBeenCalled();
-      // But a timer should be scheduled (we can verify by advancing time)
-      vi.useRealTimers();
     });
   });
 
   describe("initialization", () => {
-    it("should_load_tokens_from_sessionStorage_on_creation", () => {
-      // Arrange
-      sessionStorageMock["access_token"] = "stored-access-token";
-      sessionStorageMock["refresh_token"] = "stored-refresh-token";
+    it("loads tokenExpiry from sessionStorage on creation", () => {
+      sessionStorageMock["token_expiry"] = "123";
 
-      // Act - create completely new Pinia instance and store
       setActivePinia(createPinia());
       const newStore = useAuthStore();
 
-      // Assert - tokens should be loaded from sessionStorage
-      expect(newStore.accessToken).toBe("stored-access-token");
-      expect(newStore.refreshToken).toBe("stored-refresh-token");
+      expect(newStore.tokenExpiry).toBe(123);
+    });
+
+    it("initialises tokenExpiry as null when sessionStorage is empty", () => {
+      setActivePinia(createPinia());
+      const newStore = useAuthStore();
+      expect(newStore.tokenExpiry).toBeNull();
+    });
+  });
+
+  describe("isAuthenticated edge cases", () => {
+    it("returns false when tokenExpiry is in the past", () => {
+      store.tokenExpiry = Math.floor(Date.now() / 1000) - 60;
+      expect(store.isAuthenticated).toBe(false);
+    });
+
+    it("returns false when tokenExpiry is exactly now", () => {
+      store.tokenExpiry = Math.floor(Date.now() / 1000);
+      expect(store.isAuthenticated).toBe(false);
+    });
+
+    it("returns false when tokenExpiry is 0", () => {
+      store.tokenExpiry = 0;
+      expect(store.isAuthenticated).toBe(false);
+    });
+  });
+
+  describe("JWT expiry parsing edge cases", () => {
+    it("handles malformed JWT (missing payload) gracefully", async () => {
+      mockOfetch
+        .mockResolvedValueOnce({ access: "header-only", refresh: "x" })
+        .mockResolvedValueOnce({ pk: 1, username: "u", email: "e" });
+
+      await store.login("u", "p");
+
+      // parseJwtExpirySeconds returns 0 for malformed tokens
+      expect(store.tokenExpiry).toBe(0);
+    });
+
+    it("handles JWT with non-JSON payload", async () => {
+      const badPayload = Buffer.from("not-json").toString("base64");
+      mockOfetch
+        .mockResolvedValueOnce({
+          access: `h.${badPayload}.s`,
+          refresh: "x",
+        })
+        .mockResolvedValueOnce({ pk: 1, username: "u", email: "e" });
+
+      await store.login("u", "p");
+      expect(store.tokenExpiry).toBe(0);
+    });
+
+    it("handles JWT with missing exp claim", async () => {
+      const noExp = Buffer.from(JSON.stringify({ sub: 1 })).toString(
+        "base64",
+      );
+      mockOfetch
+        .mockResolvedValueOnce({
+          access: `h.${noExp}.s`,
+          refresh: "x",
+        })
+        .mockResolvedValueOnce({ pk: 1, username: "u", email: "e" });
+
+      await store.login("u", "p");
+      expect(store.tokenExpiry).toBe(0);
+    });
+
+    it("handles JWT with string exp claim", async () => {
+      const strExp = Buffer.from(
+        JSON.stringify({ exp: "not-a-number" }),
+      ).toString("base64");
+      mockOfetch
+        .mockResolvedValueOnce({
+          access: `h.${strExp}.s`,
+          refresh: "x",
+        })
+        .mockResolvedValueOnce({ pk: 1, username: "u", email: "e" });
+
+      await store.login("u", "p");
+      expect(store.tokenExpiry).toBe(0);
+    });
+  });
+
+  describe("refreshAccessToken edge cases", () => {
+    it("refresh sends no body (cookie-based)", async () => {
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 10;
+      const expSeconds = Math.floor(Date.now() / 1000) + 300;
+      mockOfetch.mockResolvedValueOnce({
+        access: makeJwt(expSeconds),
+      });
+
+      await store.refreshAccessToken();
+
+      const callArgs = mockOfetch.mock.calls[0];
+      expect(callArgs[1].body).toBeUndefined();
+    });
+
+    it("handles refresh response with malformed JWT", async () => {
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 10;
+      mockOfetch.mockResolvedValueOnce({ access: "bad" });
+
+      await store.refreshAccessToken();
+
+      // parseJwtExpirySeconds returns 0 -> tokenExpiry = 0
+      expect(store.tokenExpiry).toBe(0);
+    });
+  });
+
+  describe("logout edge cases", () => {
+    it("clears refresh timer on logout", async () => {
+      const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 300;
+
+      await store.logout();
+
+      // clearTimeout should have been called during logout
+      expect(store.tokenExpiry).toBeNull();
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+      clearTimeoutSpy.mockRestore();
+    });
+
+    it("server logout error does not prevent local cleanup", async () => {
+      store.tokenExpiry = Math.floor(Date.now() / 1000) + 300;
+      store.user = { pk: 1, username: "u", email: "e" };
+      mockOfetch.mockRejectedValueOnce(new Error("Network error"));
+
+      await store.logout();
+
+      expect(store.tokenExpiry).toBeNull();
+      expect(store.user).toBeNull();
+      expect(sessionStorage.removeItem).toHaveBeenCalledWith(
+        "token_expiry",
+      );
     });
   });
 });
@@ -478,32 +439,24 @@ describe("calcRefreshDelay", () => {
   it("returns 75% of remaining time for long-lived tokens", () => {
     const now = 0;
     const exp = 3600000; // expires in 1 hour
-    // 75% of 3600000 = 2700000ms, margin = 3600000-30000 = 3570000ms
-    // min(2700000, 3570000) = 2700000
     expect(calcRefreshDelay(exp, now)).toBe(2700000);
   });
 
   it("returns margin-based delay when 75% exceeds remaining-minus-margin", () => {
     const now = 0;
     const exp = 60000; // expires in 60s
-    // 75% of 60000 = 45000ms, margin = 60000-30000 = 30000ms
-    // min(45000, 30000) = 30000
     expect(calcRefreshDelay(exp, now)).toBe(30000);
   });
 
   it("works correctly for default 300s token lifetime", () => {
     const now = 0;
     const exp = 300000; // 300s = 5 min
-    // 75% of 300000 = 225000ms, margin = 300000-30000 = 270000ms
-    // min(225000, 270000) = 225000 => refreshes after 225s (75s before expiry)
     expect(calcRefreshDelay(exp, now)).toBe(225000);
   });
 
   it("works correctly for 3600s token lifetime", () => {
     const now = 0;
     const exp = 3600000; // 1 hour
-    // 75% of 3600000 = 2700000, margin = 3570000
-    // min(2700000, 3570000) = 2700000 => refreshes after 45min (15min before expiry)
     expect(calcRefreshDelay(exp, now)).toBe(2700000);
   });
 
@@ -514,15 +467,12 @@ describe("calcRefreshDelay", () => {
   it("handles remaining time exactly at 30s margin boundary", () => {
     const now = 0;
     const exp = 30000; // exactly 30s remaining
-    // margin = 30000-30000 = 0 => returns 0
     expect(calcRefreshDelay(exp, now)).toBe(0);
   });
 
   it("handles remaining time just above 30s margin boundary", () => {
     const now = 0;
     const exp = 31000; // 31s remaining
-    // 75% of 31000 = 23250, margin = 31000-30000 = 1000
-    // min(23250, 1000) = 1000
     expect(calcRefreshDelay(exp, now)).toBe(1000);
   });
 });

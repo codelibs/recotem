@@ -6,12 +6,18 @@ import PrimeVue from "primevue/config";
 import i18n from "@/i18n";
 import { useAuthStore } from "@/stores/auth";
 
-// Mock vue-router
+// Mock vue-router — must include createRouter/createWebHistory because
+// LoginPage imports isSafeRedirect from @/router/index.ts which calls
+// createRouter() at module level.
 const mockPush = vi.fn();
-vi.mock("vue-router", () => ({
-  useRouter: () => ({ push: mockPush }),
-  useRoute: () => ({ query: {} }),
-}));
+vi.mock("vue-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("vue-router")>();
+  return {
+    ...actual,
+    useRouter: () => ({ push: mockPush }),
+    useRoute: () => ({ query: {} }),
+  };
+});
 
 let pinia: ReturnType<typeof createPinia>;
 

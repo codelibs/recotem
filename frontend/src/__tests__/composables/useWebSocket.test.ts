@@ -79,6 +79,37 @@ describe("useWebSocket", () => {
       expect(isConnected.value).toBe(true);
     });
 
+    it("builds WebSocket URL without token query parameter", () => {
+      const { connect } = useWebSocket("/ws/job/1/");
+      connect();
+      expect(mockWebSocket).toHaveBeenCalledWith(
+        expect.not.stringContaining("token="),
+      );
+    });
+
+    it("does not include any auth credentials in URL", () => {
+      const { connect } = useWebSocket("/ws/job/42/");
+      connect();
+      const url = mockWebSocket.mock.calls[0][0] as string;
+      // No query params at all — auth via httpOnly cookie
+      expect(url).not.toContain("?");
+      expect(url).not.toContain("token");
+      expect(url).not.toContain("Bearer");
+      expect(url).not.toContain("access");
+    });
+
+    it("relies on cookie for auth, not explicit headers", () => {
+      const { connect } = useWebSocket("/ws/job/1/");
+      connect();
+      // WebSocket constructor only takes URL (and optional protocols)
+      // No way to pass custom headers; auth must be via cookie
+      expect(mockWebSocket).toHaveBeenCalledWith(
+        expect.any(String),
+      );
+      // Only 1 argument (URL), no protocols
+      expect(mockWebSocket.mock.calls[0]).toHaveLength(1);
+    });
+
     it("should_build_wss_url_when_protocol_is_https", () => {
       // Arrange
       vi.stubGlobal("window", {

@@ -146,6 +146,7 @@ else:
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "recotem.api.authentication.ApiKeyAuthentication",
+        "dj_rest_auth.jwt_auth.JWTCookieAuthentication",
         "rest_framework_simplejwt.authentication.JWTAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
@@ -178,8 +179,11 @@ REST_AUTH = {
     "USER_DETAILS_SERIALIZER": "recotem.api.serializers.UserDetailsSerializer",
     "SESSION_LOGIN": False,
     "USE_JWT": True,
-    "JWT_AUTH_COOKIE": None,
-    "JWT_AUTH_REFRESH_COOKIE": None,
+    "JWT_AUTH_COOKIE": "jwt-access",
+    "JWT_AUTH_REFRESH_COOKIE": "jwt-refresh",
+    "JWT_AUTH_HTTPONLY": True,
+    "JWT_AUTH_SAMESITE": "Strict",
+    "JWT_AUTH_SECURE": env.bool("JWT_AUTH_SECURE", default=False),
 }
 
 ROOT_URLCONF = "recotem.urls"
@@ -288,6 +292,14 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Celery settings
 REDIS_PASSWORD = env("REDIS_PASSWORD", default="")
+if not REDIS_PASSWORD and not DEBUG:
+    import warnings
+
+    warnings.warn(
+        "REDIS_PASSWORD is not set. "
+        "Configure it if Redis is accessible outside the Docker network.",
+        stacklevel=2,
+    )
 CELERY_BROKER_URL = _inject_redis_password_if_missing(
     env("CELERY_BROKER_URL", default="redis://localhost:6379/0"),
     REDIS_PASSWORD,
@@ -358,7 +370,7 @@ MODEL_CACHE_TIMEOUT = int(env("MODEL_CACHE_TIMEOUT", default=3600))
 
 # Pickle signing — allow loading unsigned legacy model files.
 # Set to False to reject unsigned files (recommended after running resign_models).
-PICKLE_ALLOW_LEGACY_UNSIGNED = env.bool("PICKLE_ALLOW_LEGACY_UNSIGNED", default=True)
+PICKLE_ALLOW_LEGACY_UNSIGNED = env.bool("PICKLE_ALLOW_LEGACY_UNSIGNED", default=False)
 
 # Celery task time limits (seconds)
 CELERY_TASK_TIME_LIMIT = int(env("CELERY_TASK_TIME_LIMIT", default=3600))

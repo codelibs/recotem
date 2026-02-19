@@ -27,14 +27,28 @@ class TestPickleSigning:
         with pytest.raises(ValueError, match="signature verification failed"):
             verify_and_extract(tampered)
 
-    def test_legacy_unsigned_pickle_accepted(self):
+    def test_legacy_unsigned_pickle_accepted(self, settings):
         """Legacy files starting with pickle protocol marker should be accepted."""
+        settings.PICKLE_ALLOW_LEGACY_UNSIGNED = True
         # noqa: S301 — this is a test for the signing module itself
         legacy_data = b"\x80\x04\x95" + b"x" * 100
         result = verify_and_extract(legacy_data)
         assert result == legacy_data
 
-    def test_too_short_data_treated_as_legacy(self):
+    def test_legacy_rejected_by_default(self):
+        """Default setting (no override) must REJECT unsigned pickles."""
+        from django.conf import settings
+
+        assert not settings.PICKLE_ALLOW_LEGACY_UNSIGNED, (
+            "Default must be False. "
+            "Set PICKLE_ALLOW_LEGACY_UNSIGNED=true explicitly if needed."
+        )
+        legacy_data = b"\x80\x04\x95" + b"x" * 100
+        with pytest.raises(ValueError, match="not allowed"):
+            verify_and_extract(legacy_data)
+
+    def test_too_short_data_treated_as_legacy(self, settings):
+        settings.PICKLE_ALLOW_LEGACY_UNSIGNED = True
         short_data = b"tiny"
         result = verify_and_extract(short_data)
         assert result == short_data

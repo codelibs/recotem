@@ -372,17 +372,14 @@ describe("DataUploadPage", () => {
   });
 
   describe("authorization header", () => {
-    it("sets Authorization header with bearer token on XHR", async () => {
+    it("does not set Authorization header on XHR", async () => {
       const wrapper = mountPage();
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
 
       emitUploader(wrapper, mockFile);
       await flushPromises();
 
-      expect(xhrInstances[0].setRequestHeader).toHaveBeenCalledWith(
-        "Authorization",
-        expect.stringMatching(/^Bearer /),
-      );
+      expect(xhrInstances[0].setRequestHeader).not.toHaveBeenCalled();
     });
   });
 
@@ -427,11 +424,10 @@ describe("DataUploadPage", () => {
       const wrapper = mountPage();
       const { useAuthStore } = await import("@/stores/auth");
       const authStore = useAuthStore();
-      authStore.accessToken = "old-token";
-      authStore.refreshToken = "valid-refresh";
+      authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
 
       const refreshSpy = vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
-        authStore.accessToken = "new-token";
+        authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 300;
       });
 
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
@@ -457,47 +453,14 @@ describe("DataUploadPage", () => {
       refreshSpy.mockRestore();
     });
 
-    it("uses refreshed token in retry XHR", async () => {
-      const wrapper = mountPage();
-      const { useAuthStore } = await import("@/stores/auth");
-      const authStore = useAuthStore();
-      authStore.accessToken = "old-token";
-      authStore.refreshToken = "valid-refresh";
-
-      vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
-        authStore.accessToken = "fresh-new-token";
-      });
-
-      const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
-      emitUploader(wrapper, mockFile);
-      await flushPromises();
-
-      // First XHR used old token
-      expect(xhrInstances[0].setRequestHeader).toHaveBeenCalledWith(
-        "Authorization",
-        "Bearer old-token",
-      );
-
-      // Trigger 401
-      xhrInstances[0].triggerLoad(401, JSON.stringify({ detail: "Token expired" }));
-      await flushPromises();
-
-      // Retry XHR should use the new token
-      expect(xhrInstances[1].setRequestHeader).toHaveBeenCalledWith(
-        "Authorization",
-        "Bearer fresh-new-token",
-      );
-    });
-
     it("shows error when retry also fails with non-401", async () => {
       const wrapper = mountPage();
       const { useAuthStore } = await import("@/stores/auth");
       const authStore = useAuthStore();
-      authStore.accessToken = "old-token";
-      authStore.refreshToken = "valid-refresh";
+      authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
 
       vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
-        authStore.accessToken = "new-token";
+        authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 300;
       });
 
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
@@ -520,13 +483,11 @@ describe("DataUploadPage", () => {
       const wrapper = mountPage();
       const { useAuthStore } = await import("@/stores/auth");
       const authStore = useAuthStore();
-      authStore.accessToken = "old-token";
-      authStore.refreshToken = "valid-refresh";
+      authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
 
-      // refreshAccessToken fails → sets accessToken to null
+      // refreshAccessToken fails → clears tokenExpiry
       vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
-        authStore.accessToken = null;
-        authStore.refreshToken = null;
+        authStore.tokenExpiry = null;
       });
 
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
@@ -585,11 +546,10 @@ describe("DataUploadPage", () => {
       const wrapper = mountPage();
       const { useAuthStore } = await import("@/stores/auth");
       const authStore = useAuthStore();
-      authStore.accessToken = "old-token";
-      authStore.refreshToken = "valid-refresh";
+      authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
 
       vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
-        authStore.accessToken = "new-token";
+        authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 300;
       });
 
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
@@ -614,11 +574,10 @@ describe("DataUploadPage", () => {
       const wrapper = mountPage();
       const { useAuthStore } = await import("@/stores/auth");
       const authStore = useAuthStore();
-      authStore.accessToken = "old-token";
-      authStore.refreshToken = "valid-refresh";
+      authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 60;
 
       vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
-        authStore.accessToken = "new-token";
+        authStore.tokenExpiry = Math.floor(Date.now() / 1000) + 300;
       });
 
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });
@@ -649,7 +608,7 @@ describe("DataUploadPage", () => {
       const authStore = useAuthStore();
       // Spy on refreshAccessToken to verify 401 detection works via status
       const refreshSpy = vi.spyOn(authStore, "refreshAccessToken").mockImplementation(async () => {
-        authStore.accessToken = null;
+        authStore.tokenExpiry = null;
       });
 
       const mockFile = new File(["test"], "test.csv", { type: "text/csv" });

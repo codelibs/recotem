@@ -25,9 +25,10 @@
     >
       <!-- Logo -->
       <div class="flex items-center h-14 px-4 border-b border-neutral-30 shrink-0">
-        <i
-          class="pi pi-prime text-primary text-xl"
-          aria-hidden="true"
+        <img
+          src="/favicon.png"
+          alt="Recotem"
+          class="w-6 h-6 flex-shrink-0"
         />
         <span
           v-show="!collapsed"

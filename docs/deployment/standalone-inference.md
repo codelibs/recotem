@@ -112,6 +112,7 @@ The inference-only deployment uses these variables from `envs/production.env`:
 | `INFERENCE_MAX_LOADED_MODELS` | No | Max models in LRU cache (default: 10) |
 | `INFERENCE_RATE_LIMIT` | No | Rate limit per API key (default: 100/minute) |
 | `INFERENCE_PRELOAD_MODEL_IDS` | No | Comma-separated model IDs to pre-load |
+| `INFERENCE_AUTO_RECORD_IMPRESSIONS` | No | Auto-record impressions on project predictions (default: true) |
 | `MODEL_EVENTS_REDIS_URL` | No | Redis Pub/Sub for hot-swap (ignored if Redis unavailable) |
 
 PostgreSQL variables (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `PGDATA`) are also required for the `db` service.

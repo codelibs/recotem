@@ -11,7 +11,7 @@ The inference API is the final step in the recommendation pipeline:
 3. **Deploy** -- you assign the trained model to a deployment slot so it can serve predictions.
 4. **Get recommendations (you are here)** -- your application calls the inference API with a user ID and gets back a ranked list of recommended items.
 
-The inference service is a standalone FastAPI application that serves real-time recommendations. It runs independently from the Django backend and connects directly to PostgreSQL (read-only) and Redis. This separation means the inference service can be scaled independently to handle high prediction traffic without affecting the management interface.
+The inference service is a standalone FastAPI application that serves real-time recommendations. It runs independently from the Django backend and connects directly to PostgreSQL and Redis. Database access is primarily reads, with the exception of impression event writes for A/B test tracking. This separation means the inference service can be scaled independently to handle high prediction traffic without affecting the management interface.
 
 ## Base URL
 
@@ -141,6 +141,8 @@ Get recommendations using the project's deployment slots. Instead of specifying 
 
 The response includes `slot_id` and `slot_name` so you can track which model variant served the request. Use `request_id` when recording conversion events for A/B test analysis.
 
+**Automatic impression recording**: By default, every project-level prediction automatically records an `impression` event in the background (with `metadata_json: {"source": "inference_auto"}`). This means you do not need to manually call the conversion event API for impressions -- only for click/purchase events. To disable this, set `INFERENCE_AUTO_RECORD_IMPRESSIONS=false`.
+
 **Errors:**
 
 | Status | Cause |
@@ -189,7 +191,8 @@ This means:
 | `INFERENCE_PORT` | `8081` | Port the inference service listens on |
 | `INFERENCE_MAX_LOADED_MODELS` | `10` | Maximum models in the LRU cache |
 | `INFERENCE_RATE_LIMIT` | `100/minute` | Rate limit per API key |
-| `DATABASE_URL` | (required) | PostgreSQL connection (read-only access) |
+| `INFERENCE_AUTO_RECORD_IMPRESSIONS` | `true` | Auto-record impression events on project-level predictions |
+| `DATABASE_URL` | (required) | PostgreSQL connection |
 | `SECRET_KEY` | (required) | Must match the backend's secret for HMAC verification |
 | `MODEL_EVENTS_REDIS_URL` | `redis://localhost:6379/3` | Redis URL for model event Pub/Sub |
 

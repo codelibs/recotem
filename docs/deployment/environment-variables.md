@@ -111,6 +111,7 @@ These variables configure the standalone FastAPI inference service.
 | `INFERENCE_MAX_LOADED_MODELS` | `10` | Maximum number of models in the LRU cache |
 | `INFERENCE_RATE_LIMIT` | `100/minute` | Rate limit per API key |
 | `INFERENCE_PRELOAD_MODEL_IDS` | (empty) | Comma-separated model IDs to pre-load on startup (e.g., `1,2,3`) |
+| `INFERENCE_AUTO_RECORD_IMPRESSIONS` | `true` | Auto-record impression events on project-level predictions for A/B testing |
 | `DATABASE_URL` | (required) | PostgreSQL connection string (shared with backend) |
 | `SECRET_KEY` | (required) | Must match the backend's secret for HMAC model verification |
 | `MODEL_EVENTS_REDIS_URL` | `redis://localhost:6379/3` | Redis Pub/Sub for model update notifications |

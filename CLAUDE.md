@@ -183,7 +183,7 @@ Auth: API key with `predict` scope via `X-API-Key` header.
 6. Train model (auto or manual) → TrainedModel with HMAC-signed serialized file
 7. Create API key with `predict` scope
 8. Create DeploymentSlot(s) pointing to trained model(s)
-9. Call inference API → weighted slot selection → real-time recommendations
+9. Call inference API → weighted slot selection → real-time recommendations (impression auto-recorded)
 10. Record ConversionEvents → analyze A/B test results
 
 ## Conventions
@@ -217,6 +217,7 @@ Core (see `envs/.env.example`):
 - `INFERENCE_MAX_LOADED_MODELS` — Max models in inference LRU cache (default 10)
 - `INFERENCE_RATE_LIMIT` — Inference rate limit per API key (default 100/minute)
 - `INFERENCE_PRELOAD_MODEL_IDS` — Comma-separated model IDs to pre-load on startup
+- `INFERENCE_AUTO_RECORD_IMPRESSIONS` — Auto-record impression events on project predict (default true)
 - `LOG_LEVEL`, `DJANGO_LOG_LEVEL`, `CELERY_LOG_LEVEL` — Logging levels
 
 ## CI/CD

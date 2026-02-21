@@ -29,7 +29,7 @@
           src="/favicon.png"
           alt="Recotem"
           class="w-6 h-6 flex-shrink-0"
-        />
+        >
         <span
           v-show="!collapsed"
           class="ml-3 font-semibold text-neutral-800 truncate"

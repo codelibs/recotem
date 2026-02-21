@@ -138,7 +138,7 @@ Recotem is a Docker-first web application for building, tuning, training, deploy
 - **Memory**: 512 MB reserved, 4 GB limit
 - **Volume**: `data-location:/data:ro` (read-only access to model files)
 - **Design**:
-  - Separate Python process from Django, using SQLAlchemy for read-only database access
+  - Separate Python process from Django, using SQLAlchemy for database access (primarily read-only; writes impression events for A/B tracking)
   - Thread-safe LRU model cache (configurable max size via `INFERENCE_MAX_LOADED_MODELS`)
   - Redis Pub/Sub listener for hot-swap model updates on channel `recotem:model_events`
   - Rate limiting per API key via `slowapi`
@@ -202,7 +202,7 @@ Recotem is a Docker-first web application for building, tuning, training, deploy
 | Component | Technology |
 |---|---|
 | Framework | FastAPI |
-| ORM | SQLAlchemy (read-only) |
+| ORM | SQLAlchemy (read + impression writes) |
 | Rate limiting | slowapi |
 | Password compat | passlib (Django PBKDF2-SHA256) |
 
@@ -224,7 +224,7 @@ All services communicate over a single Docker bridge network (`backend-net`). No
 │                                                                   │
 │  beat ──► redis:6379                                              │
 │                                                                   │
-│  inference:8081 ──► db:5432  (read-only)                          │
+│  inference:8081 ──► db:5432  (read + impression writes)            │
 │                 ──► redis:6379/db3  (Pub/Sub subscriber)           │
 │                                                                   │
 └───────────────────────────────────────────────────────────────────┘
@@ -272,12 +272,13 @@ Defined in `compose-inference.yaml`. Stripped-down deployment with only `db`, `i
 7. Inference picks up event       ──► inference ◄── Redis db3 (Pub/Sub)
                                               ──► /data volume (load model)
 8. Client calls inference API     ──► proxy ──► inference ──► in-memory model
+                                              ──► PostgreSQL (auto impression)
 9. Scheduled retrain (optional)   ──► beat ──► Celery ──► worker (repeat 4-7)
 ```
 
 ## Design Decisions
 
-1. **Separate inference service**: Decouples the recommendation serving path from the Django application. The inference service uses SQLAlchemy for read-only database access and has no Django dependency, enabling independent scaling and deployment.
+1. **Separate inference service**: Decouples the recommendation serving path from the Django application. The inference service uses SQLAlchemy for database access (primarily reads; writes only impression events for A/B tracking) and has no Django dependency, enabling independent scaling and deployment.
 
 2. **HMAC-signed model files**: All trained model files are signed with HMAC-SHA256 using the application's `SECRET_KEY`. This prevents loading tampered model files. The signing core module (`pickle_signing_core.py`) is Django-independent and shared with the inference service.
 

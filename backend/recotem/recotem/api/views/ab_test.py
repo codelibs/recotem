@@ -86,8 +86,21 @@ class ABTestViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
             if test.ended_at:
                 events = events.filter(timestamp__lte=test.ended_at)
 
-            impressions = events.filter(
+            # Deduplicate impressions by recommendation_request_id so that
+            # auto-recorded and manually-recorded events for the same request
+            # are only counted once.
+            impression_qs = events.filter(
                 event_type=ConversionEvent.EventType.IMPRESSION
+            )
+            impressions = (
+                impression_qs.filter(recommendation_request_id__isnull=False)
+                .values("recommendation_request_id")
+                .distinct()
+                .count()
+            )
+            # Also count impressions without a request_id (legacy manual events)
+            impressions += impression_qs.filter(
+                recommendation_request_id__isnull=True
             ).count()
             conversion_types = METRIC_CONVERSION_TYPES.get(test.target_metric_name)
             if conversion_types is None:

@@ -90,7 +90,9 @@ The response includes `slot_id`, `slot_name`, and `request_id` for tracking.
 
 ### 5. Record Conversion Events
 
-Record user interactions to measure performance:
+**Impressions are recorded automatically.** When the project-level inference endpoint returns recommendations, it records an `impression` event in the background. You do not need to track impressions manually. This is enabled by default and can be disabled with `INFERENCE_AUTO_RECORD_IMPRESSIONS=false`.
+
+For click and purchase events, record them via the conversion event API:
 
 ```bash
 # Single event
@@ -110,8 +112,8 @@ curl -X POST http://localhost:8000/api/v1/conversion_event/batch/ \
   -H "X-API-Key: rctm_your_key" \
   -d '{
     "events": [
-      {"project": 1, "deployment_slot": 1, "user_id": "42", "event_type": "impression"},
-      {"project": 1, "deployment_slot": 1, "user_id": "42", "event_type": "click", "item_id": "101"}
+      {"project": 1, "deployment_slot": 1, "user_id": "42", "event_type": "click", "item_id": "101"},
+      {"project": 1, "deployment_slot": 1, "user_id": "42", "event_type": "purchase", "item_id": "101"}
     ]
   }'
 ```

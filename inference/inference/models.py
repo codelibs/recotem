@@ -1,7 +1,7 @@
 """SQLAlchemy models mirroring Django's database schema (read-only)."""
 
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -76,3 +76,17 @@ class TrainingData(Base):
     project_id = Column(Integer)
     file = Column(String(100), name="file")
     filesize = Column(Integer)
+
+
+class ConversionEvent(Base):
+    __tablename__ = "api_conversionevent"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, nullable=False)
+    deployment_slot_id = Column(Integer, nullable=False)
+    user_id = Column(String(256), nullable=False)
+    item_id = Column(String(256), nullable=False, default="")
+    event_type = Column(String(20), nullable=False)
+    recommendation_request_id = Column(UUID(as_uuid=True), nullable=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False)
+    metadata_json = Column(JSON, nullable=False, default=dict)

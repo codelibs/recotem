@@ -1806,7 +1806,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.1,<4" },
     { name = "pyjwt", specifier = ">=2.9,<3" },
     { name = "python-json-logger", specifier = ">=3.2,<4" },
-    { name = "redis", specifier = ">=5.0,<6" },
+    { name = "redis", specifier = ">=5.0,<8" },
     { name = "scikit-learn", specifier = ">=1.6,<2" },
     { name = "whitenoise", specifier = ">=6.8,<7" },
 ]

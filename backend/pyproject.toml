@@ -30,7 +30,7 @@ dependencies = [
     "channels>=4.1,<5",
     "channels-redis>=4.2,<5",
     "daphne>=4.1,<5",
-    "fastprogress>=1.0.0,<1.1",
+    "fastprogress>=1.0.0,<1.2",
     "python-json-logger>=3.2,<5",
     "django-celery-beat>=2.7,<3",
 ]

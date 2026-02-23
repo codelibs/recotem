@@ -21,9 +21,6 @@ class Settings(BaseSettings):
         ""  # Comma-separated model IDs to pre-load on startup
     )
 
-    # Impression recording
-    inference_auto_record_impressions: bool = True
-
     # Model storage
     media_root: str = "/data"
     recotem_storage_type: str = ""

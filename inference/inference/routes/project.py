@@ -4,14 +4,13 @@ import logging
 import random
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..auth import ApiKey, require_scope
 from ..config import settings
 from ..db import get_db
-from ..impressions import record_impression
 from ..model_loader import get_or_load_model
 from ..models import DeploymentSlot, TrainedModel
 from ..rate_limit import limiter
@@ -47,7 +46,6 @@ def predict_by_project(
     request: Request,
     project_id: int,
     body: ProjectPredictRequest,
-    background_tasks: BackgroundTasks,
     api_key: ApiKey = Depends(require_scope("predict")),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ):
@@ -98,14 +96,6 @@ def predict_by_project(
         raise HTTPException(
             status_code=404, detail=f"User '{body.user_id}' not found in model"
         ) from None
-
-    background_tasks.add_task(
-        record_impression,
-        project_id=project_id,
-        deployment_slot_id=selected_slot.id,
-        user_id=body.user_id,
-        request_id=request_id,
-    )
 
     return ProjectPredictResponse(
         items=items,

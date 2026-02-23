@@ -2,7 +2,7 @@
 
 ## Overview
 
-The inference service is a standalone FastAPI application that serves real-time recommendation predictions. It operates independently from the Django backend, connecting to the same PostgreSQL database and Redis instance (Pub/Sub on db3). Database access is primarily read-only, with the exception of impression event writes for A/B test tracking. This separation enables independent scaling and deployment of the serving layer.
+The inference service is a standalone FastAPI application that serves real-time recommendation predictions. It operates independently from the Django backend, connecting to the same PostgreSQL database and Redis instance (Pub/Sub on db3). Database access is read-only. This separation enables independent scaling and deployment of the serving layer.
 
 ## Architecture
 
@@ -51,7 +51,7 @@ All settings are managed via Pydantic `BaseSettings` (loaded from environment va
 
 | Setting | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | `postgresql://recotem_user:recotem_pass@localhost:5432/recotem` | PostgreSQL connection (reads + impression writes) |
+| `DATABASE_URL` | `postgresql://recotem_user:recotem_pass@localhost:5432/recotem` | PostgreSQL connection (read-only) |
 | `MODEL_EVENTS_REDIS_URL` | `redis://localhost:6379/3` | Redis Pub/Sub URL (db3) |
 | `SECRET_KEY` | `VeryBadSecret@ChangeThis` | Must match Django's SECRET_KEY for HMAC verification |
 | `INFERENCE_PORT` | `8081` | Service listen port |
@@ -60,12 +60,11 @@ All settings are managed via Pydantic `BaseSettings` (loaded from environment va
 | `INFERENCE_PRELOAD_MODEL_IDS` | `""` | Comma-separated model IDs to load at startup |
 | `MEDIA_ROOT` | `/data` | Root path for model file storage |
 | `RECOTEM_STORAGE_TYPE` | `""` | Storage type (empty for local filesystem) |
-| `INFERENCE_AUTO_RECORD_IMPRESSIONS` | `True` | Auto-record impression events on project-level predictions |
 | `PICKLE_ALLOW_LEGACY_UNSIGNED` | `True` | Accept unsigned legacy model files |
 
 ## Database Access
 
-The inference service uses SQLAlchemy to access Django's PostgreSQL database. Access is primarily read-only, except for writing impression events (`ConversionEvent`). SQLAlchemy models mirror the Django schema:
+The inference service uses SQLAlchemy to access Django's PostgreSQL database in read-only mode. SQLAlchemy models mirror the Django schema:
 
 | SQLAlchemy Model | Django Table | Purpose |
 |---|---|---|
@@ -75,9 +74,8 @@ The inference service uses SQLAlchemy to access Django's PostgreSQL database. Ac
 | `ModelConfiguration` | `api_modelconfiguration` | Configuration metadata |
 | `DeploymentSlot` | `api_deploymentslot` | Slot routing for A/B tests |
 | `TrainingData` | `api_trainingdata` | Training data project linkage |
-| `ConversionEvent` | `api_conversionevent` | Impression/conversion event recording |
 
-Sessions are created per-request via the `get_db` FastAPI dependency and closed after request completion. The `ConversionEvent` model is used for **writes** (impression recording) -- the only write operation the inference service performs.
+Sessions are created per-request via the `get_db` FastAPI dependency and closed after request completion.
 
 ## LRU Model Cache
 
@@ -236,25 +234,11 @@ POST /inference/predict/project/{project_id}
   |
   +-- 5. Generate recommendations
   |
-  +-- 6. Schedule background impression recording
-  |      record_impression(project_id, slot_id, user_id, request_id)
-  |
-  +-- 7. Return response with slot_id and slot_name
+  +-- 6. Return response with slot_id, slot_name, and request_id
          (enables client-side event attribution)
 ```
 
-The response includes `slot_id` and `slot_name` so clients can record which slot served each recommendation for A/B test analysis via `ConversionEvent`.
-
-### Automatic Impression Recording
-
-When `INFERENCE_AUTO_RECORD_IMPRESSIONS` is enabled (the default), the project predict endpoint automatically records an `impression` event using FastAPI `BackgroundTasks`. This runs after the response is returned, adding zero latency to the prediction path.
-
-The impression is recorded with:
-- `event_type`: `"impression"`
-- `metadata_json`: `{"source": "inference_auto"}`
-- `recommendation_request_id`: The same UUID returned in the response
-
-The recording uses an independent `SessionLocal()` session (not the request-scoped session) with `try/except/finally` to ensure failures are logged but never propagate to affect the response.
+The response includes `slot_id`, `slot_name`, and `request_id` so clients can record which slot served each recommendation for A/B test analysis via `POST /api/v1/conversion_event/`.
 
 ## Rate Limiting
 
@@ -357,7 +341,7 @@ Load Balancer ---+-- Inference Instance 2 (LRU cache)
 - Each instance maintains its own LRU cache
 - All instances subscribe to the same Redis Pub/Sub channel
 - Model loading is idempotent (safe to load concurrently)
-- Database write contention is minimal (only impression event inserts)
+- No database write contention (inference is read-only)
 
 ### Memory Considerations
 

@@ -87,8 +87,7 @@ class ABTestViewSet(OwnedResourceMixin, viewsets.ModelViewSet):
                 events = events.filter(timestamp__lte=test.ended_at)
 
             # Deduplicate impressions by recommendation_request_id so that
-            # auto-recorded and manually-recorded events for the same request
-            # are only counted once.
+            # duplicate events for the same request are only counted once.
             impression_qs = events.filter(
                 event_type=ConversionEvent.EventType.IMPRESSION
             )

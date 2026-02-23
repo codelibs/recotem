@@ -217,7 +217,6 @@ Core (see `envs/.env.example`):
 - `INFERENCE_MAX_LOADED_MODELS` — Max models in inference LRU cache (default 10)
 - `INFERENCE_RATE_LIMIT` — Inference rate limit per API key (default 100/minute)
 - `INFERENCE_PRELOAD_MODEL_IDS` — Comma-separated model IDs to pre-load on startup
-- `INFERENCE_AUTO_RECORD_IMPRESSIONS` — Auto-record impression events on project predict (default true)
 - `LOG_LEVEL`, `DJANGO_LOG_LEVEL`, `CELERY_LOG_LEVEL` — Logging levels
 
 ## CI/CD

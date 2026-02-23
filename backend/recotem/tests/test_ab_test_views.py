@@ -19,6 +19,16 @@ from recotem.api.models import (
 User = get_user_model()
 
 
+@pytest.fixture(autouse=True)
+def _use_locmem_cache(settings):
+    """Use in-memory cache so tests work without Redis."""
+    settings.CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        }
+    }
+
+
 @pytest.fixture
 def user(db):
     return User.objects.create_user(username="ab_user", password="pass")
@@ -282,6 +292,79 @@ class TestABTestViewSet:
         url = reverse("ab_test-list")
         resp = client.get(url)
         assert resp.status_code == 401
+
+
+@pytest.mark.django_db
+class TestABTestImpressionDeduplication:
+    """Tests that impression deduplication by request_id works correctly."""
+
+    def test_same_request_id_counted_once(
+        self, auth_client, project, control_slot, variant_slot
+    ):
+        """Impressions sharing the same recommendation_request_id count once."""
+        import uuid
+
+        test = ABTest.objects.create(
+            project=project,
+            name="dedup-test",
+            control_slot=control_slot,
+            variant_slot=variant_slot,
+            status=ABTest.Status.RUNNING,
+        )
+        req_id = uuid.uuid4()
+        # Create two impressions with the same request_id
+        ConversionEvent.objects.create(
+            project=project,
+            deployment_slot=control_slot,
+            user_id="u1",
+            event_type="impression",
+            recommendation_request_id=req_id,
+        )
+        ConversionEvent.objects.create(
+            project=project,
+            deployment_slot=control_slot,
+            user_id="u1",
+            event_type="impression",
+            recommendation_request_id=req_id,
+        )
+
+        url = reverse("ab_test-results", args=[test.id])
+        resp = auth_client.get(url)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["control_impressions"] == 1
+
+    def test_null_request_id_each_counted(
+        self, auth_client, project, control_slot, variant_slot
+    ):
+        """Impressions without a request_id are each counted individually."""
+        test = ABTest.objects.create(
+            project=project,
+            name="null-reqid-test",
+            control_slot=control_slot,
+            variant_slot=variant_slot,
+            status=ABTest.Status.RUNNING,
+        )
+        ConversionEvent.objects.create(
+            project=project,
+            deployment_slot=control_slot,
+            user_id="u1",
+            event_type="impression",
+            recommendation_request_id=None,
+        )
+        ConversionEvent.objects.create(
+            project=project,
+            deployment_slot=control_slot,
+            user_id="u2",
+            event_type="impression",
+            recommendation_request_id=None,
+        )
+
+        url = reverse("ab_test-results", args=[test.id])
+        resp = auth_client.get(url)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["control_impressions"] == 2
 
 
 @pytest.mark.django_db

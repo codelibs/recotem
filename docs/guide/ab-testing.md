@@ -90,9 +90,7 @@ The response includes `slot_id`, `slot_name`, and `request_id` for tracking.
 
 ### 5. Record Conversion Events
 
-**Impressions are recorded automatically.** When the project-level inference endpoint returns recommendations, it records an `impression` event in the background. You do not need to track impressions manually. This is enabled by default and can be disabled with `INFERENCE_AUTO_RECORD_IMPRESSIONS=false`.
-
-For click and purchase events, record them via the conversion event API:
+Record impression, click, and purchase events via the conversion event API. Use the `request_id` from the inference response to link events to specific recommendations:
 
 ```bash
 # Single event

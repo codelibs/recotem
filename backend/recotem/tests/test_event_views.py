@@ -152,6 +152,25 @@ class TestConversionEventViewSet:
         assert resp.json()["created"] == 2
         assert ConversionEvent.objects.count() == 2
 
+    def test_create_impression_with_request_id(self, auth_client, project, slot):
+        url = reverse("conversion_event-list")
+        req_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        resp = auth_client.post(
+            url,
+            {
+                "project": project.id,
+                "deployment_slot": slot.id,
+                "user_id": "user-1",
+                "event_type": "impression",
+                "recommendation_request_id": req_id,
+            },
+            content_type="application/json",
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["event_type"] == "impression"
+        assert data["recommendation_request_id"] == req_id
+
     def test_unauthenticated_cannot_list(self, client: Client):
         url = reverse("conversion_event-list")
         resp = client.get(url)

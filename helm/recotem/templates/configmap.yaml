@@ -23,4 +23,3 @@ data:
   CELERY_BEAT_SCHEDULER: "django_celery_beat.schedulers:DatabaseScheduler"
   INFERENCE_MAX_LOADED_MODELS: {{ .Values.config.inferenceMaxLoadedModels | quote }}
   INFERENCE_RATE_LIMIT: {{ .Values.config.inferenceRateLimit | quote }}
-  INFERENCE_AUTO_RECORD_IMPRESSIONS: {{ .Values.config.inferenceAutoRecordImpressions | quote }}

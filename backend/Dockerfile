@@ -1,7 +1,7 @@
 # Multi-stage Dockerfile for Recotem backend
 # Used for both the backend (daphne) and worker (celery) services
 
-FROM python:3.12-slim AS base
+FROM python:3.14-slim AS base
 
 LABEL org.opencontainers.image.source="https://github.com/tohtsky/recotem"
 LABEL org.opencontainers.image.description="Recotem recommendation system backend"

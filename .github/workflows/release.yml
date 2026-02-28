@@ -210,11 +210,11 @@ jobs:
       - name: Build release object
         run: pip install PyYAML>=6.0.2 && python release.py
       - name: Download Helm chart
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: helm-chart
       - name: Download SBOMs
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: sbom-*
           merge-multiple: true

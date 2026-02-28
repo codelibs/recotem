@@ -27,7 +27,7 @@ jobs:
         working-directory: frontend
         run: npx vitest run --coverage --coverage.thresholds.lines=80
       - name: Save frontend coverage
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-coverage
           path: frontend/coverage/lcov.info
@@ -91,7 +91,7 @@ jobs:
         run: docker compose -f compose.yaml -f compose.ci.yaml down -v --remove-orphans
       - name: Save test artifacts
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           path: |
             frontend/playwright-report/
@@ -180,7 +180,7 @@ jobs:
               (echo "Generated types are out of date. Run: npm run generate:types" && exit 1)
           fi
       - name: Save coverage
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: pytest-coverage-py${{ matrix.python-version }}
           path: backend/recotem/coverage.xml

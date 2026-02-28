@@ -28,7 +28,7 @@
     "@axe-core/playwright": "^4.11.1",
     "@playwright/test": "^1.49.0",
     "@tailwindcss/vite": "^4.1.18",
-    "@types/node": "^22.10.0",
+    "@types/node": "^25.3.2",
     "@typescript-eslint/parser": "^8.0.0",
     "@vitejs/plugin-vue": "^6.0.0",
     "@vitest/coverage-v8": "^4.0.18",

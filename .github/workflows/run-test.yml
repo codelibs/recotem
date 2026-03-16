@@ -103,7 +103,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        python-version: ["3.12"]
+        python-version: ["3.14"]
       fail-fast: false
     services:
       postgres:
@@ -214,7 +214,7 @@ jobs:
       - name: Download backend coverage
         uses: actions/download-artifact@v8
         with:
-          name: pytest-coverage-py3.12
+          name: pytest-coverage-py3.14
           path: coverage-backend
       - name: Download frontend coverage
         uses: actions/download-artifact@v8

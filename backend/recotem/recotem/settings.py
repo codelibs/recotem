@@ -29,7 +29,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 # Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
+# See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = env("SECRET_KEY", default="VeryBadSecret@ChangeThis")
@@ -208,7 +208,7 @@ WSGI_APPLICATION = "recotem.wsgi.application"
 
 
 # Database
-# https://docs.djangoproject.com/en/5.1/ref/settings/#databases
+# https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 _DEFAULT_DB_URL = f"sqlite:///{(BASE_DIR / 'data' / 'db.sqlite3')}"
 DATABASE_URL = env("DATABASE_URL", default=_DEFAULT_DB_URL)
@@ -217,7 +217,7 @@ DATABASES["default"]["CONN_MAX_AGE"] = int(env("CONN_MAX_AGE", default=600))
 
 
 # Password validation
-# https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
+# https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -237,7 +237,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 
 # Internationalization
-# https://docs.djangoproject.com/en/5.1/topics/i18n/
+# https://docs.djangoproject.com/en/5.2/topics/i18n/
 
 LANGUAGE_CODE = "en-us"
 
@@ -264,7 +264,7 @@ elif _STORAGE_TYPE == "S3":
     AWS_LOCATION = env("AWS_LOCATION", default="")
     AWS_S3_ENDPOINT_URL = env("AWS_S3_ENDPOINT_URL", default=None)
 
-    # Django 5.1+ STORAGES configuration
+    # Django 5.2+ STORAGES configuration
     STORAGES = {
         "default": {
             "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
@@ -276,7 +276,7 @@ elif _STORAGE_TYPE == "S3":
 
 
 # Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/5.1/howto/static-files/
+# https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "dist" / "static"
@@ -285,7 +285,7 @@ STATICFILES_DIRS: list[Path] = []
 
 
 # Default primary key field type
-# https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
+# https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

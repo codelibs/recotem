@@ -7,7 +7,7 @@ Recommender system builder — Docker-first web app for tuning, training, deploy
 **7 Docker services** (see `compose.yaml`):
 - `db` — PostgreSQL 17
 - `redis` — Redis 7 (broker db0, channels db1, cache db2, model events db3)
-- `backend` — Django 5.1 + DRF + Channels, served by Daphne (ASGI)
+- `backend` — Django 5.2 + DRF + Channels, served by Daphne (ASGI)
 - `worker` — Celery (same Docker image as backend)
 - `beat` — Celery Beat for scheduled retraining (same Docker image as backend)
 - `inference` — FastAPI service for real-time recommendations (separate image)
@@ -18,7 +18,7 @@ Recommender system builder — Docker-first web app for tuning, training, deploy
 - `inference` — FastAPI service
 - `proxy` — Nginx (inference routes only, via `nginx-inference.conf`)
 
-**ML stack**: irspack 0.4.0 + Optuna for hyperparameter tuning.
+**ML stack**: irspack 0.4.1 + Optuna for hyperparameter tuning.
 
 ## Directory Layout
 
@@ -188,7 +188,7 @@ Auth: API key with `predict` scope via `X-API-Key` header.
 
 ## Conventions
 
-- **Python**: 3.12, uv for dependency management, Ruff for linting/formatting (line-length 88, rules: E/F/I/W/UP/B/SIM)
+- **Python**: 3.14, uv for dependency management, Ruff for linting/formatting (line-length 88, rules: E/F/I/W/UP/B/SIM)
 - **Frontend**: TypeScript strict, Vue 3 Composition API, PrimeVue components, Tailwind CSS 4
 - **ViewSets**: Use `OwnedResourceMixin` / `CreatedByResourceMixin` from `views/mixins.py` for ownership filtering
 - **Services**: Business logic in `api/services/`, not in views

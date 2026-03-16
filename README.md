@@ -93,7 +93,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full developer guide.
 
 ### Prerequisites
 
-- Python 3.12+, [uv](https://docs.astral.sh/uv/)
+- Python 3.14+, [uv](https://docs.astral.sh/uv/)
 - Node.js 22+
 - Docker and Docker Compose
 

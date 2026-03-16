@@ -52,7 +52,7 @@ Recotem is a Docker-first web application for building, tuning, training, deploy
 |---|---|---|---|
 | `db` | PostgreSQL 17.2 (Alpine) | 5432 | Persistent data store; Optuna study storage |
 | `redis` | Redis 7.4 (Alpine) | 6379 | Broker, channel layer, cache, model events |
-| `backend` | Django 5.1 + Daphne (ASGI) | 8080 | REST API, WebSocket, Django Admin |
+| `backend` | Django 5.2 + Daphne (ASGI) | 8080 | REST API, WebSocket, Django Admin |
 | `worker` | Celery (same image as backend) | -- | Background tasks (tuning, training) |
 | `beat` | Celery Beat (same image as backend) | -- | Scheduled retraining cron |
 | `inference` | FastAPI + Uvicorn | 8081 | Real-time recommendation serving |
@@ -88,7 +88,7 @@ Recotem is a Docker-first web application for building, tuning, training, deploy
 
 ### 3. Backend (`backend`)
 
-- **Framework**: Django 5.1 + Django REST Framework + Django Channels
+- **Framework**: Django 5.2 + Django REST Framework + Django Channels
 - **ASGI server**: Daphne (serves both HTTP and WebSocket)
 - **Internal port**: 8080
 - **User**: `appuser:1000` (non-root)
@@ -103,7 +103,7 @@ Recotem is a Docker-first web application for building, tuning, training, deploy
   - `django-celery-results` for task result persistence
   - `drf-spectacular` for OpenAPI schema generation
   - `django-environ` for settings management
-  - `irspack 0.4.0` + `optuna` for ML operations
+  - `irspack 0.4.1` + `optuna` for ML operations
 
 ### 4. Celery Worker (`worker`)
 
@@ -172,15 +172,15 @@ Recotem is a Docker-first web application for building, tuning, training, deploy
 
 | Component | Technology | Version |
 |---|---|---|
-| Language | Python | 3.12 |
-| Web framework | Django | 5.1 |
+| Language | Python | 3.14 |
+| Web framework | Django | 5.2 |
 | REST API | Django REST Framework | -- |
 | ASGI server | Daphne | -- |
 | WebSocket | Django Channels + channels-redis | -- |
 | Authentication | dj-rest-auth + simplejwt | -- |
 | Task queue | Celery | -- |
 | Task scheduler | django-celery-beat | -- |
-| ML / Tuning | irspack 0.4.0 + Optuna | -- |
+| ML / Tuning | irspack 0.4.1 + Optuna | -- |
 | Package manager | uv | -- |
 | Linting | Ruff | -- |
 

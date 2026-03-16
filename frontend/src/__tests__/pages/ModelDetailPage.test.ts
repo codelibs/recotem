@@ -27,7 +27,7 @@ const mockModel = {
   id: 10,
   configuration: 1,
   data_loc: 1,
-  irspack_version: "0.4.0",
+  irspack_version: "0.4.1",
   file: "/data/model.pkl",
   ins_datetime: "2025-01-01T00:00:00Z",
   basename: "model.pkl",

@@ -214,7 +214,7 @@ jobs:
       - name: Download backend coverage
         uses: actions/download-artifact@v8
         with:
-          name: pytest-coverage-py3.14
+          name: pytest-coverage-py3.14t
           path: coverage-backend
       - name: Download frontend coverage
         uses: actions/download-artifact@v8

@@ -55,12 +55,12 @@ inference/
     models.py             # SQLAlchemy read-only models
     routes/               # predict, project (A/B routing), health
 frontend/
-  package.json            # Vue 3.5 + Vite 6 + PrimeVue 4 + Tailwind CSS 4 + Pinia + TanStack Query
+  package.json            # Vue 3.5 + Vite 7 + PrimeVue 4 + Tailwind CSS 4 + Pinia
   src/
     pages/                # Page components (Login, Dashboard, Data*, Tuning*, Model*, ApiKey*, ABTest*, etc.)
     layouts/              # MainLayout, AuthLayout, ProjectLayout
-    stores/               # Pinia stores (auth, project, notification)
-    composables/          # useWebSocket, useJobStatus, useAbortOnUnmount, useNotification
+    stores/               # Pinia stores (auth, project)
+    composables/          # useWebSocket, useJobStatus, useAbortOnUnmount, useNotification, useDarkMode
     api/                  # API client (ofetch) + production.ts
     types/                # TypeScript types + production.ts
     utils/                # format.ts (formatDate, formatFileSize, formatScore)
@@ -131,45 +131,13 @@ docker compose up --build
 
 ### Management API
 
-Base path: `/api/v1/` (backward compat at `/api/`)
+Base path: `/api/v1/` (backward compat at `/api/`). Endpoints registered in `backend/recotem/recotem/api/urls.py`.
 
-| Endpoint | ViewSet |
-|---|---|
-| `project/` | ProjectViewSet |
-| `training_data/` | TrainingDataViewset |
-| `item_meta_data/` | ItemMetaDataViewset |
-| `split_config/` | SplitConfigViewSet |
-| `evaluation_config/` | EvaluationConfigViewSet |
-| `parameter_tuning_job/` | ParameterTuningJobViewSet |
-| `model_configuration/` | ModelConfigurationViewset |
-| `trained_model/` | TrainedModelViewset |
-| `task_log/` | TaskLogViewSet |
-| `api_keys/` | ApiKeyViewSet |
-| `retraining_schedule/` | RetrainingScheduleViewSet |
-| `retraining_run/` | RetrainingRunViewSet |
-| `deployment_slot/` | DeploymentSlotViewSet |
-| `ab_test/` | ABTestViewSet |
-| `conversion_event/` | ConversionEventViewSet |
-| `ping/` | PingView |
-| `project_summary/<id>/` | ProjectSummaryView |
-| `auth/login/` | dj-rest-auth LoginView |
-| `schema/` | drf-spectacular |
-
-Auth: JWT via dj-rest-auth + simplejwt, or API key via `X-API-Key` header.
-
-WebSocket: `/ws/job/{id}/` for job status updates.
+Auth: JWT via dj-rest-auth + simplejwt, or API key via `X-API-Key` header. WebSocket: `/ws/job/{id}/` for job status updates.
 
 ### Inference API
 
-Base path: `/inference/` (proxied to FastAPI service on port 8081)
-
-| Endpoint | Description |
-|---|---|
-| `POST /inference/predict/{model_id}` | Single-user recommendations |
-| `POST /inference/predict/{model_id}/batch` | Multi-user batch recommendations |
-| `POST /inference/predict/project/{project_id}` | Project-level with A/B slot routing |
-| `GET /inference/health` | Health check |
-| `GET /inference/models` | List loaded models |
+Base path: `/inference/` (proxied to FastAPI service on port 8081). Routes in `inference/inference/routes/`.
 
 Auth: API key with `predict` scope via `X-API-Key` header.
 
@@ -196,12 +164,12 @@ Auth: API key with `predict` scope via `X-API-Key` header.
 - **Uniqueness**: Project.name is per-owner, ModelConfiguration.name is per-training-data
 - **Backend user**: runs as `appuser:1000` in Docker
 - **Proxy**: nginx on port 8000 (non-root)
-- **Python package manager**: `uv` (not pip). Use `uv sync` to install, `uv run` to execute
+- **Python package manager**: `uv` (not pip). Use `uv sync` to install, `uv run` to execute. `pip install` → `uv add`, `python` → `uv run python`. Never use `pip` directly.
 - **Frontend package manager**: use `npm` (not pnpm)
 
 ## Environment Variables
 
-Core (see `envs/.env.example`):
+Core (see `envs/dev.env.example`, `envs/production.env.example`):
 - `DATABASE_URL` — PostgreSQL connection string
 - `CELERY_BROKER_URL` — Redis URL for Celery (db 0)
 - `CACHE_REDIS_URL` — Redis URL for cache (db 2)
@@ -221,8 +189,15 @@ Core (see `envs/.env.example`):
 
 ## CI/CD
 
-GitHub Actions (`.github/workflows/`):
+GitHub Actions (`.github/workflows/`), test environment via `compose.ci.yaml`:
 - `pre-commit.yml` — Ruff + basic hooks
 - `run-test.yml` — Playwright + pytest + coverage
 - `release.yml` — Multi-arch container build/push + Trivy scan
 - `codeql.yml` — CodeQL analysis
+
+## Gotchas
+
+- First `pytest` run downloads MovieLens100K dataset (~5MB) — needs internet access
+- `inference/` is a separate Python package with its own `pyproject.toml` and Dockerfile — not part of the Django project
+- Pickle signing: legacy unsigned model files are accepted (fallback checks 0x80 protocol marker)
+- Never use `pip` / `python` directly — always use `uv run python` / `uv add`

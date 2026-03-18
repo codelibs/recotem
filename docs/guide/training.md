@@ -114,7 +114,7 @@ When training is complete, the response includes the model file details:
   "configuration": 5,
   "data_loc": 1,
   "file": "/media/trained_models/model_3.pkl",
-  "irspack_version": "0.4.0",
+  "irspack_version": "0.4.1",
   "ins_datetime": "2025-01-15T12:00:00Z",
   "basename": "model_3.pkl",
   "filesize": 2456789,

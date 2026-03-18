@@ -105,7 +105,7 @@ describe("ModelListPage", () => {
           id: 1,
           basename: "model1",
           filesize: 5000,
-          irspack_version: "0.4.0",
+          irspack_version: "0.4.1",
           ins_datetime: "2025-01-01T00:00:00Z",
         },
       ],
@@ -157,8 +157,8 @@ describe("ModelListPage", () => {
 
   describe("confirmDelete / executeDelete", () => {
     const mockModels = [
-      { id: 1, basename: "model1", filesize: 5000, irspack_version: "0.4.0", ins_datetime: "2025-01-01T00:00:00Z" },
-      { id: 2, basename: "model2", filesize: 8000, irspack_version: "0.4.0", ins_datetime: "2025-02-01T00:00:00Z" },
+      { id: 1, basename: "model1", filesize: 5000, irspack_version: "0.4.1", ins_datetime: "2025-01-01T00:00:00Z" },
+      { id: 2, basename: "model2", filesize: 8000, irspack_version: "0.4.1", ins_datetime: "2025-02-01T00:00:00Z" },
     ];
 
     it("shows delete confirmation dialog when confirmDelete is called", async () => {

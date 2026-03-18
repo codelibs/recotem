@@ -19,7 +19,7 @@ jobs:
       run: npm ci
     - uses: actions/setup-python@v6
       with:
-        python-version: '3.12'  # Must match backend/Dockerfile
+        python-version: '3.14'  # Must match backend/Dockerfile
     - uses: pre-commit/action@v3.0.1
     - name: Check for auto-fixed files
       if: failure()

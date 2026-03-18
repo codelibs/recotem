@@ -61,7 +61,7 @@ Recotem is a recommendation system platform built with:
 
 ## Prerequisites
 
-- Python 3.12+
+- Python 3.14+
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
 - Node.js 22+
 - Docker and Docker Compose

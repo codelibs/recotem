@@ -1,0 +1,326 @@
+"""ServeConfig and TrainConfig — loaded from environment variables.
+
+Deliberately avoids pydantic-settings to keep the dependency footprint small.
+All parsing is done via plain dataclasses with a ``from_env()`` classmethod.
+
+Environment variables (Section 7 of spec):
+  RECOTEM_API_KEYS          CSV of "<kid>:sha256:<hex64>" entries
+  RECOTEM_HOST              Bind host (default 127.0.0.1 if no API keys)
+  RECOTEM_PORT              Bind port (default 8080)
+  RECOTEM_WATCH_INTERVAL    Poll interval in seconds (default 5; clamped 1–30)
+  RECOTEM_LOG_FORMAT        "json" | "console" | "auto"
+  RECOTEM_SIGNING_KEYS      CSV of "<kid>:<hex32>" entries for artifact signing
+  RECOTEM_MAX_ARTIFACT_BYTES Max artifact size in bytes (default 2 GiB)
+  RECOTEM_ALLOWED_ORIGINS   CSV of allowed CORS origins (default empty = deny)
+  RECOTEM_ALLOWED_HOSTS     CSV of allowed Host header values (default
+                              "127.0.0.1,localhost")
+  RECOTEM_ENV               Deployment environment identifier
+  RECOTEM_DRAIN_SECONDS     Graceful drain on SIGTERM (default 30)
+  RECOTEM_METADATA_FIELD_DENY  CSV of metadata fields to strip post-join
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass, field
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_HOST = "127.0.0.1"
+_DEFAULT_PORT = 8080
+_DEFAULT_WATCH_INTERVAL = 5
+_DEFAULT_MAX_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
+_DEFAULT_DRAIN_SECONDS = 30
+_DEFAULT_ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+
+# Exact hex length for a sha256 hash: 64 hex chars = 32 bytes.
+_SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+# Environments that permit --insecure-no-auth
+_INSECURE_ALLOWED_ENVS: frozenset[str] = frozenset(
+    {"development", "dev", "test"}
+)
+
+
+# ---------------------------------------------------------------------------
+# ApiKeyEntry — parsed "<kid>:sha256:<hex64>"
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ApiKeyEntry:
+    """A single API key entry parsed from RECOTEM_API_KEYS.
+
+    Attributes
+    ----------
+    kid:
+        Key identifier (arbitrary non-empty string).
+    sha256_hex:
+        64-char lowercase hex of the sha256 hash of the plaintext key.
+    """
+
+    kid: str
+    sha256_hex: str
+
+    @classmethod
+    def parse(cls, raw: str) -> ApiKeyEntry:
+        """Parse a single ``<kid>:sha256:<hex64>`` string.
+
+        Raises
+        ------
+        ValueError
+            If the entry is malformed.
+        """
+        raw = raw.strip()
+        # Expected format: "<kid>:sha256:<hex64>"
+        parts = raw.split(":", 2)
+        if len(parts) != 3 or parts[1].lower() != "sha256":
+            raise ValueError(
+                f"malformed API key entry {raw!r}: "
+                "expected '<kid>:sha256:<hex64>'"
+            )
+        kid, _, hex_hash = parts[0], parts[1], parts[2]
+        if not kid:
+            raise ValueError(
+                "malformed API key entry: kid must not be empty"
+            )
+        if not _SHA256_HEX_RE.match(hex_hash):
+            raise ValueError(
+                f"malformed API key entry for kid {kid!r}: "
+                f"hash must be exactly 64 hex chars, got {len(hex_hash)}"
+            )
+        return cls(kid=kid, sha256_hex=hex_hash.lower())
+
+
+# ---------------------------------------------------------------------------
+# ServeConfig
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ServeConfig:
+    """Configuration for ``recotem serve``, loaded from environment variables.
+
+    Do not construct directly in production code — use ``from_env()``.
+    """
+
+    # Auth
+    api_keys: list[ApiKeyEntry] = field(default_factory=list)
+
+    # Network
+    host: str = _DEFAULT_HOST
+    port: int = _DEFAULT_PORT
+
+    # Watcher
+    watch_interval: float = float(_DEFAULT_WATCH_INTERVAL)
+
+    # Logging
+    log_format: str = "auto"
+
+    # Signing
+    signing_keys_raw: str = ""  # raw env value; KeyRing built in create_app
+
+    # Artifact caps
+    max_artifact_bytes: int = _DEFAULT_MAX_ARTIFACT_BYTES
+
+    # CORS / TrustedHost
+    allowed_origins: list[str] = field(default_factory=list)
+    allowed_hosts: list[str] = field(default_factory=lambda: list(_DEFAULT_ALLOWED_HOSTS))
+
+    # Environment tag
+    env: str = ""
+
+    # Graceful drain
+    drain_seconds: int = _DEFAULT_DRAIN_SECONDS
+
+    # Metadata field deny-list (post-join column drop)
+    metadata_field_deny: list[str] = field(default_factory=list)
+
+    # Unsafe mode flags (set by CLI, not env)
+    insecure_no_auth: bool = False
+    dev_allow_unsigned: bool = False
+
+    @classmethod
+    def from_env(cls) -> ServeConfig:
+        """Build a :class:`ServeConfig` from the current environment.
+
+        Raises
+        ------
+        ValueError
+            If any env var has an invalid value (malformed API key entry,
+            out-of-range port, etc.).  The error message never includes the
+            key plaintext.
+        """
+        cfg = cls()
+
+        # RECOTEM_API_KEYS
+        raw_keys = os.environ.get("RECOTEM_API_KEYS", "").strip()
+        if raw_keys:
+            entries: list[ApiKeyEntry] = []
+            for raw_entry in raw_keys.split(","):
+                raw_entry = raw_entry.strip()
+                if not raw_entry:
+                    continue
+                try:
+                    entries.append(ApiKeyEntry.parse(raw_entry))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"RECOTEM_API_KEYS contains an invalid entry: {exc}"
+                    ) from exc
+            cfg.api_keys = entries
+
+        # RECOTEM_HOST
+        host_env = os.environ.get("RECOTEM_HOST", "").strip()
+        if host_env:
+            cfg.host = host_env
+
+        # RECOTEM_PORT
+        port_env = os.environ.get("RECOTEM_PORT", "").strip()
+        if port_env:
+            try:
+                cfg.port = int(port_env)
+            except ValueError as exc:
+                raise ValueError(
+                    f"RECOTEM_PORT must be an integer, got {port_env!r}: {exc}"
+                ) from exc
+
+        # RECOTEM_WATCH_INTERVAL (clamp 1–30)
+        interval_env = os.environ.get("RECOTEM_WATCH_INTERVAL", "").strip()
+        if interval_env:
+            try:
+                raw_interval = float(interval_env)
+            except ValueError as exc:
+                raise ValueError(
+                    f"RECOTEM_WATCH_INTERVAL must be a number, "
+                    f"got {interval_env!r}: {exc}"
+                ) from exc
+            cfg.watch_interval = max(1.0, min(30.0, raw_interval))
+
+        # RECOTEM_LOG_FORMAT
+        fmt_env = os.environ.get("RECOTEM_LOG_FORMAT", "").strip().lower()
+        if fmt_env in ("json", "console", "auto"):
+            cfg.log_format = fmt_env
+
+        # RECOTEM_SIGNING_KEYS (raw; KeyRing instantiation happens elsewhere)
+        cfg.signing_keys_raw = os.environ.get("RECOTEM_SIGNING_KEYS", "").strip()
+
+        # RECOTEM_MAX_ARTIFACT_BYTES
+        max_bytes_env = os.environ.get("RECOTEM_MAX_ARTIFACT_BYTES", "").strip()
+        if max_bytes_env:
+            try:
+                cfg.max_artifact_bytes = int(max_bytes_env)
+            except ValueError as exc:
+                raise ValueError(
+                    f"RECOTEM_MAX_ARTIFACT_BYTES must be an integer, "
+                    f"got {max_bytes_env!r}: {exc}"
+                ) from exc
+
+        # RECOTEM_ALLOWED_ORIGINS
+        origins_env = os.environ.get("RECOTEM_ALLOWED_ORIGINS", "").strip()
+        cfg.allowed_origins = (
+            [o.strip() for o in origins_env.split(",") if o.strip()]
+            if origins_env
+            else []
+        )
+
+        # RECOTEM_ALLOWED_HOSTS
+        hosts_env = os.environ.get("RECOTEM_ALLOWED_HOSTS", "").strip()
+        cfg.allowed_hosts = (
+            [h.strip() for h in hosts_env.split(",") if h.strip()]
+            if hosts_env
+            else list(_DEFAULT_ALLOWED_HOSTS)
+        )
+
+        # RECOTEM_ENV
+        cfg.env = os.environ.get("RECOTEM_ENV", "").strip()
+
+        # RECOTEM_DRAIN_SECONDS
+        drain_env = os.environ.get("RECOTEM_DRAIN_SECONDS", "").strip()
+        if drain_env:
+            try:
+                cfg.drain_seconds = int(drain_env)
+            except ValueError as exc:
+                raise ValueError(
+                    f"RECOTEM_DRAIN_SECONDS must be an integer, "
+                    f"got {drain_env!r}: {exc}"
+                ) from exc
+
+        # RECOTEM_METADATA_FIELD_DENY
+        deny_env = os.environ.get("RECOTEM_METADATA_FIELD_DENY", "").strip()
+        cfg.metadata_field_deny = (
+            [f.strip() for f in deny_env.split(",") if f.strip()]
+            if deny_env
+            else []
+        )
+
+        return cfg
+
+    def apply_auth_posture(self) -> None:
+        """Enforce security posture rules for the host binding.
+
+        If no API keys are configured and ``insecure_no_auth`` is False,
+        force HOST to ``127.0.0.1`` regardless of ``RECOTEM_HOST``.
+
+        Must be called after both ``from_env()`` and CLI flag injection.
+        """
+        if not self.api_keys and not self.insecure_no_auth:
+            self.host = "127.0.0.1"
+
+    def validate_insecure_flags(self) -> None:
+        """Validate that unsafe CLI flags are only used in safe environments.
+
+        Raises
+        ------
+        ValueError
+            If ``--insecure-no-auth`` or ``--dev-allow-unsigned`` is used in
+            a non-development environment.
+        """
+        if self.insecure_no_auth and self.env.lower() not in _INSECURE_ALLOWED_ENVS:
+            raise ValueError(
+                "--insecure-no-auth is only permitted when RECOTEM_ENV is "
+                f"one of {sorted(_INSECURE_ALLOWED_ENVS)}. "
+                f"Current RECOTEM_ENV={self.env!r}."
+            )
+
+        if self.dev_allow_unsigned and self.env.lower() != "development":
+            raise ValueError(
+                "--dev-allow-unsigned requires RECOTEM_ENV=development. "
+                f"Current RECOTEM_ENV={self.env!r}."
+            )
+
+
+# ---------------------------------------------------------------------------
+# TrainConfig
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TrainConfig:
+    """Runtime configuration for ``recotem train``, loaded from environment.
+
+    Most training configuration lives in the Recipe YAML.  TrainConfig covers
+    operator-level overrides that are not part of the recipe schema.
+    """
+
+    # Signing keys for artifact HMAC (raw env value).
+    signing_keys_raw: str = ""
+
+    # Artifact root containment (forwarded to loader).
+    artifact_root: str = ""
+
+    # Log format.
+    log_format: str = "auto"
+
+    @classmethod
+    def from_env(cls) -> TrainConfig:
+        """Build a :class:`TrainConfig` from the current environment."""
+        cfg = cls()
+        cfg.signing_keys_raw = os.environ.get("RECOTEM_SIGNING_KEYS", "").strip()
+        cfg.artifact_root = os.environ.get("RECOTEM_ARTIFACT_ROOT", "").strip()
+        cfg.log_format = (
+            os.environ.get("RECOTEM_LOG_FORMAT", "auto").strip().lower()
+        )
+        return cfg

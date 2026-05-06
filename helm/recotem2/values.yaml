@@ -1,0 +1,198 @@
+# values.yaml — Recotem 2.0 Helm chart default values
+#
+# Override in a values override file or via --set.
+# Secret values (api keys, signing keys) must be supplied at deploy time —
+# they are never stored in this file.
+
+# ── image ─────────────────────────────────────────────────────────────────────
+image:
+  repository: ghcr.io/codelibs/recotem
+  tag: "2.0.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# ── serve deployment ──────────────────────────────────────────────────────────
+replicaCount: 2
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+  # targetPort matches RECOTEM_PORT inside the container.
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: recotem.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 4Gi
+
+# SecurityContext applied to every container in the serve pod.
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ── environment variables (non-secret) ────────────────────────────────────────
+env:
+  RECOTEM_HOST: "0.0.0.0"
+  RECOTEM_PORT: "8080"
+  RECOTEM_WATCH_INTERVAL: "10"
+  RECOTEM_LOG_FORMAT: "json"
+  RECOTEM_ENV: "production"
+  RECOTEM_MAX_ARTIFACT_BYTES: ""        # empty = default 2 GiB
+  RECOTEM_ALLOWED_ORIGINS: ""           # empty = deny CORS
+  RECOTEM_ALLOWED_HOSTS: ""             # empty = default localhost only
+  RECOTEM_DRAIN_SECONDS: "30"
+
+# ── secrets ───────────────────────────────────────────────────────────────────
+# Names of Kubernetes Secrets containing sensitive env vars.
+# The chart expects each secret to carry the keys listed below.
+# Create them via:
+#   kubectl create secret generic recotem2-auth \
+#     --from-literal=RECOTEM_API_KEYS_SECRET='kid1:sha256:<hex64>,kid2:sha256:<hex64>' \
+#     --from-literal=RECOTEM_SIGNING_KEYS_SECRET='prod-2026-q2:<hex32>'
+secrets:
+  # Name of the Kubernetes Secret holding:
+  #   RECOTEM_API_KEYS_SECRET   — comma-separated "<kid>:sha256:<hex64>"
+  #   RECOTEM_SIGNING_KEYS_SECRET — comma-separated "<kid>:<hex32>"
+  secretName: recotem2-auth
+
+# ── recipes source ────────────────────────────────────────────────────────────
+# Select how recipe YAML files are delivered into the serve pod.
+# Exactly one of the sub-keys should be active.
+recipes:
+  # Mount path inside the container.
+  mountPath: /recipes
+
+  # source: configMap  — embed recipes in a ConfigMap (small files only, < 1 MB total).
+  source: configMap   # configMap | pvc | objectStore
+
+  configMap:
+    # Name of an existing ConfigMap whose keys are recipe file names (*.yaml).
+    # See templates/configmap-recipes.yaml for an in-chart managed ConfigMap.
+    name: recotem2-recipes
+    # Set to true to let the chart manage the ConfigMap from .Values.recipes.data.
+    managed: false
+    # Inline recipe data when managed=true.  Keys are filenames; values are YAML content.
+    data: {}
+    #   news.yaml: |
+    #     name: news_articles
+    #     source:
+    #       type: csv
+    #       path: /artifacts/interactions.csv.gz
+    #     ...
+
+  pvc:
+    # Name of an existing PersistentVolumeClaim pre-populated with recipe files.
+    claimName: recotem2-recipes
+    readOnly: true
+
+  objectStore:
+    # Use an init container to sync recipes from an object store before serve starts.
+    # Provide a custom initContainer spec here.  The init container should write
+    # YAML files to an emptyDir shared with the serve container at recipes.mountPath.
+    initContainer: {}
+    #   image: amazon/aws-cli:latest
+    #   command: ["sh", "-c", "aws s3 sync s3://my-bucket/recipes /recipes"]
+    #   env: []
+
+# ── artifacts volume ──────────────────────────────────────────────────────────
+artifacts:
+  # When using local filesystem for artifacts (PVC), configure here.
+  # Not needed when recipes use s3:// / gs:// paths in output.path.
+  enabled: false
+  mountPath: /artifacts
+  pvc:
+    claimName: recotem2-artifacts
+    readOnly: true
+
+# ── train CronJob ─────────────────────────────────────────────────────────────
+train:
+  enabled: false
+
+  # Cron schedule — default daily at 02:00 UTC.
+  schedule: "0 2 * * *"
+
+  # Comma-separated list of recipe YAML paths to train, relative to recipes.mountPath.
+  # If empty, the CronJob iterates all *.yaml files in the directory.
+  recipeFiles: ""
+
+  # Additional environment variables for the train job (non-secret).
+  env:
+    RECOTEM_LOG_FORMAT: "json"
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+
+  # Number of successful jobs to retain.
+  successfulJobsHistoryLimit: 3
+  # Number of failed jobs to retain.
+  failedJobsHistoryLimit: 3
+
+  # ConcurrencyPolicy: Forbid prevents overlapping runs for the same recipe
+  # (the file lock also protects against this, but belt-and-suspenders).
+  concurrencyPolicy: Forbid
+
+  # Pass --fail-on-busy to exit non-zero when a recipe lock is already held.
+  failOnBusy: false
+
+# ── ServiceAccount ────────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ── PodDisruptionBudget ───────────────────────────────────────────────────────
+pdb:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1  (use either minAvailable or maxUnavailable, not both)
+
+# ── HorizontalPodAutoscaler ───────────────────────────────────────────────────
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # targetMemoryUtilizationPercentage: 80
+
+# ── NetworkPolicy ─────────────────────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+  # Labels that identify pods allowed to reach the serve Deployment (e.g. ingress controller).
+  ingressFromPodSelector: {}
+  #   app.kubernetes.io/name: ingress-nginx

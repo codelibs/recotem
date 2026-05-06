@@ -1,0 +1,92 @@
+# examples/k8s/cronjob.yaml
+#
+# Standalone Kubernetes CronJob for daily training.
+# References the helm-installed serve Deployment's shared artifacts PVC.
+#
+# This is a standalone example; for a Helm-managed CronJob, enable
+# .Values.train.enabled=true in the recotem2 Helm chart instead.
+#
+# Usage:
+#   kubectl apply -f examples/k8s/cronjob.yaml
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: recotem2-train
+  namespace: recotem
+  labels:
+    app.kubernetes.io/name: recotem2
+    app.kubernetes.io/component: train
+spec:
+  # Daily at 02:00 UTC.
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # Hard deadline: 2 hours per training run.
+      activeDeadlineSeconds: 7200
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: recotem2
+            app.kubernetes.io/component: train
+        spec:
+          serviceAccountName: recotem2
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+          containers:
+            - name: train
+              image: ghcr.io/codelibs/recotem:2.0.0
+              imagePullPolicy: IfNotPresent
+              # Train all recipes in /recipes.
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  for recipe in /recipes/*.yaml; do
+                    [ -f "$recipe" ] || continue
+                    recotem train "$recipe"
+                  done
+              env:
+                - name: RECOTEM_LOG_FORMAT
+                  value: "json"
+                - name: RECOTEM_SIGNING_KEYS
+                  valueFrom:
+                    secretKeyRef:
+                      name: recotem2-auth
+                      key: RECOTEM_SIGNING_KEYS_SECRET
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 2Gi
+                limits:
+                  cpu: "4"
+                  memory: 8Gi
+              volumeMounts:
+                - name: recipes
+                  mountPath: /recipes
+                  readOnly: true
+                - name: artifacts
+                  mountPath: /artifacts
+                  readOnly: false
+                - name: tmp
+                  mountPath: /tmp
+
+          volumes:
+            - name: recipes
+              configMap:
+                name: recotem2-recipes
+            - name: artifacts
+              persistentVolumeClaim:
+                claimName: recotem2-artifacts
+            - name: tmp
+              emptyDir: {}

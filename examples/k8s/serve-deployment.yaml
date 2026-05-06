@@ -1,0 +1,133 @@
+# examples/k8s/serve-deployment.yaml
+#
+# Standalone (non-Helm) Deployment for recotem serve.
+# For production use the Helm chart at helm/recotem2/ instead —
+# this file is intended for quick experimentation or GitOps without Helm.
+#
+# Apply:
+#   kubectl apply -f examples/k8s/serve-deployment.yaml
+#   kubectl apply -f examples/k8s/serve-service.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recotem2-serve
+  namespace: recotem
+  labels:
+    app.kubernetes.io/name: recotem2
+    app.kubernetes.io/component: serve
+    app.kubernetes.io/version: "2.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: recotem2
+      app.kubernetes.io/component: serve
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: recotem2
+        app.kubernetes.io/component: serve
+    spec:
+      serviceAccountName: recotem2
+      # Spread replicas across nodes for availability.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: recotem2
+              app.kubernetes.io/component: serve
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+
+      containers:
+        - name: serve
+          image: ghcr.io/codelibs/recotem:2.0.0
+          imagePullPolicy: IfNotPresent
+          command: ["recotem", "serve", "--recipes", "/recipes"]
+
+          env:
+            - name: RECOTEM_HOST
+              value: "0.0.0.0"
+            - name: RECOTEM_PORT
+              value: "8080"
+            - name: RECOTEM_WATCH_INTERVAL
+              value: "10"
+            - name: RECOTEM_LOG_FORMAT
+              value: "json"
+            - name: RECOTEM_ENV
+              value: "production"
+            - name: RECOTEM_DRAIN_SECONDS
+              value: "30"
+            # API keys and signing keys from Secret.
+            - name: RECOTEM_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: recotem2-auth
+                  key: RECOTEM_API_KEYS_SECRET
+            - name: RECOTEM_SIGNING_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: recotem2-auth
+                  key: RECOTEM_SIGNING_KEYS_SECRET
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+
+          volumeMounts:
+            - name: recipes
+              mountPath: /recipes
+              readOnly: true
+            - name: artifacts
+              mountPath: /artifacts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: recipes
+          configMap:
+            name: recotem2-recipes
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: recotem2-artifacts
+        - name: tmp
+          emptyDir: {}

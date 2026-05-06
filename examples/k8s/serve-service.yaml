@@ -1,0 +1,25 @@
+# examples/k8s/serve-service.yaml
+#
+# ClusterIP Service for the standalone recotem serve Deployment.
+# Pair with examples/k8s/serve-deployment.yaml.
+#
+# To expose externally, add an Ingress or change type to LoadBalancer.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: recotem2-serve
+  namespace: recotem
+  labels:
+    app.kubernetes.io/name: recotem2
+    app.kubernetes.io/component: serve
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: recotem2
+    app.kubernetes.io/component: serve
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

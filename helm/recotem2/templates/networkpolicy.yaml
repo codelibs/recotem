@@ -1,0 +1,49 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "recotem2.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "recotem2.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "recotem2.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Allow traffic from pods matching the ingressFromPodSelector (e.g. ingress-nginx).
+    {{- if .Values.networkPolicy.ingressFromPodSelector }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressFromPodSelector | nindent 14 }}
+      ports:
+        - port: {{ .Values.service.targetPort }}
+          protocol: TCP
+    {{- else }}
+    # No ingress pod selector configured — deny all inbound traffic by default.
+    # Set .Values.networkPolicy.ingressFromPodSelector to allow ingress pods.
+    - from: []
+    {{- end }}
+
+  egress:
+    # Allow DNS resolution.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow outbound HTTPS for object store access (S3, GCS, Azure Blob).
+    - ports:
+        - port: 443
+          protocol: TCP
+    # Allow outbound HTTP on 8080 for internal health checks or sidecars if needed.
+    # Remove this rule if not needed.
+    - ports:
+        - port: 8080
+          protocol: TCP
+{{- end }}

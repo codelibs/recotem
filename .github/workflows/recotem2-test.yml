@@ -1,0 +1,166 @@
+name: recotem2 / test
+
+# Triggered on the docs/recotem-2-design branch and PRs targeting main.
+# No untrusted input (issue titles, PR bodies, etc.) is used in run: steps.
+on:
+  push:
+    branches:
+      - "docs/recotem-2-design"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/recotem2-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  ruff:
+    name: ruff lint + format check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dev dependencies
+        run: uv sync --frozen --dev
+
+      - name: ruff check
+        run: uv run ruff check src/ tests/
+
+      - name: ruff format (check only)
+        run: uv run ruff format --check src/ tests/
+
+  pytest:
+    name: pytest (unit + integration)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies (all extras)
+        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics
+
+      - name: Run unit + integration tests
+        run: |
+          uv run pytest tests/unit tests/integration \
+            --tb=short \
+            -q \
+            --cov=src/recotem \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v8
+        if: always()
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: coverage.xml
+
+  e2e:
+    name: e2e (train → serve → predict)
+    runs-on: ubuntu-24.04
+    needs: pytest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics
+
+      - name: Install recotem
+        run: uv pip install --no-deps .
+
+      - name: Run e2e script
+        run: |
+          chmod +x tests/e2e/run.sh
+          uv run bash tests/e2e/run.sh
+        env:
+          RECOTEM_LOG_FORMAT: json
+          # Test signing key — not a production value.
+          RECOTEM_SIGNING_KEYS: "test-key:0000000000000000000000000000000000000000000000000000000000000000"
+
+      - name: Upload e2e logs
+        uses: actions/upload-artifact@v8
+        if: always()
+        with:
+          name: e2e-logs
+          path: /tmp/recotem-e2e-*.log
+
+  secrets-in-logs:
+    name: secrets-in-logs grep check
+    runs-on: ubuntu-24.04
+    needs: e2e
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: e2e-logs
+          path: /tmp/e2e-logs
+
+      - name: Check for secrets in captured logs
+        # No untrusted input used — only scans static log files from prior job.
+        shell: bash
+        run: |
+          set +e
+          FAIL=0
+          LOG_DIR="/tmp/e2e-logs"
+
+          if [ ! -d "$LOG_DIR" ] || [ -z "$(ls -A "$LOG_DIR" 2>/dev/null)" ]; then
+            echo "No e2e log files found — skipping secrets check."
+            exit 0
+          fi
+
+          echo "Scanning log files in $LOG_DIR ..."
+
+          # Pattern 1: raw sha256 hex digest (signing key or hash leaked)
+          if grep -rEq 'sha256:[0-9a-f]{64}' "$LOG_DIR"; then
+            echo "FAIL: Found sha256:<hex64> in log output."
+            grep -rEn 'sha256:[0-9a-f]{64}' "$LOG_DIR" | head -5
+            FAIL=1
+          fi
+
+          # Pattern 2: AWS access key id
+          if grep -rEq 'AKIA[0-9A-Z]{16}' "$LOG_DIR"; then
+            echo "FAIL: Found AWS access key ID in log output."
+            grep -rEn 'AKIA[0-9A-Z]{16}' "$LOG_DIR" | head -5
+            FAIL=1
+          fi
+
+          # Pattern 3: literal signing key env var assignment
+          if grep -rEq 'RECOTEM_SIGNING_KEY=' "$LOG_DIR"; then
+            echo "FAIL: Found RECOTEM_SIGNING_KEY= in log output."
+            grep -rEn 'RECOTEM_SIGNING_KEY=' "$LOG_DIR" | head -5
+            FAIL=1
+          fi
+
+          # Pattern 4: AWS_SECRET value context
+          if grep -rEq 'AWS_SECRET' "$LOG_DIR"; then
+            echo "FAIL: Found AWS_SECRET in log output."
+            grep -rEn 'AWS_SECRET' "$LOG_DIR" | head -5
+            FAIL=1
+          fi
+
+          if [ "$FAIL" -eq 0 ]; then
+            echo "OK: No secrets found in log output."
+          fi
+
+          exit $FAIL

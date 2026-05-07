@@ -14,6 +14,19 @@
 
 set -euo pipefail
 
+# --tutorial mode: train against the in-tree HTTPS-source tutorial recipe.
+# Gated on RECOTEM_E2E_NETWORK to keep the offline default working.
+if [[ "${1:-}" == "--tutorial" ]]; then
+    if [[ -z "${RECOTEM_E2E_NETWORK:-}" ]]; then
+        echo "Skipping --tutorial: RECOTEM_E2E_NETWORK not set"
+        exit 0
+    fi
+    RECIPE="${RECIPE:-examples/tutorial-purchase-log/recipe.yaml}"
+    shift
+else
+    RECIPE="${RECIPE:-tests/e2e/recipe.yaml}"
+fi
+
 WORKDIR="/tmp/recotem_e2e_$$"
 ARTIFACTS_DIR="${WORKDIR}/artifacts"
 RECIPE_NAME="e2e_test"
@@ -86,7 +99,7 @@ RECIPE
 # 4. Train
 # ---------------------------------------------------------------------------
 echo "[e2e] Running recotem train..."
-recotem train "${WORKDIR}/recipe.yaml"
+recotem train "${RECIPE}"
 echo "[e2e] Training complete."
 
 # Verify artifact exists

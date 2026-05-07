@@ -4,7 +4,7 @@ Design doc for adding an end-to-end tutorial that runs from `git clone` to a
 live `/predict` call using a CSV fetched directly over HTTPS, plus the
 data-source changes that make it viable.
 
-- Status: draft
+- Status: implemented
 - Date: 2026-05-07
 - Branch: `docs/recotem-2-design`
 

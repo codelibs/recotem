@@ -23,6 +23,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Upgrade pip to fix CVE-2025-8869 (>=25.3), CVE-2026-1703 (>=26.0), and
+# CVE-2026-6357 (>=26.1).  We do not invoke pip at runtime (uv handles all
+# package management) but the bundled python:3.12-slim base ships an older
+# pip that trivy flags.  Upgrading is cheaper than uninstalling and avoids
+# breaking any operator workflow that relies on `python -m pip`.
+RUN python -m pip install --no-cache-dir --upgrade 'pip>=26.1'
+
 # Create a non-root user.  UID/GID 1000 matches the spec requirement.
 RUN groupadd --gid 1000 appuser \
  && useradd --uid 1000 --gid 1000 --no-create-home --shell /sbin/nologin appuser

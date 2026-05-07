@@ -172,8 +172,7 @@ def test_http_csv_fetch_byte_cap_exceeded_raises(
 ) -> None:
     body = b"user_id,item_id\n" + (b"0,a\n" * 1000)  # > 1 KiB
     digest = hashlib.sha256(body).hexdigest()
-    monkeypatch.setenv("RECOTEM_MAX_DOWNLOAD_BYTES", str(1024 * 1024))  # clamp floor
-    # Patch the cap below 1 MiB by direct call to make the test deterministic:
+    # Patch the cap below body size to make the test deterministic:
     from recotem.datasource import csv as csvmod
 
     monkeypatch.setattr(csvmod, "_get_max_download_bytes", lambda: 100)
@@ -190,5 +189,79 @@ def test_http_csv_fetch_404_raises() -> None:
             path=f"{base}/missing.csv",
             sha256="0" * 64,
         )
-        with pytest.raises(DataSourceError, match="HTTP|fetch"):
+        with pytest.raises(DataSourceError, match=r"HTTP 404"):
             CSVSource(cfg).fetch(_ctx())
+
+
+def test_http_csv_fetch_follows_one_redirect() -> None:
+    """3xx → 200 should resolve and load."""
+    body = b"user_id,item_id\n1,a\n2,b\n"
+    digest = hashlib.sha256(body).hexdigest()
+
+    class RedirectHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args, **kwargs) -> None:
+            return
+
+        def do_GET(self) -> None:
+            if self.path == "/start.csv":
+                self.send_response(302)
+                base = f"http://{self.server.server_address[0]}:{self.server.server_address[1]}"
+                self.send_header("Location", f"{base}/final.csv")
+                self.end_headers()
+            elif self.path == "/final.csv":
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), RedirectHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        cfg = CSVConfig(
+            type="csv",
+            path=f"http://{host}:{port}/start.csv",
+            sha256=digest,
+        )
+        df = CSVSource(cfg).fetch(_ctx())
+        assert len(df) == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_http_csv_fetch_redirect_loop_detected() -> None:
+    """A redirect cycle must trip the visited-set guard."""
+
+    class LoopHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args, **kwargs) -> None:
+            return
+
+        def do_GET(self) -> None:
+            self.send_response(302)
+            base = f"http://{self.server.server_address[0]}:{self.server.server_address[1]}"
+            other = "/b" if self.path == "/a" else "/a"
+            self.send_header("Location", f"{base}{other}")
+            self.end_headers()
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), LoopHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        cfg = CSVConfig(
+            type="csv",
+            path=f"http://{host}:{port}/a",
+            sha256="0" * 64,
+        )
+        with pytest.raises(DataSourceError, match="loop|redirects"):
+            CSVSource(cfg).fetch(_ctx())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

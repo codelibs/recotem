@@ -76,6 +76,34 @@ _CHUNK_SIZE = 1 * 1024 * 1024  # 1 MiB
 _MAX_REDIRECTS = 5
 
 
+class _NoFollowRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Override urllib's default redirect handler so 3xx responses surface.
+
+    `_fetch_http_bytes` implements its own redirect loop with a lower cap
+    (`_MAX_REDIRECTS`) and visited-set loop detection. With the default
+    handler installed, `urlopen` would silently follow redirects up to
+    urllib's own cap of 10 and our manual loop would be dead code.
+
+    We override every ``http_error_3xx`` method to return the raw response
+    object rather than following the redirect or raising an ``HTTPError``.
+    Returning the response from an ``http_error_*`` handler causes urllib to
+    hand it back to the caller intact, which is exactly what our loop needs.
+    """
+
+    def _passthrough(self, req, fp, code, msg, headers):  # type: ignore[override]
+        """Return the 3xx response directly so the caller can inspect it."""
+        return fp
+
+    http_error_301 = _passthrough  # type: ignore[assignment]
+    http_error_302 = _passthrough  # type: ignore[assignment]
+    http_error_303 = _passthrough  # type: ignore[assignment]
+    http_error_307 = _passthrough  # type: ignore[assignment]
+    http_error_308 = _passthrough  # type: ignore[assignment]
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoFollowRedirectHandler())
+
+
 def _get_max_download_bytes() -> int:
     """Indirection so tests can monkeypatch a smaller cap."""
     return get_max_download_bytes()
@@ -114,7 +142,7 @@ def _fetch_http_bytes(
             method="GET",
         )
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
                 status = getattr(resp, "status", 200)
                 # Manual redirect handling (we capped lower than urllib's default)
                 if status in (301, 302, 303, 307, 308):
@@ -125,6 +153,13 @@ def _fetch_http_bytes(
                         )
                     redirects += 1
                     current_url = urllib.request.urljoin(current_url, location)
+                    new_scheme = urlparse(current_url).scheme.lower()
+                    if new_scheme not in {"http", "https"}:
+                        raise DataSourceError(
+                            f"Refusing redirect from {safe_url} to disallowed "
+                            f"scheme '{new_scheme}://' "
+                            f"({_redact_url_userinfo(current_url)})"
+                        )
                     logger.info(
                         "csv_source_redirect",
                         recipe=recipe_name,

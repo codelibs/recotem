@@ -57,7 +57,13 @@ class ApiKeyEntry:
     kid:
         Key identifier (arbitrary non-empty string).
     sha256_hex:
-        64-char lowercase hex of the sha256 hash of the plaintext key.
+        64-char lowercase hex digest produced by
+        ``recotem.serving.auth._hash_api_key`` (scrypt KDF with the
+        ``recotem.api-key.v1`` salt) — NOT a plain SHA-256.  The
+        ``sha256:`` literal in the wire format is a digest-family prefix,
+        not the algorithm name.  The field is named ``sha256_hex`` for
+        backward compatibility with existing config; the value itself is
+        a scrypt digest.
     """
 
     kid: str

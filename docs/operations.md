@@ -71,11 +71,15 @@ API keys live in `RECOTEM_API_KEYS` as `<kid>:sha256:<hex64>` entries. Rotation 
 1. **Generate a new key.**
 
    ```bash
-   recotem keygen
-   # kid:       client-a-v2
-   # plaintext: <43-char base64url — share with the client>
-   # hash:      sha256:<64-hex — put this in RECOTEM_API_KEYS>
+   recotem keygen --type api --kid client-a-v2
+   # kid=client-a-v2
+   # plaintext=<43-char base64url — share with the client>
+   # hash=sha256:<64-hex — put this in RECOTEM_API_KEYS>
+   # env_entry=RECOTEM_API_KEYS=client-a-v2:sha256:<64-hex>
    ```
+
+   `--type api` is required — without it `recotem keygen` defaults to
+   `--type signing` and would emit the wrong key format.
 
 2. **Add the new entry alongside the old one.**
 
@@ -255,7 +259,7 @@ All Optuna trials scored 0.0. Common causes:
 ### 401 on `/predict`
 
 - Trailing or leading whitespace in the `X-API-Key` header is treated as part of the key and will not match. Trim client-side.
-- Confirm the hash in `RECOTEM_API_KEYS` matches `sha256` of the plaintext you are sending.
+- Confirm the hash in `RECOTEM_API_KEYS` was produced by `recotem keygen --type api` for the plaintext you are sending. The wire prefix is `sha256:` but the digest is **scrypt** (`hashlib.scrypt(plaintext, salt=b"recotem.api-key.v1", n=2, r=8, p=1, dklen=32)`). A plain `sha256(plaintext)` will not match.
 
 ### 503 on `/predict/{name}`
 

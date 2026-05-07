@@ -269,13 +269,69 @@ def test_models_endpoint_returns_list() -> None:
 
 
 # ---------------------------------------------------------------------------
-# /metrics off by default
+# /metrics — opt-in via RECOTEM_METRICS_ENABLED
 # ---------------------------------------------------------------------------
 
 
-def test_metrics_endpoint_off_by_default() -> None:
-    """The /metrics endpoint returns 404 when prometheus_client is not installed."""
+def test_metrics_endpoint_404_when_env_unset(monkeypatch) -> None:
+    """Without RECOTEM_METRICS_ENABLED, /metrics is not registered."""
+    monkeypatch.delenv("RECOTEM_METRICS_ENABLED", raising=False)
     client, _ = _make_test_client()
     response = client.get("/metrics")
-    # If prometheus_client is installed it returns 200; if not, 404
-    assert response.status_code in (200, 404)
+    assert response.status_code == 404
+
+
+def test_metrics_endpoint_404_when_env_falsy(monkeypatch) -> None:
+    """Falsy values for RECOTEM_METRICS_ENABLED keep /metrics off."""
+    monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "false")
+    client, _ = _make_test_client()
+    response = client.get("/metrics")
+    assert response.status_code == 404
+
+
+def test_metrics_endpoint_exposes_documented_metrics(monkeypatch) -> None:
+    """RECOTEM_METRICS_ENABLED=true exposes /metrics with all six recotem_* metrics."""
+    import pytest
+
+    pytest.importorskip("prometheus_client")
+    monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "true")
+
+    from recotem.serving import metrics
+
+    client, _ = _make_test_client()
+
+    # Drive the predict path so predict_total + predict_latency are populated.
+    response = client.post(
+        "/predict/test_recipe",
+        json={"user_id": "user1", "cutoff": 5},
+    )
+    assert response.status_code == 200
+
+    # The other four metrics are populated by app startup / watcher in
+    # production; in this unit test we exercise the recorders directly so
+    # the gauges/counters appear in the exposition output.
+    metrics.set_model_loaded("test_recipe", True)
+    metrics.inc_artifact_load_failure("test_recipe")
+    metrics.set_active_recipes(1)
+    metrics.record_swap("test_recipe", ok=True)
+
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    body = response.text
+
+    # All six metric series documented in operations.md must be present.
+    for name in (
+        "recotem_predict_total",
+        "recotem_predict_latency_seconds",
+        "recotem_model_loaded",
+        "recotem_artifact_load_failures_total",
+        "recotem_active_recipes",
+        "recotem_swap_total",
+    ):
+        assert name in body, f"missing {name!r} in /metrics output"
+
+    # Spot-check label cardinality on the metrics that carry the recipe
+    # label, so a future refactor that drops the label fails the test.
+    assert 'recotem_predict_total{recipe="test_recipe"' in body
+    assert 'recotem_model_loaded{recipe="test_recipe"' in body
+    assert 'recotem_swap_total{recipe="test_recipe"' in body

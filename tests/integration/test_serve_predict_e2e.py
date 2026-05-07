@@ -35,10 +35,12 @@ def _make_mock_recommender(users: list[str], items: list[str]):
 
 
 def _make_api_entry(plaintext: str, kid: str = "api-key") -> ApiKeyEntry:
-    # Mirror recotem.serving.auth._hash_api_key (HMAC-SHA256 with the
+    # Mirror recotem.serving.auth._hash_api_key (keyed BLAKE2b with the
     # ``recotem.api-key.v1`` domain-separation label).
-    sha256 = hmac.new(
-        b"recotem.api-key.v1", plaintext.encode(), hashlib.sha256
+    sha256 = hashlib.blake2b(
+        plaintext.encode(),
+        key=b"recotem.api-key.v1",
+        digest_size=32,
     ).hexdigest()
     return ApiKeyEntry(kid=kid, sha256_hex=sha256)
 

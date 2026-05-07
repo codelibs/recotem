@@ -465,13 +465,13 @@ def keygen(
         typer.echo(f"env_entry=RECOTEM_SIGNING_KEYS={kid}:{plaintext}")
     else:
         plaintext = base64.urlsafe_b64encode(raw_bytes).rstrip(b"=").decode("ascii")
-        # Must match recotem.serving.auth._hash_api_key — keyed HMAC with the
-        # ``recotem.api-key.v1`` domain-separation label.  Wire format keeps
-        # the ``sha256:`` prefix to identify the digest family.
-        hex_hash = hmac.new(
-            b"recotem.api-key.v1",
+        # Must match recotem.serving.auth._hash_api_key — keyed BLAKE2b with
+        # the ``recotem.api-key.v1`` domain-separation label.  Wire format keeps
+        # the ``sha256:`` prefix to identify the digest family (256-bit digest).
+        hex_hash = hashlib.blake2b(
             plaintext.encode("utf-8"),
-            hashlib.sha256,
+            key=b"recotem.api-key.v1",
+            digest_size=32,
         ).hexdigest()
         typer.echo(f"kid={kid}")
         typer.echo(f"plaintext={plaintext}")

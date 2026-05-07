@@ -94,7 +94,11 @@ jobs:
       - name: Run e2e script
         run: |
           chmod +x tests/e2e/run.sh
-          uv run bash tests/e2e/run.sh
+          # Capture combined stdout/stderr to a log file for the downstream
+          # secrets-in-logs grep job, while still streaming to the runner.
+          uv run bash tests/e2e/run.sh 2>&1 | tee /tmp/recotem-e2e-output.log
+          # Propagate exit code from the bash pipeline (uv run, not tee).
+          exit "${PIPESTATUS[0]}"
         env:
           RECOTEM_LOG_FORMAT: json
           # Test signing key — not a production value.

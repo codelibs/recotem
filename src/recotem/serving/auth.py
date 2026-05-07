@@ -41,15 +41,21 @@ _API_KEY_HMAC_LABEL = b"recotem.api-key.v1"
 
 
 def _hash_api_key(value: str) -> str:
-    """Return the hex-encoded HMAC-SHA256 of *value* under the API-key label.
+    """Return the hex-encoded keyed BLAKE2b digest of *value*.
 
-    This is **not** a password hash — API keys are 256-bit random tokens, so
-    a single HMAC iteration is sufficient (matches the GitHub / Stripe model).
-    The keyed construction provides domain separation versus a bare SHA-256
-    digest, preventing cross-context hash reuse.
+    BLAKE2b is a keyed cryptographic hash designed for fast authentication
+    of high-entropy tokens.  We use it here in keyed mode with the
+    domain-separation label ``recotem.api-key.v1`` so the stored digest
+    cannot be cross-substituted into any other context that hashes the
+    same plaintext.  This is **not** a password hash — Recotem API keys
+    are 256-bit random tokens (``recotem keygen --type api`` enforces
+    32-byte length), so a single keyed-hash iteration is sufficient and
+    matches the GitHub / Stripe API-key model.
     """
-    return hmac.new(
-        _API_KEY_HMAC_LABEL, value.encode("utf-8"), hashlib.sha256
+    return hashlib.blake2b(
+        value.encode("utf-8"),
+        key=_API_KEY_HMAC_LABEL,
+        digest_size=32,
     ).hexdigest()
 
 

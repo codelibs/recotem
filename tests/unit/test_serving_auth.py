@@ -32,13 +32,14 @@ def _make_request(api_key: str | None = None) -> MagicMock:
 
 
 def _make_entry(kid: str, plaintext: str) -> ApiKeyEntry:
-    # Mirror recotem.serving.auth._hash_api_key (HMAC-SHA256 with the
+    # Mirror recotem.serving.auth._hash_api_key (keyed BLAKE2b with the
     # ``recotem.api-key.v1`` domain-separation label).  The ApiKeyEntry
     # field is still named ``sha256_hex`` because the wire format keeps the
-    # ``sha256:`` prefix; the digest family is SHA-256 regardless of whether
-    # the construction is keyed or keyless.
-    sha256_hex = hmac.new(
-        b"recotem.api-key.v1", plaintext.encode("utf-8"), hashlib.sha256
+    # ``sha256:`` prefix; the digest family is the 32-byte hex digest.
+    sha256_hex = hashlib.blake2b(
+        plaintext.encode("utf-8"),
+        key=b"recotem.api-key.v1",
+        digest_size=32,
     ).hexdigest()
     return ApiKeyEntry(kid=kid, sha256_hex=sha256_hex)
 

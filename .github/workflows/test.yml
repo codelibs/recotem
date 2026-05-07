@@ -1,11 +1,12 @@
 name: recotem / test
 
-# Triggered on the docs/recotem-2-design branch and PRs targeting main.
+# Triggered on push to main (post-merge gate) and PRs targeting main.
+# Avoids duplicate runs on feature branches that already have an open PR.
 # No untrusted input (issue titles, PR bodies, etc.) is used in run: steps.
 on:
   push:
     branches:
-      - "docs/recotem-2-design"
+      - main
   pull_request:
     branches:
       - main

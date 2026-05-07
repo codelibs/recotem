@@ -193,8 +193,7 @@ def _probe_fsspec_path(path: str, *, kind: str) -> None:
         import fsspec
     except ImportError as exc:
         raise DataSourceError(
-            "fsspec is required for path probing. "
-            "Install it with: pip install recotem"
+            "fsspec is required for path probing. Install it with: pip install recotem"
         ) from exc
 
     try:
@@ -210,6 +209,4 @@ def _probe_fsspec_path(path: str, *, kind: str) -> None:
     except DataSourceError:
         raise
     except Exception as exc:
-        raise DataSourceError(
-            f"Failed to probe {kind} path {path!r}: {exc}"
-        ) from exc
+        raise DataSourceError(f"Failed to probe {kind} path {path!r}: {exc}") from exc

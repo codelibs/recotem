@@ -51,7 +51,7 @@ tests/
 └── e2e/                bash script: train → serve → curl /predict
 
 docs/
-├── quickstart.md       5-minute install → recipe → train → /predict
+├── getting-started.md  Docker / pip walkthrough → train → /predict
 ├── recipe-reference.md every recipe field, type, default, validation
 ├── data-sources/       bigquery.md, csv.md
 ├── deployment/         docker.md, k8s.md, cron.md
@@ -61,7 +61,7 @@ docs/
 └── superpowers/specs/  architectural specs (source of truth)
 
 helm/recotem/           serve-only chart with optional CronJob train
-examples/               csv-local, ga4-bigquery, k8s/, plugins/echo-source/
+examples/               tutorial-purchase-log, csv-local, ga4-bigquery, k8s/, plugins/echo-source/
 Dockerfile              multi-stage python:3.12-slim, appuser:1000
 docker-compose.example.yaml   train one-shot + serve long-running
 ```
@@ -80,7 +80,7 @@ export RECOTEM_SIGNING_KEYS="active:<hex>"
 export RECOTEM_API_KEYS="key1:sha256:<hex64>"
 
 # Train from a recipe
-uv run recotem train examples/csv-local/recipe.yaml
+uv run recotem train examples/tutorial-purchase-log/recipe.yaml
 
 # Serve from a directory of recipes
 uv run recotem serve --recipes ./recipes/ --port 8080
@@ -99,9 +99,11 @@ See `docs/recipe-reference.md` for the full schema. Highlights:
 - `source.type` is a discriminator (`csv` | `parquet` | `bigquery` | plugins).
 - Env-var expansion is restricted to `${RECOTEM_RECIPE_*}` and never applied
   inside `source.query` / `source.query_parameters` (forecloses SQL injection).
-- Path scheme allow-list: bare local | `s3://` | `gs://` | `az://`. No
-  `file://`, `http(s)://`, `ftp(s)://`, `memory://`. Embedded URI credentials
-  are rejected.
+- Path scheme: any fsspec-supported scheme on `source.path` and
+  `item_metadata.path`. `output.path` rejects `http(s)://`, `ftp(s)://`,
+  `memory://` (write not supported). For network-scheme inputs (`http://`,
+  `https://`), `sha256` is mandatory and `RECOTEM_MAX_DOWNLOAD_BYTES`
+  (default 256 MiB) caps the body. Embedded URI credentials are rejected.
 - Cleansing block: `drop_null_ids`, `dedup` policy, `min_rows / min_users /
   min_items` data preconditions.
 - Multi-algorithm Optuna search with optional per-algorithm trial budgets.
@@ -159,6 +161,8 @@ uv run ruff format --check src tests
 | `RECOTEM_HOST` / `RECOTEM_PORT` | 0.0.0.0 / 8080 | uvicorn bind. Overridden by 127.0.0.1 when no API keys. |
 | `RECOTEM_WATCH_INTERVAL` | 5 | Watcher poll seconds (clamped 1–30). |
 | `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. |
+| `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Cap on HTTP/HTTPS source-path body. Clamped [1 MiB, 16 GiB]. |
+| `RECOTEM_HTTP_TIMEOUT_SECONDS` | 30 | Connect/read timeout for HTTP/HTTPS source fetch. Clamped [1, 600]. |
 | `RECOTEM_ALLOWED_HOSTS` | 127.0.0.1,localhost | TrustedHostMiddleware list. |
 | `RECOTEM_ALLOWED_ORIGINS` | (empty) | CORS allow-list. Empty = deny. |
 | `RECOTEM_ENV` | (empty) | Gates `--insecure-no-auth` and `--dev-allow-unsigned`. |
@@ -178,7 +182,7 @@ uv run ruff format --check src tests
 
 ## Reference docs
 
-- Spec: `docs/superpowers/specs/2026-05-07-recotem-2-design.md`
-- Quickstart: `docs/quickstart.md`
+- Spec: `docs/superpowers/specs/2026-05-07-tutorial-and-https-source-design.md`
+- Getting started: `docs/getting-started.md`
 - Operations runbook: `docs/operations.md`
 - Security model: `docs/security.md`

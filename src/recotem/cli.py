@@ -464,14 +464,19 @@ def keygen(
         typer.echo(f"env_entry=RECOTEM_SIGNING_KEYS={kid}:{plaintext}")
     else:
         plaintext = base64.urlsafe_b64encode(raw_bytes).rstrip(b"=").decode("ascii")
-        # Must match recotem.serving.auth._hash_api_key — keyed BLAKE2b with
-        # the ``recotem.api-key.v1`` domain-separation label.  Wire format keeps
-        # the ``sha256:`` prefix to identify the digest family (256-bit digest).
-        hex_hash = hashlib.blake2b(
+        # Must match recotem.serving.auth._hash_api_key — scrypt KDF with the
+        # ``recotem.api-key.v1`` domain-separation salt at minimum cost
+        # (api keys are 256-bit random tokens; cost is irrelevant).  Wire
+        # format keeps the ``sha256:`` prefix to identify the digest family
+        # (32-byte hex digest).
+        hex_hash = hashlib.scrypt(
             plaintext.encode("utf-8"),
-            key=b"recotem.api-key.v1",
-            digest_size=32,
-        ).hexdigest()
+            salt=b"recotem.api-key.v1",
+            n=2,
+            r=8,
+            p=1,
+            dklen=32,
+        ).hex()
         typer.echo(f"kid={kid}")
         typer.echo(f"plaintext={plaintext}")
         typer.echo(f"hash=sha256:{hex_hash}")

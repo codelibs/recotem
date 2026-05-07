@@ -34,13 +34,16 @@ def _make_mock_recommender(users: list[str], items: list[str]):
 
 
 def _make_api_entry(plaintext: str, kid: str = "api-key") -> ApiKeyEntry:
-    # Mirror recotem.serving.auth._hash_api_key (keyed BLAKE2b with the
-    # ``recotem.api-key.v1`` domain-separation label).
-    sha256 = hashlib.blake2b(
+    # Mirror recotem.serving.auth._hash_api_key (scrypt KDF with the
+    # ``recotem.api-key.v1`` domain-separation salt at minimum cost).
+    sha256 = hashlib.scrypt(
         plaintext.encode(),
-        key=b"recotem.api-key.v1",
-        digest_size=32,
-    ).hexdigest()
+        salt=b"recotem.api-key.v1",
+        n=2,
+        r=8,
+        p=1,
+        dklen=32,
+    ).hex()
     return ApiKeyEntry(kid=kid, sha256_hex=sha256)
 
 

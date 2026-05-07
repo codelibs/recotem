@@ -31,15 +31,18 @@ def _make_request(api_key: str | None = None) -> MagicMock:
 
 
 def _make_entry(kid: str, plaintext: str) -> ApiKeyEntry:
-    # Mirror recotem.serving.auth._hash_api_key (keyed BLAKE2b with the
-    # ``recotem.api-key.v1`` domain-separation label).  The ApiKeyEntry
-    # field is still named ``sha256_hex`` because the wire format keeps the
-    # ``sha256:`` prefix; the digest family is the 32-byte hex digest.
-    sha256_hex = hashlib.blake2b(
+    # Mirror recotem.serving.auth._hash_api_key (scrypt KDF with the
+    # ``recotem.api-key.v1`` domain-separation salt at minimum cost).  The
+    # ApiKeyEntry field is still named ``sha256_hex`` because the wire format
+    # keeps the ``sha256:`` prefix; the digest family is the 32-byte hex digest.
+    sha256_hex = hashlib.scrypt(
         plaintext.encode("utf-8"),
-        key=b"recotem.api-key.v1",
-        digest_size=32,
-    ).hexdigest()
+        salt=b"recotem.api-key.v1",
+        n=2,
+        r=8,
+        p=1,
+        dklen=32,
+    ).hex()
     return ApiKeyEntry(kid=kid, sha256_hex=sha256_hex)
 
 

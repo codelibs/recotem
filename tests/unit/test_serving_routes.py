@@ -62,13 +62,16 @@ def _make_registry_with_recipe(
 
 
 def _make_api_key_entry(plaintext: str, kid: str = "k1") -> ApiKeyEntry:
-    # Mirror recotem.serving.auth._hash_api_key (keyed BLAKE2b with the
-    # ``recotem.api-key.v1`` domain-separation label).
-    sha256_hex = hashlib.blake2b(
+    # Mirror recotem.serving.auth._hash_api_key (scrypt KDF with the
+    # ``recotem.api-key.v1`` domain-separation salt at minimum cost).
+    sha256_hex = hashlib.scrypt(
         plaintext.encode("utf-8"),
-        key=b"recotem.api-key.v1",
-        digest_size=32,
-    ).hexdigest()
+        salt=b"recotem.api-key.v1",
+        n=2,
+        r=8,
+        p=1,
+        dklen=32,
+    ).hex()
     return ApiKeyEntry(kid=kid, sha256_hex=sha256_hex)
 
 

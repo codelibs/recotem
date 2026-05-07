@@ -57,13 +57,12 @@ docs/
 ├── deployment/         docker.md, k8s.md, cron.md
 ├── operations.md       key rotation, recovery, sizing, troubleshooting
 ├── security.md         trust boundaries, FQCN allow-list, threat model
-├── plugin-authoring.md DataSource plugin contract walkthrough
-└── superpowers/specs/  architectural specs (source of truth)
+└── plugin-authoring.md DataSource plugin contract walkthrough
 
 helm/recotem/           serve-only chart with optional CronJob train
 examples/               tutorial-purchase-log, csv-local, ga4-bigquery, k8s/, plugins/echo-source/
 Dockerfile              multi-stage python:3.12-slim, appuser:1000
-docker-compose.example.yaml   train one-shot + serve long-running
+compose.yaml            train one-shot + serve long-running (tutorial)
 ```
 
 ## Quick Start (development)
@@ -182,7 +181,6 @@ uv run ruff format --check src tests
 
 ## Reference docs
 
-- Spec: `docs/superpowers/specs/2026-05-07-tutorial-and-https-source-design.md`
 - Getting started: `docs/getting-started.md`
 - Operations runbook: `docs/operations.md`
 - Security model: `docs/security.md`

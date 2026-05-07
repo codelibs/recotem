@@ -15,7 +15,7 @@
 
 ## Deployment
 
-- [Docker](deployment/docker.md) — `docker-compose.example.yaml` walkthrough
+- [Docker](deployment/docker.md) — `compose.yaml` walkthrough
 - [Kubernetes](deployment/k8s.md) — CronJob + Deployment, Helm chart values
 - [Cron / systemd](deployment/cron.md) — plain Linux cron and systemd timers
 

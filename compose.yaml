@@ -1,4 +1,4 @@
-# docker-compose.example.yaml — Recotem 2.0 tutorial compose file
+# compose.yaml — Recotem 2.0 tutorial compose file
 #
 # This file is a runnable example for the getting-started tutorial. It is
 # NOT for production use.
@@ -15,11 +15,11 @@
 #   2. Train (one-shot)
 #      $ RECOTEM_SIGNING_KEYS_SECRET="dev:..." \
 #        RECOTEM_API_KEYS_SECRET="dev:sha256:..." \
-#        docker compose -f docker-compose.example.yaml run --rm train
+#        docker compose run --rm train
 #
 #   3. Serve + curl
 #      $ RECOTEM_SIGNING_KEYS_SECRET="..." RECOTEM_API_KEYS_SECRET="..." \
-#        docker compose -f docker-compose.example.yaml up -d serve
+#        docker compose up -d serve
 #      $ curl -sX POST http://localhost:8080/predict/purchase_log \
 #          -H "X-API-Key: <api plaintext>" \
 #          -H "Content-Type: application/json" \

@@ -2,9 +2,11 @@
 
 Recotem ships as a single Docker image. `recotem train` and `recotem serve` are separate commands in the same image.
 
-## docker-compose.example.yaml walkthrough
+## compose.yaml walkthrough
 
-The repository includes `docker-compose.example.yaml`. Here is an annotated version:
+The repository includes `compose.yaml` (the Docker Compose v2 default
+filename — `docker compose` picks it up automatically without `-f`). Here
+is an annotated version:
 
 ```yaml
 services:

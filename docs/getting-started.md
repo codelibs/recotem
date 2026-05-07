@@ -12,7 +12,7 @@ pip (everything in your venv).
 
 ## Path A — Docker Compose (recommended)
 
-The repo ships a `docker-compose.example.yaml` and an `examples/tutorial-purchase-log/`
+The repo ships a `compose.yaml` and an `examples/tutorial-purchase-log/`
 recipe. From the repo root:
 
 ### 1. Generate keys
@@ -42,7 +42,7 @@ export RECOTEM_API_PLAINTEXT="<plaintext-from-api>"      # used in step 4
 ### 2. Train
 
 ```bash
-docker compose -f docker-compose.example.yaml run --rm train
+docker compose run --rm train
 ```
 
 What happens: the train container fetches `purchase_log.csv` over HTTPS,
@@ -59,8 +59,8 @@ Expected last log line (JSON):
 ### 3. Serve
 
 ```bash
-docker compose -f docker-compose.example.yaml up -d serve
-docker compose -f docker-compose.example.yaml logs --no-color -n 20 serve
+docker compose up -d serve
+docker compose logs --no-color -n 20 serve
 ```
 
 Health check:
@@ -95,7 +95,7 @@ Expected (the exact items / scores depend on training):
 ### 5. Tear down
 
 ```bash
-docker compose -f docker-compose.example.yaml down -v
+docker compose down -v
 ```
 
 ## Path B — pip install

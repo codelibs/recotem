@@ -48,21 +48,60 @@ def test_create_app_starts_with_valid_config(tmp_path: Path) -> None:
     assert app is not None
 
 
-def test_security_posture_log_emitted_at_startup(tmp_path: Path, caplog) -> None:
+def test_security_posture_log_emitted_at_startup(tmp_path: Path) -> None:
     """create_app emits a 'security.posture' log event."""
-    import logging
+    import structlog.testing
 
     from recotem.serving.app import create_app
 
     cfg = _minimal_config(tmp_path)
-    with caplog.at_level(logging.INFO):
+    with structlog.testing.capture_logs() as cap:
         create_app(cfg)
 
-    # Check that security.posture appears somewhere in the captured logs
-    log_text = " ".join(record.getMessage() for record in caplog.records)
-    assert "security.posture" in log_text or any(
-        "security" in str(r.msg) or "posture" in str(r.msg) for r in caplog.records
-    )
+    assert any(e.get("event") == "security.posture" for e in cap)
+
+
+def test_security_posture_log_emits_signing_keys_with_fingerprints(
+    tmp_path: Path,
+) -> None:
+    """The security.posture log line must include signing_keys=[{kid,fingerprint}]
+    pairs (not just kids), so operators can confirm prod ≠ staging without
+    leaking key material."""
+    import structlog.testing
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.signing_keys_raw = "active:" + "aa" * 32
+    with structlog.testing.capture_logs() as cap:
+        create_app(cfg)
+
+    posture = next(e for e in cap if e.get("event") == "security.posture")
+    assert "signing_keys" in posture
+    assert "signing_kids" in posture
+    assert isinstance(posture["signing_keys"], list)
+    assert posture["signing_keys"], "signing_keys must not be empty when keys configured"
+    entry = posture["signing_keys"][0]
+    assert set(entry.keys()) == {"kid", "fingerprint"}
+    assert entry["kid"] == "active"
+    assert isinstance(entry["fingerprint"], str)
+    assert len(entry["fingerprint"]) == 8  # sha256(key)[:8]
+
+
+def test_dev_allow_unsigned_emits_warning_banner_at_startup(tmp_path: Path) -> None:
+    """When --dev-allow-unsigned is in effect, a DEV_ALLOW_UNSIGNED_ACTIVE
+    warning is emitted at startup (in addition to the once-per-60s loop)."""
+    import structlog.testing
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.env = "development"
+    cfg.dev_allow_unsigned = True
+    with structlog.testing.capture_logs() as cap:
+        create_app(cfg)
+
+    assert any(e.get("event") == "DEV_ALLOW_UNSIGNED_ACTIVE" for e in cap)
 
 
 # ---------------------------------------------------------------------------
@@ -219,3 +258,76 @@ def test_CORS_allows_configured_origin(tmp_path: Path) -> None:
     assert (
         response.headers.get("access-control-allow-origin") == "https://app.example.com"
     )
+
+
+# ---------------------------------------------------------------------------
+# security.posture log includes unsafe_mode flag
+# ---------------------------------------------------------------------------
+
+
+def test_security_posture_log_includes_unsafe_mode_true_when_insecure_no_auth(
+    tmp_path: Path,
+) -> None:
+    """When --insecure-no-auth is active, the security.posture log must include
+    unsafe_mode=True so monitoring alerts can detect insecure deployments.
+    """
+    import inspect
+
+    from recotem.serving.app import _emit_security_posture
+
+    source = inspect.getsource(_emit_security_posture)
+    # The function must reference 'unsafe_mode' as a structured log field.
+    assert "unsafe_mode" in source, (
+        "_emit_security_posture must include 'unsafe_mode' in the log event"
+    )
+
+    # Now verify the actual value by calling with a config that has insecure_no_auth.
+    import structlog.testing
+
+    from recotem.artifact.signing import KeyRing
+    from recotem.config import ServeConfig
+
+    cfg = ServeConfig()
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.dev_allow_unsigned = False
+    cfg.host = "127.0.0.1"
+    cfg.allowed_hosts = ["*"]
+    cfg.allowed_origins = []
+
+    kr = KeyRing("test:" + "aa" * 32)
+
+    with structlog.testing.capture_logs() as captured:
+        _emit_security_posture(cfg, kr)
+
+    posture_events = [e for e in captured if e.get("event") == "security.posture"]
+    assert posture_events, "security.posture log event must be emitted"
+    assert posture_events[0]["unsafe_mode"] is True
+
+
+def test_security_posture_log_unsafe_mode_false_when_auth_enabled(
+    tmp_path: Path,
+) -> None:
+    """When API keys are configured and no insecure flags set, unsafe_mode must be False."""
+    import structlog.testing
+
+    from recotem.artifact.signing import KeyRing
+    from recotem.config import ServeConfig
+    from recotem.serving.app import _emit_security_posture
+
+    cfg = ServeConfig()
+    cfg.env = "production"
+    cfg.insecure_no_auth = False
+    cfg.dev_allow_unsigned = False
+    cfg.host = "0.0.0.0"
+    cfg.allowed_hosts = ["*"]
+    cfg.allowed_origins = []
+
+    kr = KeyRing("test:" + "aa" * 32)
+
+    with structlog.testing.capture_logs() as captured:
+        _emit_security_posture(cfg, kr)
+
+    posture_events = [e for e in captured if e.get("event") == "security.posture"]
+    assert posture_events, "security.posture log event must be emitted"
+    assert posture_events[0]["unsafe_mode"] is False

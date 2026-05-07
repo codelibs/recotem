@@ -129,13 +129,16 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         watcher.start()
 
         banner_task = None
-        if serve_config.insecure_no_auth:
+        if serve_config.insecure_no_auth or serve_config.dev_allow_unsigned:
             import asyncio
 
             async def _warn_loop() -> None:
                 while True:
                     await asyncio.sleep(60)
-                    _emit_insecure_banner(serve_config)
+                    if serve_config.insecure_no_auth:
+                        _emit_insecure_banner(serve_config)
+                    if serve_config.dev_allow_unsigned:
+                        _emit_dev_unsigned_banner(serve_config)
 
             banner_task = asyncio.create_task(_warn_loop())
 
@@ -182,6 +185,8 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
 
     if serve_config.insecure_no_auth:
         _emit_insecure_banner(serve_config)
+    if serve_config.dev_allow_unsigned:
+        _emit_dev_unsigned_banner(serve_config)
 
     return app
 
@@ -216,13 +221,29 @@ def _build_key_ring(serve_config: ServeConfig) -> KeyRing | None:
 
 
 def _emit_security_posture(serve_config: ServeConfig, key_ring: KeyRing | None) -> None:
-    """Emit the canonical security.posture log line (spec Section 7)."""
-    signing_kids = key_ring.kids() if key_ring is not None else []
+    """Emit the canonical security.posture log line (spec Section 7).
+
+    The ``signing_keys`` field is a list of ``{"kid", "fingerprint"}`` pairs
+    where the fingerprint is the first 8 hex chars of ``sha256(key_bytes)``.
+    Operators can confirm prod ≠ staging without ever logging key material.
+    The legacy ``signing_kids`` field is preserved for SIEM rules built
+    against the earlier schema.
+    """
+    if key_ring is not None:
+        kids = key_ring.kids()
+        signing_keys = [
+            {"kid": kid, "fingerprint": key_ring.fingerprint(kid)} for kid in kids
+        ]
+    else:
+        kids = []
+        signing_keys = []
+
     logger.info(
         "security.posture",
         auth_enabled=bool(serve_config.api_keys),
         bind_host=serve_config.host,
-        signing_kids=signing_kids,
+        signing_keys=signing_keys,
+        signing_kids=kids,
         env=serve_config.env,
         allowed_hosts=serve_config.allowed_hosts,
         allowed_origins=serve_config.allowed_origins,
@@ -240,6 +261,28 @@ def _emit_insecure_banner(serve_config: ServeConfig) -> None:
             "This is only permitted in development/test environments. "
             "Set RECOTEM_API_KEYS or remove --insecure-no-auth before "
             "exposing this service to any network."
+        ),
+        env=serve_config.env,
+        bind_host=serve_config.host,
+    )
+
+
+def _emit_dev_unsigned_banner(serve_config: ServeConfig) -> None:
+    """Emit a WARN banner when running with --dev-allow-unsigned.
+
+    This posture loads artifacts that may be signed with the deterministic
+    in-memory dev key, which means the server will accept any artifact
+    anyone in the org has produced under that key.  Far more dangerous
+    than insecure-no-auth on its own.
+    """
+    logger.warning(
+        "DEV_ALLOW_UNSIGNED_ACTIVE",
+        message=(
+            "recotem serve is running with --dev-allow-unsigned. "
+            "Artifacts signed with the deterministic dev key are accepted. "
+            "This is only permitted in development/test environments. "
+            "Remove --dev-allow-unsigned and set RECOTEM_SIGNING_KEYS to "
+            "a unique value before exposing this service to any network."
         ),
         env=serve_config.env,
         bind_host=serve_config.host,

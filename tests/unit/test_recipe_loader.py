@@ -351,3 +351,155 @@ def test_validate_for_filesystem_valid_name_passes(tmp_path: Path) -> None:
 
     result = validate_for_filesystem("good-name_v1")
     assert result == "good-name_v1"
+
+
+# ---------------------------------------------------------------------------
+# Source dict → typed Config promotion (post-model_validate step)
+# ---------------------------------------------------------------------------
+
+_CSV_RECIPE_TEMPLATE = """\
+name: {name}
+source:
+  type: csv
+  path: {csv_path}
+  delimiter: ","
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {output_path}
+"""
+
+_PARQUET_RECIPE_TEMPLATE = """\
+name: {name}
+source:
+  type: parquet
+  path: {parquet_path}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {output_path}
+"""
+
+
+def _write_csv_recipe(
+    tmp_path: Path, name: str = "csv_recipe", csv_filename: str = "data.csv"
+) -> Path:
+    csv_file = tmp_path / csv_filename
+    if not csv_file.exists():
+        csv_file.write_text("user_id,item_id\nu1,i1\nu2,i2\n")
+    content = _CSV_RECIPE_TEMPLATE.format(
+        name=name,
+        csv_path=str(csv_file),
+        output_path=str(tmp_path / f"{name}.recotem"),
+    )
+    p = tmp_path / f"{name}.yaml"
+    p.write_text(content)
+    return p
+
+
+def _write_parquet_recipe(tmp_path: Path, name: str = "parquet_recipe") -> Path:
+    parquet_file = tmp_path / "data.parquet"
+    if not parquet_file.exists():
+        import pandas as pd
+
+        pd.DataFrame({"user_id": ["u1", "u2"], "item_id": ["i1", "i2"]}).to_parquet(
+            parquet_file, index=False
+        )
+    content = _PARQUET_RECIPE_TEMPLATE.format(
+        name=name,
+        parquet_path=str(parquet_file),
+        output_path=str(tmp_path / f"{name}.recotem"),
+    )
+    p = tmp_path / f"{name}.yaml"
+    p.write_text(content)
+    return p
+
+
+def test_load_recipe_promotes_source_dict_to_typed_csv_config(
+    tmp_path: Path,
+) -> None:
+    """After load_recipe, recipe.source must be a CSVConfig instance (not dict)."""
+    from recotem.datasource.csv import CSVConfig
+
+    p = _write_csv_recipe(tmp_path)
+    recipe = load_recipe(p)
+    assert isinstance(recipe.source, CSVConfig), (
+        f"Expected CSVConfig, got {type(recipe.source)}"
+    )
+
+
+def test_load_recipe_promotes_source_dict_to_typed_parquet_config(
+    tmp_path: Path,
+) -> None:
+    """After load_recipe with type=parquet, recipe.source must be a ParquetConfig."""
+    from recotem.datasource.csv import ParquetConfig
+
+    p = _write_parquet_recipe(tmp_path)
+    recipe = load_recipe(p)
+    assert isinstance(recipe.source, ParquetConfig), (
+        f"Expected ParquetConfig, got {type(recipe.source)}"
+    )
+
+
+def test_load_recipe_source_typed_attrs_accessible(tmp_path: Path) -> None:
+    """After promotion, source attributes like .path and .delimiter are accessible."""
+    p = _write_csv_recipe(tmp_path)
+    recipe = load_recipe(p)
+    # Typed access — must not raise AttributeError or return a KeyError.
+    assert recipe.source.path.endswith("data.csv")
+    assert recipe.source.delimiter == ","
+
+
+def test_load_recipe_unknown_source_type_raises_recipe_error(
+    tmp_path: Path,
+) -> None:
+    """A source with an unknown type (e.g. ftp) must raise RecipeError."""
+    content = """\
+name: ftp_recipe
+source:
+  type: ftp
+  path: ftp://example.com/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: /tmp/ftp_recipe.recotem
+"""
+    p = tmp_path / "ftp_recipe.yaml"
+    p.write_text(content)
+    with pytest.raises(RecipeError):
+        load_recipe(p)
+
+
+def test_load_recipe_source_missing_type_raises_recipe_error(
+    tmp_path: Path,
+) -> None:
+    """A source dict without the 'type' discriminator must raise RecipeError."""
+    content = """\
+name: no_type_recipe
+source:
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: /tmp/no_type_recipe.recotem
+"""
+    p = tmp_path / "no_type_recipe.yaml"
+    p.write_text(content)
+    with pytest.raises(RecipeError):
+        load_recipe(p)

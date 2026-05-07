@@ -8,6 +8,7 @@ then serves it and calls /predict.
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
@@ -153,3 +154,102 @@ def test_serve_health_endpoint_ok_with_loaded_model() -> None:
     assert data["status"] == "ok"
     assert "healthy_recipe" in data["recipes"]
     assert data["recipes"]["healthy_recipe"]["loaded"] is True
+
+
+# ---------------------------------------------------------------------------
+# Full artifact roundtrip: train → write → SafeUnpickler read
+# ---------------------------------------------------------------------------
+
+
+def _make_tiny_synthetic_csv(tmp_path: Path, n_users: int = 10, n_items: int = 10) -> Path:
+    """Create a minimal synthetic CSV with n_users users and n_items items.
+
+    Each user rates every item exactly once, yielding n_users * n_items rows
+    with no duplicates.  With 10 users and 10 items the default cutoff=5
+    stays safely below the item count.
+    """
+    rows = ["user_id,item_id"]
+    for u in range(n_users):
+        for i in range(n_items):
+            rows.append(f"u{u},i{i}")
+    csv_file = tmp_path / "synthetic.csv"
+    csv_file.write_text("\n".join(rows) + "\n")
+    return csv_file
+
+
+def test_train_then_serve_full_artifact_roundtrip(tmp_path: Path) -> None:
+    """Train on synthetic CSV with dev_allow_unsigned, write a real artifact,
+    then read it back via SafeUnpickler and assert numpy / irspack submodule
+    paths deserialize end-to-end without ArtifactError.
+    """
+    from recotem.artifact.io import read_artifact
+    from recotem.artifact.signing import KeyRing, unpickle_payload
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+    from recotem.training._compat import IDMappedRecommender
+    from recotem.training.pipeline import run_training
+
+    # 10 users × 10 items = 100 rows, no duplicates.
+    # cutoff=5 safely below the 10 unique items after split.
+    csv_file = _make_tiny_synthetic_csv(tmp_path, n_users=10, n_items=10)
+    artifact_path = str(tmp_path / "synthetic.recotem")
+
+    recipe = Recipe(
+        name="synthetic-e2e",
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        training=TrainingConfig(
+            algorithms=["TopPop"],
+            n_trials=1,
+            cutoff=5,  # must be < n_items to avoid irspack ValueError
+            split=SplitConfig(scheme="random", heldout_ratio=0.2, seed=0),
+        ),
+        output=OutputConfig(path=artifact_path, versioning="always_overwrite"),
+    )
+
+    # Use an in-memory dev key so no RECOTEM_SIGNING_KEYS env var is required.
+    kr = KeyRing("dev:" + ("0" * 64))
+    result = run_training(
+        recipe,
+        key_ring=kr,
+        signing_key="dev",
+        no_lock=True,
+        dev_allow_unsigned=True,
+        quiet=True,
+    )
+
+    assert result is not None, "run_training returned None unexpectedly"
+    assert result.best_class is not None
+
+    # Read the artifact back with the same KeyRing — exercises write_artifact's
+    # positional-arg signature and the full binary format end-to-end.
+    written_path = result.artifact_path
+    header, payload_bytes = read_artifact(written_path, kr)
+
+    # Deserialize via SafeUnpickler.  This exercises the numpy / irspack prefix
+    # allow-list with a real trained model object (numpy arrays, scipy sparse
+    # matrices, irspack recommender classes).
+    recommender = unpickle_payload(payload_bytes)
+    assert recommender is not None
+
+    # Must be the IDMappedRecommender wrapper that irspack training produces.
+    assert isinstance(recommender, IDMappedRecommender)
+
+    # The recommender has user/item mappings populated.
+    assert len(recommender.user_ids) > 0
+    assert len(recommender.item_ids) > 0
+
+    # Try recommendations for a new (cold-start) user with a subset of items
+    # seen in training — this always works for TopPop (non-personalised).
+    known_items = recommender.item_ids[:3]
+    recs = recommender.get_recommendation_for_new_user(known_items, cutoff=3)
+    assert len(recs) > 0
+    # Each recommendation is a (item_id, score) pair.
+    assert isinstance(recs[0][0], str)
+    assert isinstance(recs[0][1], float)

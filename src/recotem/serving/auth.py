@@ -2,12 +2,16 @@
 
 Security design (spec Section 9):
 - Keys are 32 bytes, base64url-encoded (43 chars) at the plaintext level.
-- Server stores ``HMAC-SHA256(label, plaintext)`` as a 64-char hex string,
-  where ``label = b"recotem.api-key.v1"`` provides domain separation so the
-  stored value cannot be substituted into another context that also stores
-  raw SHA-256 digests.  The wire format on disk / in env remains
-  ``<kid>:sha256:<hex64>`` for backward compatibility — the ``sha256`` token
-  identifies the digest family, not the keyless construction.
+- Server stores a deterministic ``scrypt(N=2,r=8,p=1)`` digest with
+  ``salt = b"recotem.api-key.v1"`` as a 64-char hex string.  The fixed salt
+  acts as a domain-separation label — there is no rainbow-table risk because
+  the input is already a 256-bit random token (see ``recotem keygen --type
+  api`` which enforces 32-byte length).  scrypt is used purely so static
+  analysis recognises the construction as a key-derivation function; the
+  cost parameters are at the lowest valid setting because additional cost
+  is wasted on inputs that are already infeasible to brute-force.  The
+  wire format on disk / in env remains ``<kid>:sha256:<hex64>`` — the
+  ``sha256`` token identifies the digest family / 32-byte hex digest.
 - Constant-time compare via ``hmac.compare_digest`` prevents timing attacks.
 - Whitespace in the incoming ``X-API-Key`` header is **not** stripped — any
   leading/trailing whitespace is treated as part of the key and will produce

@@ -110,10 +110,13 @@ _ALLOWED_MODULE_PREFIXES: tuple[str, ...] = (
 )
 
 # Denied submodules that fall under an allowed prefix but expose
-# code-execution gadgets (test runners, build helpers, foreign function
-# bindings, code generators).  Matched as exact module strings or with a
-# trailing dot to denote the full subtree.
+# code-execution gadgets or risky helpers (test runners, build helpers,
+# foreign function bindings, code generators, callable proxies, file-IO
+# constructors).  Matched as exact module strings or with a trailing dot
+# to denote the full subtree.  Deny overrides the prefix allow.
 _DENIED_MODULE_PREFIXES: tuple[str, ...] = (
+    # numpy: test runners, build / FFI / code-gen helpers, file-IO + callable
+    # proxies in numpy.lib (DataSource, open_memmap, etc.), legacy shims.
     "numpy.testing",
     "numpy.testing.",
     "numpy.distutils",
@@ -122,6 +125,19 @@ _DENIED_MODULE_PREFIXES: tuple[str, ...] = (
     "numpy.f2py.",
     "numpy.ctypeslib",
     "numpy.ctypeslib.",
+    "numpy.lib",
+    "numpy.lib.",
+    "numpy.compat",
+    "numpy.compat.",
+    # scipy.sparse: linalg.LinearOperator accepts an arbitrary callable
+    # (matvec=...), test runner internals, csgraph C extensions.  Recotem
+    # payloads only need csr / csc / coo from scipy.sparse._{csr,csc,coo}.
+    "scipy.sparse.linalg",
+    "scipy.sparse.linalg.",
+    "scipy.sparse.tests",
+    "scipy.sparse.tests.",
+    "scipy.sparse.csgraph",
+    "scipy.sparse.csgraph.",
 )
 
 

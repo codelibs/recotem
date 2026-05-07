@@ -301,6 +301,17 @@ def inspect(
         Path,
         typer.Argument(help="Path to the .recotem artifact file.", exists=True),
     ],
+    dev_allow_unsigned: Annotated[
+        bool,
+        typer.Option(
+            "--dev-allow-unsigned",
+            help=(
+                "Verify against the deterministic in-memory dev signing key "
+                "when RECOTEM_SIGNING_KEYS is unset.  Useful for inspecting "
+                "artifacts produced by `recotem train --dev-allow-unsigned`."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Read and verify an artifact header without deserializing the payload.
 
@@ -325,6 +336,9 @@ def inspect(
         _exit(_EXIT_ARTIFACT, f"Artifact parse failed: {exc}")
 
     signing_keys_raw = os.environ.get("RECOTEM_SIGNING_KEYS", "").strip()
+    if not signing_keys_raw and dev_allow_unsigned:
+        # Same in-memory dev key as run_training / serve dev mode.
+        signing_keys_raw = "dev:" + ("0" * 64)
     if signing_keys_raw:
         try:
             from recotem.artifact.signing import KeyRing, verify_hmac
@@ -439,10 +453,11 @@ def keygen(
     For signing keys:  plaintext is a 64-char hex string (32 raw bytes).
                        env_entry format: RECOTEM_SIGNING_KEYS=<kid>:<hex64>
     For API keys:      plaintext is a 43-char base64url string (32 raw bytes).
-                       hash format: HMAC-SHA256(b"recotem.api-key.v1",
-                       plaintext_utf8) as 64-char hex.  The wire prefix
-                       remains ``sha256:`` for backward-compat — it identifies
-                       the digest family, not the keyless construction.
+                       hash format: deterministic scrypt(N=2, r=8, p=1, dklen=32,
+                       salt=b"recotem.api-key.v1") of the plaintext as
+                       64-char hex.  The wire prefix remains ``sha256:``
+                       — it identifies the digest family / 32-byte hex
+                       digest, not the construction.
                        env_entry format: RECOTEM_API_KEYS=<kid>:sha256:<hex64>
     """
     if key_type not in ("signing", "api"):

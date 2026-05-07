@@ -413,3 +413,196 @@ def test_one_structured_log_per_trial(caplog) -> None:
     # The callback should have been invoked without error
     # The structured logs may go through structlog, not standard logging
     # — we just verify no unhandled exception occurred
+
+
+# ---------------------------------------------------------------------------
+# no_lock / lock semantics
+# ---------------------------------------------------------------------------
+
+
+def test_run_training_no_lock_skips_lock_acquisition(tmp_path: Path) -> None:
+    """When no_lock=True, recipe_lock must NOT be called.
+
+    We mock _run_training_locked to bypass data fetch / split / train so this
+    test focuses solely on lock-acquisition behavior.
+    """
+    from recotem.training.pipeline import TrainResult, run_training
+
+    recipe = _make_recipe(tmp_path)
+    kr = _make_key_ring()
+
+    fake_result = MagicMock(spec=TrainResult)
+
+    # Patch _run_training_locked so we don't need real training data.
+    with patch(
+        "recotem.training.pipeline._run_training_locked", return_value=fake_result
+    ) as mock_inner:
+        # recipe_lock is imported lazily from recotem.training.lock; also patch there.
+        with patch("recotem.training.lock.recipe_lock") as mock_lock:
+            result = run_training(
+                recipe,
+                key_ring=kr,
+                signing_key="active",
+                no_lock=True,
+                quiet=True,
+            )
+
+    mock_lock.assert_not_called()
+    mock_inner.assert_called_once()
+    assert result is fake_result
+
+
+def test_run_training_lock_contended_returns_none_default(tmp_path: Path) -> None:
+    """When the lock is held by another process and fail_on_busy=False, return None."""
+    import contextlib
+
+    from recotem.training.pipeline import run_training
+
+    recipe = _make_recipe(tmp_path)
+    kr = _make_key_ring()
+
+    # Simulate a contended lock by yielding False from recipe_lock.
+    @contextlib.contextmanager
+    def _contended_lock(path, *, fail_on_busy=False):
+        yield False
+
+    # recipe_lock is imported lazily from recotem.training.lock; patch it there.
+    with patch("recotem.training.lock.recipe_lock", _contended_lock):
+        result = run_training(
+            recipe,
+            key_ring=kr,
+            signing_key="active",
+            no_lock=False,
+            fail_on_busy=False,
+            quiet=True,
+        )
+    assert result is None
+
+
+def test_run_training_lock_contended_raises_when_fail_on_busy(tmp_path: Path) -> None:
+    """When the lock is held and fail_on_busy=True, LockContestedError is raised."""
+    import contextlib
+
+    from recotem.training.lock import LockContestedError
+    from recotem.training.pipeline import run_training
+
+    recipe = _make_recipe(tmp_path)
+    kr = _make_key_ring()
+
+    # Simulate the lock module raising LockContestedError when fail_on_busy=True.
+    @contextlib.contextmanager
+    def _contended_fail_on_busy(path, *, fail_on_busy=False):
+        if fail_on_busy:
+            raise LockContestedError(f"lock held at {path}")
+        yield False
+
+    with patch("recotem.training.lock.recipe_lock", _contended_fail_on_busy):
+        with pytest.raises(LockContestedError):
+            run_training(
+                recipe,
+                key_ring=kr,
+                signing_key="active",
+                no_lock=False,
+                fail_on_busy=True,
+                quiet=True,
+            )
+
+
+# ---------------------------------------------------------------------------
+# dev_allow_unsigned / signing key resolution
+# ---------------------------------------------------------------------------
+
+
+def test_run_training_dev_allow_unsigned_uses_in_memory_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """dev_allow_unsigned=True builds an in-memory dev KeyRing (kid=='dev').
+
+    We mock _run_training_locked so this test can verify KeyRing construction
+    without needing real training data.
+    """
+    monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
+
+    from recotem.training.pipeline import TrainResult, run_training
+
+    recipe = _make_recipe(tmp_path)
+
+    captured_key_rings: list = []
+
+    def _capture_inner(**kwargs):
+        captured_key_rings.append(kwargs.get("key_ring"))
+        return MagicMock(spec=TrainResult)
+
+    with patch(
+        "recotem.training.pipeline._run_training_locked", side_effect=_capture_inner
+    ):
+        result = run_training(
+            recipe,
+            key_ring=None,  # force auto-build from env
+            no_lock=True,
+            dev_allow_unsigned=True,
+            quiet=True,
+        )
+
+    assert result is not None
+    assert len(captured_key_rings) == 1
+    kr = captured_key_rings[0]
+    assert kr.active_kid == "dev"
+
+
+def test_run_training_missing_signing_key_raises_with_clear_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No RECOTEM_SIGNING_KEYS + dev_allow_unsigned=False → TrainingError with code."""
+    monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
+
+    from recotem.training.errors import TrainingError
+    from recotem.training.pipeline import run_training
+
+    recipe = _make_recipe(tmp_path)
+
+    with pytest.raises(TrainingError) as exc_info:
+        run_training(
+            recipe,
+            key_ring=None,
+            no_lock=True,
+            dev_allow_unsigned=False,
+            quiet=True,
+        )
+
+    assert exc_info.value.code == "signing_key_missing"
+    assert "RECOTEM_SIGNING_KEYS" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# get_source_class / datasource dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_run_training_uses_get_source_class_for_fetch(tmp_path: Path) -> None:
+    """_fetch_data calls get_source_class with the recipe's source.type.
+
+    get_source_class is imported lazily inside _fetch_data; we patch it at
+    the registry module where it is defined.
+    """
+    from recotem.training.pipeline import _fetch_data
+
+    recipe = _make_recipe(tmp_path)
+
+    import pandas as pd
+
+    mock_source = MagicMock()
+    mock_source.fetch.return_value = pd.DataFrame(
+        {"user_id": ["u1", "u2"], "item_id": ["i1", "i2"]}
+    )
+    mock_source_cls = MagicMock(return_value=mock_source)
+
+    with patch(
+        "recotem.datasource.registry.get_source_class",
+        return_value=mock_source_cls,
+    ) as mock_gsc:
+        df = _fetch_data(recipe, run_id="test-run")
+
+    # get_source_class must have been called with the recipe's source type.
+    mock_gsc.assert_called_once_with("csv")
+    assert len(df) == 2

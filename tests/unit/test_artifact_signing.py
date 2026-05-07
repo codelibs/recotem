@@ -7,6 +7,8 @@ Tests:
 - Unknown kid rejected
 - SafeUnpickler allow-list (parameterised gadget rejection)
 - KeyRing rotation semantics
+- Module-prefix allow-list (_module_matches, _is_allowed)
+- Denied numpy sub-trees (testing, distutils, f2py, ctypeslib)
 """
 
 from __future__ import annotations
@@ -220,3 +222,152 @@ def test_unpickle_with_disallowed_class_raises_artifact_error() -> None:
     payload = pickle.dumps(_Exploit(), protocol=4)  # noqa: S301
     with pytest.raises(ArtifactError, match="not allowed"):
         unpickle_payload(payload)
+
+
+# ---------------------------------------------------------------------------
+# Module-prefix allow-list: _module_matches helper
+# ---------------------------------------------------------------------------
+
+
+def test_module_matches_helper_with_trailing_dot() -> None:
+    """A pattern ending in '.' matches any module that starts with that prefix."""
+    from recotem.artifact.signing import _module_matches
+
+    assert _module_matches("numpy.core.multiarray", ("numpy.",)) is True
+    assert _module_matches("numpy._core.numeric", ("numpy.",)) is True
+    # Does not match an unrelated module even if it starts with the same letters.
+    assert _module_matches("numpyextension.foo", ("numpy.",)) is False
+
+
+def test_module_matches_helper_without_trailing_dot() -> None:
+    """A pattern without trailing '.' matches only the exact module string."""
+    from recotem.artifact.signing import _module_matches
+
+    assert _module_matches("numpy", ("numpy",)) is True
+    assert _module_matches("numpy.core", ("numpy",)) is False  # must be exact
+    assert _module_matches("numpyx", ("numpy",)) is False
+
+
+# ---------------------------------------------------------------------------
+# Module-prefix allow-list: _is_allowed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "numpy.foo",
+        "numpy._core.multiarray",
+        "numpy._core.numeric",
+        "numpy.dtypes",
+        "numpy.fft",
+        "numpy.linalg",
+        "numpy.random",
+    ],
+)
+def test_module_prefix_allow_numpy_subpaths(module: str) -> None:
+    """numpy sub-modules are allowed unless they fall under a denied prefix."""
+    from recotem.artifact.signing import _is_allowed
+
+    # Use an innocuous name that is not in _ALLOWED_CLASSES so we exercise
+    # the prefix path only (not the exact-match path).
+    assert _is_allowed(module, "_reconstruct") is True
+
+
+def test_module_prefix_deny_numpy_lib_overrides_allow() -> None:
+    """numpy.lib has DataSource / open_memmap / utils gadgets and is denied
+    even though the broader numpy.* prefix is allowed."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("numpy.lib", "DataSource") is False
+    assert _is_allowed("numpy.lib.npyio", "open_memmap") is False
+    assert _is_allowed("numpy.lib.format", "_read_array_header_2_0") is False
+
+
+def test_module_prefix_deny_numpy_compat() -> None:
+    """numpy.compat is a legacy shim subtree and is denied."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("numpy.compat", "asbytes") is False
+    assert _is_allowed("numpy.compat.py3k", "asunicode") is False
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "scipy.sparse.foo",
+        "scipy.sparse._compressed",
+        "scipy.sparse._data_matrix",
+    ],
+)
+def test_module_prefix_allow_scipy_sparse_subpaths(module: str) -> None:
+    """scipy.sparse sub-modules are allowed via the prefix allow-list."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed(module, "some_internal") is True
+
+
+def test_module_prefix_deny_scipy_sparse_linalg() -> None:
+    """scipy.sparse.linalg is denied: LinearOperator accepts arbitrary callables."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("scipy.sparse.linalg", "LinearOperator") is False
+    assert _is_allowed("scipy.sparse.linalg.eigen.arpack", "_arpack") is False
+
+
+def test_module_prefix_deny_scipy_sparse_tests() -> None:
+    """scipy.sparse.tests is the test runner subtree and is denied."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("scipy.sparse.tests", "test_base") is False
+    assert _is_allowed("scipy.sparse.tests.test_csr", "TestCSR") is False
+
+
+def test_module_prefix_deny_scipy_sparse_csgraph() -> None:
+    """scipy.sparse.csgraph C extensions are denied even though core sparse is allowed."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("scipy.sparse.csgraph", "shortest_path") is False
+    assert _is_allowed("scipy.sparse.csgraph._traversal", "_traverse") is False
+
+
+def test_module_prefix_deny_numpy_testing_overrides_allow() -> None:
+    """numpy.testing is in the denied list even though numpy.* is broadly allowed."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("numpy.testing", "run_module_suite") is False
+    assert _is_allowed("numpy.testing.decorators", "knownfailureif") is False
+
+
+def test_module_prefix_deny_numpy_distutils() -> None:
+    """numpy.distutils sub-tree is denied (build helper, not safe)."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("numpy.distutils", "exec_command") is False
+    assert _is_allowed("numpy.distutils.command", "build_clib") is False
+
+
+def test_module_prefix_deny_numpy_f2py() -> None:
+    """numpy.f2py sub-tree is denied (code-generator gadget)."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("numpy.f2py", "run_main") is False
+    assert _is_allowed("numpy.f2py.crackfortran", "crackline") is False
+
+
+def test_module_prefix_deny_numpy_ctypeslib() -> None:
+    """numpy.ctypeslib is denied (foreign function bindings)."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("numpy.ctypeslib", "load_library") is False
+    assert _is_allowed("numpy.ctypeslib._ctypes_loader", "_something") is False
+
+
+def test_module_prefix_does_not_match_unrelated_modules() -> None:
+    """Unrelated modules (requests, os) are not allowed via the prefix list."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("requests", "get") is False
+    assert _is_allowed("os", "system") is False
+    assert _is_allowed("requests.adapters", "HTTPAdapter") is False
+    assert _is_allowed("subprocess", "Popen") is False

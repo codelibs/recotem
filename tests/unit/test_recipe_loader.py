@@ -1,7 +1,7 @@
 """Unit tests for recotem.recipe.loader.
 
 Tests env expansion (allow/blacklist/missing/never inside query),
-path scheme allow-list, name regex enforcement, duplicate detection,
+path scheme direction-aware policy, name regex enforcement, duplicate detection,
 line-number errors, artifact root containment, and recipe file containment.
 """
 
@@ -181,48 +181,140 @@ output:
 
 
 # ---------------------------------------------------------------------------
-# Path scheme allow-list
+# Path scheme — direction-aware policy
 # ---------------------------------------------------------------------------
 
 
-def test_path_field_with_file_scheme_rejected(tmp_path: Path) -> None:
-    content = MINIMAL_RECIPE_TEMPLATE.format(
-        name="file_scheme",
-        output_path="file:///tmp/out.recotem",
-    )
+def test_input_source_with_https_scheme_accepted_when_sha256_set(
+    tmp_path: Path,
+) -> None:
+    """HTTPS source paths load when sha256 is provided. (Network rule covered in Task 4.)"""
+    out = tmp_path / "https_input_ok.recotem"
+    content = f"""\
+name: https_input_ok
+source:
+  type: csv
+  path: https://example.com/data.csv
+  sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
     p = _write_recipe(tmp_path, content)
-    with pytest.raises(RecipeError, match="scheme"):
-        load_recipe(p)
+    recipe = load_recipe(p)
+    assert recipe.source.path == "https://example.com/data.csv"
 
 
-def test_path_field_with_http_scheme_rejected(tmp_path: Path) -> None:
+def test_input_source_with_file_scheme_accepted(tmp_path: Path) -> None:
+    """file:// is accepted on input paths (equivalent to bare local)."""
+    out = tmp_path / "file_input_ok.recotem"
+    content = f"""\
+name: file_input_ok
+source:
+  type: csv
+  path: file:///tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
+    p = _write_recipe(tmp_path, content)
+    recipe = load_recipe(p)
+    assert recipe.source.path == "file:///tmp/data.csv"
+
+
+def test_output_path_with_http_scheme_rejected(tmp_path: Path) -> None:
+    """http:// is not writeable by fsspec; reject at load time."""
     content = MINIMAL_RECIPE_TEMPLATE.format(
-        name="http_scheme",
+        name="http_output",
         output_path="http://example.com/out.recotem",
     )
     p = _write_recipe(tmp_path, content)
-    with pytest.raises(RecipeError, match="scheme"):
+    with pytest.raises(RecipeError, match="does not support"):
         load_recipe(p)
 
 
-def test_path_field_with_embedded_credentials_rejected(tmp_path: Path) -> None:
+def test_output_path_with_https_scheme_rejected(tmp_path: Path) -> None:
     content = MINIMAL_RECIPE_TEMPLATE.format(
-        name="cred_path",
-        output_path="s3://AKIA123:secret@bucket/out.recotem",
+        name="https_output",
+        output_path="https://example.com/out.recotem",
     )
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="does not support"):
+        load_recipe(p)
+
+
+def test_output_path_with_memory_scheme_rejected(tmp_path: Path) -> None:
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="memory_output",
+        output_path="memory://out.recotem",
+    )
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="does not support"):
+        load_recipe(p)
+
+
+def test_output_path_with_file_scheme_accepted(tmp_path: Path) -> None:
+    """file:// is treated equivalent to bare local path on output."""
+    out = tmp_path / "out.recotem"
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="file_output_ok",
+        output_path=f"file://{out}",
+    )
+    p = _write_recipe(tmp_path, content)
+    recipe = load_recipe(p)
+    assert recipe.output.path == f"file://{out}"
+
+
+def test_output_path_with_s3_scheme_accepted(tmp_path: Path) -> None:
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="s3_output_ok",
+        output_path="s3://my-bucket/out.recotem",
+    )
+    p = _write_recipe(tmp_path, content)
+    recipe = load_recipe(p)
+    assert recipe.output.path == "s3://my-bucket/out.recotem"
+
+
+def test_input_source_with_embedded_credentials_rejected(tmp_path: Path) -> None:
+    out = tmp_path / "cred.recotem"
+    content = f"""\
+name: cred_input
+source:
+  type: csv
+  path: https://user:pass@example.com/data.csv
+  sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
     p = _write_recipe(tmp_path, content)
     with pytest.raises(RecipeError, match="credentials"):
         load_recipe(p)
 
 
-def test_s3_path_without_credentials_accepted(tmp_path: Path) -> None:
+def test_output_path_with_embedded_credentials_rejected(tmp_path: Path) -> None:
     content = MINIMAL_RECIPE_TEMPLATE.format(
-        name="s3_ok",
-        output_path="s3://my-bucket/models/out.recotem",
+        name="cred_output",
+        output_path="s3://AKIA123:secret@bucket/out.recotem",
     )
     p = _write_recipe(tmp_path, content)
-    recipe = load_recipe(p)
-    assert recipe.output.path == "s3://my-bucket/models/out.recotem"
+    with pytest.raises(RecipeError, match="credentials"):
+        load_recipe(p)
 
 
 # ---------------------------------------------------------------------------

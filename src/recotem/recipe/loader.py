@@ -18,46 +18,48 @@ from recotem.recipe.models import Recipe
 logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Path scheme allow-list
+# Path-scheme policy
 # ---------------------------------------------------------------------------
 
-_ALLOWED_SCHEMES: frozenset[str] = frozenset({"s3", "gs", "az"})
-_REJECTED_SCHEMES: frozenset[str] = frozenset(
-    {"file", "http", "https", "ftp", "ftps", "memory"}
+# Schemes for which `output.path` is rejected because writing is not
+# supported by fsspec / urllib. (See spec §5.3.)
+_OUTPUT_REJECTED_SCHEMES: frozenset[str] = frozenset(
+    {"http", "https", "ftp", "ftps", "memory"}
 )
 
+# Schemes that involve an unauthenticated network fetch. Used by the
+# sha256-required post-validator (added in Task 4).
+_NETWORK_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
-def _validate_path(path: str, field_name: str) -> None:
-    """Check path scheme and reject embedded credentials.
 
-    Raises
-    ------
-    RecipeError
-        On disallowed scheme or embedded userinfo credentials.
-    """
+def _network_scheme(path: str) -> bool:
+    """True iff *path* uses a scheme in `_NETWORK_SCHEMES`."""
+    return urlparse(path).scheme.lower() in _NETWORK_SCHEMES
+
+
+def _check_userinfo(path: str, field_name: str) -> None:
     parsed = urlparse(path)
-
-    scheme = parsed.scheme.lower() if parsed.scheme else ""
-
-    # Reject explicitly disallowed schemes.
-    if scheme in _REJECTED_SCHEMES:
-        raise RecipeError(
-            f"'{field_name}' uses the disallowed scheme '{scheme}://'. "
-            f"Allowed schemes: bare local path, s3://, gs://, az://."
-        )
-
-    # Reject unknown non-empty schemes (forward-compat guard).
-    if scheme and scheme not in _ALLOWED_SCHEMES:
-        raise RecipeError(
-            f"'{field_name}' uses unknown scheme '{scheme}://'. "
-            f"Allowed: bare local path, s3://, gs://, az://."
-        )
-
-    # Reject embedded credentials (URI userinfo).
     if parsed.username or parsed.password:
         raise RecipeError(
             f"'{field_name}' contains embedded credentials in the URI. "
-            "Use ADC / instance profile / environment for cloud authentication."
+            "Use environment-based authentication instead."
+        )
+
+
+def _validate_input_path(path: str, field_name: str) -> None:
+    """Validate an input-side path (source.path, item_metadata.path)."""
+    _check_userinfo(path, field_name)
+
+
+def _validate_output_path(path: str, field_name: str) -> None:
+    """Validate an output-side path (output.path)."""
+    _check_userinfo(path, field_name)
+    parsed = urlparse(path)
+    scheme = (parsed.scheme or "").lower()
+    if scheme in _OUTPUT_REJECTED_SCHEMES:
+        raise RecipeError(
+            f"'{field_name}' uses scheme '{scheme}://' which does not support "
+            "writes. Use a bare local path, file://, s3://, gs://, or az://."
         )
 
 
@@ -277,26 +279,23 @@ def load_recipe(
 
 def _validate_path_fields(data: dict[str, Any]) -> None:
     """Validate scheme + credentials for all path fields in the raw dict."""
-    # output.path
     output = data.get("output")
     if isinstance(output, dict):
         output_path = output.get("path")
         if isinstance(output_path, str):
-            _validate_path(output_path, "output.path")
+            _validate_output_path(output_path, "output.path")
 
-    # source.path (CSV / Parquet sources)
     source = data.get("source")
     if isinstance(source, dict):
         source_path = source.get("path")
         if isinstance(source_path, str):
-            _validate_path(source_path, "source.path")
+            _validate_input_path(source_path, "source.path")
 
-    # item_metadata.path
     item_metadata = data.get("item_metadata")
     if isinstance(item_metadata, dict):
         meta_path = item_metadata.get("path")
         if isinstance(meta_path, str):
-            _validate_path(meta_path, "item_metadata.path")
+            _validate_input_path(meta_path, "item_metadata.path")
 
 
 def load_recipes_directory(

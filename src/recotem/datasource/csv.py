@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+from io import BytesIO
 from typing import TYPE_CHECKING, ClassVar
+from urllib.parse import urlparse, urlunparse
 
 import structlog
 from pydantic import BaseModel, Field
@@ -13,6 +17,45 @@ if TYPE_CHECKING:
     import pandas as pd
 
 logger = structlog.get_logger(__name__)
+
+_NETWORK_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+
+_COMPRESSION_MAP: dict[str, str] = {
+    ".gz": "gzip",
+    ".bz2": "bz2",
+    ".zip": "zip",
+    ".xz": "xz",
+}
+
+
+def _redact_url_userinfo(path: str) -> str:
+    """Strip any userinfo from URL-shaped *path* before logging."""
+    parsed = urlparse(path)
+    if not parsed.username and not parsed.password:
+        return path
+    netloc = parsed.hostname or ""
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _infer_compression(path: str) -> str | None:
+    """Pandas-style compression hint from path extension. Returns None if plain."""
+    lower_path = urlparse(path).path.lower() if "://" in path else path.lower()
+    for ext, codec in _COMPRESSION_MAP.items():
+        if lower_path.endswith(ext):
+            return codec
+    return None
+
+
+def _verify_sha256(actual: bytes, expected_hex: str) -> None:
+    """hmac.compare_digest the sha256 of *actual* vs *expected_hex*."""
+    digest = hashlib.sha256(actual).hexdigest()
+    if not hmac.compare_digest(digest, expected_hex):
+        # Show only first 8 chars on each side to avoid leaking ground truth.
+        raise DataSourceError(
+            f"sha256 mismatch: got {digest[:8]}…, expected {expected_hex[:8]}…"
+        )
 
 
 class CSVConfig(BaseModel, extra="forbid"):
@@ -62,26 +105,33 @@ class CSVSource:
         DataSourceError
             On any I/O, parse, or schema error.
         """
+        import fsspec
         import pandas as pd
 
         cfg = self._config
+        scheme = urlparse(cfg.path).scheme.lower()
+        is_network = scheme in _NETWORK_SCHEMES
+        safe_path = _redact_url_userinfo(cfg.path)
+
         logger.info(
             "csv_source_fetch_start",
             recipe=ctx.recipe_name,
             run_id=ctx.run_id,
-            path=cfg.path,
+            path=safe_path,
+            scheme=scheme or "local",
         )
 
-        read_kwargs: dict = {
-            "sep": cfg.delimiter,
-            "encoding": cfg.encoding,
-            "header": cfg.header,
-        }
-        if cfg.dtype:
-            read_kwargs["dtype"] = cfg.dtype
+        if is_network:
+            # Implemented in Task 6; raise here so callers get a clear error
+            # if they try to use the partial implementation.
+            raise DataSourceError(
+                f"Network-scheme CSV fetch is not yet wired for '{safe_path}'."
+            )
 
+        # Non-network path: read via fsspec, then verify sha256 if set.
         try:
-            df: pd.DataFrame = pd.read_csv(cfg.path, **read_kwargs)
+            with fsspec.open(cfg.path, "rb") as f:
+                raw_bytes = f.read()
         except FileNotFoundError as exc:
             raise DataSourceError(f"CSV file not found: {cfg.path}") from exc
         except PermissionError as exc:
@@ -93,16 +143,43 @@ class CSVSource:
                 f"Failed to read CSV from '{cfg.path}': {exc}"
             ) from exc
 
+        if cfg.sha256 is not None:
+            _verify_sha256(raw_bytes, cfg.sha256)
+            sha256_verified = True
+        else:
+            sha256_verified = False
+
+        compression = _infer_compression(cfg.path)
+
+        read_kwargs: dict = {
+            "sep": cfg.delimiter,
+            "encoding": cfg.encoding,
+            "header": cfg.header,
+            "compression": compression,
+        }
+        if cfg.dtype:
+            read_kwargs["dtype"] = cfg.dtype
+
+        try:
+            df: pd.DataFrame = pd.read_csv(BytesIO(raw_bytes), **read_kwargs)
+        except Exception as exc:
+            raise DataSourceError(
+                f"Failed to parse CSV from '{safe_path}': {exc}"
+            ) from exc
+
         if df.empty:
             raise DataSourceError(
-                f"CSV file '{cfg.path}' is empty (no data rows after header)."
+                f"CSV file '{safe_path}' is empty (no data rows after header)."
             )
 
         logger.info(
             "csv_source_fetch_done",
             recipe=ctx.recipe_name,
             run_id=ctx.run_id,
+            path=safe_path,
             rows=len(df),
+            bytes=len(raw_bytes),
+            sha256_verified=sha256_verified,
             columns=list(df.columns),
         )
         return df
@@ -149,18 +226,30 @@ class ParquetSource:
         DataSourceError
             On any I/O or parse error.
         """
+        import fsspec
         import pandas as pd
 
         cfg = self._config
+        scheme = urlparse(cfg.path).scheme.lower()
+        is_network = scheme in _NETWORK_SCHEMES
+        safe_path = _redact_url_userinfo(cfg.path)
+
         logger.info(
             "parquet_source_fetch_start",
             recipe=ctx.recipe_name,
             run_id=ctx.run_id,
-            path=cfg.path,
+            path=safe_path,
+            scheme=scheme or "local",
         )
 
+        if is_network:
+            raise DataSourceError(
+                f"Network-scheme Parquet fetch is not yet wired for '{safe_path}'."
+            )
+
         try:
-            df: pd.DataFrame = pd.read_parquet(cfg.path)
+            with fsspec.open(cfg.path, "rb") as f:
+                raw_bytes = f.read()
         except FileNotFoundError as exc:
             raise DataSourceError(f"Parquet file not found: {cfg.path}") from exc
         except PermissionError as exc:
@@ -172,11 +261,27 @@ class ParquetSource:
                 f"Failed to read Parquet from '{cfg.path}': {exc}"
             ) from exc
 
+        if cfg.sha256 is not None:
+            _verify_sha256(raw_bytes, cfg.sha256)
+            sha256_verified = True
+        else:
+            sha256_verified = False
+
+        try:
+            df: pd.DataFrame = pd.read_parquet(BytesIO(raw_bytes))
+        except Exception as exc:
+            raise DataSourceError(
+                f"Failed to parse Parquet from '{safe_path}': {exc}"
+            ) from exc
+
         logger.info(
             "parquet_source_fetch_done",
             recipe=ctx.recipe_name,
             run_id=ctx.run_id,
+            path=safe_path,
             rows=len(df),
+            bytes=len(raw_bytes),
+            sha256_verified=sha256_verified,
             columns=list(df.columns),
         )
         return df

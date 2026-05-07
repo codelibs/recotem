@@ -78,7 +78,6 @@ jobs:
     name: trivy vulnerability scan
     runs-on: ubuntu-24.04
     needs: build
-    if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
 

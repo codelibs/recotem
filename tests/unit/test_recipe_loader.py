@@ -595,3 +595,104 @@ output:
     p.write_text(content)
     with pytest.raises(RecipeError):
         load_recipe(p)
+
+
+# ---------------------------------------------------------------------------
+# sha256 required for network-scheme input paths
+# ---------------------------------------------------------------------------
+
+
+def test_https_source_without_sha256_rejected(tmp_path: Path) -> None:
+    out = tmp_path / "out.recotem"
+    content = f"""\
+name: https_no_sha
+source:
+  type: csv
+  path: https://example.com/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="sha256"):
+        load_recipe(p)
+
+
+def test_http_source_without_sha256_rejected(tmp_path: Path) -> None:
+    out = tmp_path / "out.recotem"
+    content = f"""\
+name: http_no_sha
+source:
+  type: csv
+  path: http://example.com/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="sha256"):
+        load_recipe(p)
+
+
+def test_https_item_metadata_without_sha256_rejected(tmp_path: Path) -> None:
+    out = tmp_path / "out.recotem"
+    content = f"""\
+name: https_meta_no_sha
+source:
+  type: csv
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+item_metadata:
+  type: csv
+  path: https://example.com/items.csv
+  fields: [title]
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="sha256"):
+        load_recipe(p)
+
+
+def test_local_source_without_sha256_accepted(tmp_path: Path) -> None:
+    """Bare local paths don't require sha256."""
+    p = _minimal(tmp_path, name="local_no_sha")
+    recipe = load_recipe(p)
+    assert recipe.source.sha256 is None
+
+
+def test_s3_source_without_sha256_accepted(tmp_path: Path) -> None:
+    """s3:// is not a network-fetch scheme — sha256 stays optional."""
+    out = tmp_path / "out.recotem"
+    content = f"""\
+name: s3_no_sha
+source:
+  type: csv
+  path: s3://my-bucket/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
+    p = _write_recipe(tmp_path, content)
+    recipe = load_recipe(p)
+    assert recipe.source.sha256 is None

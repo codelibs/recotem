@@ -266,6 +266,9 @@ def load_recipe(
         except Exception as exc:
             raise RecipeError(f"Recipe '{p}' source resolution failed: {exc}") from exc
 
+    # Enforce sha256 integrity pin for network-scheme paths.
+    _enforce_sha256_for_network_paths(recipe)
+
     # Local output path containment check.
     output_path = recipe.output.path
     _parsed_output = urlparse(output_path)
@@ -275,6 +278,43 @@ def load_recipe(
 
     logger.info("recipe_loaded", name=recipe.name, path=str(p))
     return recipe
+
+
+def _enforce_sha256_for_network_paths(recipe: Recipe) -> None:
+    """For source / item_metadata paths using a network scheme, require sha256.
+
+    Raises
+    ------
+    RecipeError
+        If a network-scheme path is missing the integrity pin.
+    """
+    src = recipe.source
+    src_path = getattr(src, "path", None)
+    if (
+        isinstance(src_path, str)
+        and _network_scheme(src_path)
+        and not getattr(src, "sha256", None)
+    ):
+        raise RecipeError(
+            f"'source.path' uses a network scheme "
+            f"({urlparse(src_path).scheme}://) and requires a 'sha256' "
+            "integrity pin. Compute it with `shasum -a 256 <file>` and "
+            "set `source.sha256: <hex>`."
+        )
+
+    meta = recipe.item_metadata
+    if meta is not None:
+        meta_path = getattr(meta, "path", None)
+        if (
+            isinstance(meta_path, str)
+            and _network_scheme(meta_path)
+            and not getattr(meta, "sha256", None)
+        ):
+            raise RecipeError(
+                f"'item_metadata.path' uses a network scheme "
+                f"({urlparse(meta_path).scheme}://) and requires a "
+                "'sha256' integrity pin."
+            )
 
 
 def _validate_path_fields(data: dict[str, Any]) -> None:

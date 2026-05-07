@@ -1,7 +1,7 @@
 # examples/k8s/serve-deployment.yaml
 #
 # Standalone (non-Helm) Deployment for recotem serve.
-# For production use the Helm chart at helm/recotem2/ instead —
+# For production use the Helm chart at helm/recotem/ instead —
 # this file is intended for quick experimentation or GitOps without Helm.
 #
 # Apply:
@@ -11,25 +11,25 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: recotem2-serve
+  name: recotem-serve
   namespace: recotem
   labels:
-    app.kubernetes.io/name: recotem2
+    app.kubernetes.io/name: recotem
     app.kubernetes.io/component: serve
     app.kubernetes.io/version: "2.0.0"
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app.kubernetes.io/name: recotem2
+      app.kubernetes.io/name: recotem
       app.kubernetes.io/component: serve
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: recotem2
+        app.kubernetes.io/name: recotem
         app.kubernetes.io/component: serve
     spec:
-      serviceAccountName: recotem2
+      serviceAccountName: recotem
       # Spread replicas across nodes for availability.
       topologySpreadConstraints:
         - maxSkew: 1
@@ -37,7 +37,7 @@ spec:
           whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:
-              app.kubernetes.io/name: recotem2
+              app.kubernetes.io/name: recotem
               app.kubernetes.io/component: serve
 
       securityContext:
@@ -73,12 +73,12 @@ spec:
             - name: RECOTEM_API_KEYS
               valueFrom:
                 secretKeyRef:
-                  name: recotem2-auth
+                  name: recotem-auth
                   key: RECOTEM_API_KEYS_SECRET
             - name: RECOTEM_SIGNING_KEYS
               valueFrom:
                 secretKeyRef:
-                  name: recotem2-auth
+                  name: recotem-auth
                   key: RECOTEM_SIGNING_KEYS_SECRET
 
           ports:
@@ -125,9 +125,9 @@ spec:
       volumes:
         - name: recipes
           configMap:
-            name: recotem2-recipes
+            name: recotem-recipes
         - name: artifacts
           persistentVolumeClaim:
-            claimName: recotem2-artifacts
+            claimName: recotem-artifacts
         - name: tmp
           emptyDir: {}

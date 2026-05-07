@@ -1,229 +1,109 @@
-name: publish-release
-on:
-  release:
-    types:
-      - created
-jobs:
-  build-backend-worker:
-    permissions:
-      contents: read
-      packages: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push docker image (backend)
-        uses: docker/build-push-action@v6
-        with:
-          context: backend
-          file: backend/Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ghcr.io/codelibs/recotem-backend:${{ github.ref_name }}
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
-      - name: Build and push docker image (worker)
-        uses: docker/build-push-action@v6
-        with:
-          context: backend
-          file: backend/Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ghcr.io/codelibs/recotem-worker:${{ github.ref_name }}
-          cache-from: type=gha,scope=worker
-          cache-to: type=gha,mode=max,scope=worker
+name: recotem / docker
 
-  build-proxy:
-    permissions:
-      contents: read
-      packages: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+# Build-only on pull requests; build + push on main branch and version tags.
+# Image: ghcr.io/codelibs/recotem
+# Dockerfile: Dockerfile
+# Security note: no untrusted user input (PR titles, commit messages, etc.) is
+# interpolated into any run: command. All github.event.* data is used only
+# via docker/metadata-action which handles escaping internally.
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]*"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Dockerfile"
+      - ".github/workflows/recotem-docker.yml"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: codelibs/recotem
+
+jobs:
+  build:
+    name: docker build
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - uses: actions/checkout@v4
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Login to GHCR
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push docker image (proxy)
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-
+
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: proxy.dockerfile
-          push: true
+          file: Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
-          tags: ghcr.io/codelibs/recotem-proxy:${{ github.ref_name }}
-          cache-from: type=gha,scope=proxy
-          cache-to: type=gha,mode=max,scope=proxy
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
 
-  scan-images:
-    needs: [build-backend-worker, build-proxy]
-    permissions:
-      contents: read
-      packages: read
-      security-events: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      matrix:
-        image: [recotem-backend, recotem-worker, recotem-proxy]
+  trivy:
+    name: trivy vulnerability scan
+    runs-on: ubuntu-24.04
+    needs: build
+    if: github.event_name == 'push'
     steps:
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - uses: actions/checkout@v4
+
+      - name: Build local image for scanning
+        uses: docker/build-push-action@v6
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Run Trivy vulnerability scanner (blocking)
-        uses: aquasecurity/trivy-action@0.34.1
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: recotem:scan
+          platforms: linux/amd64
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
         with:
-          image-ref: "ghcr.io/codelibs/${{ matrix.image }}:${{ github.ref_name }}"
-          format: 'table'
-          exit-code: '1'
-          severity: 'CRITICAL,HIGH'
-          scanners: vuln
-      - name: Run Trivy vulnerability scanner (SARIF report)
-        uses: aquasecurity/trivy-action@0.34.1
+          image-ref: recotem:scan
+          format: sarif
+          output: trivy-results.sarif
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+
+      - name: Upload Trivy SARIF
+        uses: actions/upload-artifact@v8
         if: always()
         with:
-          image-ref: "ghcr.io/codelibs/${{ matrix.image }}:${{ github.ref_name }}"
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH,MEDIUM'
-          scanners: vuln
-      - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        with:
-          sarif_file: 'trivy-results.sarif'
-
-  sign-images:
-    needs: [build-backend-worker, build-proxy]
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      matrix:
-        image: [recotem-backend, recotem-worker, recotem-proxy]
-    steps:
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Sign container image
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-          IMAGE_REF: ghcr.io/codelibs/${{ matrix.image }}:${{ github.ref_name }}
-        run: cosign sign --yes "${IMAGE_REF}"
-
-  generate-sbom:
-    needs: [build-backend-worker, build-proxy]
-    permissions:
-      contents: read
-      packages: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      matrix:
-        image: [recotem-backend, recotem-worker, recotem-proxy]
-    steps:
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Generate SBOM with Syft
-        uses: anchore/sbom-action@v0
-        with:
-          image: ghcr.io/codelibs/${{ matrix.image }}:${{ github.ref_name }}
-          format: spdx-json
-          output-file: ${{ matrix.image }}-sbom.spdx.json
-      - name: Upload SBOM
-        uses: actions/upload-artifact@v7
-        with:
-          name: sbom-${{ matrix.image }}
-          path: ${{ matrix.image }}-sbom.spdx.json
-
-  helm-package:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: [build-backend-worker, build-proxy]
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-      - name: Lint Helm chart
-        run: helm lint helm/recotem/
-      - name: Package Helm chart
-        env:
-          TAG_REF: ${{ github.ref_name }}
-        run: |
-          helm package helm/recotem/ --version "${TAG_REF#v}" --app-version "${TAG_REF#v}"
-      - name: Upload Helm package
-        uses: actions/upload-artifact@v7
-        with:
-          name: helm-chart
-          path: recotem-*.tgz
-
-  upload-release-artifact:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: [build-backend-worker, build-proxy, helm-package, generate-sbom, scan-images]
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Setup python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-      - name: Build release object
-        run: pip install PyYAML>=6.0.2 && python release.py
-      - name: Download Helm chart
-        uses: actions/download-artifact@v8
-        with:
-          name: helm-chart
-      - name: Download SBOMs
-        uses: actions/download-artifact@v8
-        with:
-          pattern: sbom-*
-          merge-multiple: true
-      - name: Release
-        env:
-          TAG_REF: ${{ github.ref_name }}
-        run: |
-          gh release upload "${TAG_REF}" "recotem-compose-${TAG_REF}.zip#Docker resources to try out" --clobber
-          gh release upload "${TAG_REF}" recotem-*.tgz#"Helm chart" --clobber
-          for sbom in *-sbom.spdx.json; do
-            gh release upload "${TAG_REF}" "${sbom}#SBOM (${sbom%-sbom.spdx.json})" --clobber
-          done
+          name: trivy-results
+          path: trivy-results.sarif

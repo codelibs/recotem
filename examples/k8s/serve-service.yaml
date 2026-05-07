@@ -8,15 +8,15 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: recotem2-serve
+  name: recotem-serve
   namespace: recotem
   labels:
-    app.kubernetes.io/name: recotem2
+    app.kubernetes.io/name: recotem
     app.kubernetes.io/component: serve
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: recotem2
+    app.kubernetes.io/name: recotem
     app.kubernetes.io/component: serve
   ports:
     - name: http

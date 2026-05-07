@@ -4,7 +4,7 @@
 # References the helm-installed serve Deployment's shared artifacts PVC.
 #
 # This is a standalone example; for a Helm-managed CronJob, enable
-# .Values.train.enabled=true in the recotem2 Helm chart instead.
+# .Values.train.enabled=true in the recotem Helm chart instead.
 #
 # Usage:
 #   kubectl apply -f examples/k8s/cronjob.yaml
@@ -12,10 +12,10 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: recotem2-train
+  name: recotem-train
   namespace: recotem
   labels:
-    app.kubernetes.io/name: recotem2
+    app.kubernetes.io/name: recotem
     app.kubernetes.io/component: train
 spec:
   # Daily at 02:00 UTC.
@@ -30,10 +30,10 @@ spec:
       template:
         metadata:
           labels:
-            app.kubernetes.io/name: recotem2
+            app.kubernetes.io/name: recotem
             app.kubernetes.io/component: train
         spec:
-          serviceAccountName: recotem2
+          serviceAccountName: recotem
           restartPolicy: OnFailure
           securityContext:
             runAsNonRoot: true
@@ -62,7 +62,7 @@ spec:
                 - name: RECOTEM_SIGNING_KEYS
                   valueFrom:
                     secretKeyRef:
-                      name: recotem2-auth
+                      name: recotem-auth
                       key: RECOTEM_SIGNING_KEYS_SECRET
               resources:
                 requests:
@@ -84,9 +84,9 @@ spec:
           volumes:
             - name: recipes
               configMap:
-                name: recotem2-recipes
+                name: recotem-recipes
             - name: artifacts
               persistentVolumeClaim:
-                claimName: recotem2-artifacts
+                claimName: recotem-artifacts
             - name: tmp
               emptyDir: {}

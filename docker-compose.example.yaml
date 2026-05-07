@@ -17,7 +17,7 @@ x-recotem-image: &recotem-image
   # To build locally:
   # build:
   #   context: .
-  #   dockerfile: Dockerfile.recotem2
+  #   dockerfile: Dockerfile
 
 services:
 

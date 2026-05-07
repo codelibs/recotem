@@ -1,0 +1,122 @@
+{{- if .Values.train.enabled -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "recotem.fullname" . }}-train
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "recotem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: train
+spec:
+  # Default: daily at 02:00 UTC.  Override via .Values.train.schedule.
+  schedule: {{ .Values.train.schedule | quote }}
+  concurrencyPolicy: {{ .Values.train.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.train.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.train.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      # Allow up to 1 h for a single training run before hard-kill.
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            {{- include "recotem.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: train
+        spec:
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          serviceAccountName: {{ include "recotem.serviceAccountName" . }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          restartPolicy: OnFailure
+
+          containers:
+            - name: train
+              image: {{ include "recotem.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              {{- if .Values.train.recipeFiles }}
+              # Train specific recipe files listed in .Values.train.recipeFiles.
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  for recipe in {{ .Values.train.recipeFiles }}; do
+                    recotem train {{ .Values.recipes.mountPath }}/${recipe}{{ if .Values.train.failOnBusy }} --fail-on-busy{{ end }}
+                  done
+              {{- else }}
+              # Train all *.yaml recipes in the recipes directory.
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  for recipe in {{ .Values.recipes.mountPath }}/*.yaml; do
+                    [ -f "$recipe" ] || continue
+                    recotem train "$recipe"{{ if .Values.train.failOnBusy }} --fail-on-busy{{ end }}
+                  done
+              {{- end }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+
+              env:
+                {{- range $key, $value := .Values.train.env }}
+                {{- if $value }}
+                - name: {{ $key }}
+                  value: {{ $value | quote }}
+                {{- end }}
+                {{- end }}
+                # Signing keys from the shared Kubernetes Secret.
+                - name: RECOTEM_SIGNING_KEYS
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secrets.secretName }}
+                      key: RECOTEM_SIGNING_KEYS_SECRET
+
+              resources:
+                {{- toYaml .Values.train.resources | nindent 16 }}
+
+              volumeMounts:
+                - name: recipes
+                  mountPath: {{ .Values.recipes.mountPath }}
+                  readOnly: true
+                {{- if .Values.artifacts.enabled }}
+                - name: artifacts
+                  mountPath: {{ .Values.artifacts.mountPath }}
+                  # Train needs write access; readOnly must be false for the train job.
+                  readOnly: false
+                {{- end }}
+                - name: tmp
+                  mountPath: /tmp
+
+          volumes:
+            - name: recipes
+              {{- if eq .Values.recipes.source "configMap" }}
+              configMap:
+                name: {{ .Values.recipes.configMap.name }}
+              {{- else if eq .Values.recipes.source "pvc" }}
+              persistentVolumeClaim:
+                claimName: {{ .Values.recipes.pvc.claimName }}
+                readOnly: true
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+            {{- if .Values.artifacts.enabled }}
+            - name: artifacts
+              persistentVolumeClaim:
+                claimName: {{ .Values.artifacts.pvc.claimName }}
+            {{- end }}
+            - name: tmp
+              emptyDir: {}
+
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

@@ -1,5 +1,0 @@
-[run]
-omit =
-    */.local/*
-    utils/tirefire.py
-    */commands/*.py

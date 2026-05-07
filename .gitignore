@@ -20,37 +20,24 @@ venv/
 .coverage
 **/coverage.xml
 .ruff_cache/
-
-# Django
-**/db.sqlite3
-backend/recotem/htmlcov/
-
-# Node.js
-node_modules/
-npm-debug.log*
-
-# Frontend build
-/dist/
-frontend/dist/
-backend/recotem/dist/
-backend/recotem/data/
-frontend/coverage/
-frontend/imgs/
-
-# Frontend misc
-frontend/.vite/
-frontend/playwright-report/
-frontend/test-results/
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+*.egg-info/
+build/
+dist/
 
 # Environment
+.env
 .env.local
 .env.*.local
-envs/dev.env
-envs/production.env
 
-# Deployment artifacts
-recotem-compose/
-recotem-compose*.zip
+# Recotem runtime artifacts (local dev only)
+artifacts/
+recipes/local/
+*.recotem
+*.recotem.lock
+*.recotem.tmp
 
 # Tools
 .serena/

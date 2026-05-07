@@ -255,3 +255,74 @@ def test_train_then_serve_full_artifact_roundtrip(tmp_path: Path) -> None:
     # Each recommendation is a (item_id, score) pair.
     assert isinstance(recs[0][0], str)
     assert isinstance(recs[0][1], float)
+
+
+def test_train_append_sha_then_serve_resolves_pointer(tmp_path: Path) -> None:
+    """Regression: serve must read artifacts written under the documented
+    default ``versioning: append_sha``.
+
+    Earlier the serving layer's ``_read_artifact_bytes`` did not call
+    ``resolve_artifact_pointer``, so it tried to parse the pointer's ASCII
+    contents as a binary container and failed with ``magic bytes mismatch``.
+    The e2e shell test happens to use ``always_overwrite`` and missed this.
+    """
+    from recotem.artifact.io import read_artifact
+    from recotem.artifact.signing import KeyRing, unpickle_payload
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+    from recotem.serving.watcher import _read_artifact_bytes
+    from recotem.training.pipeline import run_training
+
+    csv_file = _make_tiny_synthetic_csv(tmp_path, n_users=10, n_items=10)
+    pointer_path = str(tmp_path / "synthetic.recotem")
+
+    recipe = Recipe(
+        name="synthetic-pointer",
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        training=TrainingConfig(
+            algorithms=["TopPop"],
+            n_trials=1,
+            cutoff=5,
+            split=SplitConfig(scheme="random", heldout_ratio=0.2, seed=0),
+        ),
+        # Documented default — exercise the pointer-resolving path.
+        output=OutputConfig(path=pointer_path, versioning="append_sha"),
+    )
+
+    kr = KeyRing("dev:" + ("0" * 64))
+    result = run_training(
+        recipe,
+        key_ring=kr,
+        signing_key="dev",
+        no_lock=True,
+        dev_allow_unsigned=True,
+        quiet=True,
+    )
+
+    # write_artifact in append_sha mode returns the sha-suffixed path,
+    # not the pointer.  The pointer file at recipe.output.path must contain
+    # only an ASCII basename.
+    assert result.artifact_path != pointer_path
+    pointer_contents = Path(pointer_path).read_bytes()
+    assert len(pointer_contents) < 512, "pointer file should be tiny ASCII"
+    assert pointer_contents.strip().endswith(b".recotem")
+
+    # 1. read_artifact via fsspec resolves the pointer transparently.
+    header, payload_bytes = read_artifact(pointer_path, kr)
+    recommender = unpickle_payload(payload_bytes)
+    assert recommender is not None
+
+    # 2. The serving layer's helper (which previously failed) must also
+    # transparently resolve the pointer to artifact bytes.  The first eight
+    # bytes of a real artifact are "RECOTEM\x00".
+    resolved = _read_artifact_bytes(pointer_path, max_bytes=10 * 1024 * 1024)
+    assert resolved.startswith(b"RECOTEM\x00"), (
+        "_read_artifact_bytes must resolve the pointer to raw artifact bytes"
+    )

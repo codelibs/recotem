@@ -3,7 +3,7 @@
 Tests:
 - end-to-end on small MovieLens slice with n_trials=2
 - min_data_violation (min_rows, min_users, min_items)
-- dedup policies (keep_last, sum_weight)
+- dedup policies (keep_last; sum_weight is schema-rejected)
 - drop_null_ids default true records drop_count
 - string-coerce user and item ids
 - all-trials-failing -> SearchError/TrainingError exit4
@@ -199,20 +199,15 @@ def test_dedup_keep_last_resolves_duplicates(tmp_path: Path) -> None:
     assert drop_count >= 0
 
 
-def test_dedup_sum_weight_aggregates_counts(tmp_path: Path) -> None:
-    from recotem.training.pipeline import _cleanse
+def test_dedup_sum_weight_rejected_by_schema(tmp_path: Path) -> None:
+    """sum_weight was documented but never plumbed through to the sparse-
+    matrix builder, so it is rejected at recipe-validation time.  Older
+    recipes that still set it must fail loudly rather than silently
+    behaving like keep_first."""
+    from pydantic import ValidationError
 
-    recipe = _make_recipe(tmp_path, dedup="sum_weight")
-    df = pd.DataFrame(
-        {
-            "user_id": ["u1", "u1", "u2"],
-            "item_id": ["i1", "i1", "i2"],
-        }
-    )
-    result, _ = _cleanse(df, recipe)
-    # sum_weight reduces duplicates to one row
-    u1_i1 = result[(result["user_id"] == "u1") & (result["item_id"] == "i1")]
-    assert len(u1_i1) == 1
+    with pytest.raises(ValidationError):
+        _make_recipe(tmp_path, dedup="sum_weight")
 
 
 # ---------------------------------------------------------------------------

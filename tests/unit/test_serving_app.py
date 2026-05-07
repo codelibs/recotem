@@ -333,3 +333,96 @@ def test_security_posture_log_unsafe_mode_false_when_auth_enabled(
     posture_events = [e for e in captured if e.get("event") == "security.posture"]
     assert posture_events, "security.posture log event must be emitted"
     assert posture_events[0]["unsafe_mode"] is False
+
+
+# ---------------------------------------------------------------------------
+# Failed-load handling — /health degraded + stub registry entry
+# ---------------------------------------------------------------------------
+
+
+def _write_recipe_yaml(recipes_dir: Path, name: str, output_path: Path) -> Path:
+    """Write a minimal recipe YAML pointing at *output_path* as the artifact."""
+    yaml_text = f"""
+name: {name}
+source:
+  type: csv
+  path: {recipes_dir / "data.csv"}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms:
+    - TopPop
+output:
+  path: {output_path}
+"""
+    yaml_path = recipes_dir / f"{name}.yaml"
+    yaml_path.write_text(yaml_text)
+    return yaml_path
+
+
+def test_failed_initial_load_inserts_stub_with_loaded_false(tmp_path: Path) -> None:
+    """A recipe whose artifact is missing at startup must still appear in
+    /health as loaded=false with an error string, not silently dropped."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    recipes_dir = Path(cfg.recipes_dir)  # type: ignore[arg-type]
+    missing_artifact = tmp_path / "does-not-exist.recotem"
+    _write_recipe_yaml(recipes_dir, "missing_recipe", missing_artifact)
+
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["status"] == "degraded", (
+        f"a missing artifact at startup must surface as degraded; got {body}"
+    )
+    assert "missing_recipe" in body["recipes"]
+    entry = body["recipes"]["missing_recipe"]
+    assert entry["loaded"] is False
+    assert "error" in entry and entry["error"], (
+        "stub entry must carry the failure reason"
+    )
+
+
+def test_failed_load_recipe_returns_503_on_predict(tmp_path: Path) -> None:
+    """/predict against a recipe whose artifact failed to load returns 503,
+    not 200 or 500."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    recipes_dir = Path(cfg.recipes_dir)  # type: ignore[arg-type]
+    missing_artifact = tmp_path / "does-not-exist.recotem"
+    _write_recipe_yaml(recipes_dir, "broken", missing_artifact)
+
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.post("/predict/broken", json={"user_id": "u1", "cutoff": 5})
+    assert response.status_code == 503
+
+
+def test_failed_load_recipe_excluded_from_models_listing(tmp_path: Path) -> None:
+    """/models lists only successfully loaded recipes; stubs are hidden
+    (operators see them via /health instead)."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    recipes_dir = Path(cfg.recipes_dir)  # type: ignore[arg-type]
+    missing_artifact = tmp_path / "does-not-exist.recotem"
+    _write_recipe_yaml(recipes_dir, "broken", missing_artifact)
+
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.get("/models")
+    assert response.status_code == 200
+    names = [m.get("name") for m in response.json()]
+    assert "broken" not in names

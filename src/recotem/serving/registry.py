@@ -47,15 +47,22 @@ class ModelEntry:
         previous attempt and the watcher failed to replace it with a fresh one).
     artifact_path:
         The filesystem or object-store path last successfully loaded.
+    loaded:
+        ``True`` when ``recommender`` is a usable model.  ``False`` for stub
+        entries inserted at startup when the artifact failed to load — these
+        entries appear in ``/health`` as ``loaded=false`` so operators can see
+        which recipes are not serving, and ``/predict`` should reject them
+        with 503.
     """
 
     name: str
-    recommender: Any  # IDMappedRecommender
+    recommender: Any  # IDMappedRecommender | None when loaded=False
     header: dict[str, Any]
     kid: str
     metadata_df: Any | None = None  # pd.DataFrame | None
     last_load_error: str | None = None
     artifact_path: str = ""
+    loaded: bool = True
     # Internal watcher state: (mtime_or_etag, sha256_hex)
     _loaded_marker: tuple[Any, str] = field(default_factory=lambda: (None, ""))
 
@@ -71,12 +78,13 @@ class ModelEntry:
 
     def health_dict(self) -> dict[str, Any]:
         """Summarise entry state for the ``/health`` endpoint."""
-        d: dict[str, Any] = {"loaded": True}
+        d: dict[str, Any] = {"loaded": self.loaded}
         if self.trained_at:
             d["trained_at"] = self.trained_at
         if self.best_class:
             d["best_class"] = self.best_class
-        d["kid"] = self.kid
+        if self.kid:
+            d["kid"] = self.kid
         if self.last_load_error:
             d["error"] = self.last_load_error
         return d

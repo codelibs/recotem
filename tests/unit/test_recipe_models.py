@@ -197,6 +197,14 @@ def test_cleansing_config_invalid_dedup_rejected() -> None:
 
 
 def test_cleansing_config_valid_dedup() -> None:
-    for val in ("keep_first", "keep_last", "sum_weight", "none"):
+    for val in ("keep_first", "keep_last", "none"):
         cc = CleansingConfig(dedup=val)
         assert cc.dedup == val
+
+
+def test_cleansing_config_rejects_unimplemented_sum_weight() -> None:
+    """sum_weight was documented but never plumbed end-to-end; keep it
+    rejected at the schema layer until the training pipeline can actually
+    consume per-interaction weights."""
+    with pytest.raises(ValidationError):
+        CleansingConfig(dedup="sum_weight")

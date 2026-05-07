@@ -177,17 +177,18 @@ def make_router(
     @router.get("/health", summary="Per-recipe health status")
     def health() -> dict[str, Any]:
         """Return per-recipe health.  Overall status is ``degraded`` if any
-        recipe is not loaded."""
+        recipe is unloaded or carries a load error.
+
+        Every recipe found in the recipes directory at startup appears here,
+        regardless of whether its artifact loaded — startup-failed recipes
+        are inserted as stubs with ``loaded=false`` and an ``error`` string.
+        """
         snapshot = registry.health_snapshot()
-        # Also report recipes that have a load error but are still serving.
         overall = "ok"
         for entry_health in snapshot.values():
             if not entry_health.get("loaded", True) or entry_health.get("error"):
                 overall = "degraded"
                 break
-
-        # Recipes known to the watcher but never successfully loaded show as
-        # loaded=false when their entry is absent from the registry.
         return {"status": overall, "recipes": snapshot}
 
     # ------------------------------------------------------------------
@@ -198,8 +199,13 @@ def make_router(
     def models(
         kid: str = Depends(_require_auth),
     ) -> list[dict[str, Any]]:
-        """Return metadata for all currently loaded models."""
-        return [e.models_dict() for e in registry.list()]
+        """Return metadata for all currently loaded models.
+
+        Stub entries inserted for recipes whose artifact failed to load at
+        startup are excluded — they have no header or class to report.
+        Operators see those via ``/health`` instead.
+        """
+        return [e.models_dict() for e in registry.list() if e.loaded]
 
     # ------------------------------------------------------------------
     # GET /metrics (opt-in)

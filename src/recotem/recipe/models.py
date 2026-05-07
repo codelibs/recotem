@@ -52,7 +52,7 @@ class CleansingConfig(BaseModel, extra="forbid"):
     drop_null_ids: bool = True
     dedup: str = Field(
         default="keep_last",
-        pattern=r"^(keep_first|keep_last|sum_weight|none)$",
+        pattern=r"^(keep_first|keep_last|none)$",
     )
     min_rows: int | None = Field(default=None, ge=0)
     min_users: int | None = Field(default=None, ge=0)

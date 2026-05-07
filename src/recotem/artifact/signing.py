@@ -63,6 +63,7 @@ _ALLOWED_CLASSES: frozenset[tuple[str, str]] = frozenset(
         ("irspack.recommenders.rp3", "RP3betaRecommender"),
         ("irspack.recommenders.dense_slim", "DenseSLIMRecommender"),
         ("irspack.recommenders.truncsvd", "TruncatedSVDRecommender"),
+        ("irspack.recommenders.bpr", "BPRFMRecommender"),
         # numpy
         ("numpy", "ndarray"),
         ("numpy", "dtype"),

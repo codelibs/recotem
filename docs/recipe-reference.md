@@ -93,7 +93,7 @@ schema:
 ```yaml
 cleansing:
   drop_null_ids: true        # default true
-  dedup: keep_last           # keep_first | keep_last | sum_weight | none
+  dedup: keep_last           # keep_first | keep_last | none
   min_rows: 1000             # exit 4 with min_data_violation if below
   min_users: 10
   min_items: 10
@@ -115,7 +115,6 @@ Violation of any `min_*` threshold exits with code 4 and `"code": "min_data_viol
 |-------|-----------|
 | `keep_first` | Keep the first occurrence of each (user, item) pair. |
 | `keep_last` | Keep the last occurrence (by row order or time if `time_column` is set). |
-| `sum_weight` | Sum interaction weights; produces a weight column. |
 | `none` | No deduplication. |
 
 ---

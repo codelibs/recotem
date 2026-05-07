@@ -55,13 +55,21 @@ _MAX_CONCURRENT_STATS = 16
 
 
 def _read_artifact_bytes(path: str, max_bytes: int) -> bytes:
-    """Read artifact bytes once from *path* via fsspec.
+    """Read artifact bytes once from *path* via fsspec, resolving pointers.
+
+    For ``versioning: append_sha`` (the documented default), ``path`` is a
+    small ASCII pointer file whose contents reference the actual sha-suffixed
+    artifact in the same directory.  We delegate to
+    ``resolve_artifact_pointer`` so the rest of the serving layer always
+    sees real artifact bytes regardless of the writer's versioning mode.
 
     Raises
     ------
     ArtifactError
         If the file cannot be opened or exceeds *max_bytes*.
     """
+    from recotem.artifact.io import resolve_artifact_pointer
+
     try:
         fs, fpath = fsspec.core.url_to_fs(path)
         info = fs.info(fpath)
@@ -77,7 +85,13 @@ def _read_artifact_bytes(path: str, max_bytes: int) -> bytes:
             raise ArtifactError(
                 f"artifact at '{path}' exceeds cap {max_bytes}; refusing load"
             )
-        return data
+        # If `data` is a pointer file, resolve it transparently.
+        # `resolve_artifact_pointer` enforces its own size cap on the resolved
+        # artifact and raises ArtifactError if the target is missing.
+        resolved_data, _resolved_path = resolve_artifact_pointer(
+            data, fpath, fs, max_bytes
+        )
+        return resolved_data
     except ArtifactError:
         raise
     except Exception as exc:

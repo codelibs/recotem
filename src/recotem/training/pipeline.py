@@ -506,15 +506,11 @@ def _cleanse(
         before = len(df)
         df = df.drop_duplicates(subset=[user_col, item_col], keep="last")
         drop_count += before - len(df)
-    elif dedup == "sum_weight":
-        # If there is an implicit weight column, aggregate by summing; otherwise
-        # just keep one row (count-based).
-        df = (
-            df.groupby([user_col, item_col], sort=False, as_index=False)
-            .first()
-            .reset_index(drop=True)
-        )
     # "none": no dedup
+    # NOTE: a "sum_weight" mode existed in earlier drafts but was never
+    # plumbed through to the sparse-matrix builder, so it was removed from
+    # the schema.  Reintroduce only when the training pipeline can actually
+    # consume per-interaction weights end-to-end.
 
     # 5. Min-data preconditions.
     n_rows = len(df)

@@ -213,7 +213,7 @@ schema:
 
 cleansing:                                     # optional
   drop_null_ids: true                          # default true; rows with null user/item dropped
-  dedup: keep_last                             # keep_first | keep_last | sum_weight | none
+  dedup: keep_last                             # keep_first | keep_last | none
   min_rows: 1000                               # below → exit 4 with min_data_violation
   min_users: 10
   min_items: 10
@@ -315,7 +315,7 @@ Schema rules and validation:
 
 4. Cleansing (controlled by recipe.cleansing):
    - drop_null_ids: drop rows with null user_id or item_id; record drop_count.
-   - dedup: apply policy (keep_first | keep_last | sum_weight | none).
+   - dedup: apply policy (keep_first | keep_last | none).
    - String-coerce user_id and item_id (matches serve-time treatment).
    - Coerce time_column to datetime; if scheme requires time and parse fails,
      exit 2 (recipe/data mismatch) with column name in error.
@@ -804,7 +804,7 @@ in Sections 5–10 has at least one corresponding negative-path test.
 - `test_min_users_violation_raises_exit4`.
 - `test_min_items_violation_raises_exit4`.
 - `test_dedup_keep_last_resolves_duplicates`.
-- `test_dedup_sum_weight_aggregates_counts`.
+- `test_dedup_sum_weight_rejected_by_schema` (sum_weight removed; was never plumbed through).
 - `test_drop_null_ids_default_true_records_drop_count`.
 - `test_string_coerce_user_and_item_ids`.
 

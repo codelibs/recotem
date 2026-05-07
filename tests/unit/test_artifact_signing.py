@@ -371,3 +371,32 @@ def test_module_prefix_does_not_match_unrelated_modules() -> None:
     assert _is_allowed("os", "system") is False
     assert _is_allowed("requests.adapters", "HTTPAdapter") is False
     assert _is_allowed("subprocess", "Popen") is False
+
+
+def test_supported_algorithms_match_unpickler_allow_list() -> None:
+    """Every algorithm class the trainer claims to support must be loadable
+    by the SafeUnpickler.  Drift between SUPPORTED_CLASS_NAMES and
+    _ALLOWED_CLASSES is a CRITICAL bug — the artifact passes HMAC verify
+    and then dies during deserialize.
+
+    If this test fails, either:
+      - add the missing FQCN to recotem.artifact.signing._ALLOWED_CLASSES, or
+      - remove the algorithm from recotem.training.algorithms.SUPPORTED_CLASS_NAMES.
+    """
+    from recotem.artifact.signing import _ALLOWED_CLASSES
+    from recotem.training.algorithms import SUPPORTED_CLASS_NAMES
+
+    allowed_names = {name for _module, name in _ALLOWED_CLASSES}
+    missing = SUPPORTED_CLASS_NAMES - allowed_names
+    assert not missing, (
+        f"trainer registers algorithms whose pickled classes the SafeUnpickler "
+        f"will reject: {sorted(missing)}"
+    )
+
+
+def test_bprfm_class_is_explicitly_allowed() -> None:
+    """Regression: BPRFM was registered in SUPPORTED_CLASS_NAMES but missing
+    from the allow-list, breaking every BPRFM artifact at deserialize time."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("irspack.recommenders.bpr", "BPRFMRecommender") is True

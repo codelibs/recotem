@@ -252,7 +252,7 @@ def read_artifact(
         raise ArtifactError(f"failed to read artifact {fs_path}: {exc}") from exc
 
     # Resolve pointer if applicable
-    resolved_data, resolved_path = _maybe_resolve_pointer(
+    resolved_data, resolved_path = resolve_artifact_pointer(
         raw, resolved_path, fs, max_bytes
     )
 
@@ -285,7 +285,7 @@ def read_artifact(
     return header, payload
 
 
-def _maybe_resolve_pointer(
+def resolve_artifact_pointer(
     raw: bytes,
     path: str,
     fs: fsspec.AbstractFileSystem,
@@ -293,8 +293,13 @@ def _maybe_resolve_pointer(
 ) -> tuple[bytes, str]:
     """If *raw* looks like a pointer file, resolve it and return the real bytes.
 
-    A pointer file is a small text file whose entire content matches
-    ``_POINTER_RE`` (e.g. ``news_articles.a1b2c3d4.recotem\\n``).
+    A pointer file is a small text file (max 512 B) whose entire content
+    matches ``_POINTER_RE`` (e.g. ``news_articles.a1b2c3d4.recotem\\n``).
+    Used by both ``read_artifact`` and the serving layer's hot-swap reader
+    so that ``versioning: append_sha`` artifacts (the documented default)
+    are transparently resolvable from the recipe's ``output.path``.
+
+    Returns ``(raw, path)`` unchanged when *raw* is not a pointer.
     """
     # Pointer files are at most a few hundred bytes; skip resolution for
     # anything that might be a real artifact.

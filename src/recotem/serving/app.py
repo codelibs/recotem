@@ -100,16 +100,26 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     recipes = load_recipes_directory(recipes_dir)
 
     # 6. Build registry and attempt initial artifact loads.
+    #
+    # Spec contract: every recipe found on disk must appear in /health.
+    # On successful load we insert a fully populated ModelEntry; on failure
+    # we still insert a stub (loaded=False, last_load_error=<reason>) so
+    # /health returns degraded and operators can see which recipes are not
+    # serving.  /predict checks `loaded` and returns 503 for stubs.
     registry = ModelRegistry()
     loaded_entries: dict[str, ModelEntry] = {}
 
     for recipe in recipes:
         entry = _try_load_artifact(recipe, key_ring, serve_config)
-        if entry is not None:
-            registry.replace(recipe.name, entry)
+        registry.replace(recipe.name, entry)
+        if entry.loaded:
             loaded_entries[recipe.name] = entry
         else:
-            logger.warning("recipe_not_loaded_at_startup", name=recipe.name)
+            logger.warning(
+                "recipe_not_loaded_at_startup",
+                name=recipe.name,
+                error=entry.last_load_error,
+            )
 
     # Build watcher initial states — captures mtime/sha to avoid re-load on
     # first tick (spec: "capture initial mtime/sha inside the watcher's own
@@ -294,15 +304,35 @@ def _emit_dev_unsigned_banner(serve_config: ServeConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _failed_entry(recipe: Any, reason: str) -> ModelEntry:
+    """Stub ModelEntry inserted at startup when an artifact failed to load.
+
+    Carries enough context for ``/health`` to show ``loaded=false`` plus the
+    reason string.  The route handlers must check ``entry.loaded`` before
+    dereferencing ``entry.recommender`` (which is ``None`` here).
+    """
+    return ModelEntry(
+        name=recipe.name,
+        recommender=None,
+        header={},
+        kid="",
+        metadata_df=None,
+        last_load_error=reason,
+        artifact_path=recipe.output.path,
+        loaded=False,
+    )
+
+
 def _try_load_artifact(
     recipe: Any,
     key_ring: KeyRing | None,
     serve_config: ServeConfig,
-) -> ModelEntry | None:
+) -> ModelEntry:
     """Attempt to load the artifact for *recipe* at startup.
 
-    Returns a ModelEntry on success, or None if the artifact cannot be
-    loaded (WARN is logged; server still starts with recipe as unloaded).
+    Returns a fully-populated ModelEntry on success, or a stub entry with
+    ``loaded=False`` and ``last_load_error`` set on any failure.  Either way
+    the caller registers the entry so ``/health`` reports the recipe.
     """
     artifact_path = recipe.output.path
     max_bytes = serve_config.max_artifact_bytes
@@ -311,10 +341,10 @@ def _try_load_artifact(
         data = _read_artifact_bytes(artifact_path, max_bytes)
     except ArtifactError as exc:
         logger.warning("initial_artifact_read_failed", name=recipe.name, error=str(exc))
-        return None
+        return _failed_entry(recipe, f"read failed: {exc}")
     except Exception as exc:
         logger.warning("initial_artifact_read_error", name=recipe.name, error=str(exc))
-        return None
+        return _failed_entry(recipe, f"read error: {exc}")
 
     sha256 = _sha256_bytes(data)
 
@@ -324,7 +354,7 @@ def _try_load_artifact(
         logger.warning(
             "initial_artifact_parse_failed", name=recipe.name, error=str(exc)
         )
-        return None
+        return _failed_entry(recipe, f"parse failed: {exc}")
 
     payload_bytes = data[hdr.payload_offset :]
 
@@ -345,7 +375,7 @@ def _try_load_artifact(
                 kid=hdr.kid,
                 error=str(exc),
             )
-            return None
+            return _failed_entry(recipe, f"HMAC verify failed: {exc}")
     else:
         logger.warning(
             "initial_artifact_hmac_skipped_dev",
@@ -362,7 +392,7 @@ def _try_load_artifact(
             kid=hdr.kid,
             error=str(exc),
         )
-        return None
+        return _failed_entry(recipe, f"deserialize failed: {exc}")
 
     header_dict: dict[str, Any] = json.loads(hdr.header_data.decode("utf-8"))
 

@@ -14,7 +14,7 @@ on:
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
-      - ".github/workflows/recotem-test.yml"
+      - ".github/workflows/test.yml"
 
 permissions:
   contents: read

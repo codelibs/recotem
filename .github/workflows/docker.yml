@@ -20,7 +20,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "Dockerfile"
-      - ".github/workflows/recotem-docker.yml"
+      - ".github/workflows/docker.yml"
 
 permissions:
   contents: read

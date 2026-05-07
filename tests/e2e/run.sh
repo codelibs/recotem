@@ -16,15 +16,14 @@ set -euo pipefail
 
 # --tutorial mode: train against the in-tree HTTPS-source tutorial recipe.
 # Gated on RECOTEM_E2E_NETWORK to keep the offline default working.
+TUTORIAL_MODE=0
 if [[ "${1:-}" == "--tutorial" ]]; then
     if [[ -z "${RECOTEM_E2E_NETWORK:-}" ]]; then
         echo "Skipping --tutorial: RECOTEM_E2E_NETWORK not set"
         exit 0
     fi
-    RECIPE="${RECIPE:-examples/tutorial-purchase-log/recipe.yaml}"
+    TUTORIAL_MODE=1
     shift
-else
-    RECIPE="${RECIPE:-tests/e2e/recipe.yaml}"
 fi
 
 WORKDIR="/tmp/recotem_e2e_$$"
@@ -54,10 +53,16 @@ SIGNING_KEY_HEX=$(python3 -c "import os; print(os.urandom(32).hex())")
 export RECOTEM_SIGNING_KEYS="e2e-key:${SIGNING_KEY_HEX}"
 
 # ---------------------------------------------------------------------------
-# 2. Generate synthetic CSV with enough data
+# 2. Generate synthetic CSV + recipe (default mode) OR use tutorial recipe
 # ---------------------------------------------------------------------------
-echo "[e2e] Generating synthetic interaction data..."
-python3 - <<PYEOF
+if [[ "${TUTORIAL_MODE}" == "1" ]]; then
+    RECIPE="examples/tutorial-purchase-log/recipe.yaml"
+    RECIPE_NAME="purchase_log"
+    # The tutorial recipe writes to ./artifacts/purchase_log.recotem (CWD-relative).
+    mkdir -p artifacts
+else
+    echo "[e2e] Generating synthetic interaction data..."
+    python3 - <<PYEOF
 import csv, random, os
 random.seed(42)
 n_users = 100
@@ -71,11 +76,8 @@ with open("${WORKDIR}/interactions.csv", "w", newline="") as f:
                          f"i{random.randint(0, n_items-1)}"])
 PYEOF
 
-# ---------------------------------------------------------------------------
-# 3. Write recipe
-# ---------------------------------------------------------------------------
-echo "[e2e] Writing recipe..."
-cat > "${WORKDIR}/recipe.yaml" <<RECIPE
+    echo "[e2e] Writing recipe..."
+    cat > "${WORKDIR}/recipe.yaml" <<RECIPE
 name: ${RECIPE_NAME}
 source:
   type: csv
@@ -95,6 +97,9 @@ output:
   versioning: always_overwrite
 RECIPE
 
+    RECIPE="${WORKDIR}/recipe.yaml"
+fi
+
 # ---------------------------------------------------------------------------
 # 4. Train
 # ---------------------------------------------------------------------------
@@ -103,8 +108,13 @@ recotem train "${RECIPE}"
 echo "[e2e] Training complete."
 
 # Verify artifact exists
-if [ ! -f "${ARTIFACTS_DIR}/${RECIPE_NAME}.recotem" ]; then
-    echo "[e2e] ERROR: artifact not found after training!"
+if [[ "${TUTORIAL_MODE}" == "1" ]]; then
+    ARTIFACT_PATH="artifacts/${RECIPE_NAME}.recotem"
+else
+    ARTIFACT_PATH="${ARTIFACTS_DIR}/${RECIPE_NAME}.recotem"
+fi
+if [ ! -f "${ARTIFACT_PATH}" ]; then
+    echo "[e2e] ERROR: artifact not found after training (expected: ${ARTIFACT_PATH})!"
     exit 1
 fi
 
@@ -113,7 +123,11 @@ fi
 # ---------------------------------------------------------------------------
 echo "[e2e] Starting recotem serve..."
 mkdir -p "${WORKDIR}/recipes"
-cp "${WORKDIR}/recipe.yaml" "${WORKDIR}/recipes/${RECIPE_NAME}.yaml"
+if [[ "${TUTORIAL_MODE}" == "1" ]]; then
+    cp examples/tutorial-purchase-log/recipe.yaml "${WORKDIR}/recipes/${RECIPE_NAME}.yaml"
+else
+    cp "${WORKDIR}/recipe.yaml" "${WORKDIR}/recipes/${RECIPE_NAME}.yaml"
+fi
 
 export RECOTEM_ENV=test
 recotem serve \

@@ -1,16 +1,29 @@
-# docker-compose.example.yaml — Recotem 2.0 example compose file
+# docker-compose.example.yaml — Recotem 2.0 tutorial compose file
 #
-# This file is an EXAMPLE for local experimentation and documentation.
-# It is NOT for production use.
+# This file is a runnable example for the getting-started tutorial. It is
+# NOT for production use.
 #
-# Usage:
-#   docker compose -f docker-compose.example.yaml run --rm train
-#   docker compose -f docker-compose.example.yaml up serve
+# Usage (3 commands from the repo root):
 #
-# Then:
-#   curl -H "X-API-Key: <your-plaintext-key>" \
-#        http://localhost:8080/predict/news_articles \
-#        -d '{"user_id": "user123", "cutoff": 10}'
+#   1. Generate a signing key + an API key
+#      $ docker run --rm ghcr.io/codelibs/recotem:latest keygen --type signing --kid dev
+#      # → copy the env_entry plaintext into RECOTEM_SIGNING_KEYS_SECRET below
+#      $ docker run --rm ghcr.io/codelibs/recotem:latest keygen --type api --kid dev
+#      # → copy the env_entry hash into RECOTEM_API_KEYS_SECRET below
+#      # → keep the api plaintext for later (used as X-API-Key header)
+#
+#   2. Train (one-shot)
+#      $ RECOTEM_SIGNING_KEYS_SECRET="dev:..." \
+#        RECOTEM_API_KEYS_SECRET="dev:sha256:..." \
+#        docker compose -f docker-compose.example.yaml run --rm train
+#
+#   3. Serve + curl
+#      $ RECOTEM_SIGNING_KEYS_SECRET="..." RECOTEM_API_KEYS_SECRET="..." \
+#        docker compose -f docker-compose.example.yaml up -d serve
+#      $ curl -sX POST http://localhost:8080/predict/purchase_log \
+#          -H "X-API-Key: <api plaintext>" \
+#          -H "Content-Type: application/json" \
+#          -d '{"user_id": "1", "cutoff": 5}'
 
 x-recotem-image: &recotem-image
   image: ghcr.io/codelibs/recotem:latest
@@ -22,55 +35,42 @@ x-recotem-image: &recotem-image
 services:
 
   # ── train ──────────────────────────────────────────────────────────────────
-  # One-shot training job.  Run it manually or from a scheduler.
-  # Exit codes: 0=success/skip, 2=recipe error, 3=datasource error,
+  # One-shot training job. Run via `docker compose run --rm train`.
+  # Exit codes: 0=success, 2=recipe error, 3=datasource error,
   #             4=training error, 5=artifact error.
   train:
     <<: *recotem-image
-    command: ["train", "/recipes/news.yaml"]
-    volumes:
-      - recipes:/recipes:ro
-      - artifacts:/artifacts
-    environment:
-      # Active signing key (kid:hex64 — 64 hex chars = 32 bytes).
-      # Generate with: recotem keygen --type signing
-      RECOTEM_SIGNING_KEYS: "${RECOTEM_SIGNING_KEYS_SECRET}"
-      # Log as JSON for structured log shipping.
-      RECOTEM_LOG_FORMAT: "json"
-    # One-shot: restart=no so compose run / cron invocations do not loop.
-    restart: "no"
-    # Write artifacts where the serve service can find them.
-    # Ensure the recipe's output.path points to /artifacts/<name>.recotem
+    command: ["train", "/recipes/recipe.yaml"]
     working_dir: /workspace
+    volumes:
+      - ./examples/tutorial-purchase-log:/recipes:ro
+      - artifacts:/workspace/artifacts
+    environment:
+      RECOTEM_SIGNING_KEYS: "${RECOTEM_SIGNING_KEYS_SECRET}"
+      RECOTEM_LOG_FORMAT: "json"
+    restart: "no"
 
   # ── serve ──────────────────────────────────────────────────────────────────
-  # Long-running prediction server.  Hot-swaps artifacts when train updates them.
+  # Long-running prediction server. Hot-swaps when train rewrites the artifact.
   serve:
     <<: *recotem-image
     command: ["serve", "--recipes", "/recipes"]
+    working_dir: /workspace
     ports:
       - "8080:8080"
     volumes:
-      - recipes:/recipes:ro
-      - artifacts:/artifacts:ro
+      - ./examples/tutorial-purchase-log:/recipes:ro
+      - artifacts:/workspace/artifacts:ro
     environment:
-      # Comma-separated list of "<kid>:sha256:<hex64>" entries.
-      # Generate with: recotem keygen --type api --kid <kid>
-      # (the default --type is 'signing', which produces a different key
-      # format and would 401 every request when placed here.)
-      RECOTEM_API_KEYS: "${RECOTEM_API_KEYS_SECRET}"
-      # Signing keys for artifact verification (same format as train).
       RECOTEM_SIGNING_KEYS: "${RECOTEM_SIGNING_KEYS_SECRET}"
-      # Bind on all interfaces inside the container; expose via port mapping above.
+      RECOTEM_API_KEYS:     "${RECOTEM_API_KEYS_SECRET}"
       RECOTEM_HOST: "0.0.0.0"
       RECOTEM_PORT: "8080"
-      # Poll for artifact changes every 10 seconds.
       RECOTEM_WATCH_INTERVAL: "10"
       RECOTEM_LOG_FORMAT: "json"
       RECOTEM_ENV: "production"
     restart: unless-stopped
     healthcheck:
-      # Probe the /health endpoint via stdlib urllib (no curl in the slim image).
       test:
         - "CMD-SHELL"
         - "python -c \"import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).status == 200 else 1)\""
@@ -80,13 +80,8 @@ services:
       start_period: 15s
 
 # ── volumes ────────────────────────────────────────────────────────────────────
-# Shared volumes between train (writes) and serve (reads).
-# In production, replace with a PVC, S3-mounted volume, or object-store paths
-# directly in the recipe YAML (output.path: s3://bucket/artifacts/name.recotem).
+# Shared between train (writes) and serve (reads). The recipe writes to
+# ./artifacts/purchase_log.recotem (CWD-relative); the working_dir above plus
+# this mount resolve that to /workspace/artifacts.
 volumes:
-  recipes:
-    # Mount your recipe YAML files here.
-    # Example: docker volume create recotem_recipes
-    #          docker cp examples/csv-local/recipe.yaml <vol>:/news.yaml
   artifacts:
-    # Artifacts written by train and read by serve.

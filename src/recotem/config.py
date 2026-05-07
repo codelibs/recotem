@@ -18,6 +18,10 @@ Environment variables (Section 7 of spec):
   RECOTEM_ENV               Deployment environment identifier
   RECOTEM_DRAIN_SECONDS     Graceful drain on SIGTERM (default 30)
   RECOTEM_METADATA_FIELD_DENY  CSV of metadata fields to strip post-join
+  RECOTEM_MAX_DOWNLOAD_BYTES   Max bytes for HTTP/HTTPS datasource fetch
+                                 (default 256 MiB; clamped 1 MiB–16 GiB)
+  RECOTEM_HTTP_TIMEOUT_SECONDS Timeout in seconds for HTTP/HTTPS datasource
+                                 fetch (default 30; clamped 1–600)
 """
 
 from __future__ import annotations
@@ -324,3 +328,48 @@ class TrainConfig:
         cfg.artifact_root = os.environ.get("RECOTEM_ARTIFACT_ROOT", "").strip()
         cfg.log_format = os.environ.get("RECOTEM_LOG_FORMAT", "auto").strip().lower()
         return cfg
+
+
+# ---------------------------------------------------------------------------
+# Network-fetch caps (used by datasource/csv.py for HTTP/HTTPS sources)
+# ---------------------------------------------------------------------------
+
+DEFAULT_MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB
+_MIN_DOWNLOAD_BYTES = 1 * 1024 * 1024  # 1 MiB
+_MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
+
+DEFAULT_HTTP_TIMEOUT_SECONDS = 30
+_MIN_HTTP_TIMEOUT_SECONDS = 1
+_MAX_HTTP_TIMEOUT_SECONDS = 600
+
+
+def get_max_download_bytes() -> int:
+    """Return RECOTEM_MAX_DOWNLOAD_BYTES, clamped to [1 MiB, 16 GiB]."""
+    raw = os.environ.get("RECOTEM_MAX_DOWNLOAD_BYTES", "")
+    if not raw:
+        return DEFAULT_MAX_DOWNLOAD_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_DOWNLOAD_BYTES
+    if value < _MIN_DOWNLOAD_BYTES:
+        return _MIN_DOWNLOAD_BYTES
+    if value > _MAX_DOWNLOAD_BYTES:
+        return _MAX_DOWNLOAD_BYTES
+    return value
+
+
+def get_http_timeout_seconds() -> int:
+    """Return RECOTEM_HTTP_TIMEOUT_SECONDS, clamped to [1, 600]."""
+    raw = os.environ.get("RECOTEM_HTTP_TIMEOUT_SECONDS", "")
+    if not raw:
+        return DEFAULT_HTTP_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_HTTP_TIMEOUT_SECONDS
+    if value < _MIN_HTTP_TIMEOUT_SECONDS:
+        return _MIN_HTTP_TIMEOUT_SECONDS
+    if value > _MAX_HTTP_TIMEOUT_SECONDS:
+        return _MAX_HTTP_TIMEOUT_SECONDS
+    return value

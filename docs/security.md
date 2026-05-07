@@ -43,8 +43,32 @@ The internet-facing boundary is `recotem serve`. `recotem train` has no inbound 
 | Credential injection via recipe env expansion | `RECOTEM_SIGNING_KEY*`, `RECOTEM_API_KEYS`, `*_SECRET*`, `*_PASSWORD*`, `AWS_*`, `GOOGLE_*`, `GCP_*` are blacklisted from `${...}` expansion |
 | SQL injection via recipe | Env expansion never performed inside `source.query`; dynamic values must use `@param` BigQuery placeholders |
 | Path traversal via recipe | `name` validated with `^[A-Za-z0-9_-]{1,64}$` at load and before every filesystem use; artifact root confinement via `RECOTEM_ARTIFACT_ROOT` |
+| Tampered or rotated network-fetched data | `sha256` integrity pin is **mandatory** on `source.path` / `item_metadata.path` when the scheme is `http://` or `https://`; mismatch raises `DataSourceError` (exit 3) before the bytes reach the parser |
+| Resource exhaustion via giant network fetch | `RECOTEM_MAX_DOWNLOAD_BYTES` (default 256 MiB) caps the in-memory body during HTTP/HTTPS fetch; cap exceeded → `DataSourceError` mid-stream |
+| Plaintext HTTP source on the public internet | Operator policy. `http://` is allowed (legitimate inside trusted networks) but operators MUST avoid plaintext on the public internet; sha256 mitigates content tampering for any reachable response |
 | Unrecognised plugin loading arbitrary code | Conflicting plugin `type_name` fails startup; installed plugins are treated as trusted code (pin versions) |
 | Unauthenticated external access | Default bind `127.0.0.1`; `--insecure-no-auth` gated by `RECOTEM_ENV=development`; `TrustedHostMiddleware` blocks unrecognized hosts |
+
+## Operator responsibilities for network sources
+
+Recipes are operator-authored and live inside the Recotem trust boundary.
+That means choices about which URLs to point at — and whether `http://`
+URLs are safe to use — are operator decisions, not Recotem decisions.
+
+Specific operator responsibilities:
+
+- **Choose `https://` over `http://` on the public internet.** TLS prevents
+  a network attacker from swapping bytes; `sha256` detects the swap, but
+  TLS prevents it from happening in the first place.
+- **Avoid pointing recipes at metadata services.** URLs like
+  `http://169.254.169.254/...` (AWS IMDSv1) or
+  `http://metadata.google.internal/...` will be fetched by `recotem train`
+  and could leak instance-role credentials into your dataset. This is
+  operator misuse; Recotem does not block such URLs (since it cannot
+  distinguish "metadata service" from "internal artifact server" in
+  general).
+- **Compute and pin sha256 once, then alert on changes.** A mismatch is
+  the signal. Don't bypass it by silently regenerating during CI.
 
 ## Artifact payload and the FQCN allow-list
 

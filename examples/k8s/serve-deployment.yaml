@@ -70,16 +70,19 @@ spec:
             - name: RECOTEM_DRAIN_SECONDS
               value: "30"
             # API keys and signing keys from Secret.
+            # The Secret data keys match the env var names so what the app
+            # reads, what kubectl shows, and what the Secret stores are all
+            # spelled identically.
             - name: RECOTEM_API_KEYS
               valueFrom:
                 secretKeyRef:
                   name: recotem-auth
-                  key: RECOTEM_API_KEYS_SECRET
+                  key: RECOTEM_API_KEYS
             - name: RECOTEM_SIGNING_KEYS
               valueFrom:
                 secretKeyRef:
                   name: recotem-auth
-                  key: RECOTEM_SIGNING_KEYS_SECRET
+                  key: RECOTEM_SIGNING_KEYS
 
           ports:
             - name: http

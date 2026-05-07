@@ -7,18 +7,18 @@
 #
 #   1. Generate a signing key + an API key
 #      $ docker run --rm ghcr.io/codelibs/recotem:latest keygen --type signing --kid dev
-#      # → copy the env_entry plaintext into RECOTEM_SIGNING_KEYS_SECRET below
+#      # → copy the env_entry plaintext into RECOTEM_SIGNING_KEYS below
 #      $ docker run --rm ghcr.io/codelibs/recotem:latest keygen --type api --kid dev
-#      # → copy the env_entry hash into RECOTEM_API_KEYS_SECRET below
+#      # → copy the env_entry hash into RECOTEM_API_KEYS below
 #      # → keep the api plaintext for later (used as X-API-Key header)
 #
 #   2. Train (one-shot)
-#      $ RECOTEM_SIGNING_KEYS_SECRET="dev:..." \
-#        RECOTEM_API_KEYS_SECRET="dev:sha256:..." \
+#      $ RECOTEM_SIGNING_KEYS="dev:..." \
+#        RECOTEM_API_KEYS="dev:sha256:..." \
 #        docker compose run --rm train
 #
 #   3. Serve + curl
-#      $ RECOTEM_SIGNING_KEYS_SECRET="..." RECOTEM_API_KEYS_SECRET="..." \
+#      $ RECOTEM_SIGNING_KEYS="..." RECOTEM_API_KEYS="..." \
 #        docker compose up -d serve
 #      $ curl -sX POST http://localhost:8080/predict/purchase_log \
 #          -H "X-API-Key: <api plaintext>" \
@@ -46,7 +46,7 @@ services:
       - ./examples/tutorial-purchase-log:/recipes:ro
       - artifacts:/workspace/artifacts
     environment:
-      RECOTEM_SIGNING_KEYS: "${RECOTEM_SIGNING_KEYS_SECRET}"
+      RECOTEM_SIGNING_KEYS: "${RECOTEM_SIGNING_KEYS}"
       RECOTEM_LOG_FORMAT: "json"
     restart: "no"
 
@@ -62,8 +62,8 @@ services:
       - ./examples/tutorial-purchase-log:/recipes:ro
       - artifacts:/workspace/artifacts:ro
     environment:
-      RECOTEM_SIGNING_KEYS: "${RECOTEM_SIGNING_KEYS_SECRET}"
-      RECOTEM_API_KEYS:     "${RECOTEM_API_KEYS_SECRET}"
+      RECOTEM_SIGNING_KEYS: "${RECOTEM_SIGNING_KEYS}"
+      RECOTEM_API_KEYS:     "${RECOTEM_API_KEYS}"
       RECOTEM_HOST: "0.0.0.0"
       RECOTEM_PORT: "8080"
       RECOTEM_WATCH_INTERVAL: "10"

@@ -73,7 +73,7 @@ spec:
                   valueFrom:
                     secretKeyRef:
                       name: {{ .Values.secrets.secretName }}
-                      key: RECOTEM_SIGNING_KEYS_SECRET
+                      key: RECOTEM_SIGNING_KEYS
 
               resources:
                 {{- toYaml .Values.train.resources | nindent 16 }}

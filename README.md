@@ -33,72 +33,58 @@ Requires Python 3.12+.
 
 ## Hello world (CSV)
 
-> For a runnable end-to-end tutorial (Docker Compose, no manual data prep),
-> see [docs/getting-started.md](docs/getting-started.md).
+The smallest recipe Recotem accepts is 11 lines — every other field has a
+sensible default. Below is a minimum example you can run with one CSV file
+and two `keygen` calls. For a runnable end-to-end tutorial that fetches a
+real dataset over HTTPS via Docker Compose, see
+[docs/getting-started.md](docs/getting-started.md).
 
-**1. Generate a signing key**
+**1. Generate keys**
 
 ```bash
-recotem keygen --type signing --kid my-key
-# kid=my-key
-# plaintext=<64-char hex>
-# hash=sha256:<64-char hex>
-# env_entry=RECOTEM_SIGNING_KEYS=my-key:<64-char hex>
-export RECOTEM_SIGNING_KEYS="my-key:<plaintext-hex-from-above>"
+recotem keygen --type signing --kid dev   # → copy the env_entry plaintext
+recotem keygen --type api     --kid dev   # → copy the env_entry hash; keep plaintext for X-API-Key
+
+export RECOTEM_SIGNING_KEYS="dev:<plaintext-hex-from-signing>"
+export RECOTEM_API_KEYS="dev:sha256:<hash-hex-from-api>"
 ```
 
-**2. Write a recipe**
+**2. Write a minimum recipe**
 
 ```yaml
 # recipes/top_picks.yaml
 name: top_picks
-
 source:
   type: csv
-  path: ./interactions.csv   # columns: user_id, item_id
-
+  path: ./interactions.csv      # columns: user_id, item_id
 schema:
   user_column: user_id
   item_column: item_id
-
 training:
-  algorithms: [IALS, TopPop]
-  metric: ndcg
-  cutoff: 10
-  n_trials: 20
-
+  algorithms: [TopPop]          # add IALS, CosineKNN, … to widen the search
 output:
   path: ./artifacts/top_picks.recotem
 ```
 
-**3. Train**
+That's the full recipe. `cleansing`, `metric`, `cutoff`, `n_trials`, `split`,
+and `versioning` all default to safe values. See
+[docs/recipe-reference.md](docs/recipe-reference.md) for the complete surface.
+
+**3. Train and serve**
 
 ```bash
 mkdir -p recipes artifacts
-# (save the YAML above to recipes/top_picks.yaml first)
-recotem train recipes/top_picks.yaml
-# exit 0 → artifacts/top_picks.recotem written and signed
+# (save the YAML above to recipes/top_picks.yaml, then put your interactions.csv next to it)
+
+recotem train recipes/top_picks.yaml         # exit 0 → artifacts/top_picks.recotem signed
+recotem serve --recipes ./recipes/           # FastAPI on :8080, hot-swaps on file change
 ```
 
-**4. Serve**
-
-API keys are independent from signing keys — generate one with `--type api`:
-
-```bash
-recotem keygen --type api --kid my-key
-# kid=my-key
-# plaintext=<43-char base64url>           ← keep this; clients pass it as X-API-Key
-# hash=sha256:<64-char hex>
-# env_entry=RECOTEM_API_KEYS=my-key:sha256:<64-char hex>
-export RECOTEM_API_KEYS="my-key:sha256:<hash-hex-from-above>"
-recotem serve --recipes ./recipes/
-```
-
-**5. Predict**
+**4. Predict**
 
 ```bash
 curl -X POST http://localhost:8080/predict/top_picks \
-  -H "X-API-Key: <api-key-plaintext>" \
+  -H "X-API-Key: <api-plaintext-from-step-1>" \
   -H "Content-Type: application/json" \
   -d '{"user_id": "u123", "cutoff": 5}'
 ```
@@ -107,7 +93,7 @@ curl -X POST http://localhost:8080/predict/top_picks \
 {
   "items": [{"item_id": "i42", "score": 0.91}, ...],
   "model": {"recipe": "top_picks", "trained_at": "2026-05-07T01:23:45Z",
-            "best_class": "IALSRecommender", "kid": "my-key"},
+            "best_class": "TopPopRecommender", "kid": "dev"},
   "request_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```

@@ -31,12 +31,13 @@ docker run --rm ghcr.io/codelibs/recotem:latest keygen --type api --kid dev
 # env_entry=RECOTEM_API_KEYS=dev:sha256:<hex>
 ```
 
-Export both into your shell:
+Export both into your shell. Compose passes these straight through to the
+container; the names match what the app actually reads.
 
 ```bash
-export RECOTEM_SIGNING_KEYS_SECRET="dev:<plaintext-hex-from-signing>"
-export RECOTEM_API_KEYS_SECRET="dev:sha256:<hash-hex-from-api>"
-export RECOTEM_API_PLAINTEXT="<plaintext-from-api>"      # used in step 4
+export RECOTEM_SIGNING_KEYS="dev:<plaintext-hex-from-signing>"
+export RECOTEM_API_KEYS="dev:sha256:<hash-hex-from-api>"
+export RECOTEM_API_PLAINTEXT="<plaintext-from-api>"      # used in step 4 (curl)
 ```
 
 ### 2. Train

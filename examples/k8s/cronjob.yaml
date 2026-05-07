@@ -63,7 +63,7 @@ spec:
                   valueFrom:
                     secretKeyRef:
                       name: recotem-auth
-                      key: RECOTEM_SIGNING_KEYS_SECRET
+                      key: RECOTEM_SIGNING_KEYS
               resources:
                 requests:
                   cpu: "1"

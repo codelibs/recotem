@@ -60,16 +60,17 @@ spec:
             {{- end }}
             {{- end }}
             # API keys and signing keys from Kubernetes Secret.
+            # Secret data keys match the env var names (see values.yaml).
             - name: RECOTEM_API_KEYS
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.secretName }}
-                  key: RECOTEM_API_KEYS_SECRET
+                  key: RECOTEM_API_KEYS
             - name: RECOTEM_SIGNING_KEYS
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.secretName }}
-                  key: RECOTEM_SIGNING_KEYS_SECRET
+                  key: RECOTEM_SIGNING_KEYS
 
           ports:
             - name: http

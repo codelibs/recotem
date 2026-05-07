@@ -85,15 +85,16 @@ env:
 
 # ── secrets ───────────────────────────────────────────────────────────────────
 # Names of Kubernetes Secrets containing sensitive env vars.
-# The chart expects each secret to carry the keys listed below.
-# Create them via:
+# The Secret data keys match the env var names so what the app reads,
+# what kubectl shows, and what the Secret stores are all spelled identically.
+# Create the Secret via:
 #   kubectl create secret generic recotem-auth \
-#     --from-literal=RECOTEM_API_KEYS_SECRET='kid1:sha256:<hex64>,kid2:sha256:<hex64>' \
-#     --from-literal=RECOTEM_SIGNING_KEYS_SECRET='prod-2026-q2:<hex64>'
+#     --from-literal=RECOTEM_API_KEYS='kid1:sha256:<hex64>,kid2:sha256:<hex64>' \
+#     --from-literal=RECOTEM_SIGNING_KEYS='prod-2026-q2:<hex64>'
 secrets:
   # Name of the Kubernetes Secret holding:
-  #   RECOTEM_API_KEYS_SECRET   — comma-separated "<kid>:sha256:<hex64>"
-  #   RECOTEM_SIGNING_KEYS_SECRET — comma-separated "<kid>:<hex64>" (64 hex = 32 bytes)
+  #   RECOTEM_API_KEYS    — comma-separated "<kid>:sha256:<hex64>"
+  #   RECOTEM_SIGNING_KEYS — comma-separated "<kid>:<hex64>" (64 hex = 32 bytes)
   secretName: recotem-auth
 
 # ── recipes source ────────────────────────────────────────────────────────────

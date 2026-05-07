@@ -42,7 +42,7 @@ spec:
                   valueFrom:
                     secretKeyRef:
                       name: recotem-secrets
-                      key: signing-keys
+                      key: RECOTEM_SIGNING_KEYS
           volumes:
             - name: recipes
               configMap:
@@ -111,12 +111,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: recotem-secrets
-                  key: signing-keys
+                  key: RECOTEM_SIGNING_KEYS
             - name: RECOTEM_API_KEYS
               valueFrom:
                 secretKeyRef:
                   name: recotem-secrets
-                  key: api-keys
+                  key: RECOTEM_API_KEYS
           readinessProbe:
             httpGet:
               path: /health

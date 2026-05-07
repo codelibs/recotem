@@ -37,6 +37,7 @@ import fsspec
 import structlog
 
 from recotem.artifact.format import ArtifactError
+from recotem.serving import metrics as _metrics
 from recotem.serving.registry import ModelEntry, ModelRegistry
 
 if TYPE_CHECKING:
@@ -251,7 +252,13 @@ class ArtifactWatcher(threading.Thread):
         for gone in current_names - found_names:
             logger.info("recipe_removed", name=gone)
             self._registry.remove(gone)
+            _metrics.set_model_loaded(gone, False)
             del self._states[gone]
+
+        if found_names != current_names:
+            _metrics.set_active_recipes(
+                sum(1 for e in self._registry.list() if e.loaded)
+            )
 
     # ------------------------------------------------------------------
     # Artifact polling
@@ -305,9 +312,13 @@ class ArtifactWatcher(threading.Thread):
             data = _read_artifact_bytes(artifact_path, max_bytes)
         except ArtifactError as exc:
             self._mark_error(name, f"read failed: {exc}")
+            _metrics.inc_artifact_load_failure(name)
+            _metrics.record_swap(name, ok=False)
             return
         except Exception as exc:
             self._mark_error(name, f"unexpected read error: {exc}")
+            _metrics.inc_artifact_load_failure(name)
+            _metrics.record_swap(name, ok=False)
             return
 
         sha256 = _sha256_bytes(data)
@@ -327,6 +338,8 @@ class ArtifactWatcher(threading.Thread):
                 error=str(exc),
             )
             self._mark_error(name, str(exc))
+            _metrics.inc_artifact_load_failure(name)
+            _metrics.record_swap(name, ok=False)
             return
         except Exception as exc:
             logger.error(
@@ -335,6 +348,8 @@ class ArtifactWatcher(threading.Thread):
                 error=str(exc),
             )
             self._mark_error(name, str(exc))
+            _metrics.inc_artifact_load_failure(name)
+            _metrics.record_swap(name, ok=False)
             return
 
         self._registry.replace(name, entry)
@@ -342,6 +357,9 @@ class ArtifactWatcher(threading.Thread):
         state.last_sha256 = sha256
         state.last_marker = new_marker
         entry._loaded_marker = (new_marker, sha256)
+        _metrics.set_model_loaded(name, True)
+        _metrics.record_swap(name, ok=True)
+        _metrics.set_active_recipes(sum(1 for e in self._registry.list() if e.loaded))
         logger.info(
             "artifact_hot_swapped",
             name=name,

@@ -34,6 +34,7 @@ from recotem.artifact.format import ArtifactError, parse_header_from_bytes
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
 from recotem.config import ServeConfig
 from recotem.recipe.loader import load_recipes_directory
+from recotem.serving import metrics as _metrics
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from recotem.serving.routes import make_router
 from recotem.serving.watcher import (
@@ -112,14 +113,18 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     for recipe in recipes:
         entry = _try_load_artifact(recipe, key_ring, serve_config)
         registry.replace(recipe.name, entry)
+        _metrics.set_model_loaded(recipe.name, entry.loaded)
         if entry.loaded:
             loaded_entries[recipe.name] = entry
         else:
+            _metrics.inc_artifact_load_failure(recipe.name)
             logger.warning(
                 "recipe_not_loaded_at_startup",
                 name=recipe.name,
                 error=entry.last_load_error,
             )
+
+    _metrics.set_active_recipes(len(loaded_entries))
 
     # Build watcher initial states — captures mtime/sha to avoid re-load on
     # first tick (spec: "capture initial mtime/sha inside the watcher's own

@@ -10,6 +10,7 @@ Routes (spec Section 7):
 
 from __future__ import annotations
 
+import time
 import uuid
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -17,6 +18,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from recotem.serving import metrics as _metrics
 from recotem.serving.auth import verify_api_key
 from recotem.serving.registry import ModelRegistry
 
@@ -105,70 +107,78 @@ def make_router(
     ) -> Any:
         """Return top-K recommendations for *user_id* using model *name*."""
         request_id = str(uuid.uuid4())
+        start = time.monotonic()
+        status = "error"
 
-        entry = registry.get(name)
-        if entry is None or entry.recommender is None:
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "detail": f"Recipe '{name}' is not loaded or unhealthy",
-                    "code": "recipe_unavailable",
-                },
-            )
-        if entry.last_load_error is not None:
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "detail": (
-                        f"Recipe '{name}' is unhealthy: {entry.last_load_error}"
-                    ),
-                    "code": "recipe_unhealthy",
-                },
-            )
-
-        structlog.contextvars.bind_contextvars(
-            recipe=name, request_id=request_id, kid=kid
-        )
         try:
-            raw_results: list[tuple[str, float]] = (
-                entry.recommender.get_recommendation_for_known_user_id(
-                    body.user_id, body.cutoff
+            entry = registry.get(name)
+            if entry is None or entry.recommender is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "detail": f"Recipe '{name}' is not loaded or unhealthy",
+                        "code": "recipe_unavailable",
+                    },
                 )
+            if entry.last_load_error is not None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "detail": (
+                            f"Recipe '{name}' is unhealthy: {entry.last_load_error}"
+                        ),
+                        "code": "recipe_unhealthy",
+                    },
+                )
+
+            structlog.contextvars.bind_contextvars(
+                recipe=name, request_id=request_id, kid=kid
             )
-        except KeyError:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "detail": (f"User '{body.user_id}' was not seen during training"),
-                    "code": "user_not_found",
-                },
-            ) from None
+            try:
+                raw_results: list[tuple[str, float]] = (
+                    entry.recommender.get_recommendation_for_known_user_id(
+                        body.user_id, body.cutoff
+                    )
+                )
+            except KeyError:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "detail": (
+                            f"User '{body.user_id}' was not seen during training"
+                        ),
+                        "code": "user_not_found",
+                    },
+                ) from None
+            finally:
+                structlog.contextvars.clear_contextvars()
+
+            # Build item list, joining metadata if available.
+            items: list[dict[str, Any]] = []
+            meta_df = entry.metadata_df
+
+            for item_id, score in raw_results:
+                item: dict[str, Any] = {"item_id": item_id, "score": float(score)}
+                if meta_df is not None:
+                    row = _lookup_metadata(meta_df, item_id, _deny_set)
+                    item.update(row)
+                items.append(item)
+
+            response = PredictResponse(
+                items=[RecommendationItem(**it) for it in items],
+                model=ModelInfo(
+                    recipe=name,
+                    trained_at=entry.trained_at,
+                    best_class=entry.best_class,
+                    kid=entry.kid,
+                ),
+                request_id=request_id,
+            )
+
+            status = "ok"
+            return response
         finally:
-            structlog.contextvars.clear_contextvars()
-
-        # Build item list, joining metadata if available.
-        items: list[dict[str, Any]] = []
-        meta_df = entry.metadata_df
-
-        for item_id, score in raw_results:
-            item: dict[str, Any] = {"item_id": item_id, "score": float(score)}
-            if meta_df is not None:
-                row = _lookup_metadata(meta_df, item_id, _deny_set)
-                item.update(row)
-            items.append(item)
-
-        response = PredictResponse(
-            items=[RecommendationItem(**it) for it in items],
-            model=ModelInfo(
-                recipe=name,
-                trained_at=entry.trained_at,
-                best_class=entry.best_class,
-                kid=entry.kid,
-            ),
-            request_id=request_id,
-        )
-
-        return response
+            _metrics.record_predict(name, status, time.monotonic() - start)
 
     # ------------------------------------------------------------------
     # GET /health
@@ -208,29 +218,23 @@ def make_router(
         return [e.models_dict() for e in registry.list() if e.loaded]
 
     # ------------------------------------------------------------------
-    # GET /metrics (opt-in)
+    # GET /metrics (opt-in via RECOTEM_METRICS_ENABLED)
     # ------------------------------------------------------------------
 
-    try:
-        import prometheus_client  # noqa: F401
-
-        _prometheus_available = True
-    except ImportError:
-        _prometheus_available = False
-
-    if _prometheus_available:
+    if _metrics.metrics_enabled():
 
         @router.get("/metrics", summary="Prometheus metrics", include_in_schema=True)
         def metrics() -> Any:
-            """Expose Prometheus metrics (opt-in; requires prometheus_client)."""
-            import prometheus_client
+            """Expose Prometheus metrics.
+
+            Requires both ``prometheus_client`` to be installed and
+            ``RECOTEM_METRICS_ENABLED`` to be a truthy value at app
+            construction time.
+            """
             from fastapi.responses import Response
 
-            data = prometheus_client.generate_latest()
-            return Response(
-                content=data,
-                media_type=prometheus_client.CONTENT_TYPE_LATEST,
-            )
+            data, content_type = _metrics.generate_latest()
+            return Response(content=data, media_type=content_type)
 
     return router
 

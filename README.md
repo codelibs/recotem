@@ -47,7 +47,7 @@ export RECOTEM_SIGNING_KEYS="my-key:<plaintext-hex-from-above>"
 **2. Write a recipe**
 
 ```yaml
-# recipe.yaml
+# recipes/top_picks.yaml
 name: top_picks
 
 source:
@@ -71,7 +71,9 @@ output:
 **3. Train**
 
 ```bash
-recotem train recipe.yaml
+mkdir -p recipes artifacts
+# (save the YAML above to recipes/top_picks.yaml first)
+recotem train recipes/top_picks.yaml
 # exit 0 → artifacts/top_picks.recotem written and signed
 ```
 

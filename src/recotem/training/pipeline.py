@@ -62,6 +62,8 @@ class TrainResult:
         "cutoff",
         "trained_at",
         "header",
+        "kid",
+        "trials",
     )
 
     def __init__(
@@ -77,6 +79,8 @@ class TrainResult:
         cutoff: int,
         trained_at: str,
         header: dict[str, Any],
+        kid: str,
+        trials: int,
     ) -> None:
         self.recipe_name = recipe_name
         self.run_id = run_id
@@ -88,6 +92,8 @@ class TrainResult:
         self.cutoff = cutoff
         self.trained_at = trained_at
         self.header = header
+        self.kid = kid
+        self.trials = trials
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +349,7 @@ def _run_training_locked(
         class_name=search_result.best_class_name,
         best_params=search_result.best_params,
     )
-    bound_logger.info("training_done")
+    bound_logger.info("final_model_trained")
 
     # ------------------------------------------------------------------
     # 8. Build artifact header and write.
@@ -379,9 +385,21 @@ def _run_training_locked(
         versioning=recipe.output.versioning,
     )
 
-    bound_logger.info(
-        "artifact_written",
+    # Canonical end-of-train marker (spec Section 6 step 9 / Section 10).
+    # Schema: name, run_id, exit_code, artifact, best_class, best_score,
+    # trials, trained_at, kid.  Use the unbound logger so the event keys
+    # match the spec exactly without duplicating bound context fields.
+    logger.info(
+        "train_done",
+        name=recipe.name,
+        run_id=run_id,
+        exit_code=0,
         artifact=artifact_path,
+        best_class=search_result.best_class_name,
+        best_score=search_result.best_score,
+        trials=search_result.n_completed,
+        trained_at=trained_at,
+        kid=signing_key,
     )
 
     return TrainResult(
@@ -395,6 +413,8 @@ def _run_training_locked(
         cutoff=recipe.training.cutoff,
         trained_at=trained_at,
         header=header_dict,
+        kid=signing_key,
+        trials=search_result.n_completed,
     )
 
 

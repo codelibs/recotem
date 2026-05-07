@@ -24,6 +24,7 @@ class CSVConfig(BaseModel, extra="forbid"):
     encoding: str = "utf-8"
     header: int = 0
     dtype: dict[str, str] | None = None
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class CSVSource:
@@ -112,6 +113,7 @@ class ParquetConfig(BaseModel, extra="forbid"):
 
     type: str = Field(default="parquet", pattern=r"^parquet$")
     path: str
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ParquetSource:

@@ -111,6 +111,7 @@ class ItemMetadataConfig(BaseModel, extra="forbid"):
 
     type: str = Field(pattern=r"^(csv|parquet)$")
     path: str
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     fields: list[str] = Field(min_length=1)
     on_field_missing: str = Field(
         default="error",

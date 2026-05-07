@@ -208,3 +208,84 @@ def test_cleansing_config_rejects_unimplemented_sum_weight() -> None:
     consume per-interaction weights."""
     with pytest.raises(ValidationError):
         CleansingConfig(dedup="sum_weight")
+
+
+# ---------------------------------------------------------------------------
+# sha256 integrity field on CSV / Parquet / ItemMetadata configs
+# ---------------------------------------------------------------------------
+
+
+def test_csvconfig_sha256_valid_lowercase_hex_accepted() -> None:
+    from recotem.datasource.csv import CSVConfig
+
+    cfg = CSVConfig(
+        type="csv",
+        path="/tmp/x.csv",
+        sha256="945fc769205a5976d38c5783500ae473afbb04608043b703951a699993c8f8be",
+    )
+    assert cfg.sha256 == (
+        "945fc769205a5976d38c5783500ae473afbb04608043b703951a699993c8f8be"
+    )
+
+
+def test_csvconfig_sha256_uppercase_rejected() -> None:
+    import pydantic
+
+    from recotem.datasource.csv import CSVConfig
+
+    with pytest.raises(pydantic.ValidationError):
+        CSVConfig(
+            type="csv",
+            path="/tmp/x.csv",
+            sha256="945FC769205A5976D38C5783500AE473AFBB04608043B703951A699993C8F8BE",
+        )
+
+
+def test_csvconfig_sha256_wrong_length_rejected() -> None:
+    import pydantic
+
+    from recotem.datasource.csv import CSVConfig
+
+    with pytest.raises(pydantic.ValidationError):
+        CSVConfig(type="csv", path="/tmp/x.csv", sha256="abcd1234")
+
+
+def test_csvconfig_sha256_optional_when_unset() -> None:
+    from recotem.datasource.csv import CSVConfig
+
+    cfg = CSVConfig(type="csv", path="/tmp/x.csv")
+    assert cfg.sha256 is None
+
+
+def test_parquetconfig_sha256_accepted() -> None:
+    from recotem.datasource.csv import ParquetConfig
+
+    cfg = ParquetConfig(
+        type="parquet",
+        path="/tmp/x.parquet",
+        sha256="0" * 64,
+    )
+    assert cfg.sha256 == "0" * 64
+
+
+def test_itemmetadata_sha256_accepted() -> None:
+    from recotem.recipe.models import ItemMetadataConfig
+
+    cfg = ItemMetadataConfig(
+        type="csv",
+        path="/tmp/items.csv",
+        sha256="a" * 64,
+        fields=["title"],
+    )
+    assert cfg.sha256 == "a" * 64
+
+
+def test_itemmetadata_sha256_invalid_rejected() -> None:
+    import pydantic
+
+    from recotem.recipe.models import ItemMetadataConfig
+
+    with pytest.raises(pydantic.ValidationError):
+        ItemMetadataConfig(
+            type="csv", path="/tmp/x.csv", sha256="not-hex", fields=["title"]
+        )

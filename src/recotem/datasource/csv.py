@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import urllib.error
+import urllib.request
 from io import BytesIO
 from typing import TYPE_CHECKING, ClassVar
 from urllib.parse import urlparse, urlunparse
@@ -11,6 +13,7 @@ from urllib.parse import urlparse, urlunparse
 import structlog
 from pydantic import BaseModel, Field
 
+from recotem.config import get_http_timeout_seconds, get_max_download_bytes
 from recotem.datasource.base import DataSourceError, FetchContext
 
 if TYPE_CHECKING:
@@ -66,6 +69,109 @@ def _verify_sha256(actual: bytes, expected_hex: str) -> None:
         raise DataSourceError(
             f"sha256 mismatch: got {digest[:8]}…, expected {expected_hex[:8]}…"
         )
+
+
+_USER_AGENT = "recotem/2"
+_CHUNK_SIZE = 1 * 1024 * 1024  # 1 MiB
+_MAX_REDIRECTS = 5
+
+
+def _get_max_download_bytes() -> int:
+    """Indirection so tests can monkeypatch a smaller cap."""
+    return get_max_download_bytes()
+
+
+def _fetch_http_bytes(
+    url: str,
+    *,
+    timeout: int,
+    max_bytes: int,
+    recipe_name: str,
+    run_id: str,
+) -> bytes:
+    """GET *url* via stdlib urllib. Streams into memory with a byte cap.
+
+    Follows up to ``_MAX_REDIRECTS`` redirects (urllib default is 30; we cap
+    lower to keep the path predictable). Raises :class:`DataSourceError` on
+    any HTTP, network, or cap-exceeded failure.
+    """
+    safe_url = _redact_url_userinfo(url)
+    redirects = 0
+    current_url = url
+    visited: set[str] = set()
+    while True:
+        if redirects > _MAX_REDIRECTS:
+            raise DataSourceError(
+                f"Too many redirects (>{_MAX_REDIRECTS}) fetching {safe_url}"
+            )
+        if current_url in visited:
+            raise DataSourceError(f"Redirect loop detected fetching {safe_url}")
+        visited.add(current_url)
+
+        req = urllib.request.Request(
+            current_url,
+            headers={"User-Agent": _USER_AGENT, "Accept": "*/*"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+                status = getattr(resp, "status", 200)
+                # Manual redirect handling (we capped lower than urllib's default)
+                if status in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise DataSourceError(
+                            f"HTTP {status} from {safe_url} without Location header"
+                        )
+                    redirects += 1
+                    current_url = urllib.request.urljoin(current_url, location)
+                    logger.info(
+                        "csv_source_redirect",
+                        recipe=recipe_name,
+                        run_id=run_id,
+                        from_=safe_url,
+                        to=_redact_url_userinfo(current_url),
+                        status=status,
+                    )
+                    continue
+                if status >= 400:
+                    raise DataSourceError(f"HTTP {status} fetching {safe_url}")
+                buf = bytearray()
+                while True:
+                    chunk = resp.read(_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    if len(buf) + len(chunk) > max_bytes:
+                        logger.warning(
+                            "csv_source_size_exceeded",
+                            recipe=recipe_name,
+                            run_id=run_id,
+                            path=safe_url,
+                            bytes_read=len(buf) + len(chunk),
+                            cap=max_bytes,
+                        )
+                        raise DataSourceError(
+                            f"Download size cap exceeded fetching {safe_url}: "
+                            f"> {max_bytes} bytes (RECOTEM_MAX_DOWNLOAD_BYTES)."
+                        )
+                    buf.extend(chunk)
+                return bytes(buf)
+        except urllib.error.HTTPError as exc:
+            # urllib.request follows redirects up to its own limit; HTTPError
+            # is raised for terminal 4xx/5xx.
+            raise DataSourceError(
+                f"HTTP {exc.code} fetching {safe_url}: {exc.reason}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise DataSourceError(
+                f"URL error fetching {safe_url}: {exc.reason}"
+            ) from exc
+        except DataSourceError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            raise DataSourceError(
+                f"Unexpected error fetching {safe_url}: {exc}"
+            ) from exc
 
 
 class CSVConfig(BaseModel, extra="forbid"):
@@ -132,11 +238,49 @@ class CSVSource:
         )
 
         if is_network:
-            # Implemented in Task 6; raise here so callers get a clear error
-            # if they try to use the partial implementation.
-            raise DataSourceError(
-                f"Network-scheme CSV fetch is not yet wired for '{safe_path}'."
+            raw_bytes = _fetch_http_bytes(
+                cfg.path,
+                timeout=get_http_timeout_seconds(),
+                max_bytes=_get_max_download_bytes(),
+                recipe_name=ctx.recipe_name,
+                run_id=ctx.run_id,
             )
+            # sha256 is guaranteed present by the recipe loader's
+            # _enforce_sha256_for_network_paths post-validator. Verify here.
+            assert cfg.sha256 is not None  # noqa: S101 — loader invariant
+            _verify_sha256(raw_bytes, cfg.sha256)
+            sha256_verified = True
+
+            compression = _infer_compression(cfg.path)
+            read_kwargs: dict[str, object] = {
+                "sep": cfg.delimiter,
+                "encoding": cfg.encoding,
+                "header": cfg.header,
+                "compression": compression,
+            }
+            if cfg.dtype:
+                read_kwargs["dtype"] = cfg.dtype
+            try:
+                df = pd.read_csv(BytesIO(raw_bytes), **read_kwargs)
+            except Exception as exc:
+                raise DataSourceError(
+                    f"Failed to parse CSV from '{safe_path}': {exc}"
+                ) from exc
+            if df.empty:
+                raise DataSourceError(
+                    f"CSV file '{safe_path}' is empty (no data rows after header)."
+                )
+            logger.info(
+                "csv_source_fetch_done",
+                recipe=ctx.recipe_name,
+                run_id=ctx.run_id,
+                path=safe_path,
+                rows=len(df),
+                bytes=len(raw_bytes),
+                sha256_verified=sha256_verified,
+                columns=list(df.columns),
+            )
+            return df
 
         # Non-network path
         if cfg.sha256 is not None:
@@ -270,9 +414,33 @@ class ParquetSource:
         )
 
         if is_network:
-            raise DataSourceError(
-                f"Network-scheme Parquet fetch is not yet wired for '{safe_path}'."
+            raw_bytes = _fetch_http_bytes(
+                cfg.path,
+                timeout=get_http_timeout_seconds(),
+                max_bytes=_get_max_download_bytes(),
+                recipe_name=ctx.recipe_name,
+                run_id=ctx.run_id,
             )
+            assert cfg.sha256 is not None  # noqa: S101 — loader invariant
+            _verify_sha256(raw_bytes, cfg.sha256)
+            sha256_verified = True
+            try:
+                df = pd.read_parquet(BytesIO(raw_bytes))
+            except Exception as exc:
+                raise DataSourceError(
+                    f"Failed to parse Parquet from '{safe_path}': {exc}"
+                ) from exc
+            logger.info(
+                "parquet_source_fetch_done",
+                recipe=ctx.recipe_name,
+                run_id=ctx.run_id,
+                path=safe_path,
+                rows=len(df),
+                bytes=len(raw_bytes),
+                sha256_verified=sha256_verified,
+                columns=list(df.columns),
+            )
+            return df
 
         if cfg.sha256 is not None:
             try:

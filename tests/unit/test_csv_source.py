@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import http.server
+import socketserver
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -116,3 +121,74 @@ def test_verify_sha256_match() -> None:
 def test_verify_sha256_mismatch_raises() -> None:
     with pytest.raises(DataSourceError, match="sha256"):
         _verify_sha256(b"hello", "0" * 64)
+
+
+@contextmanager
+def _local_http_server(payload: bytes, status: int = 200) -> Iterator[str]:
+    """Yield a base URL serving *payload* once."""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args, **kwargs) -> None:  # noqa: D401
+            return
+
+        def do_GET(self) -> None:
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_http_csv_fetch_with_matching_sha256_loads() -> None:
+    body = b"user_id,item_id\n1,a\n2,b\n"
+    digest = hashlib.sha256(body).hexdigest()
+    with _local_http_server(body) as base:
+        cfg = CSVConfig(type="csv", path=f"{base}/data.csv", sha256=digest)
+        df = CSVSource(cfg).fetch(_ctx())
+    assert len(df) == 2
+
+
+def test_http_csv_fetch_sha256_mismatch_raises() -> None:
+    body = b"user_id,item_id\n1,a\n"
+    bogus = "0" * 64
+    with _local_http_server(body) as base:
+        cfg = CSVConfig(type="csv", path=f"{base}/data.csv", sha256=bogus)
+        with pytest.raises(DataSourceError, match="sha256"):
+            CSVSource(cfg).fetch(_ctx())
+
+
+def test_http_csv_fetch_byte_cap_exceeded_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = b"user_id,item_id\n" + (b"0,a\n" * 1000)  # > 1 KiB
+    digest = hashlib.sha256(body).hexdigest()
+    monkeypatch.setenv("RECOTEM_MAX_DOWNLOAD_BYTES", str(1024 * 1024))  # clamp floor
+    # Patch the cap below 1 MiB by direct call to make the test deterministic:
+    from recotem.datasource import csv as csvmod
+
+    monkeypatch.setattr(csvmod, "_get_max_download_bytes", lambda: 100)
+    with _local_http_server(body) as base:
+        cfg = CSVConfig(type="csv", path=f"{base}/data.csv", sha256=digest)
+        with pytest.raises(DataSourceError, match="exceeded"):
+            CSVSource(cfg).fetch(_ctx())
+
+
+def test_http_csv_fetch_404_raises() -> None:
+    with _local_http_server(b"", status=404) as base:
+        cfg = CSVConfig(
+            type="csv",
+            path=f"{base}/missing.csv",
+            sha256="0" * 64,
+        )
+        with pytest.raises(DataSourceError, match="HTTP|fetch"):
+            CSVSource(cfg).fetch(_ctx())

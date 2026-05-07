@@ -41,6 +41,7 @@ source:
 | `encoding` | string | `"utf-8"` | Any encoding accepted by pandas. |
 | `header` | int | `0` | Row number of the header. |
 | `dtype` | map | `{}` | Key = column name, value = pandas dtype string. |
+| `sha256` | string | optional (required when `path` is `http://` or `https://`) | 64-char lowercase hex; verified against the fetched bytes; mismatch raises `DataSourceError` |
 
 For Parquet files use `type: parquet`. The `delimiter`, `encoding`, and `header` fields are ignored.
 
@@ -135,6 +136,7 @@ item_metadata:
 | `path` | string | required | See [Path rules](#path-rules). |
 | `fields` | list[string] | required | Non-empty. Only listed fields are returned in predict responses. |
 | `on_field_missing` | string | `error` | What to do if a `fields` entry is absent in the file. `error` fails startup; `null` fills with `null`. |
+| `sha256` | string | optional (required when `path` is `http://` or `https://`) | 64-char lowercase hex; verified against the fetched bytes; mismatch raises `DataSourceError` |
 
 Server-side field suppression is also available via `RECOTEM_METADATA_FIELD_DENY` (comma-separated column names), applied as a post-join column drop.
 
@@ -209,13 +211,20 @@ output:
 
 Applies to `output.path`, `source.path`, and `item_metadata.path`.
 
-Allowed schemes: bare local path, `s3://`, `gs://`, `az://`.
+Path schemes for `source.path` and `item_metadata.path`: any fsspec-supported
+scheme is accepted. Schemes `http://` and `https://` additionally require an
+`sha256` integrity pin on the same config block.
 
-Rejected schemes: `file://`, `http://`, `https://`, `ftp://`, `ftps://`, `memory://`.
+`output.path` rejects schemes that fsspec does not implement for writes:
+`http://`, `https://`, `ftp://`, `ftps://`, `memory://`. Acceptable output
+schemes: bare local, `file://`, `s3://`, `gs://`, `az://`.
 
-Embedded credentials (`s3://AKIA...:secret@bucket/`) are rejected at recipe load.
+Embedded credentials (`s3://AKIA...:secret@bucket/`) are rejected at recipe
+load on every path field.
 
-Local paths are resolved to absolute. If `RECOTEM_ARTIFACT_ROOT` is set, `output.path` must resolve to a path under it after `realpath` resolution (symlink escapes are rejected).
+Local paths are resolved to absolute. If `RECOTEM_ARTIFACT_ROOT` is set,
+`output.path` must resolve to a path under it after `realpath` resolution
+(symlink escapes are rejected).
 
 ---
 

@@ -11,14 +11,14 @@ This multi-kid pattern enables zero-downtime rotation:
 1. **Generate a new key.**
 
    ```bash
-   recotem keygen
-   # kid:        prod-2026-q3
-   # plaintext:  <not used for signing>
-   # hash:       sha256:<hex>   <-- this is the signing key hash, shown for reference only
-   # signing hex: <64-hex>      <-- use this in RECOTEM_SIGNING_KEYS
+   recotem keygen --type signing --kid prod-2026-q3
+   # kid=prod-2026-q3
+   # plaintext=<64 hex chars>     <-- 32 raw bytes; this IS the signing key
+   # hash=sha256:<64 hex chars>   <-- informational only (sha256 of plaintext)
+   # env_entry=RECOTEM_SIGNING_KEYS=prod-2026-q3:<64 hex chars>
    ```
 
-   `recotem keygen` prints a `(kid, plaintext, hash)` triple. For signing keys, use the raw hex output, not the `sha256:` prefixed form (that prefix is for API keys). See your key generation output carefully.
+   For signing keys, the **`plaintext`** line is the actual key — copy it (or the ready-made `env_entry=` line) into `RECOTEM_SIGNING_KEYS`. The `hash=sha256:<hex>` line is shown for reference only and must not be used in `RECOTEM_SIGNING_KEYS`. (The `sha256:` wire prefix is reserved for `RECOTEM_API_KEYS` entries — see "API key rotation" below.)
 
 2. **Add the new kid as the first entry, keeping the old one.**
 

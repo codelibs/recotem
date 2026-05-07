@@ -55,7 +55,9 @@ services:
       - artifacts:/artifacts:ro
     environment:
       # Comma-separated list of "<kid>:sha256:<hex64>" entries.
-      # Generate with: recotem keygen  (outputs kid + plaintext + hash)
+      # Generate with: recotem keygen --type api --kid <kid>
+      # (the default --type is 'signing', which produces a different key
+      # format and would 401 every request when placed here.)
       RECOTEM_API_KEYS: "${RECOTEM_API_KEYS_SECRET}"
       # Signing keys for artifact verification (same format as train).
       RECOTEM_SIGNING_KEYS: "${RECOTEM_SIGNING_KEYS_SECRET}"

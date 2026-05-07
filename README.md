@@ -33,6 +33,9 @@ Requires Python 3.12+.
 
 ## Hello world (CSV)
 
+> For a runnable end-to-end tutorial (Docker Compose, no manual data prep),
+> see [docs/getting-started.md](docs/getting-started.md).
+
 **1. Generate a signing key**
 
 ```bash
@@ -138,7 +141,7 @@ The server detects the new artifact and hot-swaps automatically. No restart need
 
 ## Further reading
 
-- [docs/quickstart.md](docs/quickstart.md) — 5-minute walkthrough
+- [docs/getting-started.md](docs/getting-started.md) — Docker Compose / pip walkthrough end-to-end
 - [docs/recipe-reference.md](docs/recipe-reference.md) — every field documented
 - [docs/operations.md](docs/operations.md) — key rotation, sizing, troubleshooting
 - [docs/security.md](docs/security.md) — threat model, IAM scopes, secrets handling

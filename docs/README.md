@@ -2,7 +2,7 @@
 
 ## Getting started
 
-- [Quickstart](quickstart.md) — install, write a recipe, train, curl `/predict` in 5 minutes
+- [Getting started](getting-started.md) — install (Docker or pip), train from a public CSV, curl `/predict`
 
 ## Reference
 

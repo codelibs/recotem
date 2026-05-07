@@ -56,12 +56,9 @@ RUN uv sync \
 COPY src/ ./src/
 
 # Build and install the recotem wheel into the virtual env.
-RUN uv pip install --no-deps \
-        --extra bigquery \
-        --extra s3 \
-        --extra gcs \
-        --extra metrics \
-        .
+# Dependencies (including extras) are already resolved by `uv sync` above,
+# so --no-deps is sufficient — extras only add deps, not new package code.
+RUN uv pip install --no-deps .
 
 # ── stage: runtime ────────────────────────────────────────────────────────────
 FROM base AS runtime

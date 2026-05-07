@@ -90,7 +90,7 @@ spec:
           image: ghcr.io/codelibs/recotem:2
           command: ["recotem", "serve", "--recipes", "/recipes/"]
           ports:
-            - containerPort: 8000
+            - containerPort: 8080
           volumeMounts:
             - name: recipes
               mountPath: /recipes
@@ -102,7 +102,7 @@ spec:
             - name: RECOTEM_HOST
               value: "0.0.0.0"
             - name: RECOTEM_PORT
-              value: "8000"
+              value: "8080"
             - name: RECOTEM_LOG_FORMAT
               value: "json"
             - name: RECOTEM_WATCH_INTERVAL
@@ -120,13 +120,13 @@ spec:
           readinessProbe:
             httpGet:
               path: /health
-              port: 8000
+              port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
-              port: 8000
+              port: 8080
             initialDelaySeconds: 30
             periodSeconds: 30
       volumes:
@@ -153,7 +153,7 @@ spec:
     app: recotem-serve
   ports:
     - port: 80
-      targetPort: 8000
+      targetPort: 8080
   type: ClusterIP
 ```
 

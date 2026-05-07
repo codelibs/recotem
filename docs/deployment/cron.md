@@ -132,7 +132,7 @@ Type=simple
 User=recotem
 EnvironmentFile=/etc/recotem/secrets
 Environment=RECOTEM_HOST=0.0.0.0
-Environment=RECOTEM_PORT=8000
+Environment=RECOTEM_PORT=8080
 Environment=RECOTEM_LOG_FORMAT=json
 Environment=RECOTEM_WATCH_INTERVAL=30
 ExecStart=/usr/local/bin/recotem serve --recipes /etc/recotem/recipes/

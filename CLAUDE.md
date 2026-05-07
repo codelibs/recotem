@@ -83,12 +83,12 @@ export RECOTEM_API_KEYS="key1:sha256:<hex64>"
 uv run recotem train examples/csv-local/recipe.yaml
 
 # Serve from a directory of recipes
-uv run recotem serve --recipes ./recipes/ --port 8000
+uv run recotem serve --recipes ./recipes/ --port 8080
 
 # Predict
 curl -H "X-API-Key: <plaintext>" \
      -d '{"user_id":"u1","cutoff":10}' \
-     http://localhost:8000/predict/news_articles
+     http://localhost:8080/predict/news_articles
 ```
 
 ## Recipe model
@@ -156,7 +156,7 @@ uv run ruff format --check src tests
 |---|---|---|
 | `RECOTEM_SIGNING_KEYS` | (required) | `kid:hex32,kid2:hex32` for HMAC sign/verify. |
 | `RECOTEM_API_KEYS` | (empty) | `kid:sha256:hex64,...` for serve auth. Empty forces 127.0.0.1 bind. |
-| `RECOTEM_HOST` / `RECOTEM_PORT` | 0.0.0.0 / 8000 | uvicorn bind. Overridden by 127.0.0.1 when no API keys. |
+| `RECOTEM_HOST` / `RECOTEM_PORT` | 0.0.0.0 / 8080 | uvicorn bind. Overridden by 127.0.0.1 when no API keys. |
 | `RECOTEM_WATCH_INTERVAL` | 5 | Watcher poll seconds (clamped 1–30). |
 | `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. |
 | `RECOTEM_ALLOWED_HOSTS` | 127.0.0.1,localhost | TrustedHostMiddleware list. |

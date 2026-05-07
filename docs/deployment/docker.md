@@ -31,7 +31,7 @@ services:
     image: ghcr.io/codelibs/recotem:2
     command: recotem serve --recipes /recipes/
     ports:
-      - "8000:8000"
+      - "8080:8080"
     volumes:
       - ./recipes:/recipes:ro
       - artifacts:/artifacts:ro        # serve only reads; ro is safe
@@ -39,13 +39,13 @@ services:
       RECOTEM_SIGNING_KEYS:      "${RECOTEM_SIGNING_KEYS}"
       RECOTEM_API_KEYS:          "${RECOTEM_API_KEYS}"
       RECOTEM_HOST:              "0.0.0.0"
-      RECOTEM_PORT:              "8000"
+      RECOTEM_PORT:              "8080"
       RECOTEM_WATCH_INTERVAL:    "30"    # poll every 30 s
       RECOTEM_LOG_FORMAT:        "json"
       RECOTEM_ALLOWED_HOSTS:     "localhost,myapp.example.com"
       RECOTEM_ALLOWED_ORIGINS:   "https://myapp.example.com"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -80,7 +80,7 @@ docker compose --env-file .env up -d serve
 
 ```yaml
 ports:
-  - "127.0.0.1:8000:8000"   # only accessible to host-local reverse proxy
+  - "127.0.0.1:8080:8080"   # only accessible to host-local reverse proxy
 ```
 
 ## Running train on a schedule
@@ -110,7 +110,7 @@ docker run --rm \
 | `RECOTEM_SIGNING_KEYS` | yes (train+serve) | — | `<kid>:<hex>,...` |
 | `RECOTEM_API_KEYS` | yes (serve) | — | `<kid>:sha256:<hex>,...` |
 | `RECOTEM_HOST` | no | `127.0.0.1` | Must be `0.0.0.0` inside Docker |
-| `RECOTEM_PORT` | no | `8000` | |
+| `RECOTEM_PORT` | no | `8080` | |
 | `RECOTEM_WATCH_INTERVAL` | no | `5` | Seconds between artifact polls |
 | `RECOTEM_LOG_FORMAT` | no | `console`* | `json` recommended in containers |
 | `RECOTEM_ALLOWED_HOSTS` | no | `127.0.0.1,localhost` | Comma-separated |
@@ -124,7 +124,7 @@ docker run --rm \
 ## Health check
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:8080/health
 ```
 
 ```json

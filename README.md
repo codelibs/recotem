@@ -36,11 +36,12 @@ Requires Python 3.12+.
 **1. Generate a signing key**
 
 ```bash
-recotem keygen
-# kid:        my-key
-# plaintext:  <43-char base64url>
-# hash:       sha256:<64-hex>
-export RECOTEM_SIGNING_KEYS="my-key:<hex-from-above>"
+recotem keygen --type signing --kid my-key
+# kid=my-key
+# plaintext=<64-char hex>
+# hash=sha256:<64-char hex>
+# env_entry=RECOTEM_SIGNING_KEYS=my-key:<64-char hex>
+export RECOTEM_SIGNING_KEYS="my-key:<plaintext-hex-from-above>"
 ```
 
 **2. Write a recipe**
@@ -76,16 +77,23 @@ recotem train recipe.yaml
 
 **4. Serve**
 
+API keys are independent from signing keys — generate one with `--type api`:
+
 ```bash
-export RECOTEM_API_KEYS="my-key:sha256:<hash>"
+recotem keygen --type api --kid my-key
+# kid=my-key
+# plaintext=<43-char base64url>           ← keep this; clients pass it as X-API-Key
+# hash=sha256:<64-char hex>
+# env_entry=RECOTEM_API_KEYS=my-key:sha256:<64-char hex>
+export RECOTEM_API_KEYS="my-key:sha256:<hash-hex-from-above>"
 recotem serve --recipes ./recipes/
 ```
 
 **5. Predict**
 
 ```bash
-curl -X POST http://localhost:8000/predict/top_picks \
-  -H "X-API-Key: <plaintext>" \
+curl -X POST http://localhost:8080/predict/top_picks \
+  -H "X-API-Key: <api-key-plaintext>" \
   -H "Content-Type: application/json" \
   -d '{"user_id": "u123", "cutoff": 5}'
 ```

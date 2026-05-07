@@ -49,7 +49,7 @@ This multi-kid pattern enables zero-downtime rotation:
 5. **Verify.**
 
    ```bash
-   curl http://localhost:8000/health | jq '.recipes | to_entries[] | select(.value.loaded == false)'
+   curl http://localhost:8080/health | jq '.recipes | to_entries[] | select(.value.loaded == false)'
    ```
 
    Empty output means all recipes loaded successfully under the new key.
@@ -133,7 +133,7 @@ The server continues running and returns 503 for that recipe's `/predict/{name}`
 3. **Verify.**
 
    ```bash
-   curl http://localhost:8000/health | jq '.recipes.my_recipe'
+   curl http://localhost:8080/health | jq '.recipes.my_recipe'
    # {"loaded": true, "best_class": "IALSRecommender", ...}
    ```
 
@@ -210,7 +210,7 @@ Available metrics:
 ### `recotem serve` starts but recipe is `loaded: false`
 
 ```bash
-curl http://localhost:8000/health | jq '.recipes'
+curl http://localhost:8080/health | jq '.recipes'
 ```
 
 ```json

@@ -124,11 +124,9 @@ def test_end_to_end_movielens_small_n_trials_2(
     kr = _make_key_ring()
     write_calls = []
 
-    def _mock_write(
-        payload, header_dict, output_path, versioning, key_ring, signing_key
-    ):
-        write_calls.append({"header": header_dict, "path": output_path})
-        return output_path
+    def _mock_write(payload_obj, header_dict, key_ring, fs_path, *, versioning):
+        write_calls.append({"header": header_dict, "path": fs_path})
+        return fs_path
 
     result = run_training(
         recipe, key_ring=kr, signing_key="active", write_artifact_fn=_mock_write

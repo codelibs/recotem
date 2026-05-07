@@ -24,24 +24,26 @@ recotem --help
 Every artifact is HMAC-signed. You need a key before training.
 
 ```bash
-recotem keygen
+recotem keygen --type signing --kid dev-key
 ```
 
-Output:
+Output (the plaintext is a 64-char hex string — 32 raw bytes):
 
 ```
-kid:       dev-key
-plaintext: dGhpcyBpcyBub3QgYSByZWFsIGtleWFhYWFhYQ
-hash:      sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe04294e576d4b0cccea232d5f0
+kid=dev-key
+plaintext=ab19d1c735a2b2432b4ac7374c3edc0f75bfecd090002d59549a0d203b9ccce8
+hash=sha256:04cba87ddb7ba43b40d114bc50ce2e419d18bcdc67235ca85ef7980b4b61c296
+env_entry=RECOTEM_SIGNING_KEYS=dev-key:ab19d1c735a2b2432b4ac7374c3edc0f75bfecd090002d59549a0d203b9ccce8
 ```
 
 Export the key for training:
 
 ```bash
-export RECOTEM_SIGNING_KEYS="dev-key:b94d27b9934d3e08a52e52d7da7dabfac484efe04294e576d4b0cccea232d5f0"
+export RECOTEM_SIGNING_KEYS="dev-key:ab19d1c735a2b2432b4ac7374c3edc0f75bfecd090002d59549a0d203b9ccce8"
 ```
 
-The plaintext is shown once. Store it securely — you will need it to call the API.
+The plaintext is shown once. Store it securely — `recotem train` and `recotem
+inspect` need the same key. API keys for `/predict` are separate (Step 6).
 
 ## 3. Write a recipe
 
@@ -117,15 +119,26 @@ Prints the header JSON (HMAC-verified, payload never deserialized):
 
 ## 6. Serve
 
+API keys are independent from signing keys. Generate one with `--type api` —
+this produces a 43-char base64url plaintext for clients and a scrypt-derived
+hash for the server's allow-list:
+
 ```bash
-export RECOTEM_API_KEYS="dev-key:sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe04294e576d4b0cccea232d5f0"
+recotem keygen --type api --kid dev-key
+# kid=dev-key
+# plaintext=ovz_MUSdz1eHLf1Em5RhaDFdulYMznqj0rvVD_H4rvs   ← clients send this
+# hash=sha256:a698a0b3ee823c2b23612a560b0154459e033982883648e45b74298128a30e76
+# env_entry=RECOTEM_API_KEYS=dev-key:sha256:a698a0b3ee823c2b23612a560b0154459e033982883648e45b74298128a30e76
+
+export RECOTEM_API_KEYS="dev-key:sha256:a698a0b3ee823c2b23612a560b0154459e033982883648e45b74298128a30e76"
 recotem serve --recipes ./recipes/
 ```
 
-The server starts on `http://127.0.0.1:8000` by default. Check health:
+The server starts on `http://127.0.0.1:8080` by default
+(override with `--port` or `RECOTEM_PORT`). Check health:
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8080/health
 ```
 
 ```json
@@ -135,8 +148,8 @@ curl http://127.0.0.1:8000/health
 ## 7. Call predict
 
 ```bash
-curl -s -X POST http://127.0.0.1:8000/predict/top_picks \
-  -H "X-API-Key: dGhpcyBpcyBub3QgYSByZWFsIGtleWFhYWFhYQ" \
+curl -s -X POST http://127.0.0.1:8080/predict/top_picks \
+  -H "X-API-Key: ovz_MUSdz1eHLf1Em5RhaDFdulYMznqj0rvVD_H4rvs" \
   -H "Content-Type: application/json" \
   -d '{"user_id": "u123", "cutoff": 5}' | jq .
 ```

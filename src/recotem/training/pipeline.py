@@ -124,8 +124,7 @@ def run_training(
         When ``None``, defaults to ``key_ring.active_kid``.
     write_artifact_fn:
         Callable with signature
-        ``(payload, header_dict, output_path, versioning, key_ring,
-           signing_key) -> str``.
+        ``(payload_obj, header_dict, key_ring, fs_path, *, versioning) -> str``.
         Defaults to ``recotem.artifact.io.write_artifact``.
     quiet, verbose:
         Progress reporting flags passed through to ``ProgressReporter``.

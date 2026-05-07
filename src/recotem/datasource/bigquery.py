@@ -107,6 +107,46 @@ class BigQuerySource:
     # Public API
     # ------------------------------------------------------------------
 
+    def probe(self) -> None:
+        """Verify ADC, client creation, and query validity via a dry-run job.
+
+        Dry-run jobs are billed nothing and processed bytes is set without
+        running the query, which makes them a cheap connectivity / auth /
+        SQL-syntax probe for ``recotem validate``.
+
+        Raises
+        ------
+        DataSourceError
+            On ADC failure, network error, or invalid SQL / parameters.
+        """
+        from google.api_core.exceptions import GoogleAPICallError
+        from google.cloud import bigquery
+
+        cfg = self._config
+        try:
+            client = bigquery.Client(project=cfg.project)
+        except Exception as exc:
+            raise DataSourceError(
+                f"BigQuery client creation failed: {exc}. "
+                "Ensure Application Default Credentials (ADC) are configured."
+            ) from exc
+
+        job_config = bigquery.QueryJobConfig(
+            dry_run=True,
+            use_query_cache=False,
+        )
+        if cfg.query_parameters:
+            job_config.query_parameters = self._build_query_parameters()
+
+        try:
+            client.query(cfg.query, job_config=job_config)
+        except GoogleAPICallError as exc:
+            raise DataSourceError(f"BigQuery dry-run failed: {exc}") from exc
+        except Exception as exc:
+            raise DataSourceError(
+                f"Unexpected error during BigQuery dry-run: {exc}"
+            ) from exc
+
     def fetch(self, ctx: FetchContext) -> pd.DataFrame:
         """Execute the BigQuery query and return results as a DataFrame.
 

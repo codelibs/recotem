@@ -49,6 +49,10 @@ class CSVSource:
             ) from exc
         self._config = config
 
+    def probe(self) -> None:
+        """Verify the CSV file exists and is readable without loading it."""
+        _probe_fsspec_path(self._config.path, kind="CSV")
+
     def fetch(self, ctx: FetchContext) -> pd.DataFrame:
         """Fetch the CSV file and return a DataFrame.
 
@@ -131,6 +135,10 @@ class ParquetSource:
             ) from exc
         self._config = config
 
+    def probe(self) -> None:
+        """Verify the Parquet file exists and is readable without loading it."""
+        _probe_fsspec_path(self._config.path, kind="Parquet")
+
     def fetch(self, ctx: FetchContext) -> pd.DataFrame:
         """Fetch the Parquet file and return a DataFrame.
 
@@ -170,3 +178,38 @@ class ParquetSource:
             columns=list(df.columns),
         )
         return df
+
+
+def _probe_fsspec_path(path: str, *, kind: str) -> None:
+    """Confirm *path* exists on its fsspec-resolved filesystem.
+
+    Used by file-backed sources' ``probe()`` so ``recotem validate`` catches
+    missing or unreachable inputs (local paths, ``s3://``, ``gs://``, ``az://``)
+    without loading any data.  Object-store backends require the same auth /
+    network configuration to ``exists`` as to ``read``, so a successful exists
+    check is a meaningful connectivity probe.
+    """
+    try:
+        import fsspec
+    except ImportError as exc:
+        raise DataSourceError(
+            "fsspec is required for path probing. "
+            "Install it with: pip install recotem"
+        ) from exc
+
+    try:
+        fs, resolved = fsspec.core.url_to_fs(path)
+    except Exception as exc:
+        raise DataSourceError(
+            f"{kind} path {path!r} could not be resolved: {exc}"
+        ) from exc
+
+    try:
+        if not fs.exists(resolved):
+            raise DataSourceError(f"{kind} file not found: {path}")
+    except DataSourceError:
+        raise
+    except Exception as exc:
+        raise DataSourceError(
+            f"Failed to probe {kind} path {path!r}: {exc}"
+        ) from exc

@@ -70,6 +70,12 @@ class DataSource(Protocol):
     ``fetch(self, ctx: FetchContext) -> pd.DataFrame``
         Fetch and return the raw interactions DataFrame.  Must raise
         :class:`DataSourceError` for any external / transient failure.
+    ``probe(self) -> None``  (optional)
+        Lightweight connectivity / auth check invoked by ``recotem validate``
+        when the method is defined.  Should not load full data — use
+        ``LIMIT 1`` / dry-run / ``fs.exists`` style checks.  Must raise
+        :class:`DataSourceError` on failure.  Sources without ``probe`` are
+        still validated for extras and config schema only.
     """
 
     type_name: ClassVar[str]

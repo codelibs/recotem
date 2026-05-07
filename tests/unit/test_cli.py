@@ -72,6 +72,45 @@ def test_validate_output_contains_schema_ok(tmp_path: Path) -> None:
     assert "OK" in result.stdout or result.exit_code == 0
 
 
+def test_validate_probes_csv_path_and_exits_3_on_missing_file(
+    tmp_path: Path,
+) -> None:
+    """validate exits 3 (DataSource error) when the CSV file is missing.
+
+    Confirms ``CSVSource.probe()`` is invoked by the CLI's optional probe
+    hook and that the missing path surfaces as a DataSourceError.
+    """
+    artifact_path = tmp_path / "missing.recotem"
+    yaml_path = tmp_path / "missing.yaml"
+    yaml_path.write_text(
+        f"""\
+name: missing
+source:
+  type: csv
+  path: {tmp_path / "does-not-exist.csv"}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {artifact_path}
+"""
+    )
+    result = runner.invoke(app, ["validate", str(yaml_path)])
+    assert result.exit_code == 3
+    assert "CSV file not found" in (result.stdout + result.stderr)
+
+
+def test_validate_probe_ok_for_existing_csv(tmp_path: Path) -> None:
+    """validate prints "probe OK" when the CSV path is reachable."""
+    yaml_path = _minimal_recipe_yaml(tmp_path)
+    result = runner.invoke(app, ["validate", str(yaml_path)])
+    assert result.exit_code == 0
+    assert "probe OK (csv)" in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # recotem schema
 # ---------------------------------------------------------------------------

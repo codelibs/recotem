@@ -417,8 +417,16 @@ def validate(
         # to __init__, so this catches missing extras (e.g. google-cloud-bigquery)
         # and config / Config-class mismatches.  We do NOT call .fetch() here —
         # full data loads can be expensive (BigQuery scans, large CSV reads).
-        source_cls(source_cfg)
-        typer.echo(f"DataSource: probe OK ({type_name})")
+        source = source_cls(source_cfg)
+
+        # Optional connectivity probe — plugin-authoring.md documents this hook.
+        # Built-ins implement it; third-party plugins may opt in.
+        probe = getattr(source, "probe", None)
+        if callable(probe):
+            probe()
+            typer.echo(f"DataSource: probe OK ({type_name})")
+        else:
+            typer.echo(f"DataSource: extras OK ({type_name}, no probe defined)")
     except Exception as exc:
         code = _map_exception_to_exit(exc)
         _exit(code, f"DataSource probe failed: {exc}")

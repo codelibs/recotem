@@ -1,4 +1,5 @@
 """Pydantic v2 models for the Recotem recipe schema (Section 5)."""
+
 from __future__ import annotations
 
 import re
@@ -151,9 +152,7 @@ class Recipe(BaseModel, extra="forbid"):
     @classmethod
     def _validate_name(cls, v: str) -> str:
         if not _NAME_RE.match(v):
-            raise ValueError(
-                f"Recipe name {v!r} must match ^[A-Za-z0-9_-]{{1,64}}$"
-            )
+            raise ValueError(f"Recipe name {v!r} must match ^[A-Za-z0-9_-]{{1,64}}$")
         return v
 
     @model_validator(mode="after")

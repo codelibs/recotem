@@ -62,9 +62,15 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow (deselect with -m \"not slow\")",
+]
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning:google.*",
+    "ignore::pydantic.warnings.PydanticDeprecatedSince20",
+    "ignore::DeprecationWarning:irspack.*",
+    "ignore::DeprecationWarning:fastprogress.*",
 ]
 
 [tool.ruff]
@@ -74,10 +80,13 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B", "SIM", "TID"]
-ignore = ["E501"]
+ignore = ["E501", "SIM105", "SIM108"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*" = ["S101"]
+"tests/**/*" = ["S101", "F841", "B007", "B011", "SIM117"]
+"src/recotem/artifact/io.py" = ["SIM117"]
+"src/recotem/training/lock.py" = ["SIM117"]
+"src/recotem/training/pipeline.py" = ["B904"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["recotem"]

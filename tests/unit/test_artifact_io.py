@@ -10,6 +10,7 @@ Tests:
 NOTE: write_artifact pickles its payload_obj argument internally.
 Tests pass plain Python objects; write_artifact handles serialization.
 """
+
 from __future__ import annotations
 
 import json
@@ -19,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from recotem.artifact.format import ArtifactError, DEFAULT_MAX_PAYLOAD_BYTES
+from recotem.artifact.format import ArtifactError
 from recotem.artifact.io import read_artifact, write_artifact
 from recotem.artifact.signing import KeyRing
 from tests.conftest import ACTIVE_KEY_HEX
@@ -32,6 +33,7 @@ def _make_keyring() -> KeyRing:
 # ---------------------------------------------------------------------------
 # Write + read roundtrip
 # ---------------------------------------------------------------------------
+
 
 def test_write_read_roundtrip_always_overwrite(tmp_path: Path) -> None:
     """write_artifact then read_artifact: header is preserved."""
@@ -88,6 +90,7 @@ def test_write_read_roundtrip_append_sha(tmp_path: Path) -> None:
 # Atomic write via tempfile + rename
 # ---------------------------------------------------------------------------
 
+
 def test_atomic_local_write_via_tempfile_rename(tmp_path: Path) -> None:
     """write_artifact leaves no .tmp files after a successful write."""
     kr = _make_keyring()
@@ -110,6 +113,7 @@ def test_atomic_local_write_via_tempfile_rename(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # append_sha pointer atomicity
 # ---------------------------------------------------------------------------
+
 
 def test_versioning_append_sha_writes_pointer_atomically(tmp_path: Path) -> None:
     """append_sha mode writes a valid pointer file with exactly one filename line."""
@@ -140,6 +144,7 @@ def test_versioning_append_sha_writes_pointer_atomically(tmp_path: Path) -> None
 # max_bytes enforcement
 # ---------------------------------------------------------------------------
 
+
 def test_read_artifact_max_bytes_rejection(tmp_path: Path) -> None:
     """read_artifact with small max_bytes rejects a valid (but large) artifact."""
     kr = _make_keyring()
@@ -160,6 +165,7 @@ def test_read_artifact_max_bytes_rejection(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # inspect path: read + HMAC verify without unpickling
 # ---------------------------------------------------------------------------
+
 
 def test_inspect_runs_full_hmac_and_does_not_unpickle(tmp_path: Path) -> None:
     """read_artifact verifies HMAC; caller must explicitly unpickle payload."""

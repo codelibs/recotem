@@ -110,13 +110,13 @@ def recipe_lock(
                         time.sleep(0.05)
             else:
                 fcntl.flock(fd, lock_op)
-        except OSError:
+        except OSError as exc:
             # Lock contended (LOCK_NB + EWOULDBLOCK / EACCES).
             if fail_on_busy:
                 raise LockContestedError(
                     f"Recipe lock at {lock_path} is held by another process. "
                     "Pass --fail-on-busy to surface this as an error, or wait."
-                )
+                ) from exc
             yield False
             return
 

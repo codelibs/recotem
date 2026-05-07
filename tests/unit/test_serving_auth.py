@@ -7,6 +7,7 @@ Tests:
 - Malformed entry rejection
 - kid attached to request.state
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -38,6 +39,7 @@ def _make_entry(kid: str, plaintext: str) -> ApiKeyEntry:
 # Basic auth
 # ---------------------------------------------------------------------------
 
+
 def test_verify_api_key_succeeds_with_correct_key() -> None:
     entry = _make_entry("k1", "supersecretkey123456789012345678")
     request = _make_request("supersecretkey123456789012345678")
@@ -65,6 +67,7 @@ def test_verify_api_key_missing_header_raises_401() -> None:
 # No-auth mode (empty key list)
 # ---------------------------------------------------------------------------
 
+
 def test_verify_api_key_no_keys_configured_returns_anonymous() -> None:
     request = _make_request(api_key=None)
     kid = verify_api_key(request, [])
@@ -74,6 +77,7 @@ def test_verify_api_key_no_keys_configured_returns_anonymous() -> None:
 # ---------------------------------------------------------------------------
 # Whitespace rejection
 # ---------------------------------------------------------------------------
+
 
 def test_api_key_with_padding_whitespace_rejected_401() -> None:
     """Leading/trailing whitespace makes the key invalid (no strip)."""
@@ -99,6 +103,7 @@ def test_api_key_with_trailing_whitespace_rejected_401() -> None:
 # Multiple keys: any authenticates
 # ---------------------------------------------------------------------------
 
+
 def test_multiple_keys_any_authenticates() -> None:
     entry1 = _make_entry("k1", "key_number_one_32_bytes_exactly!")
     entry2 = _make_entry("k2", "key_number_two_32_bytes_exactly!")
@@ -122,6 +127,7 @@ def test_three_configured_keys_fourth_unrecognized_rejected_401() -> None:
 # kid attached to request.state (not plaintext or hash)
 # ---------------------------------------------------------------------------
 
+
 def test_kid_attached_to_request_state_not_plaintext() -> None:
     plaintext = "my_secret_key_32_bytes_exactly!!"
     entry = _make_entry("my-kid", plaintext)
@@ -138,6 +144,7 @@ def test_kid_attached_to_request_state_not_plaintext() -> None:
 # ---------------------------------------------------------------------------
 # ApiKeyEntry.parse malformed entry rejection
 # ---------------------------------------------------------------------------
+
 
 def test_malformed_api_keys_entry_bad_format_raises() -> None:
     with pytest.raises(ValueError, match="malformed"):
@@ -159,10 +166,13 @@ def test_malformed_api_keys_entry_empty_kid_raises() -> None:
 # Constant-time compare
 # ---------------------------------------------------------------------------
 
+
 def test_api_key_compare_uses_hmac_compare_digest() -> None:
     """Verify that the auth module uses hmac.compare_digest (not ==)."""
     import inspect
+
     import recotem.serving.auth as auth_module
+
     source = inspect.getsource(auth_module)
     assert "compare_digest" in source, (
         "auth.py must use hmac.compare_digest for constant-time comparison"

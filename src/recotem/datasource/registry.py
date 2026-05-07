@@ -7,6 +7,7 @@ entry-point group, validates the plugin contract, detects duplicate
 ``build_source_config_union()`` uses that mapping to build a
 ``typing.Annotated`` discriminated union suitable for use in pydantic models.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -62,8 +63,7 @@ def get_source_types() -> dict[str, type]:
             cls = ep.load()
         except Exception as exc:
             raise DataSourceError(
-                f"Failed to load DataSource plugin '{ep.name}' "
-                f"from '{ep.value}': {exc}"
+                f"Failed to load DataSource plugin '{ep.name}' from '{ep.value}': {exc}"
             ) from exc
 
         try:
@@ -160,7 +160,6 @@ def get_source_class(type_name: str) -> type:
     if type_name not in types:
         known = sorted(types.keys())
         raise DataSourceError(
-            f"Unknown DataSource type '{type_name}'. "
-            f"Known types: {known}."
+            f"Unknown DataSource type '{type_name}'. Known types: {known}."
         )
     return types[type_name]

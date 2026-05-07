@@ -6,11 +6,10 @@ Wraps ``irspack.Evaluator`` construction given a recipe's metric and cutoff.
 from __future__ import annotations
 
 import scipy.sparse as sps
+from irspack import Evaluator
 
 # _compat applies IPython stub before irspack imports (see _compat.py).
 import recotem.training._compat  # noqa: F401
-from irspack import Evaluator
-
 from recotem.training.errors import TrainingError
 
 # Metric names accepted by the recipe schema -> irspack target_metric strings
@@ -53,8 +52,7 @@ def build_evaluator(
     irspack_metric = _METRIC_MAP.get(metric.lower())
     if irspack_metric is None:
         raise TrainingError(
-            f"Unsupported metric {metric!r}. "
-            f"Must be one of: {sorted(_METRIC_MAP)}.",
+            f"Unsupported metric {metric!r}. Must be one of: {sorted(_METRIC_MAP)}.",
             code="invalid_metric",
         )
     return Evaluator(

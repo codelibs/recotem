@@ -7,12 +7,11 @@ all supported class names for this release.
 
 from __future__ import annotations
 
+from irspack.recommenders.base import get_recommender_class
+
 # _compat must be imported first: it applies the IPython stub that allows
 # irspack (which depends on fastprogress) to be imported without IPython.
 import recotem.training._compat  # noqa: F401
-
-from irspack.recommenders.base import get_recommender_class
-
 from recotem.training.errors import UnknownAlgorithmError
 
 # ---------------------------------------------------------------------------

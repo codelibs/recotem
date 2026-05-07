@@ -101,7 +101,7 @@ def make_router(
         name: str,
         body: PredictRequest,
         request: Request,
-        kid: Annotated[str, Depends(_require_auth)],
+        kid: str = Depends(_require_auth),
     ) -> Any:
         """Return top-K recommendations for *user_id* using model *name*."""
         request_id = str(uuid.uuid4())
@@ -139,9 +139,7 @@ def make_router(
             raise HTTPException(
                 status_code=404,
                 detail={
-                    "detail": (
-                        f"User '{body.user_id}' was not seen during training"
-                    ),
+                    "detail": (f"User '{body.user_id}' was not seen during training"),
                     "code": "user_not_found",
                 },
             ) from None
@@ -198,7 +196,7 @@ def make_router(
 
     @router.get("/models", summary="List loaded models")
     def models(
-        kid: Annotated[str, Depends(_require_auth)],
+        kid: str = Depends(_require_auth),
     ) -> list[dict[str, Any]]:
         """Return metadata for all currently loaded models."""
         return [e.models_dict() for e in registry.list()]

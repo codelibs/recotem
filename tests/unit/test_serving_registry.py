@@ -5,13 +5,12 @@ Tests:
 - RLock semantics (concurrent access)
 - In-flight references stay valid
 """
+
 from __future__ import annotations
 
 import threading
 import time
 from unittest.mock import MagicMock
-
-import pytest
 
 from recotem.serving.registry import ModelEntry, ModelRegistry
 
@@ -20,7 +19,10 @@ def _make_entry(name: str, recommender: object | None = None) -> ModelEntry:
     return ModelEntry(
         name=name,
         recommender=recommender or MagicMock(),
-        header={"best_class": "TopPopRecommender", "trained_at": "2026-01-01T00:00:00Z"},
+        header={
+            "best_class": "TopPopRecommender",
+            "trained_at": "2026-01-01T00:00:00Z",
+        },
         kid="active",
     )
 
@@ -28,6 +30,7 @@ def _make_entry(name: str, recommender: object | None = None) -> ModelEntry:
 # ---------------------------------------------------------------------------
 # Basic CRUD
 # ---------------------------------------------------------------------------
+
 
 def test_registry_get_returns_none_for_unknown() -> None:
     reg = ModelRegistry()
@@ -75,6 +78,7 @@ def test_registry_names_sorted() -> None:
 # Atomic replace
 # ---------------------------------------------------------------------------
 
+
 def test_atomic_replace_old_entry_replaced() -> None:
     reg = ModelRegistry()
     old = _make_entry("r", recommender=MagicMock(name="old"))
@@ -87,6 +91,7 @@ def test_atomic_replace_old_entry_replaced() -> None:
 # ---------------------------------------------------------------------------
 # Concurrent access
 # ---------------------------------------------------------------------------
+
 
 def test_concurrent_replace_no_data_race() -> None:
     """Multiple threads replacing and reading do not cause data races."""
@@ -121,6 +126,7 @@ def test_concurrent_replace_no_data_race() -> None:
 # In-flight references stay valid
 # ---------------------------------------------------------------------------
 
+
 def test_in_flight_reference_stays_valid_after_replace() -> None:
     """An existing reference to an old entry is not invalidated by replace."""
     reg = ModelRegistry()
@@ -143,6 +149,7 @@ def test_in_flight_reference_stays_valid_after_replace() -> None:
 # ---------------------------------------------------------------------------
 # Health snapshot
 # ---------------------------------------------------------------------------
+
 
 def test_health_snapshot_contains_loaded_true() -> None:
     reg = ModelRegistry()

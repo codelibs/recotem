@@ -3,20 +3,17 @@
 Tests spec-mandated exit codes and smoke tests for each subcommand.
 Uses Typer's CliRunner for isolation.
 """
+
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
-import pytest
 from typer.testing import CliRunner
 
 from recotem.cli import app
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 ACTIVE_KEY_HEX = "aa" * 32
 
@@ -24,6 +21,7 @@ ACTIVE_KEY_HEX = "aa" * 32
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _minimal_recipe_yaml(tmp_path: Path, name: str = "cli_test") -> Path:
     csv_file = tmp_path / "data.csv"
@@ -52,6 +50,7 @@ output:
 # recotem validate
 # ---------------------------------------------------------------------------
 
+
 def test_validate_exit0_on_valid_recipe(tmp_path: Path) -> None:
     """validate exits 0 for a schema-valid recipe."""
     yaml_path = _minimal_recipe_yaml(tmp_path)
@@ -77,6 +76,7 @@ def test_validate_output_contains_schema_ok(tmp_path: Path) -> None:
 # recotem schema
 # ---------------------------------------------------------------------------
 
+
 def test_schema_command_emits_valid_jsonschema() -> None:
     """schema subcommand outputs valid JSON Schema."""
     result = runner.invoke(app, ["schema"])
@@ -88,6 +88,7 @@ def test_schema_command_emits_valid_jsonschema() -> None:
 # ---------------------------------------------------------------------------
 # recotem keygen
 # ---------------------------------------------------------------------------
+
 
 def test_keygen_emits_kid_plaintext_hash_triple() -> None:
     """keygen outputs kid, plaintext, hash, and env_entry lines."""
@@ -138,11 +139,14 @@ def test_keygen_api_key_plaintext_is_43_chars_base64url() -> None:
 # recotem inspect
 # ---------------------------------------------------------------------------
 
+
 def test_inspect_exit0_on_valid_artifact(tmp_path: Path, monkeypatch) -> None:
     """inspect exits 0 for a valid HMAC-signed artifact."""
     from tests.conftest import build_raw_artifact
+
     artifact_path = tmp_path / "model.recotem"
     import pickle  # noqa: S403
+
     payload = pickle.dumps({"x": 1}, protocol=4)  # noqa: S301
     data = build_raw_artifact(
         kid="active",
@@ -169,8 +173,10 @@ def test_inspect_exit5_on_wrong_magic(tmp_path: Path, monkeypatch) -> None:
 def test_inspect_exit5_on_unknown_kid(tmp_path: Path, monkeypatch) -> None:
     """inspect exits 5 when the artifact's kid is not in the key ring."""
     from tests.conftest import build_raw_artifact
+
     artifact_path = tmp_path / "model.recotem"
     import pickle  # noqa: S403
+
     payload = pickle.dumps({"x": 1}, protocol=4)  # noqa: S301
     data = build_raw_artifact(
         kid="unknown-kid",
@@ -188,6 +194,7 @@ def test_inspect_exit5_on_unknown_kid(tmp_path: Path, monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 # recotem train: exit code smoke tests
 # ---------------------------------------------------------------------------
+
 
 def test_train_exit2_on_recipe_error(tmp_path: Path, monkeypatch) -> None:
     """train exits 2 when the recipe has a schema error."""
@@ -215,11 +222,11 @@ def test_train_exit5_on_signing_key_missing_without_dev_flag(
 # recotem serve smoke
 # ---------------------------------------------------------------------------
 
-def test_serve_smoke_starts_and_responds_to_health(
-    tmp_path: Path, monkeypatch
-) -> None:
+
+def test_serve_smoke_starts_and_responds_to_health(tmp_path: Path, monkeypatch) -> None:
     """Smoke test: create_app() succeeds and /health returns 200."""
     from fastapi.testclient import TestClient
+
     from recotem.config import ServeConfig
     from recotem.serving.app import create_app
 

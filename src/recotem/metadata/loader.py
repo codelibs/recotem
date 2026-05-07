@@ -165,19 +165,14 @@ def _read_file(file_type: str, path: str) -> pd.DataFrame:
         try:
             return pd.read_parquet(path)
         except Exception as exc:
-            raise ValueError(
-                f"failed to read parquet file {path!r}: {exc}"
-            ) from exc
+            raise ValueError(f"failed to read parquet file {path!r}: {exc}") from exc
     elif file_type in {"csv", "tsv"}:
         sep = "\t" if file_type == "tsv" else ","
         try:
             return pd.read_csv(path, sep=sep, dtype=str)
         except Exception as exc:
-            raise ValueError(
-                f"failed to read csv file {path!r}: {exc}"
-            ) from exc
+            raise ValueError(f"failed to read csv file {path!r}: {exc}") from exc
     else:
         raise ValueError(
-            f"unsupported metadata file type {file_type!r}; "
-            "expected 'csv' or 'parquet'"
+            f"unsupported metadata file type {file_type!r}; expected 'csv' or 'parquet'"
         )

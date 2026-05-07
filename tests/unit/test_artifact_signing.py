@@ -8,13 +8,12 @@ Tests:
 - SafeUnpickler allow-list (parameterised gadget rejection)
 - KeyRing rotation semantics
 """
-from __future__ import annotations
 
-import struct
+from __future__ import annotations
 
 import pytest
 
-from recotem.artifact.format import ArtifactError, parse_header_from_bytes
+from recotem.artifact.format import ArtifactError
 from recotem.artifact.signing import (
     KeyRing,
     SafeUnpickler,
@@ -22,7 +21,7 @@ from recotem.artifact.signing import (
     unpickle_payload,
     verify_hmac,
 )
-from tests.conftest import ACTIVE_KEY_HEX, OLD_KEY_HEX, build_raw_artifact
+from tests.conftest import ACTIVE_KEY_HEX, OLD_KEY_HEX
 
 # ---------------------------------------------------------------------------
 # KeyRing construction
@@ -151,6 +150,7 @@ def test_hmac_valid_with_unknown_kid_rejected() -> None:
 # KeyRing rotation: old key still verifies
 # ---------------------------------------------------------------------------
 
+
 def test_old_key_verifies_with_two_key_ring() -> None:
     """An artifact signed with the old key verifies against a two-key ring."""
     kr_old_only = KeyRing(f"old:{OLD_KEY_HEX}")
@@ -183,6 +183,7 @@ _GADGETS = [
 def test_payload_class_outside_whitelist_rejected(module: str, name: str) -> None:
     """SafeUnpickler.find_class rejects classes not in the allow-list."""
     import io
+
     unpickler = SafeUnpickler(io.BytesIO(b""))
     with pytest.raises(ArtifactError, match="not allowed"):
         unpickler.find_class(module, name)
@@ -190,7 +191,6 @@ def test_payload_class_outside_whitelist_rejected(module: str, name: str) -> Non
 
 def test_safe_unpickler_allows_builtins_dict() -> None:
     """builtins.dict is in the allow-list and must not be blocked."""
-    import io
     import pickle  # noqa: S403
 
     payload = pickle.dumps({"x": 1}, protocol=4)  # noqa: S301
@@ -209,12 +209,9 @@ def test_safe_unpickler_allows_builtins_list() -> None:
 
 def test_unpickle_with_disallowed_class_raises_artifact_error() -> None:
     """A pickle stream referencing a disallowed class raises ArtifactError."""
-    import io
-    import pickle  # noqa: S403
-    import pickletools
-
     # Build a pickle stream that calls os.system
     import os as _os
+    import pickle  # noqa: S403
 
     class _Exploit:
         def __reduce__(self):

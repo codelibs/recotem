@@ -47,8 +47,8 @@ MAX_HEADER_LEN: int = 65_536
 DEFAULT_MAX_PAYLOAD_BYTES: int = 2 * 1024 * 1024 * 1024  # 2 GiB
 
 # Struct format strings (little-endian)
-_FMT_VERSION_RESERVED = "<HH"   # 2 × uint16 LE
-_FMT_HEADER_LEN = "<I"          # uint32 LE
+_FMT_VERSION_RESERVED = "<HH"  # 2 × uint16 LE
+_FMT_HEADER_LEN = "<I"  # uint32 LE
 
 
 # ---------------------------------------------------------------------------
@@ -76,9 +76,9 @@ class ArtifactHeader:
 
     version: int
     kid: str
-    hmac_digest: bytes        # 32 bytes, read from file; not yet verified here
-    header_data: bytes        # raw Header JSON UTF-8 bytes
-    payload_offset: int       # byte offset at which the payload begins
+    hmac_digest: bytes  # 32 bytes, read from file; not yet verified here
+    header_data: bytes  # raw Header JSON UTF-8 bytes
+    payload_offset: int  # byte offset at which the payload begins
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +111,7 @@ def parse_header_from_bytes(data: bytes, max_payload_bytes: int) -> ArtifactHead
         raise ArtifactError("artifact too short: missing magic bytes")
     if data[:MAGIC_SIZE] != MAGIC:
         raise ArtifactError(
-            f"magic bytes mismatch: expected {MAGIC!r}, "
-            f"got {data[:MAGIC_SIZE]!r}"
+            f"magic bytes mismatch: expected {MAGIC!r}, got {data[:MAGIC_SIZE]!r}"
         )
     offset += MAGIC_SIZE
 
@@ -128,9 +127,7 @@ def parse_header_from_bytes(data: bytes, max_payload_bytes: int) -> ArtifactHead
             f"this build supports up to version {FORMAT_VERSION}"
         )
     if reserved != 0:
-        raise ArtifactError(
-            f"reserved bytes must be 0, got {reserved!r}"
-        )
+        raise ArtifactError(f"reserved bytes must be 0, got {reserved!r}")
 
     # 3. kid_len
     if len(data) < offset + KID_LEN_SIZE:

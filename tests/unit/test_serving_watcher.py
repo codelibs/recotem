@@ -8,23 +8,18 @@ Tests (using RECOTEM_WATCH_INTERVAL=0.05, assertions within 0.5s):
 - non-yaml ignored
 - initial mtime captured pre-watcher
 """
+
 from __future__ import annotations
 
-import json
-import os
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
-
-import pytest
 
 from recotem.artifact.signing import KeyRing
 from recotem.config import ServeConfig
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from recotem.serving.watcher import (
     ArtifactWatcher,
-    _RecipeWatchState,
-    _stat_marker,
     build_initial_states,
 )
 from tests.conftest import ACTIVE_KEY_HEX, build_raw_artifact
@@ -54,11 +49,16 @@ def _make_entry(name: str = "recipe1") -> ModelEntry:
 def _write_valid_artifact(path: Path) -> None:
     """Write a signed artifact (dict payload) to path."""
     import pickle  # noqa: S403
+
     payload = pickle.dumps({"key": "test"}, protocol=4)  # noqa: S301
     data = build_raw_artifact(
         kid="active",
         key_hex=ACTIVE_KEY_HEX,
-        header_dict={"recipe_name": "test", "best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        header_dict={
+            "recipe_name": "test",
+            "best_class": "TopPop",
+            "trained_at": "2026-01-01T00:00:00Z",
+        },
         payload_bytes=payload,
     )
     path.write_bytes(data)
@@ -87,6 +87,7 @@ output:
 # ---------------------------------------------------------------------------
 # build_initial_states (initial mtime captured pre-watcher)
 # ---------------------------------------------------------------------------
+
 
 def test_initial_mtime_captured_in_watcher_state_no_missed_swap(
     tmp_path: Path,
@@ -117,6 +118,7 @@ def test_initial_mtime_captured_in_watcher_state_no_missed_swap(
 # hot-swap success
 # ---------------------------------------------------------------------------
 
+
 def test_hot_swap_success(tmp_path: Path) -> None:
     """When the artifact file changes, the watcher replaces the registry entry."""
     recipes_dir = tmp_path / "recipes"
@@ -134,11 +136,9 @@ def test_hot_swap_success(tmp_path: Path) -> None:
     cfg = _make_serve_config()
     kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
 
-    from tests.conftest import build_raw_artifact as _bra
-    import pickle  # noqa: S403
-
     # Build initial state
     from recotem.recipe.loader import load_recipe
+
     recipe = load_recipe(yaml_path)
     initial_states = build_initial_states([recipe], {"test": old_entry})
     # Force the last_sha256 to empty so the first tick sees a "change"
@@ -167,6 +167,7 @@ def test_hot_swap_success(tmp_path: Path) -> None:
 # Malformed file keeps old + marks last_load_error
 # ---------------------------------------------------------------------------
 
+
 def test_malformed_swap_keeps_old_model_marks_health_error(
     tmp_path: Path,
 ) -> None:
@@ -187,6 +188,7 @@ def test_malformed_swap_keeps_old_model_marks_health_error(
     kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
 
     from recotem.recipe.loader import load_recipe
+
     recipe = load_recipe(yaml_path)
     initial_states = build_initial_states([recipe], {"test_bad": good_entry})
     # Force a re-load by clearing sha256
@@ -219,6 +221,7 @@ def test_malformed_swap_keeps_old_model_marks_health_error(
 # ---------------------------------------------------------------------------
 # Non-yaml files silently ignored
 # ---------------------------------------------------------------------------
+
 
 def test_non_yaml_files_in_recipes_dir_silently_ignored(tmp_path: Path) -> None:
     """Files without .yaml extension in the recipes dir do not cause errors."""
@@ -254,6 +257,7 @@ def test_non_yaml_files_in_recipes_dir_silently_ignored(tmp_path: Path) -> None:
 # yaml deleted removes entry from registry
 # ---------------------------------------------------------------------------
 
+
 def test_yaml_deleted_removes_entry_from_registry(tmp_path: Path) -> None:
     """When a YAML file is deleted, the watcher removes it from the registry."""
     recipes_dir = tmp_path / "recipes"
@@ -264,6 +268,7 @@ def test_yaml_deleted_removes_entry_from_registry(tmp_path: Path) -> None:
     yaml_path = _write_recipe_yaml(recipes_dir, "removable", artifact_path)
 
     from recotem.recipe.loader import load_recipe
+
     recipe = load_recipe(yaml_path)
 
     registry = ModelRegistry()

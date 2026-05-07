@@ -1,4 +1,5 @@
 """CSVSource and ParquetSource — fsspec-backed via pandas."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
@@ -44,8 +45,7 @@ class CSVSource:
             import pandas  # noqa: F401
         except ImportError as exc:
             raise DataSourceError(
-                "pandas is required for CSVSource. "
-                "Install it with: pip install recotem"
+                "pandas is required for CSVSource. Install it with: pip install recotem"
             ) from exc
         self._config = config
 

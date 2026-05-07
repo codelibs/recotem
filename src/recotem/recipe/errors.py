@@ -1,4 +1,5 @@
 """RecipeError with YAML line-number context."""
+
 from __future__ import annotations
 
 

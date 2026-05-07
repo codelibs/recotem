@@ -4,16 +4,15 @@ Tests env expansion (allow/blacklist/missing/never inside query),
 path scheme allow-list, name regex enforcement, duplicate detection,
 line-number errors, artifact root containment, and recipe file containment.
 """
+
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 from recotem.recipe.errors import RecipeError
 from recotem.recipe.loader import load_recipe, load_recipes_directory
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,6 +54,7 @@ def _minimal(tmp_path: Path, name: str = "my_recipe", extra: str = "") -> Path:
 # Name validation
 # ---------------------------------------------------------------------------
 
+
 def test_recipe_name_with_slash_rejected(tmp_path: Path) -> None:
     p = _write_recipe(
         tmp_path,
@@ -89,6 +89,7 @@ def test_recipe_name_valid_with_hyphens_underscore(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Env expansion
 # ---------------------------------------------------------------------------
+
 
 def test_env_var_expansion_allowed_only_with_RECOTEM_RECIPE_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -183,6 +184,7 @@ output:
 # Path scheme allow-list
 # ---------------------------------------------------------------------------
 
+
 def test_path_field_with_file_scheme_rejected(tmp_path: Path) -> None:
     content = MINIMAL_RECIPE_TEMPLATE.format(
         name="file_scheme",
@@ -227,6 +229,7 @@ def test_s3_path_without_credentials_accepted(tmp_path: Path) -> None:
 # RECOTEM_ARTIFACT_ROOT containment
 # ---------------------------------------------------------------------------
 
+
 def test_local_output_path_outside_artifact_root_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -261,6 +264,7 @@ def test_local_output_path_inside_artifact_root_accepted(
 # Duplicate recipe names
 # ---------------------------------------------------------------------------
 
+
 def test_duplicate_recipe_name_in_directory_rejected_at_startup(
     tmp_path: Path,
 ) -> None:
@@ -280,6 +284,7 @@ def test_duplicate_recipe_name_in_directory_rejected_at_startup(
 # Line-number errors
 # ---------------------------------------------------------------------------
 
+
 def test_recipe_error_includes_yaml_line_number(tmp_path: Path) -> None:
     """A YAML parse error produces a RecipeError with a non-None line number."""
     bad_yaml = "name: test\n  invalid: indentation: here:\n"
@@ -295,6 +300,7 @@ def test_recipe_error_includes_yaml_line_number(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Recipe file containment
 # ---------------------------------------------------------------------------
+
 
 def test_recipe_path_outside_recipes_root_rejected(tmp_path: Path) -> None:
     """A recipe file that resolves outside recipes_root raises RecipeError."""
@@ -313,6 +319,7 @@ def test_recipe_path_outside_recipes_root_rejected(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Missing fields
 # ---------------------------------------------------------------------------
+
 
 def test_recipe_with_no_source_rejected(tmp_path: Path) -> None:
     content = """\

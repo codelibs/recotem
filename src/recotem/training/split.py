@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import pandas as pd
 import scipy.sparse as sps
+from irspack import split_dataframe_partial_user_holdout
 
 # _compat applies IPython stub before irspack imports (see _compat.py).
 import recotem.training._compat  # noqa: F401
-from irspack import split_dataframe_partial_user_holdout
-
 from recotem.recipe.models import SplitConfig
 from recotem.training.errors import SplitError
 
@@ -64,9 +63,7 @@ def split_interactions(
             heldout_ratio_val=split_config.heldout_ratio,
         )
     except Exception as exc:
-        raise SplitError(
-            f"irspack split failed: {exc}"
-        ) from exc
+        raise SplitError(f"irspack split failed: {exc}") from exc
 
     train = dataset["train"]
     val = dataset["val"]

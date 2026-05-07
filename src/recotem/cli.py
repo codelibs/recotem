@@ -422,7 +422,9 @@ def schema() -> None:
 def keygen(
     kid: Annotated[
         str | None,
-        typer.Option("--kid", help="Key identifier (default: auto-generated UUID prefix)."),
+        typer.Option(
+            "--kid", help="Key identifier (default: auto-generated UUID prefix)."
+        ),
     ] = None,
     key_type: Annotated[
         str,

@@ -1,4 +1,5 @@
 """YAML → Recipe loader with restricted env expansion and path security."""
+
 from __future__ import annotations
 
 import os
@@ -120,7 +121,9 @@ def _expand_node(
         result: dict[str, Any] = {}
         for k, v in node.items():
             in_no_expand = _in_no_expand or (k in _NO_EXPAND_KEYS)
-            result[k] = _expand_node(v, extra_allowed=extra_allowed, _in_no_expand=in_no_expand)
+            result[k] = _expand_node(
+                v, extra_allowed=extra_allowed, _in_no_expand=in_no_expand
+            )
         return result
     if isinstance(node, list):
         return [
@@ -229,9 +232,37 @@ def load_recipe(
         recipe = Recipe.model_validate(expanded)
     except Exception as exc:
         # Translate pydantic validation errors into RecipeError.
-        raise RecipeError(
-            f"Recipe '{p}' failed validation: {exc}"
-        ) from exc
+        raise RecipeError(f"Recipe '{p}' failed validation: {exc}") from exc
+
+    # Promote `recipe.source` from raw dict to typed Config via the dynamic
+    # discriminated union assembled from datasource entry points.  Done after
+    # the main Recipe.model_validate so that the rest of the recipe is parsed
+    # even if datasource extras are missing.
+    raw_source = recipe.source
+    if isinstance(raw_source, dict):
+        try:
+            from recotem.datasource.registry import get_source_class
+
+            type_name = raw_source.get("type")
+            if not type_name:
+                raise RecipeError(
+                    f"Recipe '{p}' source is missing the 'type' discriminator."
+                )
+            source_cls = get_source_class(str(type_name))
+            config_cls = source_cls.Config
+            try:
+                typed_source = config_cls.model_validate(raw_source)
+            except Exception as exc:
+                raise RecipeError(
+                    f"Recipe '{p}' source failed validation: {exc}"
+                ) from exc
+            # Reassign on the model.  Recipe.source is typed Any, so this is
+            # a plain attribute set; pydantic does not re-validate.
+            object.__setattr__(recipe, "source", typed_source)
+        except RecipeError:
+            raise
+        except Exception as exc:
+            raise RecipeError(f"Recipe '{p}' source resolution failed: {exc}") from exc
 
     # Local output path containment check.
     output_path = recipe.output.path
@@ -289,10 +320,14 @@ def load_recipes_directory(
     root = Path(path).resolve()
 
     if not root.is_dir():
-        raise RecipeError(f"Recipes directory '{root}' does not exist or is not a directory.")
+        raise RecipeError(
+            f"Recipes directory '{root}' does not exist or is not a directory."
+        )
 
     # Non-recursive: only direct children ending in .yaml
-    yaml_files = sorted(f for f in root.iterdir() if f.is_file() and f.suffix == ".yaml")
+    yaml_files = sorted(
+        f for f in root.iterdir() if f.is_file() and f.suffix == ".yaml"
+    )
 
     recipes: list[Recipe] = []
     names_seen: dict[str, str] = {}  # name → filename

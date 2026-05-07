@@ -1,4 +1,5 @@
 """BigQuerySource — google-cloud-bigquery with ADC and @parameter binding."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -148,9 +149,7 @@ class BigQuerySource:
         try:
             query_job = client.query(cfg.query, job_config=job_config)
         except GoogleAPICallError as exc:
-            raise DataSourceError(
-                f"BigQuery query submission failed: {exc}"
-            ) from exc
+            raise DataSourceError(f"BigQuery query submission failed: {exc}") from exc
         except Exception as exc:
             raise DataSourceError(
                 f"Unexpected error submitting BigQuery query: {exc}"
@@ -163,9 +162,7 @@ class BigQuerySource:
             except Exception:
                 df = query_job.to_dataframe()
         except GoogleAPICallError as exc:
-            raise DataSourceError(
-                f"BigQuery query execution failed: {exc}"
-            ) from exc
+            raise DataSourceError(f"BigQuery query execution failed: {exc}") from exc
         except Exception as exc:
             raise DataSourceError(
                 f"Failed to download BigQuery results: {exc}"

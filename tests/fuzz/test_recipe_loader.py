@@ -3,19 +3,16 @@
 Hypothesis YAML mutations; the loader must always either return a valid
 Recipe or raise RecipeError — never any other exception type.
 """
+
 from __future__ import annotations
 
-import os
-import random
 import string
 from pathlib import Path
 
-import pytest
-from hypothesis import given, settings, HealthCheck
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from recotem.recipe.errors import RecipeError
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -65,8 +62,12 @@ def _try_load_yaml(content: str, tmp_path: Path) -> None:
 # Hypothesis: random YAML strings
 # ---------------------------------------------------------------------------
 
+
 @given(content=st.text(min_size=0, max_size=500))
-@settings(max_examples=200, suppress_health_checks=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=200,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
 def test_loader_handles_arbitrary_text(content: str, tmp_path: Path) -> None:
     """Arbitrary text input to load_recipe never causes unhandled exceptions."""
     _try_load_yaml(content, tmp_path)
@@ -76,11 +77,15 @@ def test_loader_handles_arbitrary_text(content: str, tmp_path: Path) -> None:
 # Hypothesis: valid YAML with mutated values
 # ---------------------------------------------------------------------------
 
+
 @given(
     name=st.text(alphabet=string.printable, min_size=0, max_size=100),
     n_trials=st.one_of(st.integers(), st.text(min_size=0, max_size=10)),
 )
-@settings(max_examples=100, suppress_health_checks=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=100,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
 def test_loader_handles_invalid_field_values(
     name: str, n_trials: object, tmp_path: Path
 ) -> None:
@@ -106,11 +111,13 @@ output:
 # Hypothesis: nested mutation of source field
 # ---------------------------------------------------------------------------
 
+
 @given(source_type=st.text(alphabet=string.ascii_letters, min_size=0, max_size=30))
-@settings(max_examples=100, suppress_health_checks=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture])
-def test_loader_handles_unknown_source_type(
-    source_type: str, tmp_path: Path
-) -> None:
+@settings(
+    max_examples=100,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+def test_loader_handles_unknown_source_type(source_type: str, tmp_path: Path) -> None:
     """Unknown source types produce RecipeError, not unhandled exceptions."""
     content = f"""\
 name: fuzz_src
@@ -132,6 +139,7 @@ output:
 # ---------------------------------------------------------------------------
 # Edge cases: empty/null content
 # ---------------------------------------------------------------------------
+
 
 def test_empty_yaml_raises_recipe_error(tmp_path: Path) -> None:
     _try_load_yaml("", tmp_path)

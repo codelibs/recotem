@@ -40,9 +40,7 @@ _DEFAULT_ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
 _SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 # Environments that permit --insecure-no-auth
-_INSECURE_ALLOWED_ENVS: frozenset[str] = frozenset(
-    {"development", "dev", "test"}
-)
+_INSECURE_ALLOWED_ENVS: frozenset[str] = frozenset({"development", "dev", "test"})
 
 
 # ---------------------------------------------------------------------------
@@ -79,14 +77,11 @@ class ApiKeyEntry:
         parts = raw.split(":", 2)
         if len(parts) != 3 or parts[1].lower() != "sha256":
             raise ValueError(
-                f"malformed API key entry {raw!r}: "
-                "expected '<kid>:sha256:<hex64>'"
+                f"malformed API key entry {raw!r}: expected '<kid>:sha256:<hex64>'"
             )
         kid, _, hex_hash = parts[0], parts[1], parts[2]
         if not kid:
-            raise ValueError(
-                "malformed API key entry: kid must not be empty"
-            )
+            raise ValueError("malformed API key entry: kid must not be empty")
         if not _SHA256_HEX_RE.match(hex_hash):
             raise ValueError(
                 f"malformed API key entry for kid {kid!r}: "
@@ -128,7 +123,9 @@ class ServeConfig:
 
     # CORS / TrustedHost
     allowed_origins: list[str] = field(default_factory=list)
-    allowed_hosts: list[str] = field(default_factory=lambda: list(_DEFAULT_ALLOWED_HOSTS))
+    allowed_hosts: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_ALLOWED_HOSTS)
+    )
 
     # Environment tag
     env: str = ""
@@ -251,9 +248,7 @@ class ServeConfig:
         # RECOTEM_METADATA_FIELD_DENY
         deny_env = os.environ.get("RECOTEM_METADATA_FIELD_DENY", "").strip()
         cfg.metadata_field_deny = (
-            [f.strip() for f in deny_env.split(",") if f.strip()]
-            if deny_env
-            else []
+            [f.strip() for f in deny_env.split(",") if f.strip()] if deny_env else []
         )
 
         return cfg
@@ -320,7 +315,5 @@ class TrainConfig:
         cfg = cls()
         cfg.signing_keys_raw = os.environ.get("RECOTEM_SIGNING_KEYS", "").strip()
         cfg.artifact_root = os.environ.get("RECOTEM_ARTIFACT_ROOT", "").strip()
-        cfg.log_format = (
-            os.environ.get("RECOTEM_LOG_FORMAT", "auto").strip().lower()
-        )
+        cfg.log_format = os.environ.get("RECOTEM_LOG_FORMAT", "auto").strip().lower()
         return cfg

@@ -3,14 +3,12 @@
 10 reader threads issue /predict while the watcher replaces the model entry.
 No data races, no panics, and all responses are either 200 or 503.
 """
+
 from __future__ import annotations
 
 import threading
 import time
-from typing import Any
 from unittest.mock import MagicMock
-
-import pytest
 
 from recotem.serving.registry import ModelEntry, ModelRegistry
 

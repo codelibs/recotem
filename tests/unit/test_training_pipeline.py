@@ -11,11 +11,11 @@ Tests:
 - per_algorithm_trials partitioning
 - one structured log per trial
 """
+
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -24,16 +24,15 @@ import pytest
 from recotem.training.errors import (
     MinDataViolation,
     SearchError,
-    TrainingError,
     ZeroScoreError,
 )
-
 
 ACTIVE_KEY_HEX = "aa" * 32
 
 
 def _make_key_ring():
     from recotem.artifact.signing import KeyRing
+
     return KeyRing(f"active:{ACTIVE_KEY_HEX}")
 
 
@@ -48,6 +47,7 @@ def _make_recipe(
     drop_null_ids: bool = True,
     per_algorithm_trials: dict | None = None,
 ):
+    from recotem.datasource.csv import CSVConfig
     from recotem.recipe.models import (
         CleansingConfig,
         OutputConfig,
@@ -56,7 +56,6 @@ def _make_recipe(
         SplitConfig,
         TrainingConfig,
     )
-    from recotem.datasource.csv import CSVConfig
 
     if algorithms is None:
         algorithms = ["TopPop"]
@@ -91,15 +90,20 @@ def _make_recipe(
 # end-to-end on small MovieLens slice with n_trials=2
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.slow
 def test_end_to_end_movielens_small_n_trials_2(
     tmp_path: Path, movielens_small_df: pd.DataFrame
 ) -> None:
     """Full training pipeline on small MovieLens slice with n_trials=2."""
-    from recotem.recipe.models import (
-        CleansingConfig, OutputConfig, Recipe, SchemaConfig, SplitConfig, TrainingConfig
-    )
     from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
     from recotem.training.pipeline import run_training
 
     csv_file = tmp_path / "ml100k_small.csv"
@@ -120,11 +124,15 @@ def test_end_to_end_movielens_small_n_trials_2(
     kr = _make_key_ring()
     write_calls = []
 
-    def _mock_write(payload, header_dict, output_path, versioning, key_ring, signing_key):
+    def _mock_write(
+        payload, header_dict, output_path, versioning, key_ring, signing_key
+    ):
         write_calls.append({"header": header_dict, "path": output_path})
         return output_path
 
-    result = run_training(recipe, key_ring=kr, signing_key="active", write_artifact_fn=_mock_write)
+    result = run_training(
+        recipe, key_ring=kr, signing_key="active", write_artifact_fn=_mock_write
+    )
     assert result is not None
     assert result.best_score > 0
     assert result.best_class is not None
@@ -134,6 +142,7 @@ def test_end_to_end_movielens_small_n_trials_2(
 # ---------------------------------------------------------------------------
 # min_data_violation
 # ---------------------------------------------------------------------------
+
 
 def test_min_rows_violation_raises_exit4_min_data(tmp_path: Path) -> None:
     """min_rows threshold violation raises MinDataViolation."""
@@ -152,8 +161,9 @@ def test_min_users_violation_raises_exit4(tmp_path: Path) -> None:
     from recotem.training.pipeline import _cleanse
 
     recipe = _make_recipe(tmp_path, min_users=100)
-    df = pd.DataFrame({"user_id": [f"u{i}" for i in range(5)],
-                       "item_id": [f"i{i}" for i in range(5)]})
+    df = pd.DataFrame(
+        {"user_id": [f"u{i}" for i in range(5)], "item_id": [f"i{i}" for i in range(5)]}
+    )
     with pytest.raises(MinDataViolation):
         _cleanse(df, recipe)
 
@@ -162,8 +172,7 @@ def test_min_items_violation_raises_exit4(tmp_path: Path) -> None:
     from recotem.training.pipeline import _cleanse
 
     recipe = _make_recipe(tmp_path, min_items=200)
-    df = pd.DataFrame({"user_id": [f"u{i}" for i in range(10)],
-                       "item_id": ["i1"] * 10})
+    df = pd.DataFrame({"user_id": [f"u{i}" for i in range(10)], "item_id": ["i1"] * 10})
     with pytest.raises(MinDataViolation):
         _cleanse(df, recipe)
 
@@ -172,14 +181,17 @@ def test_min_items_violation_raises_exit4(tmp_path: Path) -> None:
 # dedup policies
 # ---------------------------------------------------------------------------
 
+
 def test_dedup_keep_last_resolves_duplicates(tmp_path: Path) -> None:
     from recotem.training.pipeline import _cleanse
 
     recipe = _make_recipe(tmp_path, dedup="keep_last")
-    df = pd.DataFrame({
-        "user_id": ["u1", "u1", "u2"],
-        "item_id": ["i1", "i1", "i1"],  # u1,i1 is a duplicate
-    })
+    df = pd.DataFrame(
+        {
+            "user_id": ["u1", "u1", "u2"],
+            "item_id": ["i1", "i1", "i1"],  # u1,i1 is a duplicate
+        }
+    )
     result, drop_count = _cleanse(df, recipe)
     # After dedup, u1-i1 should appear once
     u1_i1 = result[(result["user_id"] == "u1") & (result["item_id"] == "i1")]
@@ -191,10 +203,12 @@ def test_dedup_sum_weight_aggregates_counts(tmp_path: Path) -> None:
     from recotem.training.pipeline import _cleanse
 
     recipe = _make_recipe(tmp_path, dedup="sum_weight")
-    df = pd.DataFrame({
-        "user_id": ["u1", "u1", "u2"],
-        "item_id": ["i1", "i1", "i2"],
-    })
+    df = pd.DataFrame(
+        {
+            "user_id": ["u1", "u1", "u2"],
+            "item_id": ["i1", "i1", "i2"],
+        }
+    )
     result, _ = _cleanse(df, recipe)
     # sum_weight reduces duplicates to one row
     u1_i1 = result[(result["user_id"] == "u1") & (result["item_id"] == "i1")]
@@ -205,14 +219,17 @@ def test_dedup_sum_weight_aggregates_counts(tmp_path: Path) -> None:
 # drop_null_ids
 # ---------------------------------------------------------------------------
 
+
 def test_drop_null_ids_default_true_records_drop_count(tmp_path: Path) -> None:
     from recotem.training.pipeline import _cleanse
 
     recipe = _make_recipe(tmp_path, drop_null_ids=True)
-    df = pd.DataFrame({
-        "user_id": ["u1", None, "u3"],
-        "item_id": ["i1", "i2", "i3"],
-    })
+    df = pd.DataFrame(
+        {
+            "user_id": ["u1", None, "u3"],
+            "item_id": ["i1", "i2", "i3"],
+        }
+    )
     result, drop_count = _cleanse(df, recipe)
     assert drop_count >= 1
     assert len(result) == 2
@@ -222,14 +239,20 @@ def test_drop_null_ids_default_true_records_drop_count(tmp_path: Path) -> None:
 # string coerce
 # ---------------------------------------------------------------------------
 
+
 def test_string_coerce_user_and_item_ids(tmp_path: Path) -> None:
     from recotem.training.pipeline import _cleanse
 
     recipe = _make_recipe(tmp_path)
     df = pd.DataFrame({"user_id": [1, 2, 3], "item_id": [10, 20, 30]})
     result, _ = _cleanse(df, recipe)
-    assert result["user_id"].dtype == object
-    assert result["item_id"].dtype == object
+    # pandas may return either object (legacy) or StringDtype depending on version.
+    assert result["user_id"].dtype == object or pd.api.types.is_string_dtype(
+        result["user_id"]
+    )
+    assert result["item_id"].dtype == object or pd.api.types.is_string_dtype(
+        result["item_id"]
+    )
     assert result["user_id"].iloc[0] == "1"
 
 
@@ -237,12 +260,14 @@ def test_string_coerce_user_and_item_ids(tmp_path: Path) -> None:
 # all-trials-failing -> SearchError
 # ---------------------------------------------------------------------------
 
+
 def test_all_trials_failing_raises_TrainingError_exit4(tmp_path: Path) -> None:
     """When no trials complete, run_search raises SearchError (code=no_completed_trials)."""
-    from recotem.training.search import run_search
-    from recotem.training.progress import ProgressReporter
-    import scipy.sparse as sps
     import numpy as np
+    import scipy.sparse as sps
+
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
 
     # Tiny matrix that will cause evaluator/split to fail, but we mock the study
     with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
@@ -279,13 +304,15 @@ def test_all_trials_failing_raises_TrainingError_exit4(tmp_path: Path) -> None:
 # all-scores-zero -> ZeroScoreError
 # ---------------------------------------------------------------------------
 
+
 def test_all_scores_zero_raises_TrainingError_exit4(tmp_path: Path) -> None:
     """When all completed trials score 0.0, ZeroScoreError is raised."""
-    import optuna
-    from recotem.training.search import run_search
-    from recotem.training.progress import ProgressReporter
-    import scipy.sparse as sps
     import numpy as np
+    import optuna
+    import scipy.sparse as sps
+
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
 
     with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
         mock_study = MagicMock()
@@ -329,6 +356,7 @@ def test_all_scores_zero_raises_TrainingError_exit4(tmp_path: Path) -> None:
 # per_algorithm_trials partitioning
 # ---------------------------------------------------------------------------
 
+
 def test_per_algorithm_trials_partition_global_budget() -> None:
     from recotem.training.search import _compute_budgets
 
@@ -362,10 +390,12 @@ def test_per_algorithm_trials_proportional_without_override() -> None:
 # one structured log per trial
 # ---------------------------------------------------------------------------
 
+
 def test_one_structured_log_per_trial(caplog) -> None:
     """The trial progress reporter emits one log per completed trial."""
-    from recotem.training.progress import ProgressReporter, make_trial_callback
     import optuna
+
+    from recotem.training.progress import ProgressReporter, make_trial_callback
 
     with caplog.at_level(logging.DEBUG):
         with ProgressReporter(n_trials=3, recipe_name="test", run_id="run-log") as rep:

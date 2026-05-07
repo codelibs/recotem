@@ -6,16 +6,16 @@ NOTE: This test module builds raw .recotem artifact bytes for security testing.
 The pickle usage here is tested under HMAC protection: we test that the format
 layer rejects malformed bytes BEFORE any deserialization occurs.
 """
+
 from __future__ import annotations
 
-import json
 import struct
 
 import pytest
 
 from recotem.artifact.format import (
-    MAGIC,
     FORMAT_VERSION,
+    MAGIC,
     MAX_HEADER_LEN,
     ArtifactError,
     ArtifactHeader,
@@ -150,7 +150,7 @@ def test_build_artifact_bytes_roundtrip() -> None:
     hdr = parse_header_from_bytes(data, max_payload_bytes=2**31)
     assert hdr.kid == kid
     assert hdr.header_data == header_json
-    assert data[hdr.payload_offset:] == payload
+    assert data[hdr.payload_offset :] == payload
 
 
 def test_build_artifact_bytes_kid_too_long_rejected() -> None:

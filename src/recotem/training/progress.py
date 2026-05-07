@@ -62,10 +62,7 @@ class ProgressReporter:
         self._quiet = quiet
         self._verbose = verbose
         self._use_rich = (
-            not force_log
-            and not quiet
-            and sys.stderr.isatty()
-            and _rich_available()
+            not force_log and not quiet and sys.stderr.isatty() and _rich_available()
         )
         self._lock = threading.Lock()
         self._completed = 0
@@ -78,7 +75,7 @@ class ProgressReporter:
     # Context manager
     # ------------------------------------------------------------------
 
-    def __enter__(self) -> "ProgressReporter":
+    def __enter__(self) -> ProgressReporter:
         if self._use_rich:
             self._start_rich()
         return self
@@ -109,7 +106,9 @@ class ProgressReporter:
                 self._best_algorithm = algorithm
 
         if self._use_rich and self._progress is not None:
-            desc = f"[cyan]{algorithm}[/cyan]  score={score:.4f}" if score else algorithm
+            desc = (
+                f"[cyan]{algorithm}[/cyan]  score={score:.4f}" if score else algorithm
+            )
             self._progress.update(
                 self._task_id,
                 advance=1,

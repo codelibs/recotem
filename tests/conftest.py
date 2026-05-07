@@ -12,9 +12,9 @@ Provides:
 - make_artifact: factory for building signed artifact bytes
 - movielens_df: session-scoped MovieLens100K DataFrame (downloaded once)
 """
+
 from __future__ import annotations
 
-import hashlib
 import json
 import struct
 import textwrap
@@ -58,6 +58,7 @@ def single_key_ring():
 # Artifact builder helper (used by multiple test modules)
 # ---------------------------------------------------------------------------
 
+
 def build_raw_artifact(
     kid: str,
     key_hex: str,
@@ -93,7 +94,7 @@ def build_raw_artifact(
     h.update(payload_bytes)
     digest = h.digest()
 
-    from recotem.artifact.format import MAGIC, FORMAT_VERSION
+    from recotem.artifact.format import FORMAT_VERSION, MAGIC
 
     kid_len = len(kid_bytes)
     header_len = len(header_json)
@@ -118,6 +119,7 @@ def make_artifact(tmp_path: Path):
     Usage: make_artifact(payload_bytes=None, header_dict=None, kid='active',
                          key_hex=ACTIVE_KEY_HEX) -> bytes
     """
+
     def _factory(
         payload_bytes: bytes | None = None,
         header_dict: dict[str, Any] | None = None,
@@ -203,6 +205,7 @@ def tmp_recipe_yaml(tmp_path: Path):
 # MovieLens 100K fixture (session-scoped, downloaded once)
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def movielens_df() -> pd.DataFrame:
     """Return the MovieLens100K interactions as a pandas DataFrame.
@@ -210,13 +213,24 @@ def movielens_df() -> pd.DataFrame:
     Downloaded once per test session via irspack's MovieLens100KDataManager.
     Columns normalised to: user_id (str), item_id (str).
     """
+    # Apply the IPython stub required by irspack's transitive fastprogress dep.
     from irspack.dataset import MovieLens100KDataManager
+
+    import recotem.training._compat  # noqa: F401
 
     dm = MovieLens100KDataManager()
     df = dm.read_interaction()
-    df = df.rename(
-        columns={c: c.lower().replace(" ", "_") for c in df.columns}
-    )
+    rename_map = {
+        "userId": "user_id",
+        "movieId": "item_id",
+        "userid": "user_id",
+        "itemid": "item_id",
+        "movie_id": "item_id",
+        "movieid": "item_id",
+        "user": "user_id",
+        "item": "item_id",
+    }
+    df = df.rename(columns=rename_map)
     for col in ("user_id", "item_id"):
         if col in df.columns:
             df[col] = df[col].astype(str)

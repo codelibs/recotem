@@ -1,4 +1,5 @@
 """DataSource Protocol, DataSourceError, FetchContext, and plugin contract."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -75,8 +76,7 @@ class DataSource(Protocol):
     Config: ClassVar[type[BaseModel]]
     extras_required: ClassVar[list[str]]
 
-    def fetch(self, ctx: FetchContext) -> pd.DataFrame:
-        ...
+    def fetch(self, ctx: FetchContext) -> pd.DataFrame: ...
 
 
 def validate_plugin_contract(cls: type) -> None:

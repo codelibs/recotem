@@ -11,23 +11,23 @@ Tests:
 - request_id in X-Request-ID header
 - kid field in model block of predict response
 """
+
 from __future__ import annotations
 
 import hashlib
 from unittest.mock import MagicMock
 
-import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from recotem.config import ApiKeyEntry
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from recotem.serving.routes import make_router
-from fastapi import FastAPI
-
 
 # ---------------------------------------------------------------------------
 # Fixture helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_registry_with_recipe(
     name: str = "test_recipe",
@@ -94,6 +94,7 @@ def _make_test_client(
 # /predict happy path
 # ---------------------------------------------------------------------------
 
+
 def test_predict_happy_path_returns_items() -> None:
     registry = _make_registry_with_recipe()
     client, _ = _make_test_client(registry=registry)
@@ -144,6 +145,7 @@ def test_response_includes_kid_field_in_model_block() -> None:
 # /predict 401
 # ---------------------------------------------------------------------------
 
+
 def test_predict_401_without_api_key() -> None:
     """With keys configured, missing X-API-Key header → 401."""
     plaintext = "api_key_32_bytes_exactly_here!!!"
@@ -177,6 +179,7 @@ def test_predict_401_with_wrong_api_key() -> None:
 # /predict 404 (user not found)
 # ---------------------------------------------------------------------------
 
+
 def test_predict_404_user_not_in_training_data() -> None:
     client, _ = _make_test_client()
     response = client.post("/predict/test_recipe", json={"user_id": "unknown_user"})
@@ -186,6 +189,7 @@ def test_predict_404_user_not_in_training_data() -> None:
 # ---------------------------------------------------------------------------
 # /predict 503 (recipe not loaded / unhealthy)
 # ---------------------------------------------------------------------------
+
 
 def test_predict_503_recipe_not_loaded() -> None:
     registry = ModelRegistry()  # empty
@@ -207,6 +211,7 @@ def test_unhealthy_recipe_returns_503_not_404() -> None:
 # ---------------------------------------------------------------------------
 # /health
 # ---------------------------------------------------------------------------
+
 
 def test_health_returns_ok_when_all_recipes_loaded() -> None:
     client, _ = _make_test_client()
@@ -244,6 +249,7 @@ def test_health_per_recipe_status() -> None:
 # /models
 # ---------------------------------------------------------------------------
 
+
 def test_models_endpoint_returns_list() -> None:
     client, _ = _make_test_client()
     response = client.get("/models")
@@ -256,6 +262,7 @@ def test_models_endpoint_returns_list() -> None:
 # ---------------------------------------------------------------------------
 # /metrics off by default
 # ---------------------------------------------------------------------------
+
 
 def test_metrics_endpoint_off_by_default() -> None:
     """The /metrics endpoint returns 404 when prometheus_client is not installed."""

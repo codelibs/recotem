@@ -215,9 +215,7 @@ def _build_key_ring(serve_config: ServeConfig) -> KeyRing | None:
 # ---------------------------------------------------------------------------
 
 
-def _emit_security_posture(
-    serve_config: ServeConfig, key_ring: KeyRing | None
-) -> None:
+def _emit_security_posture(serve_config: ServeConfig, key_ring: KeyRing | None) -> None:
     """Emit the canonical security.posture log line (spec Section 7)."""
     signing_kids = key_ring.kids() if key_ring is not None else []
     logger.info(
@@ -228,9 +226,7 @@ def _emit_security_posture(
         env=serve_config.env,
         allowed_hosts=serve_config.allowed_hosts,
         allowed_origins=serve_config.allowed_origins,
-        unsafe_mode=(
-            serve_config.insecure_no_auth or serve_config.dev_allow_unsigned
-        ),
+        unsafe_mode=(serve_config.insecure_no_auth or serve_config.dev_allow_unsigned),
     )
 
 
@@ -271,14 +267,10 @@ def _try_load_artifact(
     try:
         data = _read_artifact_bytes(artifact_path, max_bytes)
     except ArtifactError as exc:
-        logger.warning(
-            "initial_artifact_read_failed", name=recipe.name, error=str(exc)
-        )
+        logger.warning("initial_artifact_read_failed", name=recipe.name, error=str(exc))
         return None
     except Exception as exc:
-        logger.warning(
-            "initial_artifact_read_error", name=recipe.name, error=str(exc)
-        )
+        logger.warning("initial_artifact_read_error", name=recipe.name, error=str(exc))
         return None
 
     sha256 = _sha256_bytes(data)

@@ -4,26 +4,18 @@ Uses FastAPI TestClient for synchronous testing without a real server.
 Trains a TopPop model on synthetic data, writes a signed artifact,
 then serves it and calls /predict.
 """
+
 from __future__ import annotations
 
 import hashlib
-import json
-import os
-import struct
-from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
-import pandas as pd
-import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from recotem.artifact.signing import KeyRing
-from recotem.config import ApiKeyEntry, ServeConfig
+from recotem.config import ApiKeyEntry
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from recotem.serving.routes import make_router
-from fastapi import FastAPI
-
 
 ACTIVE_KEY_HEX = "aa" * 32
 
@@ -49,6 +41,7 @@ def _make_api_entry(plaintext: str, kid: str = "api-key") -> ApiKeyEntry:
 # ---------------------------------------------------------------------------
 # In-process end-to-end test
 # ---------------------------------------------------------------------------
+
 
 def test_serve_predict_e2e_in_process() -> None:
     """Train-like mock → serve → /predict returns valid response."""

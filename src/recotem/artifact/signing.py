@@ -32,7 +32,6 @@ import hashlib
 import hmac
 import io
 import pickle
-import struct
 from typing import Any
 
 import structlog
@@ -147,9 +146,7 @@ class KeyRing:
                     f"32 bytes, got {len(key_bytes)}"
                 )
             if kid in self._keys:
-                raise ArtifactError(
-                    f"duplicate kid {kid!r} in KeyRing entries"
-                )
+                raise ArtifactError(f"duplicate kid {kid!r} in KeyRing entries")
             self._keys[kid] = key_bytes
             self._order.append(kid)
 

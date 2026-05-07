@@ -9,11 +9,10 @@ Tests:
 - predict returns null metadata for unjoined item
 - metadata id string coerced matches recommender ids
 """
+
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -23,6 +22,7 @@ from recotem.metadata.loader import load_item_metadata
 
 class _Config:
     """Minimal config object for load_item_metadata."""
+
     def __init__(self, type_: str, path: str, item_id_column: str = "item_id"):
         self.type = type_
         self.path = path
@@ -39,6 +39,7 @@ def _write_csv(tmp_path: Path, content: str, filename: str = "meta.csv") -> Path
 # null item_id rows dropped + warning
 # ---------------------------------------------------------------------------
 
+
 def test_warning_logged_and_row_skipped_for_null_item_id(
     tmp_path: Path, caplog
 ) -> None:
@@ -48,6 +49,7 @@ def test_warning_logged_and_row_skipped_for_null_item_id(
         "item_id,title\n,No Title\ni1,Item One\n",
     )
     import logging
+
     with caplog.at_level(logging.WARNING):
         df = load_item_metadata(
             _Config("csv", str(csv_file)),
@@ -61,6 +63,7 @@ def test_warning_logged_and_row_skipped_for_null_item_id(
 # ---------------------------------------------------------------------------
 # field outside allowlist never present
 # ---------------------------------------------------------------------------
+
 
 def test_field_outside_allowlist_never_in_response(tmp_path: Path) -> None:
     """The returned DataFrame only contains the requested fields."""
@@ -80,6 +83,7 @@ def test_field_outside_allowlist_never_in_response(tmp_path: Path) -> None:
 # missing field with on_field_missing=error
 # ---------------------------------------------------------------------------
 
+
 def test_field_in_allowlist_but_missing_in_file_with_on_field_missing_error(
     tmp_path: Path,
 ) -> None:
@@ -98,6 +102,7 @@ def test_field_in_allowlist_but_missing_in_file_with_on_field_missing_error(
 # ---------------------------------------------------------------------------
 # missing field with on_field_missing=null
 # ---------------------------------------------------------------------------
+
 
 def test_field_in_allowlist_but_missing_with_on_field_missing_null(
     tmp_path: Path,
@@ -119,6 +124,7 @@ def test_field_in_allowlist_but_missing_with_on_field_missing_null(
 # metadata field deny override
 # ---------------------------------------------------------------------------
 
+
 def test_metadata_field_deny_overrides_recipe_fields(tmp_path: Path) -> None:
     """Fields in the deny-list are not present in the result."""
     csv_file = _write_csv(
@@ -138,6 +144,7 @@ def test_metadata_field_deny_overrides_recipe_fields(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # predict returns null metadata for unjoined item
 # ---------------------------------------------------------------------------
+
 
 def test_predict_returns_null_metadata_for_unjoined_item(tmp_path: Path) -> None:
     """An item not in the metadata file has no metadata fields in the response."""
@@ -162,6 +169,7 @@ def test_predict_returns_null_metadata_for_unjoined_item(tmp_path: Path) -> None
 # metadata id string coerced matches recommender ids
 # ---------------------------------------------------------------------------
 
+
 def test_metadata_id_string_coerced_matches_recommender_ids(tmp_path: Path) -> None:
     """Numeric item_ids in the metadata file are str-coerced for index lookup."""
     csv_file = _write_csv(
@@ -181,6 +189,7 @@ def test_metadata_id_string_coerced_matches_recommender_ids(tmp_path: Path) -> N
 # empty fields list rejected
 # ---------------------------------------------------------------------------
 
+
 def test_empty_fields_list_raises_value_error(tmp_path: Path) -> None:
     csv_file = _write_csv(tmp_path, "item_id,title\ni1,T1\n")
     with pytest.raises(ValueError, match="non-empty"):
@@ -190,6 +199,7 @@ def test_empty_fields_list_raises_value_error(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # parquet support
 # ---------------------------------------------------------------------------
+
 
 def test_parquet_metadata_loads_correctly(tmp_path: Path) -> None:
     parquet_file = tmp_path / "meta.parquet"

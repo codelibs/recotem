@@ -6,11 +6,10 @@ Tests:
 - Handles nested dicts/lists
 - Must be first-in-chain (processor signature)
 """
+
 from __future__ import annotations
 
-import pytest
-
-from recotem.serving.log_redaction import redact_sensitive_keys, _should_redact
+from recotem.serving.log_redaction import _should_redact, redact_sensitive_keys
 
 _REDACTED = "[REDACTED]"
 
@@ -23,6 +22,7 @@ def _invoke(event_dict: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Direct key redaction
 # ---------------------------------------------------------------------------
+
 
 def test_redact_x_api_key() -> None:
     result = _invoke({"x-api-key": "my_secret_api_key", "event": "request"})
@@ -54,6 +54,7 @@ def test_redact_cookie() -> None:
 # AWS / Google / GCP credentials
 # ---------------------------------------------------------------------------
 
+
 def test_redact_aws_prefix() -> None:
     result = _invoke({"aws_secret_access_key": "AKIASECRET", "event": "e"})
     assert result["aws_secret_access_key"] == _REDACTED
@@ -65,7 +66,9 @@ def test_redact_aws_access_key_id() -> None:
 
 
 def test_redact_google_credentials() -> None:
-    result = _invoke({"google_application_credentials": "/path/to/creds.json", "event": "e"})
+    result = _invoke(
+        {"google_application_credentials": "/path/to/creds.json", "event": "e"}
+    )
     assert result["google_application_credentials"] == _REDACTED
 
 
@@ -77,6 +80,7 @@ def test_redact_gcp_project() -> None:
 # ---------------------------------------------------------------------------
 # Glob patterns
 # ---------------------------------------------------------------------------
+
 
 def test_redact_secret_suffix_pattern() -> None:
     result = _invoke({"db_secret": "password123", "event": "e"})
@@ -98,6 +102,7 @@ def test_non_sensitive_key_not_redacted() -> None:
 # ---------------------------------------------------------------------------
 # Nested dicts/lists
 # ---------------------------------------------------------------------------
+
 
 def test_redact_nested_dict() -> None:
     event = {
@@ -130,6 +135,7 @@ def test_redact_nested_list_of_dicts() -> None:
 # should_redact helper
 # ---------------------------------------------------------------------------
 
+
 def test_should_redact_case_insensitive() -> None:
     assert _should_redact("X-API-KEY") is True
     assert _should_redact("x-api-key") is True
@@ -148,9 +154,11 @@ def test_should_not_redact_normal_fields() -> None:
 # Processor is callable (first-in-chain contract)
 # ---------------------------------------------------------------------------
 
+
 def test_processor_is_callable_with_standard_signature() -> None:
     """The processor must accept (logger, method_name, event_dict) positional args."""
     import inspect
+
     sig = inspect.signature(redact_sensitive_keys)
     params = list(sig.parameters.keys())
     assert len(params) == 3

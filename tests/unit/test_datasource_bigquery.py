@@ -6,6 +6,7 @@ Tests:
 - Query submission error wraps in DataSourceError
 - Query execution error wraps in DataSourceError
 """
+
 from __future__ import annotations
 
 import sys
@@ -24,11 +25,11 @@ def _ctx() -> FetchContext:
 # Missing extras
 # ---------------------------------------------------------------------------
 
+
 def test_bigquery_extra_not_installed_clear_error_with_extra_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When google-cloud-bigquery is missing, DataSourceError names the extra."""
-    import importlib
 
     # Temporarily remove the bigquery module to simulate missing extra
     original = sys.modules.get("google.cloud.bigquery")
@@ -51,25 +52,33 @@ def test_bigquery_extra_not_installed_clear_error_with_extra_name(
 # Credential failure
 # ---------------------------------------------------------------------------
 
+
 def test_bigquery_credentials_failure_wraps_in_DataSourceError_exit3() -> None:
     """bigquery.Client() that raises wraps the error in DataSourceError."""
-    with patch.dict(sys.modules, {
-        "google.cloud.bigquery": MagicMock(),
-        "db_dtypes": MagicMock(),
-        "google.api_core.exceptions": MagicMock(),
-    }):
-        import importlib
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": MagicMock(),
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": MagicMock(),
+        },
+    ):
         # Reload to pick up mocked modules
         if "recotem.datasource.bigquery" in sys.modules:
             del sys.modules["recotem.datasource.bigquery"]
 
         mock_bq = MagicMock()
-        mock_bq.Client.side_effect = Exception("DefaultCredentialsError: no credentials")
+        mock_bq.Client.side_effect = Exception(
+            "DefaultCredentialsError: no credentials"
+        )
 
-        with patch.dict(sys.modules, {
-            "google.cloud.bigquery": mock_bq,
-            "db_dtypes": MagicMock(),
-        }):
+        with patch.dict(
+            sys.modules,
+            {
+                "google.cloud.bigquery": mock_bq,
+                "db_dtypes": MagicMock(),
+            },
+        ):
             from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
 
             cfg = BigQueryConfig(type="bigquery", query="SELECT * FROM tbl")
@@ -84,6 +93,7 @@ def test_bigquery_credentials_failure_wraps_in_DataSourceError_exit3() -> None:
 # Query submission error
 # ---------------------------------------------------------------------------
 
+
 def test_bigquery_query_submission_error_wraps_DataSourceError() -> None:
     """GoogleAPICallError from client.query() is wrapped in DataSourceError."""
     mock_bq = MagicMock()
@@ -91,18 +101,23 @@ def test_bigquery_query_submission_error_wraps_DataSourceError() -> None:
     mock_bq.Client.return_value = mock_client
     mock_bq.QueryJobConfig.return_value = MagicMock()
 
-    mock_api_core = MagicMock()
     mock_api_error = type("GoogleAPICallError", (Exception,), {})
-    mock_api_core.exceptions.GoogleAPICallError = mock_api_error
+    mock_exceptions = MagicMock()
+    mock_exceptions.GoogleAPICallError = mock_api_error
+    mock_api_core = MagicMock()
+    mock_api_core.exceptions = mock_exceptions
 
     mock_client.query.side_effect = mock_api_error("query submission failed")
 
-    with patch.dict(sys.modules, {
-        "google.cloud.bigquery": mock_bq,
-        "db_dtypes": MagicMock(),
-        "google.api_core.exceptions": mock_api_core,
-        "google.api_core": mock_api_core,
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
         if "recotem.datasource.bigquery" in sys.modules:
             del sys.modules["recotem.datasource.bigquery"]
 
@@ -120,15 +135,19 @@ def test_bigquery_query_submission_error_wraps_DataSourceError() -> None:
 # Unsupported query parameter type
 # ---------------------------------------------------------------------------
 
+
 def test_bigquery_unsupported_param_type_raises_DataSourceError() -> None:
     """An unsupported query_parameters type (e.g. list) raises DataSourceError."""
     mock_bq = MagicMock()
     mock_bq.ScalarQueryParameter = MagicMock()
 
-    with patch.dict(sys.modules, {
-        "google.cloud.bigquery": mock_bq,
-        "db_dtypes": MagicMock(),
-    }):
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+        },
+    ):
         if "recotem.datasource.bigquery" in sys.modules:
             del sys.modules["recotem.datasource.bigquery"]
 

@@ -3,6 +3,7 @@
 Only variables matching the prefix ``RECOTEM_RECIPE_*`` are expanded.
 A secondary blacklist blocks sensitive variable names regardless of prefix.
 """
+
 from __future__ import annotations
 
 import fnmatch

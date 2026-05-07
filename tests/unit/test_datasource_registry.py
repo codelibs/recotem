@@ -5,6 +5,7 @@ Tests:
 - Dynamic discriminated union includes builtin types
 - Third-party plugin type appears in the union
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -13,10 +14,10 @@ import pytest
 
 from recotem.datasource.base import DataSourceError
 
-
 # ---------------------------------------------------------------------------
 # Duplicate type_name detection
 # ---------------------------------------------------------------------------
+
 
 def test_two_plugins_register_same_name_rejected_at_discovery() -> None:
     """Two plugins with the same type_name raise DataSourceError at discovery."""
@@ -50,6 +51,7 @@ def test_two_plugins_register_same_name_rejected_at_discovery() -> None:
     with patch("recotem.datasource.registry.entry_points", return_value=[ep1, ep2]):
         # Clear the lru_cache to force re-discovery
         from recotem.datasource import registry
+
         registry.get_source_types.cache_clear()
         try:
             with pytest.raises(DataSourceError, match="[Dd]uplicate"):
@@ -62,9 +64,11 @@ def test_two_plugins_register_same_name_rejected_at_discovery() -> None:
 # Dynamic union includes builtin types
 # ---------------------------------------------------------------------------
 
+
 def test_dynamic_discriminated_union_includes_builtin_csv() -> None:
     """The dynamic union must include at least the builtin csv and parquet types."""
     from recotem.datasource import registry
+
     registry.get_source_types.cache_clear()
     try:
         types = registry.get_source_types()
@@ -78,6 +82,7 @@ def test_dynamic_discriminated_union_includes_builtin_csv() -> None:
 def test_build_source_config_union_returns_annotated_type() -> None:
     """build_source_config_union() returns an annotated type (not None, not plain class)."""
     from recotem.datasource import registry
+
     registry.get_source_types.cache_clear()
     try:
         union = registry.build_source_config_union()
@@ -105,6 +110,7 @@ def test_dynamic_discriminated_union_includes_third_party_type() -> None:
 
     with patch("recotem.datasource.registry.entry_points", return_value=[ep]):
         from recotem.datasource import registry
+
         registry.get_source_types.cache_clear()
         try:
             types = registry.get_source_types()
@@ -117,8 +123,10 @@ def test_dynamic_discriminated_union_includes_third_party_type() -> None:
 # get_source_class error path
 # ---------------------------------------------------------------------------
 
+
 def test_get_source_class_unknown_type_raises() -> None:
     from recotem.datasource import registry
+
     registry.get_source_types.cache_clear()
     try:
         with pytest.raises(DataSourceError, match="[Uu]nknown"):

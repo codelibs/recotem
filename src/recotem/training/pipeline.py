@@ -19,23 +19,20 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+# NOTE: importing the recotem.training package applies the IPython stub
+# required by irspack's transitive fastprogress dep, so importing irspack
+# below is safe in stub-less environments.
 import pandas as pd
-import scipy.sparse as sps
 import structlog
-
-# _compat must be imported before irspack to apply the IPython stub.
-from recotem.training._compat import IDMappedRecommender  # noqa: E402
 from irspack import __version__ as irspack_version
 from irspack.utils import df_to_sparse
 
 from recotem.recipe.models import Recipe
+from recotem.training._compat import IDMappedRecommender
 from recotem.training.algorithms import get_recommender_cls, resolve_algorithm_name
 from recotem.training.errors import (
     MinDataViolation,
-    SearchError,
-    SplitError,
     TrainingError,
-    ZeroScoreError,
 )
 from recotem.training.evaluate import build_evaluator
 from recotem.training.progress import ProgressReporter
@@ -159,7 +156,7 @@ def run_training(
     # 2. Fetch data via DataSource.
     # ------------------------------------------------------------------
     bound_logger.info("fetching_data")
-    df: pd.DataFrame = _fetch_data(recipe)
+    df: pd.DataFrame = _fetch_data(recipe, run_id=run_id)
     bound_logger.info("data_fetched", n_rows=len(df))
 
     # ------------------------------------------------------------------
@@ -221,7 +218,9 @@ def run_training(
     ]
     random_seed = recipe.training.split.seed
 
-    bound_logger.info("search_started", algorithms=resolved_algos, n_trials=recipe.training.n_trials)
+    bound_logger.info(
+        "search_started", algorithms=resolved_algos, n_trials=recipe.training.n_trials
+    )
 
     with ProgressReporter(
         n_trials=recipe.training.n_trials,
@@ -345,31 +344,31 @@ def _compute_recipe_hash(recipe: Recipe) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _fetch_data(recipe: Recipe) -> pd.DataFrame:
-    """Fetch data using the recipe's datasource."""
+def _fetch_data(recipe: Recipe, run_id: str) -> pd.DataFrame:
+    """Fetch data using the recipe's datasource (per spec section 13 contract)."""
     from recotem.datasource.base import DataSourceError, FetchContext  # noqa: PLC0415
+    from recotem.datasource.registry import get_source_class  # noqa: PLC0415
 
     source_config = recipe.source
-    # The DataSource class is resolved via the dynamic discriminated union.
-    # The source_config object IS the typed config; its class knows the source type.
+    # `recipe.source` is the validated typed Config (CSVConfig / BigQueryConfig / ...).
+    # Each source's `type` field discriminator names the source class.
+    type_name = getattr(source_config, "type", None) or (
+        source_config.get("type") if isinstance(source_config, dict) else None
+    )
+    if not type_name:
+        raise TrainingError(
+            "Recipe source has no discriminator 'type' field.",
+            code="datasource_error",
+        )
+
     try:
-        source_cls = source_config.__class__
-        # Convention: each source type's class has a ``fetch`` classmethod or
-        # the config is itself a DataSource instance.  We support both patterns.
-        if hasattr(source_cls, "fetch") and callable(source_cls.fetch):
-            ctx = FetchContext(recipe=recipe)
-            df = source_cls.fetch(source_config, ctx)
-        elif hasattr(source_config, "fetch"):
-            ctx = FetchContext(recipe=recipe)
-            df = source_config.fetch(ctx)
-        else:
-            raise TrainingError(
-                f"Source type {source_cls.__name__!r} does not implement fetch().",
-                code="datasource_error",
-            )
-    except TrainingError:
-        raise
+        source_cls = get_source_class(str(type_name))
+        source_instance = source_cls(source_config)
+        ctx = FetchContext(recipe_name=recipe.name, run_id=run_id)
+        df = source_instance.fetch(ctx)
     except DataSourceError:
+        raise
+    except TrainingError:
         raise
     except Exception as exc:
         raise TrainingError(
@@ -395,7 +394,6 @@ def _cleanse(
     item_col = recipe.schema_.item_column
     time_col = recipe.schema_.time_column
 
-    original_len = len(df)
     drop_count = 0
 
     # 1. Drop null user_id / item_id.
@@ -406,8 +404,11 @@ def _cleanse(
 
     # 2. String-coerce ids.
     df = df.copy()
-    df[user_col] = df[user_col].astype(str)
-    df[item_col] = df[item_col].astype(str)
+    # Coerce IDs to plain Python strings (numpy object dtype) so that downstream
+    # irspack code paths that pass through numpy.shuffle do not encounter
+    # ArrowStringArray (pandas 2.x default) which numpy cannot shuffle.
+    df[user_col] = df[user_col].astype(str).astype(object)
+    df[item_col] = df[item_col].astype(str).astype(object)
 
     # 3. Parse time column if present.
     if time_col is not None and time_col in df.columns:
@@ -446,17 +447,11 @@ def _cleanse(
 
     violations: list[str] = []
     if cfg.min_rows is not None and n_rows < cfg.min_rows:
-        violations.append(
-            f"n_rows={n_rows} < min_rows={cfg.min_rows}"
-        )
+        violations.append(f"n_rows={n_rows} < min_rows={cfg.min_rows}")
     if cfg.min_users is not None and n_users < cfg.min_users:
-        violations.append(
-            f"n_users={n_users} < min_users={cfg.min_users}"
-        )
+        violations.append(f"n_users={n_users} < min_users={cfg.min_users}")
     if cfg.min_items is not None and n_items < cfg.min_items:
-        violations.append(
-            f"n_items={n_items} < min_items={cfg.min_items}"
-        )
+        violations.append(f"n_items={n_items} < min_items={cfg.min_items}")
 
     if violations:
         raise MinDataViolation(

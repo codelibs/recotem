@@ -19,12 +19,11 @@ from typing import Any
 
 import optuna
 import scipy.sparse as sps
-
-# _compat applies IPython stub before irspack imports (see _compat.py).
-import recotem.training._compat  # noqa: F401
 from irspack import Evaluator
 from optuna.samplers import TPESampler
 
+# _compat applies IPython stub before irspack imports (see _compat.py).
+import recotem.training._compat  # noqa: F401
 from recotem.training.algorithms import get_recommender_cls, resolve_algorithm_name
 from recotem.training.errors import SearchError, ZeroScoreError
 from recotem.training.evaluate import get_score
@@ -311,11 +310,7 @@ def run_search(
     )
 
     # Post-search analysis.
-    completed = [
-        t
-        for t in study.trials
-        if t.state == optuna.trial.TrialState.COMPLETE
-    ]
+    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
     n_completed = len(completed)
 
     if n_completed == 0:

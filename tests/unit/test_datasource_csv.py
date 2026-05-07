@@ -7,9 +7,9 @@ Tests:
 - Empty CSV after header -> DataSourceError
 - Corrupt parquet -> DataSourceError
 """
+
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pandas as pd
@@ -26,6 +26,7 @@ def _ctx(name: str = "test") -> FetchContext:
 # ---------------------------------------------------------------------------
 # CSV positive path
 # ---------------------------------------------------------------------------
+
 
 def test_csv_source_reads_file(tmp_path: Path) -> None:
     csv_file = tmp_path / "interactions.csv"
@@ -52,12 +53,14 @@ def test_csv_source_dtype_override(tmp_path: Path) -> None:
     cfg = CSVConfig(type="csv", path=str(csv_file), dtype={"user_id": "str"})
     source = CSVSource(cfg)
     df = source.fetch(_ctx())
-    assert df["user_id"].dtype == object  # str in pandas is object
+    # pandas may return either object (legacy) or StringDtype depending on version.
+    assert df["user_id"].dtype == object or pd.api.types.is_string_dtype(df["user_id"])
 
 
 # ---------------------------------------------------------------------------
 # CSV negative paths
 # ---------------------------------------------------------------------------
+
 
 def test_csv_missing_file_raises_DataSourceError(tmp_path: Path) -> None:
     cfg = CSVConfig(type="csv", path=str(tmp_path / "nonexistent.csv"))
@@ -95,6 +98,7 @@ def test_csv_corrupt_file_raises_DataSourceError(tmp_path: Path) -> None:
 # Parquet positive path
 # ---------------------------------------------------------------------------
 
+
 def test_parquet_source_reads_file(tmp_path: Path) -> None:
     parquet_file = tmp_path / "data.parquet"
     df_orig = pd.DataFrame({"user_id": ["u1", "u2"], "item_id": ["i1", "i2"]})
@@ -108,6 +112,7 @@ def test_parquet_source_reads_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Parquet negative paths
 # ---------------------------------------------------------------------------
+
 
 def test_parquet_corrupt_wraps_in_DataSourceError(tmp_path: Path) -> None:
     corrupt = tmp_path / "corrupt.parquet"

@@ -216,9 +216,7 @@ class ArtifactWatcher(threading.Thread):
             try:
                 from recotem.recipe.loader import load_recipe
 
-                recipe: Recipe = load_recipe(
-                    yaml_file, recipes_root=self._recipes_dir
-                )
+                recipe: Recipe = load_recipe(yaml_file, recipes_root=self._recipes_dir)
             except Exception as exc:
                 logger.warning(
                     "recipe_rescan_load_error",
@@ -284,9 +282,7 @@ class ArtifactWatcher(threading.Thread):
     # Load / verify / replace
     # ------------------------------------------------------------------
 
-    def _load_recipe(
-        self, name: str, state: _RecipeWatchState, *, force: bool
-    ) -> None:
+    def _load_recipe(self, name: str, state: _RecipeWatchState, *, force: bool) -> None:
         """Read, verify, deserialize, and atomically replace the entry for *name*."""
         artifact_path = state.artifact_path
         max_bytes = self._config.max_artifact_bytes

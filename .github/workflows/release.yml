@@ -98,6 +98,13 @@ jobs:
           format: sarif
           output: trivy-results.sarif
           severity: "CRITICAL,HIGH"
+          # Skip CVEs without an upstream fix.  Slim base images frequently
+          # carry HIGH OS CVEs (libcap2, ncurses-bin, libudev1, ...) that
+          # have no fixed Debian version yet — gating CI on these would mean
+          # the pipeline is permanently red with nothing the project can do
+          # about it.  We rebuild on every push, so as soon as a fix lands
+          # in the base image we pick it up automatically.
+          ignore-unfixed: true
           exit-code: "1"
 
       - name: Upload Trivy SARIF

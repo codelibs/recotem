@@ -45,7 +45,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        # NOTE: irspack 0.4.0 ships a C extension `_core_evaluator` only for
+        # Python 3.12.  3.13 wheels do not yet exist; pip falls back to source
+        # build which is not packaged.  Revisit when irspack publishes 3.13
+        # wheels (track in CHANGELOG).
+        python-version: ["3.12"]
     steps:
       - uses: actions/checkout@v4
 

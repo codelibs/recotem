@@ -161,7 +161,9 @@ def test_serve_health_endpoint_ok_with_loaded_model() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_tiny_synthetic_csv(tmp_path: Path, n_users: int = 10, n_items: int = 10) -> Path:
+def _make_tiny_synthetic_csv(
+    tmp_path: Path, n_users: int = 10, n_items: int = 10
+) -> Path:
     """Create a minimal synthetic CSV with n_users users and n_items items.
 
     Each user rates every item exactly once, yielding n_users * n_items rows

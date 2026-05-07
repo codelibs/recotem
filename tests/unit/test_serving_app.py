@@ -80,7 +80,9 @@ def test_security_posture_log_emits_signing_keys_with_fingerprints(
     assert "signing_keys" in posture
     assert "signing_kids" in posture
     assert isinstance(posture["signing_keys"], list)
-    assert posture["signing_keys"], "signing_keys must not be empty when keys configured"
+    assert posture["signing_keys"], (
+        "signing_keys must not be empty when keys configured"
+    )
     entry = posture["signing_keys"][0]
     assert set(entry.keys()) == {"kid", "fingerprint"}
     assert entry["kid"] == "active"

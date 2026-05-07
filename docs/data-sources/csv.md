@@ -47,30 +47,72 @@ source:
 
 `delimiter`, `encoding`, and `header` are ignored for Parquet. All other fields are the same as CSV.
 
-## fsspec paths
+## Path schemes
 
-Any path field accepts fsspec URIs. Local paths may be relative (resolved from the working directory at train time) or absolute.
+Any fsspec-supported scheme is accepted on `source.path` and
+`item_metadata.path`:
 
 ```yaml
-# Local (relative)
+# Local (relative or absolute)
 path: ./data/interactions.csv
-
-# Local (absolute)
 path: /mnt/data/interactions.csv
 
-# S3 (uses AWS credentials from instance profile or environment)
+# Object storage (uses cloud SDK auth — instance profile / ADC / env vars)
 path: s3://my-bucket/data/interactions.csv.gz
-
-# GCS (uses ADC)
 path: gs://my-bucket/data/interactions.parquet
-
-# Azure Blob Storage
 path: az://my-container/interactions.parquet
+
+# HTTP / HTTPS — `sha256` integrity pin is REQUIRED
+path: https://files.example.com/2025-01/interactions.csv
+sha256: 945fc769205a5976d38c5783500ae473afbb04608043b703951a699993c8f8be
+
+# file:// is treated as a bare local path
+path: file:///mnt/data/interactions.csv
 ```
 
-Rejected schemes: `file://`, `http://`, `https://`, `ftp://`, `ftps://`, `memory://`. These are rejected at recipe load with a `RecipeError`.
+Embedded credentials in URIs (e.g. `s3://AKIA...:secret@bucket/`) are
+rejected at recipe load. Credentials must come from the environment
+(instance profile, ADC, `AWS_*` env vars, etc.).
 
-Embedded credentials in URIs (e.g. `s3://AKIA...:secret@bucket/`) are also rejected at recipe load. Credentials must come from the environment (instance profile, ADC, `AWS_*` env vars, etc.).
+`output.path` is more restrictive — `http://`, `https://`, `ftp://`,
+`ftps://`, and `memory://` are rejected because writes are not supported
+on those schemes. Use a bare local path, `file://`, or a writeable
+object-store scheme.
+
+## Network-scheme integrity (HTTP / HTTPS)
+
+When `source.path` (or `item_metadata.path`) uses `http://` or `https://`:
+
+- `sha256` is **mandatory** on the same config block. Recipe load fails
+  with `RecipeError` if it is missing.
+- The fetch is performed via stdlib `urllib.request` — no extra runtime
+  deps required. Up to 5 redirects are followed (using a custom opener
+  that bypasses urllib's default redirect handler), with TLS verification
+  always on for `https://`. Redirects to non-`http(s)://` schemes are
+  rejected.
+- The downloaded payload is capped at `RECOTEM_MAX_DOWNLOAD_BYTES` (default
+  256 MiB; clamped to [1 MiB, 16 GiB]).
+- The connect/read timeout is `RECOTEM_HTTP_TIMEOUT_SECONDS` (default 30,
+  clamped to [1, 600]).
+- `recotem validate` issues a HEAD-like check (`fs.exists()` for non-network
+  schemes); the integrity check is performed at fetch time, not validate.
+
+Compute the sha256 once when authoring the recipe:
+
+```bash
+curl -sL <url> | shasum -a 256
+```
+
+If the upstream file rotates, regenerate the value and update the recipe.
+The mismatch is the alert.
+
+## sha256 on non-network paths
+
+`sha256` is also valid (but optional) on local, `file://`, and object-store
+paths. When set, the bytes are hashed and compared post-read. Useful for
+internal reproducibility audits even when the network is not involved.
+On non-network paths, when `sha256` is unset, pandas streams via fsspec
+without buffering the full file (preserving large-file performance).
 
 ## dtype overrides
 

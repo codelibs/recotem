@@ -1,0 +1,46 @@
+# Tutorial recipe — fetches a small public CSV over HTTPS and trains.
+# Walkthrough: docs/getting-started.md
+#
+# The CSV is the v1.0.0-tagged purchase log used by the original Recotem
+# project's e2e tests. Two columns: user_id, item_id.
+
+name: purchase_log
+
+source:
+  type: csv
+  path: https://raw.githubusercontent.com/codelibs/recotem/refs/tags/v1.0.0/frontend/e2e/test_data/purchase_log.csv
+  # sha256 is mandatory for network-scheme paths. Computed once at
+  # tutorial-authoring time. If upstream rotates the file, regenerate with:
+  #   curl -sL <url> | shasum -a 256
+  # and update both this value and docs/getting-started.md.
+  sha256: 945fc769205a5976d38c5783500ae473afbb04608043b703951a699993c8f8be
+  dtype:
+    user_id: str
+    item_id: str
+
+schema:
+  user_column: user_id
+  item_column: item_id
+  # No timestamp column on this dataset → split.scheme must be `random`.
+
+cleansing:
+  drop_null_ids: true
+  dedup: keep_last
+  min_rows: 100
+  min_users: 10
+  min_items: 10
+
+training:
+  algorithms: [IALS, TopPop]
+  metric: ndcg
+  cutoff: 10
+  n_trials: 10
+  parallelism: 1
+  split:
+    scheme: random
+    heldout_ratio: 0.2
+    seed: 42
+
+output:
+  path: ./artifacts/purchase_log.recotem
+  versioning: append_sha

@@ -8,7 +8,6 @@ then serves it and calls /predict.
 from __future__ import annotations
 
 import hashlib
-import hmac
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI

@@ -89,11 +89,11 @@ env:
 # Create them via:
 #   kubectl create secret generic recotem-auth \
 #     --from-literal=RECOTEM_API_KEYS_SECRET='kid1:sha256:<hex64>,kid2:sha256:<hex64>' \
-#     --from-literal=RECOTEM_SIGNING_KEYS_SECRET='prod-2026-q2:<hex32>'
+#     --from-literal=RECOTEM_SIGNING_KEYS_SECRET='prod-2026-q2:<hex64>'
 secrets:
   # Name of the Kubernetes Secret holding:
   #   RECOTEM_API_KEYS_SECRET   — comma-separated "<kid>:sha256:<hex64>"
-  #   RECOTEM_SIGNING_KEYS_SECRET — comma-separated "<kid>:<hex32>"
+  #   RECOTEM_SIGNING_KEYS_SECRET — comma-separated "<kid>:<hex64>" (64 hex = 32 bytes)
   secretName: recotem-auth
 
 # ── recipes source ────────────────────────────────────────────────────────────

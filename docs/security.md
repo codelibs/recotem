@@ -130,7 +130,7 @@ Grant `s3:PutObject` only to the train role, not the serve role.
 **What must be kept secret:**
 
 - `RECOTEM_SIGNING_KEYS` — HMAC keys for artifact signing and verification.
-- `RECOTEM_API_KEYS` — contains sha256 hashes of API key plaintexts. The hashes are not secret in the classical sense, but their exposure enables offline pre-image attacks. Treat them as secrets.
+- `RECOTEM_API_KEYS` — contains scrypt digests of API key plaintexts (`hashlib.scrypt` with salt `b"recotem.api-key.v1"`, n=2, r=8, p=1, dklen=32 — see `recotem.serving.auth._hash_api_key`). The wire prefix `sha256:` is a digest-family label, not the algorithm. The digests are not secret in the classical sense, but their exposure enables offline pre-image attacks. Treat them as secrets.
 - API key plaintexts — shown once at `recotem keygen` time. Store in a password manager or secrets manager.
 
 **Storage recommendations:**

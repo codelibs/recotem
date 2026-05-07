@@ -154,7 +154,7 @@ uv run ruff format --check src tests
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RECOTEM_SIGNING_KEYS` | (required) | `kid:hex32,kid2:hex32` for HMAC sign/verify. |
+| `RECOTEM_SIGNING_KEYS` | (required) | `kid:hex64,kid2:hex64` for HMAC sign/verify (64 hex = 32 bytes). |
 | `RECOTEM_API_KEYS` | (empty) | `kid:sha256:hex64,...` for serve auth. Empty forces 127.0.0.1 bind. |
 | `RECOTEM_HOST` / `RECOTEM_PORT` | 0.0.0.0 / 8080 | uvicorn bind. Overridden by 127.0.0.1 when no API keys. |
 | `RECOTEM_WATCH_INTERVAL` | 5 | Watcher poll seconds (clamped 1–30). |

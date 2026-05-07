@@ -2,7 +2,7 @@
 
 ## Signing key rotation
 
-Signing keys are configured in `RECOTEM_SIGNING_KEYS` as a comma-separated list of `<kid>:<hex32>` entries. The server verifies against any entry; `recotem train` always signs with the **first** entry (the active key).
+Signing keys are configured in `RECOTEM_SIGNING_KEYS` as a comma-separated list of `<kid>:<hex64>` entries (64 hex characters = 32 raw bytes). The server verifies against any entry; `recotem train` always signs with the **first** entry (the active key).
 
 This multi-kid pattern enables zero-downtime rotation:
 

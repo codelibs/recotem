@@ -19,7 +19,7 @@ independent, layered controls:
 
 Key rotation
 ------------
-``RECOTEM_SIGNING_KEYS`` is a comma-separated list of ``<kid>:<hex32>``
+``RECOTEM_SIGNING_KEYS`` is a comma-separated list of ``<kid>:<hex64>``
 entries.  ``recotem train`` uses ``KeyRing.active_kid`` (the first entry).
 ``recotem serve`` verifies against any entry.  Adding a new key, retraining,
 then removing the old key is a zero-downtime rotation.  Each artifact's kid
@@ -169,7 +169,8 @@ class KeyRing:
 
     Construction
     ------------
-    Pass one or more ``"<kid>:<hex32>"`` strings (the format used by
+    Pass one or more ``"<kid>:<hex64>"`` strings — i.e. a kid followed by
+    64 hex chars that decode to 32 raw bytes (the format used by
     ``RECOTEM_SIGNING_KEYS``).  Entries may be supplied as a single
     comma-separated string or as individual positional arguments.
 
@@ -200,7 +201,7 @@ class KeyRing:
         for entry in flat:
             if ":" not in entry:
                 raise ArtifactError(
-                    f"malformed KeyRing entry {entry!r}: expected '<kid>:<hex32>'"
+                    f"malformed KeyRing entry {entry!r}: expected '<kid>:<hex64>'"
                 )
             kid, _, hex_key = entry.partition(":")
             if not kid:

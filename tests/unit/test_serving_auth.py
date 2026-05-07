@@ -234,10 +234,10 @@ def test_hash_api_key_produces_64_char_hex() -> None:
 
 
 def test_hash_api_key_label_constant_is_recotem_api_key_v1() -> None:
-    """_API_KEY_HMAC_LABEL must be b'recotem.api-key.v1' (domain separation)."""
-    from recotem.serving.auth import _API_KEY_HMAC_LABEL
+    """_API_KEY_SCRYPT_SALT must be b'recotem.api-key.v1' (domain separation)."""
+    from recotem.serving.auth import _API_KEY_SCRYPT_SALT
 
-    assert _API_KEY_HMAC_LABEL == b"recotem.api-key.v1"
+    assert _API_KEY_SCRYPT_SALT == b"recotem.api-key.v1"
 
 
 def test_scrypt_params_match_cli_keygen() -> None:

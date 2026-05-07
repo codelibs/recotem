@@ -32,7 +32,8 @@ services:
       - recipes:/recipes:ro
       - artifacts:/artifacts
     environment:
-      # Active signing key (kid:hex32).  Generate with: recotem keygen
+      # Active signing key (kid:hex64 — 64 hex chars = 32 bytes).
+      # Generate with: recotem keygen --type signing
       RECOTEM_SIGNING_KEYS: "${RECOTEM_SIGNING_KEYS_SECRET}"
       # Log as JSON for structured log shipping.
       RECOTEM_LOG_FORMAT: "json"

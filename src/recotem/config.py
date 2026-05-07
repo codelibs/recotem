@@ -9,7 +9,8 @@ Environment variables (Section 7 of spec):
   RECOTEM_PORT              Bind port (default 8080)
   RECOTEM_WATCH_INTERVAL    Poll interval in seconds (default 5; clamped 1–30)
   RECOTEM_LOG_FORMAT        "json" | "console" | "auto"
-  RECOTEM_SIGNING_KEYS      CSV of "<kid>:<hex32>" entries for artifact signing
+  RECOTEM_SIGNING_KEYS      CSV of "<kid>:<hex64>" entries for artifact signing
+                              (64 hex chars = 32 raw bytes)
   RECOTEM_MAX_ARTIFACT_BYTES Max artifact size in bytes (default 2 GiB)
   RECOTEM_ALLOWED_ORIGINS   CSV of allowed CORS origins (default empty = deny)
   RECOTEM_ALLOWED_HOSTS     CSV of allowed Host header values (default

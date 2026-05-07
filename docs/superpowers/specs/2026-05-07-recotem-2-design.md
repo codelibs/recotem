@@ -552,7 +552,7 @@ Why `best_params` lives in both the header and the payload:
 Security posture:
 
 - **Multi-key signing with rotation**: `RECOTEM_SIGNING_KEYS` is a
-  comma-separated list of `<kid>:<hex32>`. `recotem train` uses the first
+  comma-separated list of `<kid>:<hex64>`. `recotem train` uses the first
   entry (the active key). `recotem serve` verifies against any entry. Adding
   a new key, retraining, then removing the old key is a zero-downtime
   rotation. Each artifact's kid is logged on load (never the key).

@@ -36,12 +36,12 @@ logger = structlog.get_logger(__name__)
 # Header name used by the client (lowercase for case-insensitive lookup).
 _API_KEY_HEADER = "x-api-key"
 
-# Domain-separation label for API key hashing.  Keyed HMAC ensures the stored
-# digest is bound to this specific use (API key verification) and cannot be
-# substituted into any other context that hashes the same plaintext.  Treated
-# as a fixed protocol constant — bumping the ``v1`` suffix would invalidate
-# all stored hashes and require re-issuing keys.
-_API_KEY_HMAC_LABEL = b"recotem.api-key.v1"
+# Domain-separation salt for API key hashing via scrypt.  The fixed salt
+# binds the stored digest to this specific use (API key verification) so it
+# cannot be substituted into any other context that hashes the same
+# plaintext.  Treated as a fixed protocol constant — bumping the ``v1``
+# suffix would invalidate all stored hashes and require re-issuing keys.
+_API_KEY_SCRYPT_SALT = b"recotem.api-key.v1"
 
 # scrypt parameters tuned for API key verification (NOT password hashing).
 # Recotem API keys are 256-bit random tokens (recotem keygen --type api
@@ -70,7 +70,7 @@ def _hash_api_key(value: str) -> str:
     """
     return hashlib.scrypt(
         value.encode("utf-8"),
-        salt=_API_KEY_HMAC_LABEL,
+        salt=_API_KEY_SCRYPT_SALT,
         n=_SCRYPT_N,
         r=_SCRYPT_R,
         p=_SCRYPT_P,

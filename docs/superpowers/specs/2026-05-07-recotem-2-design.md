@@ -646,6 +646,12 @@ full training and serving lifecycle, including at trace level.
 - Keys are 32 bytes (256 bits), base64url-encoded (43 chars no padding) at
   the plaintext level. Server rejects entries whose hex hash is not 64 chars.
 - `recotem keygen` refuses to emit keys shorter than 32 bytes.
+- The stored hash is `HMAC-SHA256(label=b"recotem.api-key.v1", plaintext)`,
+  not a bare SHA-256 digest. The keyed construction provides domain
+  separation: the stored digest cannot be cross-substituted into any other
+  context that happens to hash the same plaintext (Stripe / GitHub style).
+  The wire prefix `sha256:` identifies the digest family — bumping `v1` to
+  a new label string would invalidate all stored hashes and require key re-issue.
 - Constant-time compare via `hmac.compare_digest`.
 - The matching `kid` (never the plaintext or hash) is attached to request
   context for logging.

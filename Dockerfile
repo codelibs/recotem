@@ -37,8 +37,10 @@ FROM base AS builder
 
 WORKDIR /build
 
-# Copy dependency manifests first for layer caching.
-COPY pyproject.toml uv.lock ./
+# Copy dependency manifests + LICENSE first for layer caching.
+# LICENSE is required because pyproject.toml declares `license = { file = "LICENSE" }`
+# and hatchling reads it during the build performed by `uv sync` / `uv pip install`.
+COPY pyproject.toml uv.lock LICENSE README.md ./
 
 # Install all runtime extras (bigquery, s3, gcs, metrics) but NOT az.
 # Use --no-dev to exclude test/dev group.

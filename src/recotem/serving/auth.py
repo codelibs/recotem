@@ -2,7 +2,12 @@
 
 Security design (spec Section 9):
 - Keys are 32 bytes, base64url-encoded (43 chars) at the plaintext level.
-- Server stores ``sha256(plaintext)`` as a 64-char hex string.
+- Server stores ``HMAC-SHA256(label, plaintext)`` as a 64-char hex string,
+  where ``label = b"recotem.api-key.v1"`` provides domain separation so the
+  stored value cannot be substituted into another context that also stores
+  raw SHA-256 digests.  The wire format on disk / in env remains
+  ``<kid>:sha256:<hex64>`` for backward compatibility — the ``sha256`` token
+  identifies the digest family, not the keyless construction.
 - Constant-time compare via ``hmac.compare_digest`` prevents timing attacks.
 - Whitespace in the incoming ``X-API-Key`` header is **not** stripped — any
   leading/trailing whitespace is treated as part of the key and will produce
@@ -27,10 +32,25 @@ logger = structlog.get_logger(__name__)
 # Header name used by the client (lowercase for case-insensitive lookup).
 _API_KEY_HEADER = "x-api-key"
 
+# Domain-separation label for API key hashing.  Keyed HMAC ensures the stored
+# digest is bound to this specific use (API key verification) and cannot be
+# substituted into any other context that hashes the same plaintext.  Treated
+# as a fixed protocol constant — bumping the ``v1`` suffix would invalidate
+# all stored hashes and require re-issuing keys.
+_API_KEY_HMAC_LABEL = b"recotem.api-key.v1"
 
-def _sha256_hex(value: str) -> str:
-    """Return the hex-encoded SHA-256 digest of a UTF-8 string."""
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+def _hash_api_key(value: str) -> str:
+    """Return the hex-encoded HMAC-SHA256 of *value* under the API-key label.
+
+    This is **not** a password hash — API keys are 256-bit random tokens, so
+    a single HMAC iteration is sufficient (matches the GitHub / Stripe model).
+    The keyed construction provides domain separation versus a bare SHA-256
+    digest, preventing cross-context hash reuse.
+    """
+    return hmac.new(
+        _API_KEY_HMAC_LABEL, value.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
 
 
 def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
@@ -70,7 +90,7 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
         )
 
     # No stripping — whitespace is part of the key.
-    candidate_hash = _sha256_hex(raw_header)
+    candidate_hash = _hash_api_key(raw_header)
 
     for entry in api_keys:
         # hmac.compare_digest operates on equal-length strings; both are 64

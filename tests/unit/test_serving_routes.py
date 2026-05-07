@@ -15,6 +15,7 @@ Tests:
 from __future__ import annotations
 
 import hashlib
+import hmac
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
@@ -62,7 +63,11 @@ def _make_registry_with_recipe(
 
 
 def _make_api_key_entry(plaintext: str, kid: str = "k1") -> ApiKeyEntry:
-    sha256_hex = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+    # Mirror recotem.serving.auth._hash_api_key (HMAC-SHA256 with the
+    # ``recotem.api-key.v1`` domain-separation label).
+    sha256_hex = hmac.new(
+        b"recotem.api-key.v1", plaintext.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
     return ApiKeyEntry(kid=kid, sha256_hex=sha256_hex)
 
 

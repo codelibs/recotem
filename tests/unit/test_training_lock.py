@@ -36,7 +36,7 @@ def test_lock_contention_fail_on_busy_false_yields_false(tmp_path: Path) -> None
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Hold the lock from within this process
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o644)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         # Now try to acquire from the same process: non-blocking should fail
@@ -63,7 +63,7 @@ def test_lock_fail_on_busy_raises_lock_contested_error(tmp_path: Path) -> None:
     # We test by using a separate process to hold the lock.
     # Since inter-process locking is what flock actually guarantees:
     def _hold_lock(lock_path_str: str, ready_event, release_event) -> None:
-        fd = os.open(lock_path_str, os.O_CREAT | os.O_WRONLY, 0o644)
+        fd = os.open(lock_path_str, os.O_CREAT | os.O_WRONLY, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
         ready_event.set()
         release_event.wait(timeout=5.0)

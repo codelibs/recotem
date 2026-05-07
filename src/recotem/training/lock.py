@@ -92,7 +92,7 @@ def recipe_lock(
     if timeout == 0.0:
         lock_op |= fcntl.LOCK_NB  # non-blocking
 
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o644)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
     try:
         try:
             if timeout > 0:
@@ -135,7 +135,7 @@ def _try_acquire_windows(lock_path: Path) -> bool:
         fd = os.open(
             str(lock_path),
             os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            0o644,
+            0o600,
         )
         os.close(fd)
         return True

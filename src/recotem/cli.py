@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -439,7 +440,10 @@ def keygen(
     For signing keys:  plaintext is a 64-char hex string (32 raw bytes).
                        env_entry format: RECOTEM_SIGNING_KEYS=<kid>:<hex64>
     For API keys:      plaintext is a 43-char base64url string (32 raw bytes).
-                       hash format: sha256(<plaintext_utf8>) as 64-char hex.
+                       hash format: HMAC-SHA256(b"recotem.api-key.v1",
+                       plaintext_utf8) as 64-char hex.  The wire prefix
+                       remains ``sha256:`` for backward-compat — it identifies
+                       the digest family, not the keyless construction.
                        env_entry format: RECOTEM_API_KEYS=<kid>:sha256:<hex64>
     """
     if key_type not in ("signing", "api"):
@@ -461,7 +465,14 @@ def keygen(
         typer.echo(f"env_entry=RECOTEM_SIGNING_KEYS={kid}:{plaintext}")
     else:
         plaintext = base64.urlsafe_b64encode(raw_bytes).rstrip(b"=").decode("ascii")
-        hex_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+        # Must match recotem.serving.auth._hash_api_key — keyed HMAC with the
+        # ``recotem.api-key.v1`` domain-separation label.  Wire format keeps
+        # the ``sha256:`` prefix to identify the digest family.
+        hex_hash = hmac.new(
+            b"recotem.api-key.v1",
+            plaintext.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
         typer.echo(f"kid={kid}")
         typer.echo(f"plaintext={plaintext}")
         typer.echo(f"hash=sha256:{hex_hash}")

@@ -8,6 +8,7 @@ then serves it and calls /predict.
 from __future__ import annotations
 
 import hashlib
+import hmac
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
@@ -34,7 +35,11 @@ def _make_mock_recommender(users: list[str], items: list[str]):
 
 
 def _make_api_entry(plaintext: str, kid: str = "api-key") -> ApiKeyEntry:
-    sha256 = hashlib.sha256(plaintext.encode()).hexdigest()
+    # Mirror recotem.serving.auth._hash_api_key (HMAC-SHA256 with the
+    # ``recotem.api-key.v1`` domain-separation label).
+    sha256 = hmac.new(
+        b"recotem.api-key.v1", plaintext.encode(), hashlib.sha256
+    ).hexdigest()
     return ApiKeyEntry(kid=kid, sha256_hex=sha256)
 
 

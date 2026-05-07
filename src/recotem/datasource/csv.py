@@ -27,10 +27,20 @@ _COMPRESSION_MAP: dict[str, str] = {
     ".xz": "xz",
 }
 
+# Schemes where urlparse's "userinfo" actually means credentials. For other
+# schemes (gs://bucket@project/..., s3://...) the @ is part of the path.
+_USERINFO_SCHEMES: frozenset[str] = frozenset({"http", "https", "ftp", "ftps"})
+
 
 def _redact_url_userinfo(path: str) -> str:
-    """Strip any userinfo from URL-shaped *path* before logging."""
+    """Strip any userinfo from URL-shaped *path* before logging.
+
+    Only redacts for HTTP(S) / FTP(S); object-store schemes like
+    ``gs://bucket@project/...`` use ``@`` in their idiomatic syntax.
+    """
     parsed = urlparse(path)
+    if parsed.scheme.lower() not in _USERINFO_SCHEMES:
+        return path
     if not parsed.username and not parsed.password:
         return path
     netloc = parsed.hostname or ""
@@ -128,44 +138,61 @@ class CSVSource:
                 f"Network-scheme CSV fetch is not yet wired for '{safe_path}'."
             )
 
-        # Non-network path: read via fsspec, then verify sha256 if set.
-        try:
-            with fsspec.open(cfg.path, "rb") as f:
-                raw_bytes = f.read()
-        except FileNotFoundError as exc:
-            raise DataSourceError(f"CSV file not found: {cfg.path}") from exc
-        except PermissionError as exc:
-            raise DataSourceError(
-                f"Permission denied reading CSV file: {cfg.path}"
-            ) from exc
-        except Exception as exc:
-            raise DataSourceError(
-                f"Failed to read CSV from '{cfg.path}': {exc}"
-            ) from exc
-
+        # Non-network path
         if cfg.sha256 is not None:
+            try:
+                with fsspec.open(cfg.path, "rb") as f:
+                    raw_bytes = f.read()
+            except FileNotFoundError as exc:
+                raise DataSourceError(f"CSV file not found: {safe_path}") from exc
+            except PermissionError as exc:
+                raise DataSourceError(
+                    f"Permission denied reading CSV file: {safe_path}"
+                ) from exc
+            except Exception as exc:
+                raise DataSourceError(
+                    f"Failed to read CSV from '{safe_path}': {exc}"
+                ) from exc
             _verify_sha256(raw_bytes, cfg.sha256)
             sha256_verified = True
+            compression = _infer_compression(cfg.path)
+            read_kwargs: dict[str, object] = {
+                "sep": cfg.delimiter,
+                "encoding": cfg.encoding,
+                "header": cfg.header,
+                "compression": compression,
+            }
+            if cfg.dtype:
+                read_kwargs["dtype"] = cfg.dtype
+            try:
+                df: pd.DataFrame = pd.read_csv(BytesIO(raw_bytes), **read_kwargs)
+            except Exception as exc:
+                raise DataSourceError(
+                    f"Failed to parse CSV from '{safe_path}': {exc}"
+                ) from exc
+            bytes_count = len(raw_bytes)
         else:
             sha256_verified = False
-
-        compression = _infer_compression(cfg.path)
-
-        read_kwargs: dict = {
-            "sep": cfg.delimiter,
-            "encoding": cfg.encoding,
-            "header": cfg.header,
-            "compression": compression,
-        }
-        if cfg.dtype:
-            read_kwargs["dtype"] = cfg.dtype
-
-        try:
-            df: pd.DataFrame = pd.read_csv(BytesIO(raw_bytes), **read_kwargs)
-        except Exception as exc:
-            raise DataSourceError(
-                f"Failed to parse CSV from '{safe_path}': {exc}"
-            ) from exc
+            read_kwargs = {
+                "sep": cfg.delimiter,
+                "encoding": cfg.encoding,
+                "header": cfg.header,
+            }
+            if cfg.dtype:
+                read_kwargs["dtype"] = cfg.dtype
+            try:
+                df = pd.read_csv(cfg.path, **read_kwargs)
+            except FileNotFoundError as exc:
+                raise DataSourceError(f"CSV file not found: {safe_path}") from exc
+            except PermissionError as exc:
+                raise DataSourceError(
+                    f"Permission denied reading CSV file: {safe_path}"
+                ) from exc
+            except Exception as exc:
+                raise DataSourceError(
+                    f"Failed to read CSV from '{safe_path}': {exc}"
+                ) from exc
+            bytes_count = -1  # not measured on the streaming path
 
         if df.empty:
             raise DataSourceError(
@@ -178,7 +205,7 @@ class CSVSource:
             run_id=ctx.run_id,
             path=safe_path,
             rows=len(df),
-            bytes=len(raw_bytes),
+            bytes=bytes_count,
             sha256_verified=sha256_verified,
             columns=list(df.columns),
         )
@@ -247,32 +274,44 @@ class ParquetSource:
                 f"Network-scheme Parquet fetch is not yet wired for '{safe_path}'."
             )
 
-        try:
-            with fsspec.open(cfg.path, "rb") as f:
-                raw_bytes = f.read()
-        except FileNotFoundError as exc:
-            raise DataSourceError(f"Parquet file not found: {cfg.path}") from exc
-        except PermissionError as exc:
-            raise DataSourceError(
-                f"Permission denied reading Parquet file: {cfg.path}"
-            ) from exc
-        except Exception as exc:
-            raise DataSourceError(
-                f"Failed to read Parquet from '{cfg.path}': {exc}"
-            ) from exc
-
         if cfg.sha256 is not None:
+            try:
+                with fsspec.open(cfg.path, "rb") as f:
+                    raw_bytes = f.read()
+            except FileNotFoundError as exc:
+                raise DataSourceError(f"Parquet file not found: {safe_path}") from exc
+            except PermissionError as exc:
+                raise DataSourceError(
+                    f"Permission denied reading Parquet file: {safe_path}"
+                ) from exc
+            except Exception as exc:
+                raise DataSourceError(
+                    f"Failed to read Parquet from '{safe_path}': {exc}"
+                ) from exc
             _verify_sha256(raw_bytes, cfg.sha256)
             sha256_verified = True
+            try:
+                df: pd.DataFrame = pd.read_parquet(BytesIO(raw_bytes))
+            except Exception as exc:
+                raise DataSourceError(
+                    f"Failed to parse Parquet from '{safe_path}': {exc}"
+                ) from exc
+            bytes_count = len(raw_bytes)
         else:
             sha256_verified = False
-
-        try:
-            df: pd.DataFrame = pd.read_parquet(BytesIO(raw_bytes))
-        except Exception as exc:
-            raise DataSourceError(
-                f"Failed to parse Parquet from '{safe_path}': {exc}"
-            ) from exc
+            try:
+                df = pd.read_parquet(cfg.path)
+            except FileNotFoundError as exc:
+                raise DataSourceError(f"Parquet file not found: {safe_path}") from exc
+            except PermissionError as exc:
+                raise DataSourceError(
+                    f"Permission denied reading Parquet file: {safe_path}"
+                ) from exc
+            except Exception as exc:
+                raise DataSourceError(
+                    f"Failed to read Parquet from '{safe_path}': {exc}"
+                ) from exc
+            bytes_count = -1  # not measured on the streaming path
 
         logger.info(
             "parquet_source_fetch_done",
@@ -280,7 +319,7 @@ class ParquetSource:
             run_id=ctx.run_id,
             path=safe_path,
             rows=len(df),
-            bytes=len(raw_bytes),
+            bytes=bytes_count,
             sha256_verified=sha256_verified,
             columns=list(df.columns),
         )

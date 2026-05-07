@@ -326,9 +326,19 @@ def inspect(
         _exit(_EXIT_ARTIFACT, f"Cannot read artifact '{artifact}': {exc}")
 
     try:
+        import fsspec
+
         from recotem.artifact.format import (
             DEFAULT_MAX_PAYLOAD_BYTES,
             parse_header_from_bytes,
+        )
+        from recotem.artifact.io import resolve_artifact_pointer
+
+        # Resolve pointer files written by the default ``append_sha`` versioning
+        # mode so users can inspect via the recipe's output.path directly.
+        fs, resolved_path = fsspec.core.url_to_fs(str(artifact))
+        data, _resolved = resolve_artifact_pointer(
+            data, resolved_path, fs, DEFAULT_MAX_PAYLOAD_BYTES
         )
 
         hdr = parse_header_from_bytes(data, DEFAULT_MAX_PAYLOAD_BYTES)
@@ -395,14 +405,20 @@ def validate(
         _exit(code, f"Recipe validation failed: {exc}")
 
     try:
-        from recotem.datasource.registry import (
-            get_source_for_recipe,  # type: ignore[import-untyped]
-        )
+        from recotem.datasource.registry import get_source_class
 
-        get_source_for_recipe(loaded_recipe)
-        typer.echo("DataSource: probe OK")
-    except ImportError:
-        typer.echo("DataSource: skipped (registry not available)", err=True)
+        source_cfg = loaded_recipe.source
+        type_name = getattr(source_cfg, "type", None)
+        if type_name is None:
+            raise RuntimeError("Recipe source is missing the 'type' discriminator.")
+
+        source_cls = get_source_class(type_name)
+        # Instantiate the source.  Plugins defer optional-dependency imports
+        # to __init__, so this catches missing extras (e.g. google-cloud-bigquery)
+        # and config / Config-class mismatches.  We do NOT call .fetch() here —
+        # full data loads can be expensive (BigQuery scans, large CSV reads).
+        source_cls(source_cfg)
+        typer.echo(f"DataSource: probe OK ({type_name})")
     except Exception as exc:
         code = _map_exception_to_exit(exc)
         _exit(code, f"DataSource probe failed: {exc}")

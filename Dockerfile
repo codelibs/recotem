@@ -85,7 +85,7 @@ USER appuser
 WORKDIR /workspace
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD recotem --version || exit 1
+    CMD recotem schema >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["recotem"]
 CMD ["--help"]

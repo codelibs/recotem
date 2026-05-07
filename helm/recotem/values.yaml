@@ -43,7 +43,17 @@ resources:
     cpu: "2"
     memory: 4Gi
 
-# SecurityContext applied to every container in the serve pod.
+# PodSecurityContext applied at the pod level.  Only fields valid on
+# Kubernetes' PodSecurityContext schema belong here.  Fields like
+# allowPrivilegeEscalation / readOnlyRootFilesystem / capabilities are
+# container-level and live under .Values.securityContext below.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# SecurityContext applied to every container in the pod.
 securityContext:
   runAsNonRoot: true
   runAsUser: 1000

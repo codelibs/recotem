@@ -29,7 +29,7 @@ spec:
           {{- end }}
           serviceAccountName: {{ include "recotem.serviceAccountName" . }}
           securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
           restartPolicy: OnFailure
 
           containers:

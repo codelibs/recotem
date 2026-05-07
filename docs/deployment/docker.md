@@ -16,9 +16,10 @@ services:
   train:
     image: ghcr.io/codelibs/recotem:2
     command: recotem train /recipes/my_recipe.yaml
+    working_dir: /workspace
     volumes:
-      - ./recipes:/recipes:ro          # mount recipe YAMLs read-only
-      - artifacts:/artifacts           # shared artifact volume
+      - ./examples/tutorial-purchase-log:/recipes:ro  # bind-mount recipe dir read-only
+      - artifacts:/workspace/artifacts                # shared artifact volume
     environment:
       RECOTEM_SIGNING_KEYS: "${RECOTEM_SIGNING_KEYS}"
     restart: "no"                      # run once; use a cron wrapper to repeat
@@ -30,11 +31,12 @@ services:
   serve:
     image: ghcr.io/codelibs/recotem:2
     command: recotem serve --recipes /recipes/
+    working_dir: /workspace
     ports:
       - "8080:8080"
     volumes:
-      - ./recipes:/recipes:ro
-      - artifacts:/artifacts:ro        # serve only reads; ro is safe
+      - ./examples/tutorial-purchase-log:/recipes:ro
+      - artifacts:/workspace/artifacts:ro  # serve only reads; ro is safe
     environment:
       RECOTEM_SIGNING_KEYS:      "${RECOTEM_SIGNING_KEYS}"
       RECOTEM_API_KEYS:          "${RECOTEM_API_KEYS}"
@@ -96,7 +98,8 @@ Or run the `train` image as a separate, throwaway container that shares the arti
 
 ```bash
 docker run --rm \
-  -v recotem_artifacts:/artifacts \
+  -w /workspace \
+  -v recotem_artifacts:/workspace/artifacts \
   -v /opt/recotem/recipes:/recipes:ro \
   -e RECOTEM_SIGNING_KEYS="${RECOTEM_SIGNING_KEYS}" \
   ghcr.io/codelibs/recotem:2 \

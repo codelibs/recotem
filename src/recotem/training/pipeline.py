@@ -98,13 +98,16 @@ class TrainResult:
 def run_training(
     recipe: Recipe,
     *,
-    key_ring: Any,
-    signing_key: str,
+    key_ring: Any | None = None,
+    signing_key: str | None = None,
     write_artifact_fn: Callable | None = None,
     quiet: bool = False,
     verbose: bool = False,
     run_id: str | None = None,
-) -> TrainResult:
+    no_lock: bool = False,
+    fail_on_busy: bool = False,
+    dev_allow_unsigned: bool = False,
+) -> TrainResult | None:
     """Orchestrate the full training pipeline for *recipe*.
 
     Parameters
@@ -113,9 +116,12 @@ def run_training(
         Validated ``Recipe`` object (from ``recotem.recipe``).
     key_ring:
         ``recotem.artifact.signing.KeyRing`` instance used for artifact
-        signing.
+        signing.  When ``None`` and ``dev_allow_unsigned=False``, the function
+        constructs one from ``RECOTEM_SIGNING_KEYS``.  When
+        ``dev_allow_unsigned=True``, an in-memory deterministic key is used.
     signing_key:
         The active signing key identifier (first key in ``key_ring``).
+        When ``None``, defaults to ``key_ring.active_kid``.
     write_artifact_fn:
         Callable with signature
         ``(payload, header_dict, output_path, versioning, key_ring,
@@ -125,10 +131,21 @@ def run_training(
         Progress reporting flags passed through to ``ProgressReporter``.
     run_id:
         Opaque run identifier; auto-generated if not provided.
+    no_lock:
+        Skip per-recipe file lock acquisition (matches ``--no-lock``).
+    fail_on_busy:
+        Raise ``LockContestedError`` when the lock is held instead of
+        gracefully returning ``None``.  Ignored when ``no_lock=True``.
+    dev_allow_unsigned:
+        Build artifacts using an in-memory dev signing key when no signing
+        key is configured.  Spec-mandated guardrails are enforced by the
+        CLI before this is reached.
 
     Returns
     -------
-    TrainResult
+    TrainResult on success.
+    ``None`` when the recipe lock is held by another process and
+    ``fail_on_busy`` is False (gracefully skipped).
 
     Raises
     ------
@@ -138,6 +155,70 @@ def run_training(
     if run_id is None:
         run_id = uuid.uuid4().hex[:12]
 
+    # Resolve KeyRing if the caller didn't pass one.
+    if key_ring is None:
+        from recotem.artifact.signing import KeyRing  # noqa: PLC0415
+
+        if dev_allow_unsigned:
+            key_ring = KeyRing("dev:" + ("0" * 64))
+        else:
+            import os  # noqa: PLC0415
+
+            raw = os.environ.get("RECOTEM_SIGNING_KEYS", "").strip()
+            if not raw:
+                raise TrainingError(
+                    "RECOTEM_SIGNING_KEYS is not set.  Run "
+                    "`recotem keygen --type signing` to generate one, or "
+                    "pass --dev-allow-unsigned for local development.",
+                    code="signing_key_missing",
+                )
+            key_ring = KeyRing(*[e.strip() for e in raw.split(",") if e.strip()])
+    if signing_key is None:
+        signing_key = key_ring.active_kid
+
+    # Acquire the per-recipe lock unless suppressed.
+    if no_lock:
+        return _run_training_locked(
+            recipe=recipe,
+            key_ring=key_ring,
+            signing_key=signing_key,
+            write_artifact_fn=write_artifact_fn,
+            quiet=quiet,
+            verbose=verbose,
+            run_id=run_id,
+        )
+    from recotem.training.lock import recipe_lock  # noqa: PLC0415
+
+    with recipe_lock(recipe.output.path, fail_on_busy=fail_on_busy) as acquired:
+        if not acquired:
+            logger.info(
+                "recipe_lock_contended_skipping",
+                recipe=recipe.name,
+                run_id=run_id,
+            )
+            return None
+        return _run_training_locked(
+            recipe=recipe,
+            key_ring=key_ring,
+            signing_key=signing_key,
+            write_artifact_fn=write_artifact_fn,
+            quiet=quiet,
+            verbose=verbose,
+            run_id=run_id,
+        )
+
+
+def _run_training_locked(
+    *,
+    recipe: Recipe,
+    key_ring: Any,
+    signing_key: str,
+    write_artifact_fn: Callable | None,
+    quiet: bool,
+    verbose: bool,
+    run_id: str,
+) -> TrainResult:
+    """Inner pipeline body — runs while the per-recipe lock is held."""
     bound_logger = logger.bind(recipe=recipe.name, run_id=run_id)
     bound_logger.info("training_started")
 
@@ -291,17 +372,12 @@ def run_training(
         "data_stats": data_stats,
     }
 
-    import pickle  # noqa: S403, PLC0415
-
-    payload: bytes = pickle.dumps(trained_recommender)  # noqa: S301
-
     artifact_path: str = write_artifact_fn(
-        payload=payload,
-        header_dict=header_dict,
-        output_path=recipe.output.path,
+        trained_recommender,
+        header_dict,
+        key_ring,
+        recipe.output.path,
         versioning=recipe.output.versioning,
-        key_ring=key_ring,
-        signing_key=signing_key,
     )
 
     bound_logger.info(

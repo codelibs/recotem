@@ -46,18 +46,23 @@ logger = structlog.get_logger(__name__)
 
 _ALLOWED_CLASSES: frozenset[tuple[str, str]] = frozenset(
     {
-        # Recotem compat wrapper
+        # Recotem compat wrapper.  Pickle records the class's *original*
+        # defining module (recotem.training._compat); recotem.serving._compat
+        # is a re-export alias used by readers that don't depend on training.
         ("recotem.serving._compat", "IDMappedRecommender"),
+        ("recotem.training._compat", "IDMappedRecommender"),
         # irspack id mapping
         ("irspack.utils.id_mapping", "IDMapper"),
-        # irspack recommenders
-        ("irspack.recommenders", "IALSRecommender"),
-        ("irspack.recommenders", "CosineKNNRecommender"),
-        ("irspack.recommenders", "TopPopRecommender"),
-        ("irspack.recommenders", "RP3betaRecommender"),
-        ("irspack.recommenders", "DenseSLIMRecommender"),
-        ("irspack.recommenders", "TruncatedSVDRecommender"),
-        ("irspack.recommenders", "BPRFMRecommender"),
+        # irspack recommenders.  Pickle records the original defining
+        # submodule, not the package re-export.  The set is frozen per
+        # release and tracked in CHANGELOG when irspack adds / renames
+        # recommenders.
+        ("irspack.recommenders.ials", "IALSRecommender"),
+        ("irspack.recommenders.knn", "CosineKNNRecommender"),
+        ("irspack.recommenders.toppop", "TopPopRecommender"),
+        ("irspack.recommenders.rp3", "RP3betaRecommender"),
+        ("irspack.recommenders.dense_slim", "DenseSLIMRecommender"),
+        ("irspack.recommenders.truncsvd", "TruncatedSVDRecommender"),
         # numpy
         ("numpy", "ndarray"),
         ("numpy", "dtype"),
@@ -83,6 +88,58 @@ _ALLOWED_CLASSES: frozenset[tuple[str, str]] = frozenset(
         ("collections", "OrderedDict"),
     }
 )
+
+
+# Module-prefix allow-list for scientific computing libraries.
+#
+# numpy and scipy reorganise their internal layout between releases (e.g.
+# numpy.core.* -> numpy._core.* in 2.x, plus serialisation helpers like
+# numpy._core.numeric._frombuffer and numpy.dtypes.* that vary by release).
+# Hand-enumerating every reconstruction helper would break each time we
+# bump the dep.
+#
+# These libraries do not contain shell-execution gadgets in their public
+# API, so the additional risk over the FQCN list is bounded.  HMAC
+# verification remains the primary defence; this prefix list is the
+# secondary layer scoped to the scientific stack only.
+_ALLOWED_MODULE_PREFIXES: tuple[str, ...] = (
+    "numpy.",
+    "numpy",
+    "scipy.sparse.",
+    "scipy.sparse",
+)
+
+# Denied submodules that fall under an allowed prefix but expose
+# code-execution gadgets (test runners, build helpers, foreign function
+# bindings, code generators).  Matched as exact module strings or with a
+# trailing dot to denote the full subtree.
+_DENIED_MODULE_PREFIXES: tuple[str, ...] = (
+    "numpy.testing",
+    "numpy.testing.",
+    "numpy.distutils",
+    "numpy.distutils.",
+    "numpy.f2py",
+    "numpy.f2py.",
+    "numpy.ctypeslib",
+    "numpy.ctypeslib.",
+)
+
+
+def _module_matches(module: str, patterns: tuple[str, ...]) -> bool:
+    for p in patterns:
+        if p.endswith(".") and module.startswith(p):
+            return True
+        if not p.endswith(".") and module == p:
+            return True
+    return False
+
+
+def _is_allowed(module: str, name: str) -> bool:
+    if (module, name) in _ALLOWED_CLASSES:
+        return True
+    if _module_matches(module, _DENIED_MODULE_PREFIXES):
+        return False
+    return _module_matches(module, _ALLOWED_MODULE_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -247,10 +304,11 @@ class SafeUnpickler(pickle.Unpickler):
     """
 
     def find_class(self, module: str, name: str) -> Any:
-        if (module, name) not in _ALLOWED_CLASSES:
+        if not _is_allowed(module, name):
             raise ArtifactError(
                 f"class not allowed: {module}.{name}; "
-                "only the hand-enumerated FQCN list may be constructed"
+                "only the hand-enumerated FQCN list (and the numpy / "
+                "scipy.sparse module-prefix allow-list) may be constructed"
             )
         return super().find_class(module, name)
 

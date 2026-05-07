@@ -559,25 +559,38 @@ Security posture:
 - **HMAC scope**: kid bytes + header JSON + payload. Tampering any of the
   three fails verify. `recotem inspect` runs the *same* verify path even
   though it does not deserialize the payload.
-- **Hand-enumerated FQCN allow-list** during deserialization. Module-prefix
-  allow-listing (1.x style) admits gadgets like `numpy.testing.run_module_suite`
-  or callable proxies in `numpy.distutils`. The allow-list is exactly:
+- **Two-tier allow-list** during deserialization:
+  1. A hand-enumerated FQCN list of recotem / irspack / builtins / collections
+     classes (exact module + class name match).
+  2. A module-prefix allow-list scoped to the scientific-stack libraries
+     (`numpy.*`, `scipy.sparse.*`) whose internal layout shifts between
+     releases (e.g. `numpy.core.*` → `numpy._core.*` in 2.x, plus
+     reconstruction helpers like `numpy._core.numeric._frombuffer`).
+  3. A deny list for code-execution-prone numpy submodules that would
+     otherwise fall under the prefix:
+     `numpy.testing.*`, `numpy.distutils.*`, `numpy.f2py.*`,
+     `numpy.ctypeslib.*`. The deny list overrides the allow list.
+
+  The hand-enumerated FQCN list is exactly:
   ```
   recotem.serving._compat.IDMappedRecommender
+  recotem.training._compat.IDMappedRecommender   # pickle-recorded path
   irspack.utils.id_mapping.IDMapper
-  irspack.recommenders.{IALSRecommender, CosineKNNRecommender,
-                        TopPopRecommender, RP3betaRecommender,
-                        DenseSLIMRecommender, TruncatedSVDRecommender,
-                        BPRFMRecommender, ...}     # exact set frozen per release
-  numpy.ndarray, numpy.dtype, numpy.core.multiarray._reconstruct,
-  numpy.core.multiarray.scalar
-  scipy.sparse.{csr_matrix, csc_matrix, coo_matrix}
-  builtins.{int, float, bool, list, tuple, dict, str, bytes, complex}
+  irspack.recommenders.ials.IALSRecommender
+  irspack.recommenders.knn.CosineKNNRecommender
+  irspack.recommenders.toppop.TopPopRecommender
+  irspack.recommenders.rp3.RP3betaRecommender
+  irspack.recommenders.dense_slim.DenseSLIMRecommender
+  irspack.recommenders.truncsvd.TruncatedSVDRecommender
+  builtins.{int, float, bool, list, tuple, dict, str, bytes, complex,
+            set, frozenset}
   collections.OrderedDict
   ```
-  Any other class triggers `ArtifactError` before construction. The list is
-  frozen per Recotem release; updates ship with a CHANGELOG note. Defence
-  in depth: even with HMAC bypass, only these classes can be constructed.
+
+  The lists are frozen per Recotem release; updates ship with a CHANGELOG
+  note. HMAC verification remains the primary defence; the FQCN list is the
+  RCE backstop for non-scientific code; the prefix list with explicit deny
+  entries is the layered control for the scientific stack.
 - **Resource caps**:
   - Header JSON length ≤ 64 KiB (declared length larger than this is rejected
     *before* allocation).

@@ -5,7 +5,7 @@ description = "Recipe-driven recommender training and serving on irspack."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
-authors = [{ name = "Shinsuke Sugaya", email = "shinsuke.sugaya@codelibs.co" }]
+authors = [{ name = "CodeLibs, Inc.", email = "info@codelibs.co" }]
 
 dependencies = [
     "fastapi>=0.120,<0.140",

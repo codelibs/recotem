@@ -1,0 +1,25 @@
+# examples/helloworld/recipe.yaml
+#
+# The smallest runnable Recotem recipe. Trains a TopPop recommender from
+# a tiny local CSV. Both source.path and output.path are scoped to this
+# directory, so everything stays self-contained.
+#
+# From the repository root:
+#   recotem train examples/helloworld/recipe.yaml
+#   recotem serve --recipes examples/helloworld/
+
+name: top_picks
+
+source:
+  type: csv
+  path: examples/helloworld/interactions.csv
+
+schema:
+  user_column: user_id
+  item_column: item_id
+
+training:
+  algorithms: [TopPop]
+
+output:
+  path: examples/helloworld/artifacts/top_picks.recotem

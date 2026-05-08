@@ -33,10 +33,10 @@ Requires Python 3.12+.
 
 ## Hello world (CSV)
 
-The smallest recipe Recotem accepts is 11 lines — every other field has a
-sensible default. Below is a minimum example you can run with one CSV file
-and two `keygen` calls. For a runnable end-to-end tutorial that fetches a
-real dataset over HTTPS via Docker Compose, see
+The repository ships with a self-contained example at
+[`examples/helloworld/`](examples/helloworld/) — recipe, dataset, and
+output directory all in one place. For a runnable end-to-end tutorial that
+fetches a real dataset over HTTPS via Docker Compose, see
 [docs/getting-started.md](docs/getting-started.md).
 
 **1. Generate keys**
@@ -49,54 +49,40 @@ export RECOTEM_SIGNING_KEYS="dev:<plaintext-hex-from-signing>"
 export RECOTEM_API_KEYS="dev:sha256:<hash-hex-from-api>"
 ```
 
-**2. Write a minimum recipe**
+**2. Train and serve**
 
-```yaml
-# recipes/top_picks.yaml
-name: top_picks
-source:
-  type: csv
-  path: ./interactions.csv      # columns: user_id, item_id
-schema:
-  user_column: user_id
-  item_column: item_id
-training:
-  algorithms: [TopPop]          # add IALS, CosineKNN, … to widen the search
-output:
-  path: ./artifacts/top_picks.recotem
-```
-
-That's the full recipe. `cleansing`, `metric`, `cutoff`, `n_trials`, `split`,
-and `versioning` all default to safe values. See
-[docs/recipe-reference.md](docs/recipe-reference.md) for the complete surface.
-
-**3. Train and serve**
+From the repository root:
 
 ```bash
-mkdir -p recipes artifacts
-# (save the YAML above to recipes/top_picks.yaml, then put your interactions.csv next to it)
+recotem train examples/helloworld/recipe.yaml
+# → examples/helloworld/artifacts/top_picks.<sha>.recotem (signed; gitignored)
 
-recotem train recipes/top_picks.yaml         # exit 0 → artifacts/top_picks.recotem signed
-recotem serve --recipes ./recipes/           # FastAPI on :8080, hot-swaps on file change
+recotem serve --recipes examples/helloworld/
+# FastAPI on :8080, hot-swaps on file change
 ```
 
-**4. Predict**
+**3. Predict**
 
 ```bash
 curl -X POST http://localhost:8080/predict/top_picks \
   -H "X-API-Key: <api-plaintext-from-step-1>" \
   -H "Content-Type: application/json" \
-  -d '{"user_id": "u123", "cutoff": 5}'
+  -d '{"user_id": "u01", "cutoff": 5}'
 ```
 
 ```json
 {
-  "items": [{"item_id": "i42", "score": 0.91}, ...],
+  "items": [{"item_id": "i00", "score": 0.91}, ...],
   "model": {"recipe": "top_picks", "trained_at": "2026-05-07T01:23:45Z",
             "best_class": "TopPopRecommender", "kid": "dev"},
   "request_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
+
+The recipe itself is 11 lines — every other field has a sensible default.
+See [`examples/helloworld/recipe.yaml`](examples/helloworld/recipe.yaml) for
+the source of truth and
+[docs/recipe-reference.md](docs/recipe-reference.md) for the full schema.
 
 ## Scheduling retrains
 

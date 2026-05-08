@@ -1,4 +1,4 @@
-# Hello world
+# Quickstart example
 
 The smallest runnable Recotem example. Trains a TopPop recommender from a
 tiny synthetic CSV (60 users, 20 items, ~850 rows). No network, no extras.
@@ -14,23 +14,24 @@ tiny synthetic CSV (60 users, 20 items, ~850 rows). No network, no extras.
 From the repository root:
 
 ```bash
-# Generate keys (once per machine)
-recotem keygen --type signing --kid dev   # → copy the env_entry plaintext
-recotem keygen --type api     --kid dev   # → copy env_entry hash + plaintext
+# 1. Generate keys (once per machine). Copy the values into the exports below.
+recotem keygen --type signing --kid dev
+recotem keygen --type api     --kid dev
 
-export RECOTEM_SIGNING_KEYS="dev:<plaintext-hex-from-signing>"
-export RECOTEM_API_KEYS="dev:sha256:<hash-hex-from-api>"
+export RECOTEM_SIGNING_KEYS="dev:<signing-plaintext>"   # signing: env_entry value
+export RECOTEM_API_KEYS="dev:sha256:<api-hash>"         # api:     env_entry value
+export RECOTEM_API_KEY="<api-plaintext>"                # api:     plaintext, for curl
 
-# Train
-recotem train examples/helloworld/recipe.yaml
-# → examples/helloworld/artifacts/top_picks.<sha>.recotem (signed)
+# 2. Train
+recotem train examples/quickstart/recipe.yaml
+# → examples/quickstart/artifacts/top_picks.<sha>.recotem (signed)
 
-# Serve
-recotem serve --recipes examples/helloworld/
+# 3. Serve (foreground)
+recotem serve --recipes examples/quickstart/
 
-# Predict (in another terminal)
+# 4. Predict (in another terminal)
 curl -X POST http://localhost:8080/predict/top_picks \
-  -H "X-API-Key: <api-plaintext-from-keygen>" \
+  -H "X-API-Key: $RECOTEM_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"user_id": "u01", "cutoff": 5}'
 ```

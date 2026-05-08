@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for the Recotem 2.0 test suite.
+"""Shared pytest fixtures for the Recotem test suite.
 
 NOTE: This test suite tests a system whose payload format is pickle (required
 by irspack for scipy sparse matrices). The pickle usage here is intentional

@@ -1,4 +1,4 @@
-"""Item metadata loader for Recotem 2.0.
+"""Item metadata loader for Recotem.
 
 Loads a CSV or Parquet file via fsspec/pandas, validates that all requested
 fields are present (or fills missing ones with nulls depending on

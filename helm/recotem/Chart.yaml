@@ -1,7 +1,7 @@
 apiVersion: v2
 name: recotem
 description: >
-  Helm chart for Recotem 2.0 — recipe-driven recommender training and serving.
+  Helm chart for Recotem — recipe-driven recommender training and serving.
   Provides a stateless serve Deployment with optional CronJob for training,
   NetworkPolicy, PodDisruptionBudget, and HorizontalPodAutoscaler.
 type: application

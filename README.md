@@ -1,120 +1,154 @@
-# Recotem 2.0
+# Recotem
 
-Fetch data from a source on a schedule, train a recommender, and serve it as an API.
+[![PyPI](https://img.shields.io/pypi/v/recotem.svg)](https://pypi.org/project/recotem/)
+[![Python](https://img.shields.io/pypi/pyversions/recotem.svg)](https://pypi.org/project/recotem/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![CI](https://github.com/codelibs/recotem/actions/workflows/test.yml/badge.svg)](https://github.com/codelibs/recotem/actions/workflows/test.yml)
 
-One recipe YAML → one trained model → one `/predict/{name}` endpoint.
+Recipe-driven recommender training and serving, built on
+[irspack](https://github.com/tohtsky/irspack). One YAML recipe describes
+where the data lives, how to train, and where to write the result —
+`recotem train` produces a signed binary artifact, `recotem serve`
+mounts it as a `/predict/{name}` HTTP endpoint and hot-swaps when a new
+artifact appears. No database, no message broker, no admin UI.
 
-## What it is
+## Why Recotem
 
-- **CLI** (`recotem train`, `recotem serve`) — no web UI, no database, no message broker.
-- **Plugin data sources** — builtin BigQuery (GA4-ready) and CSV/Parquet; extend via entry points.
-- **Hyperparameter search** — irspack algorithms + Optuna; just pick a metric.
-- **FastAPI inference server** — hot-swaps models on artifact change, no restart needed.
-- **HMAC-signed artifacts** — multi-key rotation, FQCN allow-listed deserialization.
-- **API-key auth** — header `X-API-Key`; keys never stored in plaintext.
+Most recommender stacks pull in a service mesh of databases, queues, and
+control planes before you can train your first model. Recotem keeps the
+moving parts to a recipe file and a binary artifact:
 
-## What it is not
+- **Single binary, two commands.** `recotem train` runs as a batch job;
+  `recotem serve` runs as a long-lived FastAPI process. They share
+  nothing but the artifact file on disk (or object storage).
+- **Reproducible by construction.** Recipes are versioned with your
+  code; artifacts are HMAC-signed with a SHA-checked header you can
+  inspect without loading the model.
+- **Hot-swap, no restart.** The serving process watches the artifact
+  directory and atomically swaps the in-memory model when training
+  emits a new file.
+- **Bring-your-own scheduler.** `recotem train` is a normal process —
+  drive it from cron, Airflow, a Kubernetes CronJob, or anything else.
 
-No web admin UI, no multi-user projects, no A/B testing, no PostgreSQL, no Redis, no Celery.
+## Features
+
+- Recipe-driven: 1 YAML = 1 model = 1 `/predict/{name}` endpoint
+- Hyperparameter search across irspack algorithms via Optuna
+- Pluggable data sources (built-in: CSV / Parquet / BigQuery; extend via Python entry points)
+- HMAC-signed artifacts with multi-key rotation and a deterministic
+  FQCN allow-list at deserialization time
+- API-key authentication (`X-API-Key`); keys hashed at rest
+- fsspec paths everywhere — local, S3, GCS, HTTPS, anything fsspec speaks
+- Optional Prometheus metrics endpoint, structured JSON logs with
+  built-in secret redaction
 
 ## Install
 
 ```bash
-pip install recotem
-
-# BigQuery support
-pip install "recotem[bigquery]"
-
-# Prometheus metrics endpoint
-pip install "recotem[metrics]"
+pip install recotem                 # core
+pip install "recotem[bigquery]"     # BigQuery data source
+pip install "recotem[metrics]"      # Prometheus metrics endpoint
 ```
 
-Requires Python 3.12+.
+Requires Python 3.12+. A multi-arch Docker image is published to
+`ghcr.io/codelibs/recotem`.
 
-## Hello world (CSV)
+## Quickstart
 
 The repository ships with a self-contained example at
-[`examples/helloworld/`](examples/helloworld/) — recipe, dataset, and
-output directory all in one place. For a runnable end-to-end tutorial that
-fetches a real dataset over HTTPS via Docker Compose, see
-[docs/getting-started.md](docs/getting-started.md).
-
-**1. Generate keys**
+[`examples/quickstart/`](examples/quickstart/) — recipe, dataset, and
+artifact directory all in one place. Train a TopPop recommender from a
+60-user CSV in under a minute.
 
 ```bash
-recotem keygen --type signing --kid dev   # → copy the env_entry plaintext
-recotem keygen --type api     --kid dev   # → copy the env_entry hash; keep plaintext for X-API-Key
+# 1. Generate keys (once per machine). Copy the values into the exports below.
+recotem keygen --type signing --kid dev
+recotem keygen --type api     --kid dev
 
-export RECOTEM_SIGNING_KEYS="dev:<plaintext-hex-from-signing>"
-export RECOTEM_API_KEYS="dev:sha256:<hash-hex-from-api>"
-```
+export RECOTEM_SIGNING_KEYS="dev:<signing-plaintext>"   # used by train + serve
+export RECOTEM_API_KEYS="dev:sha256:<api-hash>"         # used by serve
+export RECOTEM_API_KEY="<api-plaintext>"                # used by curl below
 
-**2. Train and serve**
+# 2. Train, serve
+recotem train examples/quickstart/recipe.yaml
+recotem serve --recipes examples/quickstart/ &
 
-From the repository root:
-
-```bash
-recotem train examples/helloworld/recipe.yaml
-# → examples/helloworld/artifacts/top_picks.<sha>.recotem (signed; gitignored)
-
-recotem serve --recipes examples/helloworld/
-# FastAPI on :8080, hot-swaps on file change
-```
-
-**3. Predict**
-
-```bash
+# 3. Predict
 curl -X POST http://localhost:8080/predict/top_picks \
-  -H "X-API-Key: <api-plaintext-from-step-1>" \
+  -H "X-API-Key: $RECOTEM_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"user_id": "u01", "cutoff": 5}'
 ```
 
 ```json
 {
-  "items": [{"item_id": "i00", "score": 0.91}, ...],
-  "model": {"recipe": "top_picks", "trained_at": "2026-05-07T01:23:45Z",
+  "items": [{"item_id": "i00", "score": 0.91}],
+  "model": {"recipe": "top_picks", "trained_at": "...",
             "best_class": "TopPopRecommender", "kid": "dev"},
-  "request_id": "550e8400-e29b-41d4-a716-446655440000"
+  "request_id": "..."
 }
 ```
 
 The recipe itself is 11 lines — every other field has a sensible default.
-See [`examples/helloworld/recipe.yaml`](examples/helloworld/recipe.yaml) for
-the source of truth and
+See [`examples/quickstart/recipe.yaml`](examples/quickstart/recipe.yaml)
+for the source of truth and
 [docs/recipe-reference.md](docs/recipe-reference.md) for the full schema.
 
-## Scheduling retrains
+### Which env var is needed where?
 
-`recotem train` is a plain process — schedule it with whatever you already use:
+| Variable | Required by | Purpose |
+|---|---|---|
+| `RECOTEM_SIGNING_KEYS` | `train` and `serve` | HMAC sign / verify artifact files (server keeps plaintext; needed for both sides) |
+| `RECOTEM_API_KEYS` | `serve` | Authenticate `/predict` callers (server keeps **hash** only) |
+| `X-API-Key: <plaintext>` | HTTP clients | Sent by clients on every `/predict` call; server re-hashes and compares |
+
+Both variables accept multiple comma-separated entries (`kid:value,kid2:value,…`)
+to enable zero-downtime key rotation — that is why they are pluralised.
+
+## Architecture
 
 ```
-# cron
-0 3 * * * RECOTEM_SIGNING_KEYS=... recotem train /etc/recotem/recipe.yaml
+┌────────────────────────────────────────────────────────────────────────┐
+│                  recotem (single Python package)                       │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│   recipe.yaml ──▶ recotem train ──▶ artifact.recotem ──▶ recotem serve │
+│                   (batch job)        (HMAC-signed)        (FastAPI,    │
+│                                                            hot-swap)   │
+│                                                                        │
+│   any scheduler          local FS, S3,             POST /predict/{name}│
+│   (cron / k8s / …)       GCS, fsspec               X-API-Key auth      │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-```yaml
-# Kubernetes CronJob
-schedule: "0 3 * * *"
+`train` and `serve` communicate **only via signed artifact files**. They
+can run on different machines; the watcher swaps models per recipe based
+on file mtime.
+
+## Documentation
+
+- [Getting started](docs/getting-started.md) — Docker Compose / pip walkthrough end-to-end
+- [Recipe reference](docs/recipe-reference.md) — every field documented
+- [Operations](docs/operations.md) — key rotation, sizing, troubleshooting
+- [Security](docs/security.md) — threat model, IAM scopes, secrets handling
+- [Plugin authoring](docs/plugin-authoring.md) — write a custom data source
+- [Documentation index](docs/README.md)
+
+## Contributing
+
+Issues and pull requests welcome. Development uses
+[uv](https://docs.astral.sh/uv/) for dependency management:
+
+```bash
+uv sync --all-extras
+uv run pytest tests
+uv run ruff check src tests
 ```
 
-The server detects the new artifact and hot-swaps automatically. No restart needed.
+See `CLAUDE.md` (or the project guidelines therein) for the full
+contributor workflow.
 
-## Exit codes
+## License
 
-| Code | Meaning |
-|------|---------|
-| 0 | Success (or lock-contention skip) |
-| 2 | RecipeError — bad YAML, missing env, column mismatch |
-| 3 | DataSourceError — auth failure, query error, network |
-| 4 | TrainingError — split failed, all scores zero, min_data_violation |
-| 5 | ArtifactError — signing key missing, magic mismatch |
-| 1 | Unexpected error |
-
-## Further reading
-
-- [docs/getting-started.md](docs/getting-started.md) — Docker Compose / pip walkthrough end-to-end
-- [docs/recipe-reference.md](docs/recipe-reference.md) — every field documented
-- [docs/operations.md](docs/operations.md) — key rotation, sizing, troubleshooting
-- [docs/security.md](docs/security.md) — threat model, IAM scopes, secrets handling
-- [docs/README.md](docs/README.md) — full docs index
+[Apache License 2.0](LICENSE).

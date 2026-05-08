@@ -1,7 +1,7 @@
 [project]
 name = "recotem-echo-source"
 version = "0.1.0"
-description = "Example third-party DataSource plugin for Recotem 2.0 — returns a static DataFrame."
+description = "Example third-party DataSource plugin for Recotem — returns a static DataFrame."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

@@ -1,6 +1,6 @@
 # Kubernetes manifests
 
-Standalone Kubernetes manifests for running Recotem 2.0. Use these as a
+Standalone Kubernetes manifests for running Recotem. Use these as a
 starting point if you don't want to use the Helm chart in
 [`helm/recotem/`](../../helm/recotem/).
 

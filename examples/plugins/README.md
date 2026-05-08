@@ -1,6 +1,6 @@
 # DataSource plugin examples
 
-Recotem 2.0 discovers third-party `DataSource` implementations through the
+Recotem discovers third-party `DataSource` implementations through the
 `recotem.datasources` Python entry-point group. This directory hosts
 runnable example plugins that demonstrate the contract.
 

@@ -1,4 +1,4 @@
-# values.yaml — Recotem 2.0 Helm chart default values
+# values.yaml — Recotem Helm chart default values
 #
 # Override in a values override file or via --set.
 # Secret values (api keys, signing keys) must be supplied at deploy time —

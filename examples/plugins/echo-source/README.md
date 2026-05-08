@@ -1,6 +1,6 @@
 # Echo source plugin
 
-Minimal third-party `DataSource` plugin for Recotem 2.0. `EchoSource`
+Minimal third-party `DataSource` plugin for Recotem. `EchoSource`
 returns a deterministic, statically-generated DataFrame keyed by
 `(n_users, n_items, n_rows)`. It is suitable for tests, documentation, and
 as a starting scaffold for real plugins — never for production training.

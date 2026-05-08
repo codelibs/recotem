@@ -1,4 +1,4 @@
-"""Recotem 2.0: recipe-driven recommender training and serving."""
+"""Recotem: recipe-driven recommender training and serving."""
 
 from recotem.version import __version__
 

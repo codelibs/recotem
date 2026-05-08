@@ -1,4 +1,4 @@
-"""recotem_echo — example DataSource plugin for Recotem 2.0.
+"""recotem_echo — example DataSource plugin for Recotem.
 
 Demonstrates the minimal plugin contract.  EchoSource returns a static
 DataFrame and is suitable only for testing and documentation purposes.

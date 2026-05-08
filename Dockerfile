@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Dockerfile.recotem — Recotem 2.0 multi-stage image
+# Dockerfile.recotem — Recotem multi-stage image
 # Single image carries both `recotem train` and `recotem serve`.
 # Base: python:3.12-slim
 # Install: uv

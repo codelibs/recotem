@@ -1,4 +1,4 @@
-# Recotem 2.0 Documentation
+# Recotem Documentation
 
 ## Getting started
 

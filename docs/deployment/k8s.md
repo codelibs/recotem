@@ -2,7 +2,7 @@
 
 ## Overview
 
-Two Kubernetes objects cover the Recotem 2.0 lifecycle:
+Two Kubernetes objects cover the Recotem lifecycle:
 
 - **CronJob** — runs `recotem train` on a schedule.
 - **Deployment** — runs `recotem serve` continuously, reading artifacts from a shared store.

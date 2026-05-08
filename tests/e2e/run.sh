@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Recotem 2.0 end-to-end test script.
+# Recotem end-to-end test script.
 #
 # Steps:
 #   1. Generate a small synthetic CSV of interactions

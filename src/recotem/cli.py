@@ -1,4 +1,4 @@
-"""Recotem 2.0 CLI --- Typer-based command interface.
+"""Recotem CLI --- Typer-based command interface.
 
 Commands:
   train     Fetch data, tune hyperparameters, train, and sign an artifact.

@@ -1,6 +1,6 @@
-"""EchoSource — a minimal Recotem 2.0 DataSource plugin.
+"""EchoSource — a minimal Recotem DataSource plugin.
 
-This module demonstrates the full DataSource contract that Recotem 2.0 expects
+This module demonstrates the full DataSource contract that Recotem expects
 from third-party plugins (spec Section 13).
 
 Contract summary
@@ -83,7 +83,7 @@ class EchoSource:
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
-    def __init__(self, config: "EchoSource.Config") -> None:
+    def __init__(self, config: EchoSource.Config) -> None:
         """Store validated config.
 
         Defer any import of optional dependencies to here (not module top-level)

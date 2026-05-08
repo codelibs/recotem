@@ -1,6 +1,6 @@
 # Tutorial example: purchase_log
 
-Self-contained Recotem 2.0 tutorial recipe. Fetches a small public CSV
+Self-contained Recotem tutorial recipe. Fetches a small public CSV
 (≈37 KiB, ≈4 988 interactions) over HTTPS and trains an IALS + TopPop
 recommender against it.
 

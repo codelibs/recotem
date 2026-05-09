@@ -121,7 +121,9 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
 - Payload uses Python's native binary serialisation because irspack's
   `IDMappedRecommender` carries scipy sparse matrices and numpy arrays. Defence
   in depth: HMAC verify before any byte is interpreted, plus a hand-enumerated
-  FQCN allow-list during load. See `docs/security.md`.
+  FQCN allow-list augmented by a narrow `numpy.*` / `scipy.sparse.*` module-
+  prefix allow-list (with a deny-list for high-risk submodules) during load.
+  See `docs/security.md`.
 
 ## Conventions
 

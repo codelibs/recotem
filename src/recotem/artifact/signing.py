@@ -11,9 +11,12 @@ independent, layered controls:
    compare via ``hmac.compare_digest``; signing keys are never logged (only
    the kid is surfaced in log events).
 3. Hand-enumerated FQCN allow-list in ``SafeUnpickler.find_class`` -- an RCE
-   backstop that is independent of the HMAC.  Module-prefix wildcards are
-   explicitly rejected; every (module, name) pair must appear verbatim in
-   ``_ALLOWED_CLASSES``.
+   backstop that is independent of the HMAC.  Augmented by a narrow
+   module-prefix allow-list scoped to ``numpy.*`` and ``scipy.sparse.*``
+   (numpy / scipy reshuffle their reconstruction helpers across releases,
+   so a strict FQCN list would break on every dep bump); a deny-list
+   removes the high-risk submodules within those prefixes.  See
+   ``docs/security.md`` for the full threat model.
 4. Required signing key for both train and serve; a misconfigured deployment
    fails closed rather than loading arbitrary files.
 

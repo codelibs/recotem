@@ -54,38 +54,32 @@ SUPPORTED_CLASS_NAMES: frozenset[str] = frozenset(
 def resolve_algorithm_name(alias: str) -> str:
     """Resolve a user-facing algorithm alias to a canonical class name.
 
+    Resolution is restricted to the frozen ``SUPPORTED_CLASS_NAMES`` set so
+    that recipes cannot reference irspack recommenders the artifact loader
+    would refuse at serve time.
+
     Tries (in order):
     1. Direct lookup in ``_ALIAS_MAP``.
-    2. The alias itself if it ends with "Recommender" and is importable.
-    3. Appending "Recommender" suffix.
-    4. Attempting ``get_recommender_class`` from irspack (future-proofing).
+    2. The alias itself if it is in ``SUPPORTED_CLASS_NAMES``.
+    3. Appending "Recommender" suffix and checking ``SUPPORTED_CLASS_NAMES``.
 
     Raises
     ------
     UnknownAlgorithmError
-        If no mapping can be found.
+        If no mapping can be found within the supported set.
     """
     if alias in _ALIAS_MAP:
         return _ALIAS_MAP[alias]
 
-    # Already a full class name?
-    if alias.endswith("Recommender"):
-        try:
-            get_recommender_class(alias)
-            return alias
-        except (ImportError, AttributeError, ValueError, KeyError):
-            pass
+    if alias in SUPPORTED_CLASS_NAMES:
+        return alias
 
-    # Try appending "Recommender"
     candidate = f"{alias}Recommender"
-    try:
-        get_recommender_class(candidate)
+    if candidate in SUPPORTED_CLASS_NAMES:
         return candidate
-    except (ImportError, AttributeError, ValueError, KeyError):
-        pass
 
     raise UnknownAlgorithmError(
-        f"Unknown algorithm {alias!r}. "
+        f"Unknown or unsupported algorithm {alias!r}. "
         f"Supported aliases: {sorted(_ALIAS_MAP)} "
         f"or full class names: {sorted(SUPPORTED_CLASS_NAMES)}."
     )

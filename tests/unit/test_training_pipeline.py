@@ -379,6 +379,57 @@ def test_per_algorithm_trials_proportional_without_override() -> None:
     assert budgets["C"] == 3
 
 
+def test_per_algorithm_trials_explicit_zero_skips_algorithm() -> None:
+    """Regression: explicit ``0`` must mean 'skip', not 'minimum 1'."""
+    from recotem.training.search import _compute_budgets
+
+    budgets = _compute_budgets(
+        class_names=["A", "B", "C"],
+        n_trials=10,
+        per_algorithm_trials={"A": 10, "B": 0, "C": 0},
+    )
+    assert budgets == {"A": 10, "B": 0, "C": 0}
+    assert sum(budgets.values()) == 10
+
+
+def test_per_algorithm_trials_unspecified_share_leftover() -> None:
+    from recotem.training.search import _compute_budgets
+
+    budgets = _compute_budgets(
+        class_names=["A", "B", "C"],
+        n_trials=10,
+        per_algorithm_trials={"A": 5},
+    )
+    assert budgets["A"] == 5
+    assert budgets["B"] + budgets["C"] == 5
+    assert sum(budgets.values()) == 10
+
+
+def test_per_algorithm_trials_all_zero_falls_back_to_even_split() -> None:
+    from recotem.training.search import _compute_budgets
+
+    budgets = _compute_budgets(
+        class_names=["A", "B", "C"],
+        n_trials=9,
+        per_algorithm_trials={"A": 0, "B": 0, "C": 0},
+    )
+    # All-zero override is treated as "no override".
+    assert sum(budgets.values()) == 9
+    assert all(v > 0 for v in budgets.values())
+
+
+def test_per_algorithm_trials_over_budget_scaled_down() -> None:
+    from recotem.training.search import _compute_budgets
+
+    budgets = _compute_budgets(
+        class_names=["A", "B", "C"],
+        n_trials=10,
+        per_algorithm_trials={"A": 8, "B": 7, "C": 5},
+    )
+    assert sum(budgets.values()) == 10
+    assert all(v >= 1 for v in budgets.values())
+
+
 # ---------------------------------------------------------------------------
 # one structured log per trial
 # ---------------------------------------------------------------------------

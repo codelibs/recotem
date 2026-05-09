@@ -165,6 +165,17 @@ def run_search(
         per_algorithm_trials=per_algorithm_trials,
     )
 
+    # Drop algorithms that the caller explicitly disabled (budget == 0) so
+    # Optuna does not waste sampler calls on classes whose every trial would
+    # immediately be pruned.
+    active_classes = [c for c in class_names if budgets.get(c, 0) > 0]
+    if not active_classes:
+        raise SearchError(
+            "All algorithms are disabled by per_algorithm_trials.",
+            code="no_active_algorithms",
+        )
+    class_names = active_classes
+
     storage = _make_storage(storage_path)
     study_name = f"recotem_{recipe_name}_{run_id}"
 
@@ -311,11 +322,25 @@ def _compute_budgets(
 ) -> dict[str, int]:
     """Return a per-class trial budget dictionary.
 
-    If *per_algorithm_trials* is provided, use those values (scaled down if
-    their sum exceeds *n_trials*).  Otherwise split proportionally.
+    Semantics:
+
+    * No ``per_algorithm_trials`` (or empty): even split over ``class_names``;
+      the leading classes absorb the rounding remainder.
+    * Explicit ``0`` for a class: that class is **skipped** (budget 0).
+    * Explicit positive value: respected literally if it fits; if the sum of
+      explicit values exceeds ``n_trials`` the positive values are scaled
+      down proportionally (each remains ≥ 1; the last non-zero entry absorbs
+      rounding remainder so the total equals ``n_trials``).
+    * Class in ``class_names`` but absent from ``per_algorithm_trials``:
+      shares whatever budget is left after honouring explicit values.
+    * If every class is explicitly 0 *and* nothing is unspecified, the
+      configuration is treated as "no override" and falls back to the even
+      split (so the run still produces trials).
+
+    The returned mapping always sums to ``n_trials`` unless every entry is 0
+    (which only happens when the caller asked for no trials).
     """
     if not per_algorithm_trials:
-        # Equal split; last class absorbs the remainder.
         base = n_trials // len(class_names)
         remainder = n_trials % len(class_names)
         budgets: dict[str, int] = {}
@@ -323,34 +348,54 @@ def _compute_budgets(
             budgets[name] = base + (1 if idx < remainder else 0)
         return budgets
 
-    # Resolve aliases in per_algorithm_trials keys.
     resolved: dict[str, int] = {}
     for alias, count in per_algorithm_trials.items():
         try:
             cname = resolve_algorithm_name(alias)
         except Exception:  # noqa: BLE001
             cname = alias
-        resolved[cname] = count
+        resolved[cname] = max(0, count)
 
-    total_requested = sum(resolved.get(c, 0) for c in class_names)
+    explicit_classes = [c for c in class_names if c in resolved]
+    unspecified_classes = [c for c in class_names if c not in resolved]
+    explicit_sum = sum(resolved[c] for c in explicit_classes)
 
-    if total_requested == 0:
-        # Fall back to proportional.
+    if explicit_sum == 0 and not unspecified_classes:
         return _compute_budgets(class_names, n_trials, None)
 
-    # Scale down if over budget.
-    scale = min(1.0, n_trials / total_requested)
-    budgets = {}
-    allocated = 0
-    for idx, name in enumerate(class_names):
-        raw = resolved.get(name, 0)
-        if idx == len(class_names) - 1:
-            # Last class gets the remainder to avoid rounding losses.
-            budgets[name] = max(1, n_trials - allocated)
-        else:
-            b = max(1, round(raw * scale))
-            budgets[name] = b
-            allocated += b
+    budgets = dict.fromkeys(class_names, 0)
+
+    if explicit_sum > n_trials:
+        nonzero_explicit = [c for c in explicit_classes if resolved[c] > 0]
+        scale = n_trials / explicit_sum
+        allocated = 0
+        for c in explicit_classes:
+            v = resolved[c]
+            if v == 0:
+                budgets[c] = 0
+            elif c == nonzero_explicit[-1]:
+                budgets[c] = max(1, n_trials - allocated)
+            else:
+                b = max(1, round(v * scale))
+                budgets[c] = b
+                allocated += b
+        return budgets
+
+    for c in explicit_classes:
+        budgets[c] = resolved[c]
+    leftover = n_trials - explicit_sum
+    if leftover <= 0:
+        return budgets
+
+    if unspecified_classes:
+        base = leftover // len(unspecified_classes)
+        rem = leftover % len(unspecified_classes)
+        for idx, c in enumerate(unspecified_classes):
+            budgets[c] = base + (1 if idx < rem else 0)
+    else:
+        nonzero = [c for c in explicit_classes if resolved[c] > 0]
+        if nonzero:
+            budgets[nonzero[-1]] += leftover
 
     return budgets
 

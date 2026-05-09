@@ -173,7 +173,7 @@ training:
 | `metric` | string | `ndcg` | One of `ndcg`, `map`, `recall`, `hit`. |
 | `cutoff` | int | `20` | Recommendation list length for evaluation (must be ≥ 1). |
 | `n_trials` | int | `40` | Total Optuna trial budget (must be ≥ 1). |
-| `per_algorithm_trials` | map | `null` | Per-algorithm trial overrides. Sum need not equal `n_trials`; if it exceeds `n_trials` budgets are scaled down proportionally and the last algorithm absorbs rounding remainder. Unknown algorithm keys are silently ignored. |
+| `per_algorithm_trials` | map | `null` | Per-algorithm trial overrides. **Explicit `0` disables that algorithm** (it is dropped from the search entirely). Algorithms in `algorithms` that are *unspecified* in this map split whatever budget remains after honouring the explicit values. If the explicit values sum to more than `n_trials`, positive values are scaled down proportionally (each remains ≥ 1; the last non-zero entry absorbs the rounding remainder). The total budget never exceeds `n_trials`. Unknown algorithm keys are silently ignored. |
 | `per_trial_timeout_seconds` | int | `null` | Soft per-trial wall-clock cap. Implemented by running the trial in a worker thread; if it overshoots, Optuna prunes the trial but the underlying thread is daemonised and may continue until it finishes naturally (CPU/memory still spent). |
 | `timeout_seconds` | int | `null` | Overall tuning wall-clock cap. |
 | `parallelism` | int | `1` | Optuna `n_jobs` (Python threads, not processes). Algorithms whose hot loop is GIL-bound see little speed-up; native-code learners (IALS, RP3beta) benefit most. |

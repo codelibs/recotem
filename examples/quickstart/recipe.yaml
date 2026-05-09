@@ -11,6 +11,7 @@
 name: top_picks
 
 source:
+  # Choices: csv, parquet, bigquery (or a plugin name).
   type: csv
   path: examples/quickstart/interactions.csv
 
@@ -19,6 +20,7 @@ schema:
   item_column: item_id
 
 training:
+  # Choices: IALS, CosineKNN, TopPop, RP3beta, DenseSLIM, TruncatedSVD, BPRFM. Optuna picks the best combination.
   algorithms: [TopPop]
 
 output:

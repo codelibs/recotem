@@ -22,6 +22,7 @@
 name: news_articles
 
 source:
+  # Choices: csv, parquet, bigquery (or a plugin name).
   type: bigquery
   # Optional: falls back to the ADC project if omitted.
   # Use RECOTEM_RECIPE_ prefix for env expansion.
@@ -73,10 +74,13 @@ cleansing:
   min_items: 50
 
 training:
+  # Choices: IALS, CosineKNN, TopPop, RP3beta, DenseSLIM, TruncatedSVD, BPRFM. Optuna picks the best combination.
   algorithms: [IALS, CosineKNN, TopPop]
+  # Choices: ndcg, map, recall, hit.
   metric: ndcg
   cutoff: 20
   n_trials: 40
+  # Keys must match algorithm names listed in `algorithms` above; overrides the even split of n_trials.
   per_algorithm_trials:
     IALS: 24
     CosineKNN: 12

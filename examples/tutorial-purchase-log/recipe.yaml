@@ -7,6 +7,7 @@
 name: purchase_log
 
 source:
+  # Choices: csv, parquet, bigquery (or a plugin name).
   type: csv
   path: https://raw.githubusercontent.com/codelibs/recotem/refs/tags/v1.0.0/frontend/e2e/test_data/purchase_log.csv
   # sha256 is mandatory for network-scheme paths. Computed once at
@@ -31,7 +32,9 @@ cleansing:
   min_items: 10
 
 training:
+  # Choices: IALS, CosineKNN, TopPop, RP3beta, DenseSLIM, TruncatedSVD, BPRFM. Optuna picks the best combination.
   algorithms: [IALS, TopPop]
+  # Choices: ndcg, map, recall, hit.
   metric: ndcg
   cutoff: 10
   n_trials: 10

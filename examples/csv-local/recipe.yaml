@@ -12,6 +12,7 @@
 name: csv_local_example
 
 source:
+  # Choices: csv, parquet, bigquery (or a plugin name).
   type: csv
   # Path is relative to the working directory where `recotem train` is invoked,
   # or an absolute path.  s3:// and gs:// are also supported.
@@ -28,6 +29,8 @@ schema:
   item_column: item_id
   time_column: timestamp       # optional; remove if the CSV has no time column
 
+# Optional `item_metadata:` block enriches /predict responses with item fields; see docs/recipe-reference.md.
+
 cleansing:
   drop_null_ids: true
   dedup: keep_last
@@ -36,7 +39,9 @@ cleansing:
   min_items: 10
 
 training:
+  # Choices: IALS, CosineKNN, TopPop, RP3beta, DenseSLIM, TruncatedSVD, BPRFM. Optuna picks the best combination.
   algorithms: [IALS, CosineKNN, TopPop]
+  # Choices: ndcg, map, recall, hit.
   metric: ndcg
   cutoff: 20
   n_trials: 30

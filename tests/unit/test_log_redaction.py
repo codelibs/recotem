@@ -1,4 +1,4 @@
-"""Unit tests for recotem.serving.log_redaction.
+"""Unit tests for recotem.log_redaction.
 
 Tests:
 - Strips API/signing keys
@@ -9,7 +9,7 @@ Tests:
 
 from __future__ import annotations
 
-from recotem.serving.log_redaction import _should_redact, redact_sensitive_keys
+from recotem.log_redaction import _should_redact, redact_sensitive_keys
 
 _REDACTED = "[REDACTED]"
 

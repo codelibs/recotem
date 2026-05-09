@@ -254,7 +254,7 @@ def _build_key_ring(serve_config: ServeConfig) -> KeyRing | None:
 
 
 def _emit_security_posture(serve_config: ServeConfig, key_ring: KeyRing | None) -> None:
-    """Emit the canonical security.posture log line (spec Section 7).
+    """Emit the canonical security.posture log line.
 
     The ``signing_keys`` field is a list of ``{"kid", "fingerprint"}`` pairs
     where the fingerprint is the first 8 hex chars of ``sha256(key_bytes)``.

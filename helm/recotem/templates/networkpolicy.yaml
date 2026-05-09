@@ -14,9 +14,11 @@ spec:
     - Ingress
     - Egress
 
+  # Note: an ingress rule with `from: []` matches ALL sources (Kubernetes
+  # NetworkPolicy spec) — the opposite of deny-all. The canonical deny-all
+  # form is `ingress: []` combined with policyTypes including Ingress.
+  {{- if .Values.networkPolicy.ingressFromPodSelector }}
   ingress:
-    # Allow traffic from pods matching the ingressFromPodSelector (e.g. ingress-nginx).
-    {{- if .Values.networkPolicy.ingressFromPodSelector }}
     - from:
         - podSelector:
             matchLabels:
@@ -24,11 +26,10 @@ spec:
       ports:
         - port: {{ .Values.service.targetPort }}
           protocol: TCP
-    {{- else }}
-    # No ingress pod selector configured — deny all inbound traffic by default.
-    # Set .Values.networkPolicy.ingressFromPodSelector to allow ingress pods.
-    - from: []
-    {{- end }}
+  {{- else }}
+  # No ingress pod selector configured — deny all inbound traffic.
+  ingress: []
+  {{- end }}
 
   egress:
     # Allow DNS resolution.

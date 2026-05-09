@@ -8,15 +8,22 @@ Tests:
 - _make_storage: accepts URLs without userinfo (connection errors allowed)
 - _make_storage: bare file path converted to sqlite URL
 - _make_storage: empty / whitespace returns None
+- orphaned_count tracked in SearchResult
+- excessive orphan trials raises TrainingError
+- unknown algorithm in per_algorithm_trials raises TrainingError
 """
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import optuna
 import pytest
+import scipy.sparse as sps
 
-from recotem.training.errors import SearchError
+from recotem.training.errors import SearchError, TrainingError
 from recotem.training.search import _compute_budgets, _make_storage
 
 # ---------------------------------------------------------------------------
@@ -155,3 +162,213 @@ def test_make_storage_sqlite_path_to_url() -> None:
 def test_make_storage_empty_returns_none(path: str) -> None:
     """Empty or whitespace-only storage_path means in-memory — returns None."""
     assert _make_storage(path) is None
+
+
+# ---------------------------------------------------------------------------
+# E-3 (new). orphaned_count tracked in SearchResult
+# ---------------------------------------------------------------------------
+
+
+def test_orphan_trial_count_in_search_result() -> None:
+    """SearchResult.orphaned_count is incremented for each per-trial-timeout orphan.
+
+    Strategy: use a slow recommender (sleeps > per_trial_timeout_seconds) and
+    inject 3 fake completed trials so the excessive-orphan guard (orphaned > n//2)
+    does not fire for a single orphan (1 > 3//2 == 1 > 1 == False).
+
+    After run_search returns, we assert orphaned_count >= 1.
+    """
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    # A recommender that always sleeps past the per-trial timeout.
+    class _SlowRecommender:
+        learnt_config: dict = {}
+
+        def __init__(self, X, **kwargs):
+            pass
+
+        @staticmethod
+        def default_suggest_parameter(trial, space):
+            return {}
+
+        def learn_with_optimizer(self, evaluator, trial):
+            time.sleep(2)  # always exceeds 1s timeout
+
+        def learn(self):
+            return self
+
+    def _make_fake_trial(number: int) -> MagicMock:
+        t = MagicMock(spec=optuna.trial.FrozenTrial)
+        t.state = optuna.trial.TrialState.COMPLETE
+        t.value = -0.5  # score = 0.5 after negation
+        t.number = number
+        t.params = {"recommender_class_name": "TopPopRecommender"}
+        t.user_attrs = {"recommender_class_name": "TopPopRecommender"}
+        return t
+
+    # 3 completed fake trials → 1 orphan satisfies 1 > 3//2 == 1 > 1 == False
+    fake_trials = [_make_fake_trial(i) for i in range(3)]
+    best_fake_trial = fake_trials[0]
+
+    with patch(
+        "recotem.training.search.get_recommender_cls", return_value=_SlowRecommender
+    ):
+        with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+            mock_study = MagicMock()
+
+            def _optimize_with_one_orphan(objective, n_trials, **kwargs):
+                """Fire objective once (producing one orphan) then expose 3 completed."""
+                fake_t = MagicMock(spec=optuna.Trial)
+                fake_t.number = 0
+                fake_t.suggest_categorical.return_value = "TopPopRecommender"
+                fake_t.set_user_attr = MagicMock()
+                try:
+                    objective(fake_t)
+                except optuna.TrialPruned:
+                    pass
+                except Exception:  # noqa: BLE001
+                    pass
+                mock_study.trials = fake_trials
+                mock_study.best_trial = best_fake_trial
+
+            mock_study.trials = []
+            mock_study.optimize = _optimize_with_one_orphan
+            mock_study_fn.return_value = mock_study
+
+            X = sps.csr_matrix(np.ones((5, 3)))
+            evaluator = MagicMock()
+
+            with ProgressReporter(
+                n_trials=4, recipe_name="orphan_test", run_id="r1"
+            ) as rep:
+                result = run_search(
+                    algorithms=["TopPopRecommender"],
+                    X_tv_train=X,
+                    evaluator=evaluator,
+                    n_trials=4,
+                    per_algorithm_trials=None,
+                    per_trial_timeout_seconds=1,  # 1s timeout; _SlowRecommender sleeps 2s
+                    timeout_seconds=None,
+                    parallelism=1,
+                    storage_path="",
+                    random_seed=42,
+                    reporter=rep,
+                    recipe_name="orphan_test",
+                    run_id="r1",
+                )
+
+    assert result.orphaned_count >= 1, (
+        f"Expected orphaned_count >= 1, got {result.orphaned_count}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# E-3 (new). excessive orphan trials raises TrainingError
+# ---------------------------------------------------------------------------
+
+
+def test_excessive_orphan_trials_raises_training_error() -> None:
+    """When orphaned_count > completed_count // 2, TrainingError with
+    code='excessive_per_trial_timeouts' must be raised.
+    """
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    class _SlowRecommender:
+        learnt_config: dict = {}
+
+        def __init__(self, X, **kwargs):
+            pass
+
+        @staticmethod
+        def default_suggest_parameter(trial, space):
+            return {}
+
+        def learn_with_optimizer(self, evaluator, trial):
+            time.sleep(2)  # always exceeds the 0.05 s timeout
+
+        def learn(self):
+            return self
+
+    # One completed trial (score != 0) — orphaned_count > 1//2 == 0, so 1 orphan suffices.
+    fake_trial = MagicMock(spec=optuna.trial.FrozenTrial)
+    fake_trial.state = optuna.trial.TrialState.COMPLETE
+    fake_trial.value = -0.5
+    fake_trial.number = 99
+    fake_trial.params = {"recommender_class_name": "TopPopRecommender"}
+    fake_trial.user_attrs = {"recommender_class_name": "TopPopRecommender"}
+
+    with patch(
+        "recotem.training.search.get_recommender_cls", return_value=_SlowRecommender
+    ):
+        with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+            mock_study = MagicMock()
+
+            def _optimize_with_orphan(objective, n_trials, **kwargs):
+                fake_t = MagicMock(spec=optuna.Trial)
+                fake_t.number = 0
+                fake_t.suggest_categorical.return_value = "TopPopRecommender"
+                fake_t.set_user_attr = MagicMock()
+                try:
+                    objective(fake_t)
+                except optuna.TrialPruned:
+                    pass
+                except Exception:  # noqa: BLE001
+                    pass
+                mock_study.trials = [fake_trial]
+                mock_study.best_trial = fake_trial
+
+            mock_study.trials = []
+            mock_study.optimize = _optimize_with_orphan
+            mock_study_fn.return_value = mock_study
+
+            X = sps.csr_matrix(np.ones((5, 3)))
+            evaluator = MagicMock()
+
+            with ProgressReporter(
+                n_trials=1, recipe_name="excessive_test", run_id="r3"
+            ) as rep:
+                with pytest.raises(TrainingError) as exc_info:
+                    run_search(
+                        algorithms=["TopPopRecommender"],
+                        X_tv_train=X,
+                        evaluator=evaluator,
+                        n_trials=1,
+                        per_algorithm_trials=None,
+                        per_trial_timeout_seconds=1,
+                        timeout_seconds=None,
+                        parallelism=1,
+                        storage_path="",
+                        random_seed=42,
+                        reporter=rep,
+                        recipe_name="excessive_test",
+                        run_id="r3",
+                    )
+
+    assert exc_info.value.code == "excessive_per_trial_timeouts", (
+        f"Expected code='excessive_per_trial_timeouts', got {exc_info.value.code!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# E-4 (new). Unknown algorithm alias in per_algorithm_trials raises TrainingError
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_algorithm_in_per_algorithm_trials_raises() -> None:
+    """A typo in per_algorithm_trials (e.g. 'IALSS') must raise TrainingError
+    with code='unknown_algorithm_in_budget' — not silently drop to zero budget.
+    """
+    with pytest.raises(TrainingError) as exc_info:
+        _compute_budgets(
+            class_names=["IALSRecommender", "TopPopRecommender"],
+            n_trials=10,
+            per_algorithm_trials={"IALSS": 7, "TopPop": 3},  # "IALSS" is a typo
+        )
+    assert exc_info.value.code == "unknown_algorithm_in_budget", (
+        f"Expected code='unknown_algorithm_in_budget', got {exc_info.value.code!r}"
+    )
+    assert "IALSS" in str(exc_info.value), (
+        f"Error message must name the bad alias; got: {exc_info.value!s}"
+    )

@@ -30,7 +30,7 @@
 
 The internet-facing boundary is `recotem serve`. `recotem train` has no inbound network surface.
 
-## Threat model summary (spec section 8)
+## Threat model summary
 
 | Threat | Mitigation |
 |--------|-----------|
@@ -97,20 +97,29 @@ Specific operator responsibilities:
 
 ## Artifact payload and the FQCN allow-list
 
-irspack's `IDMappedRecommender` depends on scipy sparse matrices and numpy arrays. These cannot be expressed in JSON without losing structure. The native irspack serialization format is required, and it is unavoidable.
+irspack's `IDMappedRecommender` depends on scipy sparse matrices and numpy arrays. These cannot be expressed in JSON without losing structure. The native irspack binary serialization format is required, and it is unavoidable.
 
-The risk is mitigated by four layered controls:
+### Primary gate: HMAC-before-deserialize
+
+**HMAC-SHA256 verification is the primary security control.** The byte sequence is verified against `RECOTEM_SIGNING_KEYS` before a single byte reaches the deserializer. A valid HMAC means the artifact was produced by a process that held the signing key — an attacker without the key cannot construct a payload that passes verification. All four controls below are applied in order; steps 3 and 4 are defence-in-depth and do not substitute for HMAC.
+
+The four layered controls:
 
 1. Magic bytes, format version, and size checks before any deserialization.
-2. HMAC-SHA256 signature verification with multi-kid support and constant-time compare; keys never logged.
-3. Hand-enumerated FQCN allow-list plus a narrow module-prefix allow-list scoped to `numpy.*` and `scipy.sparse.*`, with an explicit deny-list overlaid on those prefixes — RCE backstop independent of HMAC.
-4. Signing key is required for both train and serve, with no env-default. A misconfigured deployment fails closed rather than loading arbitrary files.
+2. **HMAC-SHA256 signature verification** with multi-kid support and constant-time compare; signing keys are never logged (only the kid is surfaced). No legacy unsigned fallback — a misconfigured or missing `RECOTEM_SIGNING_KEYS` fails closed.
+3. Hand-enumerated FQCN allow-list plus a narrow module-prefix allow-list (defence-in-depth, not the primary gate — see below).
+4. Signing key required for both train and serve with no env-default.
+
+### Defence-in-depth: FQCN allow-list
+
+The FQCN allow-list in `SafeUnpickler.find_class` is a secondary layer that operates independently of HMAC. Its purpose is to bound the blast radius if HMAC is ever bypassed (e.g. a signing-key compromise that has not yet been rotated, or a future HMAC vulnerability). It does **not** guarantee safety by itself: a sufficiently broad allow-list still exposes whatever API surface the permitted libraries expose.
+
+The allow-list is frozen per irspack 0.4.x. If irspack adds or renames recommender classes, the list and the CHANGELOG entry are updated together.
 
 The FQCN allow-list permits only these classes. Any other class outside both this list and the module-prefix allow-list triggers `ArtifactError` before construction:
 
 ```
-recotem.serving._compat.IDMappedRecommender
-recotem.training._compat.IDMappedRecommender
+recotem._idmap.IDMappedRecommender
 irspack.utils.id_mapping.IDMapper
 irspack.recommenders.ials.IALSRecommender
 irspack.recommenders.knn.CosineKNNRecommender
@@ -145,7 +154,7 @@ This list is frozen per Recotem release. Changes ship with a CHANGELOG entry.
 In addition to the FQCN list, classes from any module under the prefixes
 `numpy.*` and `scipy.sparse.*` are permitted, because numpy and scipy
 reorganise their internal layout between releases (e.g. `numpy.core.*` →
-`numpy._core.*` in 2.x) and reconstruction helpers move between
+`numpy._core.*` in numpy 2.x) and reconstruction helpers move between
 submodules. To keep the prefix allow-list tight, the following submodules
 are explicitly **denied** even though they fall under an allowed prefix —
 they expose code-execution gadgets, callable proxies, file-IO
@@ -157,7 +166,13 @@ numpy.ctypeslib[.*]    numpy.lib[.*]         numpy.compat[.*]
 scipy.sparse.linalg[.*]   scipy.sparse.tests[.*]   scipy.sparse.csgraph[.*]
 ```
 
-Deny overrides allow. HMAC verification remains the primary defence; the prefix list is the secondary layer scoped to the scientific stack only.
+Deny overrides allow. Note that `numpy._core.*` (numpy 2.x) and `numpy.core.*`
+(numpy 1.x) are **not** on the deny-list, so reconstruction helpers from those
+submodules pass through the prefix allow-list. The hand-enumerated FQCN entries
+for `numpy.core.multiarray._reconstruct` and `numpy.core.multiarray.scalar`
+cover the most common 1.x case explicitly. HMAC verification remains the
+primary defence; the prefix allow-list is the secondary layer scoped to the
+scientific stack only.
 
 `recotem inspect <artifact>` runs the full HMAC verify path and prints the header JSON without invoking the deserializer. It is safe to run on untrusted artifacts.
 

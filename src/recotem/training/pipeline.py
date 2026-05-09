@@ -217,12 +217,27 @@ def run_training(
         # of run_training() get this event regardless of whether they wrap
         # the call themselves; pairs with the train_done event emitted
         # inside _run_training_locked on success.
+        # For domain errors (TrainingError subclasses), use the declared code.
+        # For unexpected non-domain errors (KeyError, AttributeError, etc.),
+        # emit code="internal_error" so operators can distinguish bugs from
+        # expected failure modes when alerting on the code field.
+        from recotem.training.errors import (
+            TrainingError as _TrainingError,  # noqa: PLC0415
+        )
+
+        declared_code = getattr(exc, "code", None)
+        if declared_code:
+            error_code = declared_code
+        elif isinstance(exc, _TrainingError):
+            error_code = "training_error"
+        else:
+            error_code = "internal_error"
         logger.error(
             "train_error",
             recipe=recipe.name,
             run_id=run_id,
             error=str(exc),
-            code=getattr(exc, "code", None) or type(exc).__name__,
+            code=error_code,
             trained_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
         raise
@@ -386,6 +401,7 @@ def _run_training_locked(
             "tried_algorithms": search_result.tried_algorithms,
             "n_trials": search_result.n_trials,
             "n_completed": search_result.n_completed,
+            "n_orphaned": search_result.orphaned_count,
             "best_trial_number": search_result.best_trial_number,
             "search_seed": search_result.search_seed,
         },
@@ -400,10 +416,10 @@ def _run_training_locked(
         versioning=recipe.output.versioning,
     )
 
-    # Canonical end-of-train marker (spec Section 6 step 9 / Section 10).
+    # Canonical end-of-train marker.
     # Schema: name, run_id, exit_code, artifact, best_class, best_score,
-    # trials, trained_at, kid.  Use the unbound logger so the event keys
-    # match the spec exactly without duplicating bound context fields.
+    # trials, n_orphaned, trained_at, kid.  Use the unbound logger so the
+    # event keys do not duplicate bound context fields.
     logger.info(
         "train_done",
         name=recipe.name,
@@ -413,6 +429,7 @@ def _run_training_locked(
         best_class=search_result.best_class_name,
         best_score=search_result.best_score,
         trials=search_result.n_completed,
+        n_orphaned=search_result.orphaned_count,
         trained_at=trained_at,
         kid=signing_key,
     )

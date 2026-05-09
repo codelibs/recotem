@@ -163,3 +163,126 @@ def test_bigquery_unsupported_param_type_raises_DataSourceError() -> None:
 
         with pytest.raises(DataSourceError, match="unsupported type"):
             source._build_query_parameters()
+
+
+# ---------------------------------------------------------------------------
+# E-5: Storage API fallback — log event + OOM propagation
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_bq_modules():
+    """Return (mock_bq, mock_exceptions, mock_api_core) for use in patch.dict."""
+    mock_api_error_cls = type("GoogleAPICallError", (Exception,), {})
+    mock_exceptions = MagicMock()
+    mock_exceptions.GoogleAPICallError = mock_api_error_cls
+    mock_api_core = MagicMock()
+    mock_api_core.exceptions = mock_exceptions
+
+    mock_client = MagicMock()
+    mock_query_job = MagicMock()
+    mock_client.query.return_value = mock_query_job
+    mock_bq = MagicMock()
+    mock_bq.Client.return_value = mock_client
+    mock_bq.QueryJobConfig.return_value = MagicMock()
+
+    return (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    )
+
+
+def test_storage_fallback_emits_log_event(monkeypatch) -> None:
+    """When the Storage Read API raises GoogleAPICallError, a structured
+    'bigquery_storage_fallback' log event must be emitted before falling back
+    to the standard REST path.
+    """
+    import structlog
+    import structlog.testing
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    # Storage API raises GoogleAPICallError; REST fallback succeeds.
+    import pandas as pd
+
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    def _to_dataframe_side_effect(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise mock_api_error_cls("storage permission denied")
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_side_effect
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with structlog.testing.capture_logs() as cap_logs:
+            result = source.fetch(_ctx())
+
+    # Fallback event must have been emitted.
+    events = [e.get("event") for e in cap_logs]
+    assert "bigquery_storage_fallback" in events, (
+        f"Expected 'bigquery_storage_fallback' log event; got: {events}"
+    )
+    assert len(result) == 1
+
+
+def test_storage_oom_propagates() -> None:
+    """A MemoryError from the Storage Read API must propagate, not trigger fallback.
+
+    MemoryError is not an ImportError or GoogleAPICallError, so it must escape
+    the inner try/except and be re-raised as DataSourceError by the outer handler.
+    """
+    mock_bq, mock_exceptions, mock_api_core, mock_client, mock_query_job, _ = (
+        _make_mock_bq_modules()
+    )
+
+    # Storage API raises MemoryError — this must NOT be silently caught.
+    mock_query_job.to_dataframe.side_effect = MemoryError("out of memory")
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError, match="[Ff]ailed|[Mm]emory"):
+            source.fetch(_ctx())

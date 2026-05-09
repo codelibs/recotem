@@ -1,0 +1,55 @@
+# .dockerignore — Exclude files from the Docker build context.
+# Reduces context size sent to the daemon and prevents leaking dev/test
+# artifacts into the image layers.
+
+# Version-control
+.git/
+.gitignore
+.gitattributes
+
+# CI / GitHub
+.github/
+
+# Python dev artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+htmlcov/
+.coverage
+coverage.xml
+
+# Virtual environments / uv caches
+.venv/
+.uv/
+
+# Documentation (not needed in the image)
+docs/
+
+# Tests (not needed in the image)
+tests/
+
+# Examples (not needed in the image; operators use volume mounts)
+examples/
+
+# Editor / OS artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Helm chart (runtime infra, not part of the Python package)
+helm/
+
+# Compose files (not needed in the image)
+compose*.yaml
+docker-compose*.yml

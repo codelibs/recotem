@@ -24,11 +24,16 @@ _ALLOWED_PREFIX = "RECOTEM_RECIPE_"
 
 # Blacklist patterns (case-insensitive glob).  A variable whose *upper-cased*
 # name matches any of these is rejected even if it satisfies the prefix.
+# Defence-in-depth: the RECOTEM_RECIPE_* prefix check fires first, but this
+# list ensures that even a validly-prefixed variable containing a credential
+# keyword is blocked (e.g. RECOTEM_RECIPE_MY_TOKEN, RECOTEM_RECIPE_MY_KEY).
 _BLACKLIST_PATTERNS: tuple[str, ...] = (
     "RECOTEM_SIGNING_KEY",
     "RECOTEM_API_KEYS",
     "*_SECRET*",
     "*_PASSWORD*",
+    "*_TOKEN*",
+    "*_KEY*",
     "AWS_*",
     "GOOGLE_*",
     "GCP_*",

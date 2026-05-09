@@ -1,6 +1,6 @@
 """X-API-Key authentication dependency for the Recotem serving layer.
 
-Security design (spec Section 9):
+Security design:
 - Keys are 32 bytes, base64url-encoded (43 chars) at the plaintext level.
 - Server stores a deterministic ``scrypt(N=2,r=8,p=1)`` digest with
   ``salt = b"recotem.api-key.v1"`` as a 64-char hex string.  The fixed salt

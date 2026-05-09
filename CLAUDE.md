@@ -41,6 +41,9 @@ src/recotem/
 ├── artifact/           HMAC-signed binary container with FQCN allow-list
 ├── metadata/           item metadata loader (CSV/Parquet via fsspec)
 ├── serving/            FastAPI app, ModelRegistry, ArtifactWatcher
+├── _idmap.py           Neutral home for IDMappedRecommender (canonical FQCN)
+├── _http_fetch.py      SSRF-guarded HTTP/HTTPS fetcher with sha256 verify
+├── log_redaction.py    structlog processor stripping API/signing keys + creds
 ├── config.py           ServeConfig / TrainConfig from env vars
 └── logging.py          structlog setup with redaction processor first
 
@@ -138,12 +141,17 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
   breaks FastAPI dependency introspection (e.g. `routes.py` uses
   `kid: str = Depends(_require_auth)` instead of `Annotated[...]`).
 - structlog logger per module; the redaction processor in
-  `recotem.serving.log_redaction` is first in the chain and strips API keys,
-  signing keys, and cloud creds.
-- Modules `training/` and `serving/` never import each other; they
-  communicate only via artifact files.
-- `recotem.training` imports `_compat` first to install the IPython stub
-  required by irspack's transitive `fastprogress -> IPython.display`.
+  `recotem.log_redaction` is first in the chain and strips API keys, signing
+  keys, and cloud creds. Lives at the top level so `train`-only invocations do
+  not pull in the serving package.
+- Modules `training/` and `serving/` never import each other; they communicate
+  only via artifact files. Shared classes such as `IDMappedRecommender` live
+  in neutral top-level modules (`recotem._idmap`) so neither sub-package
+  depends on the other.
+- The IPython stub required by irspack's transitive
+  `fastprogress -> IPython.display` is installed idempotently by both
+  `recotem.training._compat` (for training-package callers) and
+  `recotem._idmap` (for direct importers, e.g. serving).
 
 ## Test commands
 
@@ -164,7 +172,7 @@ uv run ruff format --check src tests
 | `RECOTEM_HOST` / `RECOTEM_PORT` | 127.0.0.1 / 8080 | uvicorn bind. Must be `0.0.0.0` inside Docker; overridden to 127.0.0.1 when no API keys are set. |
 | `RECOTEM_WATCH_INTERVAL` | 5 | Watcher poll seconds (clamped 1–30). |
 | `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. |
-| `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Cap on HTTP/HTTPS source-path body. Clamped [1 MiB, 16 GiB]. |
+| `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Cap on source-path body for HTTP/HTTPS, local, and object-store reads. Clamped [1 MiB, 16 GiB]. |
 | `RECOTEM_HTTP_TIMEOUT_SECONDS` | 30 | Connect/read timeout for HTTP/HTTPS source fetch. Clamped [1, 600]. |
 | `RECOTEM_HTTP_ALLOW_PRIVATE` | (empty) | Truthy (`1`/`true`/`yes`/`on`) opts the HTTP fetcher into accepting private/loopback/link-local destinations. Default refuses RFC1918 / `127.0.0.0/8` / `169.254.0.0/16` to block SSRF on cloud-metadata services. |
 | `RECOTEM_ALLOWED_HOSTS` | 127.0.0.1,localhost | TrustedHostMiddleware list. Whitespace-only comma input falls back to default. |

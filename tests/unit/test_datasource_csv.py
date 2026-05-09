@@ -180,3 +180,49 @@ def test_csv_probe_http_allow_private_skips_fsspec(monkeypatch) -> None:
     source = CSVSource(cfg)
     # Should return without error and without touching fsspec
     source.probe()
+
+
+# ---------------------------------------------------------------------------
+# E-8: byte cap enforced on local non-network reads
+# ---------------------------------------------------------------------------
+
+
+def test_local_csv_over_byte_cap_rejected(tmp_path: Path, monkeypatch) -> None:
+    """A local CSV file larger than RECOTEM_MAX_DOWNLOAD_BYTES must raise DataSourceError.
+
+    The cap (controlled by RECOTEM_MAX_DOWNLOAD_BYTES) must be enforced for local
+    paths — not only for HTTP downloads — to prevent OOM on large inputs.
+    """
+    from recotem.datasource import csv as csv_module
+
+    csv_file = tmp_path / "big.csv"
+    # Write 100 bytes of real CSV content.
+    csv_file.write_text("user_id,item_id\n" + "u1,i1\n" * 10)
+
+    # Patch the cap to 10 bytes so the real file (100 bytes) exceeds it.
+    monkeypatch.setattr(csv_module, "_get_max_download_bytes", lambda: 10)
+
+    cfg = CSVConfig(type="csv", path=str(csv_file))
+    source = CSVSource(cfg)
+    with pytest.raises(DataSourceError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
+        source.fetch(_ctx())
+
+
+def test_local_parquet_over_byte_cap_rejected(tmp_path: Path, monkeypatch) -> None:
+    """A local Parquet file larger than the byte cap must raise DataSourceError.
+
+    Same enforcement as CSV — the cap applies to all non-HTTP source reads.
+    """
+    from recotem.datasource import csv as csv_module
+
+    parquet_file = tmp_path / "big.parquet"
+    df_orig = pd.DataFrame({"user_id": ["u1", "u2"] * 50, "item_id": ["i1", "i2"] * 50})
+    df_orig.to_parquet(parquet_file, index=False)
+
+    # Patch the cap to 10 bytes so the parquet file (much larger) exceeds it.
+    monkeypatch.setattr(csv_module, "_get_max_download_bytes", lambda: 10)
+
+    cfg = ParquetConfig(type="parquet", path=str(parquet_file))
+    source = ParquetSource(cfg)
+    with pytest.raises(DataSourceError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
+        source.fetch(_ctx())

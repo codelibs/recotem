@@ -104,6 +104,8 @@ When `source.path` (or `item_metadata.path`) uses `http://` or `https://`:
   256 MiB; clamped to [1 MiB, 16 GiB]). The cap is checked *during* the
   read, not afterwards — once the limit is exceeded the connection is
   dropped and `DataSourceError` is raised; partial bytes are not parsed.
+  Note: the same cap also applies to local and object-store source reads
+  (see below).
 - The connect/read timeout is `RECOTEM_HTTP_TIMEOUT_SECONDS` (default 30,
   clamped to [1, 600]).
 - The destination host is resolved before each request (and on every
@@ -138,6 +140,14 @@ paths. When set, the bytes are hashed and compared post-read. Useful for
 internal reproducibility audits even when the network is not involved.
 On non-network paths, when `sha256` is unset, pandas streams via fsspec
 without buffering the full file (preserving large-file performance).
+
+`RECOTEM_MAX_DOWNLOAD_BYTES` applies to **all** source reads, not only
+HTTP/HTTPS. For local files, `Path.stat().st_size` is checked before any
+I/O; for object-store paths, `fsspec.info()["size"]` is checked. If the
+reported size exceeds the cap, `DataSourceError` is raised before the
+file is opened. Set `RECOTEM_MAX_DOWNLOAD_BYTES` large enough to accommodate
+your training data, or leave it at the default 256 MiB if all sources are
+reasonably sized.
 
 Symlinks at `source.path` are followed implicitly (no resolution check;
 the symlink-escape guard applies only to `output.path` under

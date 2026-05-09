@@ -818,3 +818,147 @@ output:
     assert recipe.item_metadata.item_id_column == "item_id", (
         f"Expected default 'item_id', got {recipe.item_metadata.item_id_column!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# S-1: symlink-in-parent containment check
+# ---------------------------------------------------------------------------
+
+
+def test_output_path_symlink_in_parent_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symlink in the parent directory of output.path must be rejected.
+
+    An attacker who can drop a symlink inside the artifact root could escape
+    containment on the first write if only the final path is resolved.
+    The loader must resolve the *parent* strictly and assert it stays inside
+    the artifact root.
+    """
+    artifact_root = tmp_path / "allowed"
+    artifact_root.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+
+    # Create a symlink inside artifact_root that points outside it.
+    symlink_dir = artifact_root / "escape"
+    symlink_dir.symlink_to(outside_dir)
+
+    monkeypatch.setenv("RECOTEM_ARTIFACT_ROOT", str(artifact_root))
+
+    # output.path points into artifact_root/escape/model.recotem; after the
+    # symlink is followed the parent resolves to tmp_path/outside — outside root.
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="symlink_escape",
+        output_path=str(symlink_dir / "model.recotem"),
+    )
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError):
+        load_recipe(p)
+
+
+# ---------------------------------------------------------------------------
+# S-3: TOKEN / KEY blacklist patterns
+# ---------------------------------------------------------------------------
+
+
+def test_envvars_blacklist_token_pattern_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RECOTEM_RECIPE_MY_TOKEN must be rejected by the blacklist (*_TOKEN*)."""
+    monkeypatch.setenv("RECOTEM_RECIPE_MY_TOKEN", "secret-token-value")
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="token_test",
+        output_path=str(tmp_path / "token_test.recotem"),
+    )
+    content = content.replace("user_id", "${RECOTEM_RECIPE_MY_TOKEN}")
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="blacklisted"):
+        load_recipe(p)
+
+
+def test_envvars_blacklist_key_pattern_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RECOTEM_RECIPE_MY_KEY must be rejected by the blacklist (*_KEY*)."""
+    monkeypatch.setenv("RECOTEM_RECIPE_MY_KEY", "secret-key-value")
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="key_test",
+        output_path=str(tmp_path / "key_test.recotem"),
+    )
+    content = content.replace("user_id", "${RECOTEM_RECIPE_MY_KEY}")
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="blacklisted"):
+        load_recipe(p)
+
+
+# ---------------------------------------------------------------------------
+# E-6: pydantic ValidationError field locations in RecipeError message
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_validation_error_includes_field_locations(tmp_path: Path) -> None:
+    """A recipe with multiple field errors must report each field location.
+
+    Previously, bare Exception catch flattened pydantic's structured errors()
+    (which carry loc, type, ctx) into a single opaque string.  Now each error
+    must appear as a dotted field path in the RecipeError message.
+    """
+    # n_trials must be >= 1 (ge=1), parallelism must be >= 1 (ge=1).
+    # Providing 0 for both triggers two distinct validation errors.
+    out = tmp_path / "multi_err.recotem"
+    content = f"""\
+name: multi_err
+source:
+  type: csv
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 0
+  parallelism: 0
+output:
+  path: {out}
+"""
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError) as exc_info:
+        load_recipe(p)
+    msg = str(exc_info.value)
+    # Both field names must appear somewhere in the error message.
+    assert "n_trials" in msg, f"Expected 'n_trials' in message, got: {msg}"
+    assert "parallelism" in msg, f"Expected 'parallelism' in message, got: {msg}"
+
+
+# ---------------------------------------------------------------------------
+# Q-2: extra="forbid" enforced on source after validation
+# ---------------------------------------------------------------------------
+
+
+def test_source_extra_forbid_enforced_after_validation(tmp_path: Path) -> None:
+    """A CSV source with an unknown field must be rejected with extra='forbid'.
+
+    Previously, object.__setattr__ was used to reassign recipe.source after the
+    Recipe was already constructed, which bypassed pydantic re-validation.
+    Now the typed source is built first — extra='forbid' must fire here.
+    """
+    out = tmp_path / "extra_field.recotem"
+    content = f"""\
+name: extra_field_test
+source:
+  type: csv
+  path: /tmp/data.csv
+  unknown_extra_field: should_be_rejected
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError):
+        load_recipe(p)

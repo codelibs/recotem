@@ -312,6 +312,94 @@ def test_metrics_endpoint_404_when_env_falsy(monkeypatch) -> None:
     assert response.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# m-4: metadata_field_deny is case-insensitive
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_field_deny_is_case_insensitive() -> None:
+    """Deny-list entries must block metadata columns regardless of case.
+
+    e.g. denying 'internal_id' must also block 'Internal_ID', 'INTERNAL_ID'.
+    """
+    import pandas as pd
+
+    from recotem.serving.routes import _lookup_metadata
+
+    df = pd.DataFrame(
+        {
+            "item_id": ["i1"],
+            "title": ["Widget"],
+            "Internal_ID": ["secret-123"],
+            "SCORE": [0.99],
+        }
+    ).set_index("item_id")
+
+    # Deny list uses lowercase; columns use mixed/upper case.
+    deny_set: frozenset[str] = frozenset({"internal_id", "score"})
+
+    result = _lookup_metadata(df, "i1", deny_set)
+
+    # 'title' should be present — not in deny list.
+    assert "title" in result
+    # 'Internal_ID' denied via 'internal_id' (case-fold).
+    assert "Internal_ID" not in result
+    # 'SCORE' denied via 'score' (case-fold).
+    assert "SCORE" not in result
+
+
+def test_metadata_field_deny_blocks_lower_when_deny_entry_is_upper() -> None:
+    """The deny-list itself is also case-folded at router construction time.
+
+    Passing 'INTERNAL_ID' in the deny list must still block 'internal_id' and
+    'Internal_ID' in the metadata columns.
+    """
+    import pandas as pd
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    df = pd.DataFrame(
+        {
+            "item_id": ["u_item"],
+            "title": ["Thing"],
+            "secret_col": ["hide-me"],
+        }
+    ).set_index("item_id")
+
+    recommender = MagicMock()
+    recommender.get_recommendation_for_known_user_id.return_value = [("u_item", 0.5)]
+
+    entry = ModelEntry(
+        name="deny_test",
+        recommender=recommender,
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="k1",
+        metadata_df=df,
+    )
+    registry = ModelRegistry()
+    registry.replace("deny_test", entry)
+
+    # Pass deny list with UPPER-CASE entry — must still block the lower-case column.
+    router = make_router(
+        registry=registry, api_keys=[], metadata_field_deny=["SECRET_COL"]
+    )
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/predict/deny_test", json={"user_id": "u_item", "cutoff": 1}
+    )
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 1
+    item = items[0]
+    assert "title" in item, "'title' must not be denied"
+    assert "secret_col" not in item, (
+        "'secret_col' must be denied even when deny entry was 'SECRET_COL'"
+    )
+
+
 def test_metrics_endpoint_exposes_documented_metrics(monkeypatch) -> None:
     """RECOTEM_METRICS_ENABLED=true exposes /metrics with all six recotem_* metrics."""
     import pytest

@@ -104,6 +104,20 @@ spec:
               containerPort: {{ .Values.service.targetPort }}
               protocol: TCP
 
+          # startupProbe guards cold starts where a large artifact is being
+          # loaded. Liveness/readiness only take over after startup succeeds.
+          # failureThreshold * periodSeconds = 12 * 10s = 120s max startup window.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            periodSeconds: 10
+            failureThreshold: 12
+            timeoutSeconds: 5
+
           readinessProbe:
             httpGet:
               path: /health
@@ -143,6 +157,12 @@ spec:
             # tmpfs for any writable scratch space the process needs.
             - name: tmp
               mountPath: /tmp
+            # /workspace is the Dockerfile WORKDIR and the process cwd.
+            # readOnlyRootFilesystem=true forbids writes to the container root
+            # filesystem, so this emptyDir provides a writable cwd for any
+            # tooling that creates temp files relative to cwd.
+            - name: workspace
+              mountPath: /workspace
 
       volumes:
         - name: recipes
@@ -164,6 +184,8 @@ spec:
             claimName: {{ .Values.artifacts.pvc.claimName }}
         {{- end }}
         - name: tmp
+          emptyDir: {}
+        - name: workspace
           emptyDir: {}
 
       {{- with .Values.nodeSelector }}

@@ -180,10 +180,13 @@ plugin — the loader resolves `source.type` through the entry-point registry
 and will report `Unknown DataSource type 'echo'` if the plugin is not
 installed in the same environment as `recotem`.
 
-> Note: `recotem schema` emits the JSON Schema for the top-level `Recipe`
-> model only. `Recipe.source` is typed as `Any` because the discriminated
-> union is built dynamically from entry points, so plugin `Config` schemas
-> do not appear in that output.
+> Note: `recotem schema` builds the JSON Schema at runtime by constructing
+> a discriminated union of every registered DataSource `Config` class
+> (including plugin-provided ones) and substituting it into the `Recipe`
+> model. Plugin `Config` schemas **do** appear in the output — this is
+> what makes IDE autocompletion work for `source.*` fields. The union is
+> assembled via `build_source_config_union()` at invocation time, so the
+> plugin must be installed in the same Python environment as `recotem`.
 
 Recipe:
 

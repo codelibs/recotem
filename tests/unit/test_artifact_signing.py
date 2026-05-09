@@ -403,8 +403,139 @@ def test_bprfm_class_is_explicitly_allowed() -> None:
 
 
 # ---------------------------------------------------------------------------
+# T-4: End-to-end SafeUnpickler rejection for denied numpy submodules
+# ---------------------------------------------------------------------------
+# Tests call SafeUnpickler.find_class directly — the same hook invoked for
+# every GLOBAL/REDUCE opcode during deserialization.  This confirms the
+# protection applies through the full find_class code path, independent of
+# _is_allowed unit tests.
+
+
+def test_safe_unpickler_rejects_numpy_lib_via_find_class() -> None:
+    """SafeUnpickler must raise ArtifactError for numpy.lib classes.
+
+    numpy.lib contains file-IO and callable-proxy gadgets (DataSource,
+    open_memmap, _read_array_header_2_0, …).  It is explicitly denied even
+    though the broader numpy.* prefix is allowed.
+    """
+    import io
+
+    unpickler = SafeUnpickler(io.BytesIO(b""))
+
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickler.find_class("numpy.lib", "DataSource")
+
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickler.find_class("numpy.lib.format", "_read_array_header_2_0")
+
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickler.find_class("numpy.lib.npyio", "open_memmap")
+
+
+def test_safe_unpickler_rejects_numpy_compat_via_find_class() -> None:
+    """SafeUnpickler must raise ArtifactError for numpy.compat classes.
+
+    numpy.compat is a legacy shim tree; it is explicitly denied.
+    """
+    import io
+
+    unpickler = SafeUnpickler(io.BytesIO(b""))
+
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickler.find_class("numpy.compat", "asbytes")
+
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickler.find_class("numpy.compat.py3k", "asunicode")
+
+
+def test_safe_unpickler_rejects_numpy_lib_via_raw_opcode_stream() -> None:
+    """Verify end-to-end rejection via a hand-built serialization opcode stream.
+
+    Constructs a minimal binary stream that instructs the deserializer to
+    load numpy.lib.DataSource — a denied class — without actually importing
+    DataSource.  This confirms find_class fires and raises ArtifactError
+    before any object is instantiated.
+
+    Uses raw opcode bytes (no third-party serialization library) so the test
+    is independent of any helper that itself uses the deserialization format.
+    """
+    import io
+    import struct
+
+    # Raw opcode constants (protocol 4)
+    # 0x80 = PROTO, 0x95 = FRAME, ord('c') = GLOBAL opcode, ord('.') = STOP
+    PROTO_OPCODE = b"\x80\x04"
+    FRAME_OPCODE = b"\x95"
+    GLOBAL_OPCODE = b"c"
+    STOP_OPCODE = b"."
+
+    module_name = b"numpy.lib"
+    class_name = b"DataSource"
+    body = GLOBAL_OPCODE + module_name + b"\n" + class_name + b"\n" + STOP_OPCODE
+    stream = PROTO_OPCODE + FRAME_OPCODE + struct.pack("<Q", len(body)) + body
+
+    with pytest.raises(ArtifactError, match="not allowed"):
+        SafeUnpickler(io.BytesIO(stream)).load()
+
+
+# ---------------------------------------------------------------------------
 # H1. kid bytes tamper rejected
 # ---------------------------------------------------------------------------
+
+
+def test_idmap_module_imports_without_training_compat() -> None:
+    """``from recotem._idmap import IDMappedRecommender`` must succeed even
+    if ``recotem.training._compat`` (where the IPython stub historically lived)
+    has not been imported yet.
+
+    Regression: irspack pulls in fastprogress at import time, which imports
+    ``IPython.display``.  The stub used to live only in
+    ``recotem.training._compat``, so importing ``recotem._idmap`` first (e.g.
+    from a serving-only context) raised ``ModuleNotFoundError: No module named
+    'IPython'``.  ``recotem._idmap`` must self-bootstrap the stub.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from recotem._idmap import IDMappedRecommender; "
+            "assert IDMappedRecommender.__module__ == 'recotem._idmap'",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"Direct import of recotem._idmap failed: stderr={result.stderr!r}"
+    )
+
+
+def test_idmap_neutral_fqcn_in_allow_list() -> None:
+    """recotem._idmap.IDMappedRecommender must be in the FQCN allow-list.
+
+    The old paths (recotem.training._compat, recotem.serving._compat) must NOT
+    be present -- artifacts using those FQCNs are intentionally broken in
+    2.0.0a0 to enforce the clean neutral-module migration.
+    """
+    from recotem.artifact.signing import _ALLOWED_CLASSES
+
+    assert ("recotem._idmap", "IDMappedRecommender") in _ALLOWED_CLASSES, (
+        "recotem._idmap.IDMappedRecommender must be in _ALLOWED_CLASSES"
+    )
+    assert (
+        "recotem.training._compat",
+        "IDMappedRecommender",
+    ) not in _ALLOWED_CLASSES, (
+        "recotem.training._compat.IDMappedRecommender must NOT be in _ALLOWED_CLASSES "
+        "(old pre-2.0.0a0 path)"
+    )
+    assert ("recotem.serving._compat", "IDMappedRecommender") not in _ALLOWED_CLASSES, (
+        "recotem.serving._compat.IDMappedRecommender must NOT be in _ALLOWED_CLASSES "
+        "(old cross-package re-export path)"
+    )
 
 
 def test_kid_bytes_tampered_rejected() -> None:

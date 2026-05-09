@@ -8,13 +8,16 @@ Commands:
   schema    Emit the JSON Schema for the Recipe model.
   keygen    Generate a signing or API key (kid, plaintext, hash triple).
 
-Exit codes (spec Section 6):
+Exit codes:
   0  success
-  2  RecipeError
-  3  DataSourceError
-  4  TrainingError
-  5  ArtifactError
-  1  anything else
+  1  unexpected / unknown error
+  2  RecipeError (bad schema, env expansion, validation)
+  3  DataSourceError (fetch failure, missing file, bad credentials)
+  4  TrainingError (Optuna search, split, evaluation failures)
+  5  ArtifactError (sign / verify / parse failure)
+  6  LockContestedError (recipe lock held by another process, --fail-on-busy)
+  7  HttpFetchError (SSRF guard, timeout, HTTP error during source fetch)
+  8  configuration error (missing RECOTEM_SIGNING_KEYS, bad env var)
 """
 
 from __future__ import annotations
@@ -40,11 +43,14 @@ app = typer.Typer(
 # ---------------------------------------------------------------------------
 
 _EXIT_SUCCESS = 0
+_EXIT_UNKNOWN = 1
 _EXIT_RECIPE = 2
 _EXIT_DATASOURCE = 3
 _EXIT_TRAINING = 4
 _EXIT_ARTIFACT = 5
-_EXIT_UNKNOWN = 1
+_EXIT_LOCK_CONTESTED = 6
+_EXIT_HTTP_FETCH = 7
+_EXIT_CONFIG = 8
 
 
 def _exit(code: int, message: str | None = None) -> None:
@@ -55,7 +61,24 @@ def _exit(code: int, message: str | None = None) -> None:
 
 
 def _map_exception_to_exit(exc: Exception) -> int:
-    """Map a known exception type to its canonical exit code."""
+    """Map a known exception type to its canonical exit code.
+
+    Checked in priority order so that the most-specific mapping wins when
+    exception hierarchies overlap (e.g. a subclass of TrainingError that
+    signals a configuration problem should map to _EXIT_CONFIG).
+    """
+    # --- configuration errors (missing signing keys, bad env) ---
+    try:
+        from recotem.training.errors import TrainingError as _TrainingError
+
+        if isinstance(exc, _TrainingError) and getattr(exc, "code", "") in (
+            "signing_key_missing",
+        ):
+            return _EXIT_CONFIG
+    except (ImportError, AttributeError):
+        pass
+
+    # --- recipe errors ---
     try:
         from recotem.recipe.errors import RecipeError as _RecipeError
 
@@ -64,6 +87,7 @@ def _map_exception_to_exit(exc: Exception) -> int:
     except ImportError:
         pass
 
+    # --- datasource errors ---
     try:
         from recotem.datasource.base import DataSourceError as _DataSourceError
 
@@ -72,6 +96,16 @@ def _map_exception_to_exit(exc: Exception) -> int:
     except ImportError:
         pass
 
+    # --- HTTP fetch errors ---
+    try:
+        from recotem._http_fetch import HttpFetchError as _HttpFetchError
+
+        if isinstance(exc, _HttpFetchError):
+            return _EXIT_HTTP_FETCH
+    except (ImportError, AttributeError):
+        pass
+
+    # --- artifact errors ---
     try:
         from recotem.artifact.format import ArtifactError as _ArtifactError
 
@@ -80,12 +114,20 @@ def _map_exception_to_exit(exc: Exception) -> int:
     except ImportError:
         pass
 
+    # --- lock contested ---
     try:
-        from recotem.training.pipeline import (
-            TrainingError as _TrainingError,  # type: ignore[import-untyped]
-        )
+        from recotem.training.lock import LockContestedError as _LockContestedError
 
-        if isinstance(exc, _TrainingError):
+        if isinstance(exc, _LockContestedError):
+            return _EXIT_LOCK_CONTESTED
+    except (ImportError, AttributeError):
+        pass
+
+    # --- general training errors ---
+    try:
+        from recotem.training.errors import TrainingError as _TrainingError2
+
+        if isinstance(exc, _TrainingError2):
             return _EXIT_TRAINING
     except (ImportError, AttributeError):
         pass
@@ -213,7 +255,13 @@ def train(
             dev_allow_unsigned=dev_allow_unsigned,
         )
     except SystemExit as exc:
-        raise typer.Exit(code=exc.code or 0) from exc
+        # exc.code or 0 would collapse None/falsy codes to success (C-2).
+        # Only literal int 0 is success; everything else (None, non-zero int,
+        # str) maps to a non-zero exit so we never suppress a real failure.
+        code = exc.code
+        if isinstance(code, int) and code == 0:
+            raise typer.Exit(code=0) from exc
+        raise typer.Exit(code=_EXIT_UNKNOWN) from exc
     except Exception as exc:
         # The canonical train_error event is emitted inside run_training so
         # library callers receive it too — we only need to map the exception
@@ -309,15 +357,34 @@ def serve(
         code = _map_exception_to_exit(exc)
         _exit(code, f"Server startup failed: {exc}")
 
+    import structlog as _structlog
     import uvicorn
 
-    uvicorn.run(
-        fastapi_app,
-        host=cfg.host,
-        port=cfg.port,
-        timeout_graceful_shutdown=cfg.drain_seconds,
-        log_config=None,
-    )
+    _srv_log = _structlog.get_logger(__name__)
+
+    try:
+        uvicorn.run(
+            fastapi_app,
+            host=cfg.host,
+            port=cfg.port,
+            timeout_graceful_shutdown=cfg.drain_seconds,
+            log_config=None,
+        )
+    except KeyboardInterrupt:
+        _srv_log.info("serve_terminated", reason="KeyboardInterrupt")
+        raise typer.Exit(code=0) from None
+    except OSError as exc:
+        _srv_log.error(
+            "serve_startup_failed",
+            error=str(exc),
+            host=cfg.host,
+            port=cfg.port,
+        )
+        _exit(_EXIT_CONFIG, f"Server bind/startup failed: {exc}")
+    except Exception as exc:
+        _srv_log.error("serve_startup_failed", error=str(exc))
+        code = _map_exception_to_exit(exc)
+        _exit(code, f"Server error: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +396,11 @@ def serve(
 def inspect(
     artifact: Annotated[
         Path,
-        typer.Argument(help="Path to the .recotem artifact file.", exists=True),
+        # exists=True is intentionally omitted: read_artifact_header / fsspec
+        # support remote schemes (s3://, gs://, etc.) that Typer cannot stat
+        # locally.  Missing-path errors are surfaced by the fsspec.open() call
+        # inside this function and reported as exit 5 (ArtifactError).
+        typer.Argument(help="Path or URI to the .recotem artifact file."),
     ],
     dev_allow_unsigned: Annotated[
         bool,

@@ -241,7 +241,7 @@ Local paths are resolved to absolute. If `RECOTEM_ARTIFACT_ROOT` is set,
 
 ## Environment variable expansion
 
-Syntax: `${RECOTEM_RECIPE_VAR}`. Only variables matching the prefix `RECOTEM_RECIPE_*` are expanded. Matching is case-insensitive (the *upper-cased* name is checked against the prefix and blacklist). Additional values can be injected with `recotem train --env-var KEY=value`; the `KEY` must still match the `RECOTEM_RECIPE_*` prefix and pass the blacklist check.
+Syntax: `${RECOTEM_RECIPE_VAR}`. Only variables matching the prefix `RECOTEM_RECIPE_*` are expanded. Matching is case-insensitive (the *upper-cased* name is checked against the prefix and blacklist). Additional values can be injected without exporting to the shell environment using `recotem train --env-var KEY=VALUE` (repeatable). The `KEY` must still start with `RECOTEM_RECIPE_` and pass the blacklist check. Example: `recotem train recipe.yaml --env-var RECOTEM_RECIPE_DATE=20260501`.
 
 Blacklisted (never expanded regardless of prefix): `RECOTEM_SIGNING_KEY`, `RECOTEM_API_KEYS`, and any name matching `*_SECRET*`, `*_PASSWORD*`, `AWS_*`, `GOOGLE_*`, `GCP_*`.
 

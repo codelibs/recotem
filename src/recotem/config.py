@@ -3,7 +3,7 @@
 Deliberately avoids pydantic-settings to keep the dependency footprint small.
 All parsing is done via plain dataclasses with a ``from_env()`` classmethod.
 
-Environment variables (Section 7 of spec):
+Environment variables:
   RECOTEM_API_KEYS          CSV of "<kid>:sha256:<hex64>" entries
   RECOTEM_HOST              Bind host (default 127.0.0.1 if no API keys)
   RECOTEM_PORT              Bind port (default 8080)

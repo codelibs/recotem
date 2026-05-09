@@ -67,7 +67,7 @@ recotem keygen --type api     --kid dev
 
 export RECOTEM_SIGNING_KEYS="dev:<signing-plaintext>"   # used by train + serve
 export RECOTEM_API_KEYS="dev:sha256:<api-hash>"         # used by serve
-export RECOTEM_API_KEY="<api-plaintext>"                # used by curl below
+export RECOTEM_API_PLAINTEXT="<api-plaintext>"          # used by curl below
 
 # 2. Train, serve
 recotem train examples/quickstart/recipe.yaml
@@ -75,7 +75,7 @@ recotem serve --recipes examples/quickstart/ &
 
 # 3. Predict
 curl -X POST http://localhost:8080/predict/top_picks \
-  -H "X-API-Key: $RECOTEM_API_KEY" \
+  -H "X-API-Key: $RECOTEM_API_PLAINTEXT" \
   -H "Content-Type: application/json" \
   -d '{"user_id": "u01", "cutoff": 5}'
 ```

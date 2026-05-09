@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
+import pydantic
 import structlog
 import yaml
 
@@ -85,14 +86,51 @@ def _local_output_path(output_path: str) -> Path | None:
 
 
 def _check_local_output_containment(local_path: Path) -> None:
-    """If RECOTEM_ARTIFACT_ROOT is set, assert resolved path lies under it."""
+    """If RECOTEM_ARTIFACT_ROOT is set, assert resolved path lies under it.
+
+    ``Path.resolve(strict=False)`` on a non-existent file does not follow
+    symlinks in the *parent* directory; an attacker who drops a symlink under
+    the artifact root could therefore escape containment on the first write.
+    This function explicitly resolves the *parent* with ``strict=True`` (the
+    parent must already exist, or the recipe is rejected) and asserts that the
+    resolved parent also lies inside the artifact root before the final
+    component is appended.
+    """
     artifact_root_env = os.environ.get("RECOTEM_ARTIFACT_ROOT", "")
     if not artifact_root_env:
         return
 
     artifact_root = Path(artifact_root_env).resolve()
-    resolved = local_path.resolve()
 
+    # --- resolve the parent directory with strict=True so that any symlink
+    # in the parent chain is followed to its real destination before the
+    # containment check.  The output file itself need not exist yet.
+    parent = local_path.parent
+    try:
+        resolved_parent = parent.resolve(strict=True)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise RecipeError(
+            f"output.path parent directory '{parent}' does not exist or is not "
+            "a directory. Create it before running training."
+        ) from exc
+    except OSError as exc:
+        raise RecipeError(
+            f"output.path parent directory '{parent}' could not be resolved: {exc}"
+        ) from exc
+
+    # Check the resolved parent is inside the artifact root.
+    try:
+        resolved_parent.relative_to(artifact_root)
+    except ValueError:
+        raise RecipeError(
+            f"output.path parent '{resolved_parent}' is outside "
+            f"RECOTEM_ARTIFACT_ROOT='{artifact_root}'. "
+            "Symlink escapes are rejected."
+        ) from None
+
+    # Also resolve the full path (non-strict) and check it, guarding against
+    # any remaining path components that could walk out with '..'.
+    resolved = local_path.resolve()
     try:
         resolved.relative_to(artifact_root)
     except ValueError:
@@ -154,6 +192,27 @@ def _expand_node(
             for item in node
         ]
     return node
+
+
+# ---------------------------------------------------------------------------
+# Pydantic validation error formatting
+# ---------------------------------------------------------------------------
+
+
+def _format_pydantic_errors(exc: pydantic.ValidationError) -> str:
+    """Format pydantic v2 ValidationError into a human-readable multi-line message.
+
+    Each error line contains the dotted field path and the error message, e.g.::
+
+        - training.n_trials: Input should be greater than or equal to 1
+        - output.path: Field required
+    """
+    lines: list[str] = []
+    for error in exc.errors():
+        loc = ".".join(str(part) for part in error.get("loc", ()))
+        msg = error.get("msg", "")
+        lines.append(f"  - {loc}: {msg}" if loc else f"  - {msg}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -250,18 +309,11 @@ def load_recipe(
     # Path security checks.
     _validate_path_fields(expanded)
 
-    # Build Recipe via pydantic (validates all sub-schemas).
-    try:
-        recipe = Recipe.model_validate(expanded)
-    except Exception as exc:
-        # Translate pydantic validation errors into RecipeError.
-        raise RecipeError(f"Recipe '{p}' failed validation: {exc}") from exc
-
-    # Promote `recipe.source` from raw dict to typed Config via the dynamic
-    # discriminated union assembled from datasource entry points.  Done after
-    # the main Recipe.model_validate so that the rest of the recipe is parsed
-    # even if datasource extras are missing.
-    raw_source = recipe.source
+    # Resolve the typed DataSource Config BEFORE building the Recipe so that
+    # pydantic's extra="forbid" is enforced on the source and the Recipe is
+    # constructed once with the typed source in place (no object.__setattr__
+    # bypass of re-validation).
+    raw_source = expanded.get("source")
     if isinstance(raw_source, dict):
         try:
             from recotem.datasource.registry import get_source_class
@@ -275,17 +327,44 @@ def load_recipe(
             config_cls = source_cls.Config
             try:
                 typed_source = config_cls.model_validate(raw_source)
+            except pydantic.ValidationError as exc:
+                detail = _format_pydantic_errors(exc)
+                raise RecipeError(
+                    f"Recipe '{p}' source failed validation:\n{detail}"
+                ) from exc
+            except RecipeError:
+                raise
             except Exception as exc:
                 raise RecipeError(
                     f"Recipe '{p}' source failed validation: {exc}"
                 ) from exc
-            # Reassign on the model.  Recipe.source is typed Any, so this is
-            # a plain attribute set; pydantic does not re-validate.
-            object.__setattr__(recipe, "source", typed_source)
         except RecipeError:
             raise
         except Exception as exc:
             raise RecipeError(f"Recipe '{p}' source resolution failed: {exc}") from exc
+        # Replace the raw dict with the validated typed config before passing
+        # to Recipe.model_validate — this prevents object.__setattr__ bypass.
+        expanded = {**expanded, "source": typed_source}
+
+    # Build Recipe via pydantic (validates all sub-schemas).
+    try:
+        recipe = Recipe.model_validate(expanded)
+    except pydantic.ValidationError as exc:
+        # Format structured field errors so users know exactly which fields failed.
+        detail = _format_pydantic_errors(exc)
+        raise RecipeError(f"Recipe '{p}' failed validation:\n{detail}") from exc
+    except RecipeError:
+        raise
+    except Exception as exc:
+        logger.error(
+            "unexpected_validation_error",
+            recipe=str(p),
+            exc_type=type(exc).__name__,
+            exc=str(exc),
+        )
+        raise RecipeError(
+            f"Recipe '{p}' failed validation (unexpected error): {exc}"
+        ) from exc
 
     # Enforce sha256 integrity pin for network-scheme paths.
     _enforce_sha256_for_network_paths(recipe)

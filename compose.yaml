@@ -38,6 +38,11 @@ services:
   # One-shot training job. Run via `docker compose run --rm train`.
   # Exit codes: 0=success, 2=recipe error, 3=datasource error,
   #             4=training error, 5=artifact error.
+  #
+  # Note: train does NOT bind any network port — it reads data, trains,
+  # and writes an artifact file. RECOTEM_ALLOWED_HOSTS, RECOTEM_API_KEYS,
+  # RECOTEM_HOST/PORT, and RECOTEM_ALLOWED_ORIGINS are serve-only variables
+  # and are intentionally omitted here.
   train:
     <<: *recotem-image
     command: ["train", "/recipes/recipe.yaml"]

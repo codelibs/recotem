@@ -49,7 +49,7 @@ def _remote_lock_path(output_str: str) -> Path:
     """
     base_env = os.environ.get("RECOTEM_LOCK_DIR", "").strip()
     base = Path(base_env) if base_env else Path(tempfile.gettempdir()) / "recotem-locks"
-    digest = hashlib.sha256(output_str.encode("utf-8")).hexdigest()[:32]
+    digest = hashlib.sha256(output_str.encode("utf-8")).hexdigest()
     return base / f"{digest}.lock"
 
 

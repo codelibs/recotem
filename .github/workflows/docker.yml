@@ -82,6 +82,9 @@ jobs:
     name: trivy vulnerability scan
     runs-on: ubuntu-24.04
     needs: build
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v6
 
@@ -111,7 +114,13 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
 
-      - name: Upload Trivy SARIF
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Upload Trivy SARIF as artifact (for download)
         uses: actions/upload-artifact@v7
         if: always()
         with:

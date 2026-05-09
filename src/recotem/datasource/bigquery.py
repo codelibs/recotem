@@ -195,12 +195,34 @@ class BigQuerySource:
                 f"Unexpected error submitting BigQuery query: {exc}"
             ) from exc
 
-        # Attempt fast path via Storage Read API; fall back to standard.
+        # Attempt fast path via Storage Read API; fall back to REST API only
+        # for expected, recoverable failures (missing extra, storage-specific
+        # API errors).  All other exceptions propagate immediately so that OOM
+        # errors, quota failures, and auth errors are not silently swallowed.
         try:
             try:
                 df = query_job.to_dataframe(create_bqstorage_client=True)
-            except Exception:
+            except ImportError as storage_exc:
+                # google-cloud-bigquery-storage extra is not installed.
+                logger.warning(
+                    "bigquery_storage_fallback",
+                    reason="ImportError — google-cloud-bigquery-storage not installed",
+                    exc_type=type(storage_exc).__name__,
+                    exc=str(storage_exc),
+                )
                 df = query_job.to_dataframe()
+            except GoogleAPICallError as storage_exc:
+                # Storage-specific API failure (PermissionDenied, ServiceUnavailable,
+                # etc.) — fall back to the slower REST path and log the cause.
+                logger.warning(
+                    "bigquery_storage_fallback",
+                    reason="GoogleAPICallError from Storage Read API",
+                    exc_type=type(storage_exc).__name__,
+                    exc=str(storage_exc),
+                )
+                df = query_job.to_dataframe()
+            # Any other exception (MemoryError, RuntimeError, etc.) propagates
+            # out of the inner try and is caught by the outer handler below.
         except GoogleAPICallError as exc:
             raise DataSourceError(f"BigQuery query execution failed: {exc}") from exc
         except Exception as exc:

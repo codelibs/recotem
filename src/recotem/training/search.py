@@ -25,7 +25,7 @@ from optuna.samplers import TPESampler
 # _compat applies IPython stub before irspack imports (see _compat.py).
 import recotem.training._compat  # noqa: F401
 from recotem.training.algorithms import get_recommender_cls, resolve_algorithm_name
-from recotem.training.errors import SearchError, ZeroScoreError
+from recotem.training.errors import SearchError, TrainingError, ZeroScoreError
 from recotem.training.evaluate import get_score
 from recotem.training.progress import ProgressReporter, make_trial_callback
 
@@ -51,6 +51,7 @@ class SearchResult:
         "tried_algorithms",
         "n_trials",
         "n_completed",
+        "orphaned_count",
         "search_seed",
     )
 
@@ -63,6 +64,7 @@ class SearchResult:
         tried_algorithms: list[str],
         n_trials: int,
         n_completed: int,
+        orphaned_count: int,
         search_seed: int,
     ) -> None:
         self.best_class_name = best_class_name
@@ -72,6 +74,7 @@ class SearchResult:
         self.tried_algorithms = tried_algorithms
         self.n_trials = n_trials
         self.n_completed = n_completed
+        self.orphaned_count = orphaned_count
         self.search_seed = search_seed
 
 
@@ -223,7 +226,7 @@ def run_search(
         already_completed: dict[str, int] = dict.fromkeys(class_names, 0)
         for t in study.trials:
             if t.state == optuna.trial.TrialState.COMPLETE:
-                cls = _trial_class(t, multi_algo=True)
+                cls = _trial_class(t)
                 if cls in already_completed:
                     already_completed[cls] += 1
         for cname in class_names:
@@ -235,6 +238,10 @@ def run_search(
                 )
 
     has_per_trial_timeout = per_trial_timeout_seconds is not None
+
+    # Thread-safe counter for per-trial-timeout orphaned threads.
+    _orphan_lock = threading.Lock()
+    _orphaned_count: list[int] = [0]
 
     trial_progress_cb = make_trial_callback(reporter)
 
@@ -251,7 +258,7 @@ def run_search(
             1
             for t in study.trials
             if t.state == optuna.trial.TrialState.COMPLETE
-            and _trial_class(t, len(class_names) > 1) == class_name
+            and _trial_class(t) == class_name
         )
         if completed_for_class >= budgets.get(class_name, n_trials):
             raise optuna.TrialPruned(
@@ -290,6 +297,8 @@ def run_search(
                 # finishes its current learn step.  Operators should treat
                 # repeated occurrences as a sign that ``per_trial_timeout_seconds``
                 # is too aggressive for this dataset+algorithm combination.
+                with _orphan_lock:
+                    _orphaned_count[0] += 1
                 logger.warning(
                     "per_trial_timeout_thread_orphaned",
                     recipe=recipe_name,
@@ -328,6 +337,7 @@ def run_search(
     # Post-search analysis.
     completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
     n_completed = len(completed)
+    orphaned_count = _orphaned_count[0]
 
     if n_completed == 0:
         raise SearchError(
@@ -335,6 +345,16 @@ def run_search(
             "Check algorithm compatibility with the dataset and increase "
             "per_trial_timeout_seconds or n_trials.",
             code="no_completed_trials",
+        )
+
+    # Fail loudly if more than half of completed trials were orphaned — this
+    # indicates per_trial_timeout_seconds is far too aggressive.
+    if orphaned_count > n_completed // 2:
+        raise TrainingError(
+            f"Excessive per-trial timeouts: {orphaned_count} threads orphaned vs "
+            f"{n_completed} trials completed. Increase per_trial_timeout_seconds "
+            "or reduce dataset/algorithm complexity.",
+            code="excessive_per_trial_timeouts",
         )
 
     best_trial = study.best_trial
@@ -367,6 +387,7 @@ def run_search(
         tried_algorithms=class_names,
         n_trials=n_trials,
         n_completed=n_completed,
+        orphaned_count=orphaned_count,
         search_seed=random_seed,
     )
 
@@ -415,10 +436,21 @@ def _compute_budgets(
 
     resolved: dict[str, int] = {}
     for alias, count in per_algorithm_trials.items():
-        try:
-            cname = resolve_algorithm_name(alias)
-        except Exception:  # noqa: BLE001
+        # If the key is already a resolved class name (present in class_names),
+        # use it directly without going through resolve_algorithm_name so that
+        # callers passing already-canonical names (e.g. "IALSRecommender") are
+        # accepted without a redundant round-trip through the alias table.
+        if alias in class_names:
             cname = alias
+        else:
+            try:
+                cname = resolve_algorithm_name(alias)
+            except Exception as exc:
+                raise TrainingError(
+                    f"Unknown algorithm alias {alias!r} in per_algorithm_trials. "
+                    "Check the algorithm name against the supported algorithms list.",
+                    code="unknown_algorithm_in_budget",
+                ) from exc
         resolved[cname] = max(0, count)
 
     explicit_classes = [c for c in class_names if c in resolved]
@@ -476,7 +508,7 @@ def _compute_budgets(
     return budgets
 
 
-def _trial_class(trial: optuna.trial.FrozenTrial, multi_algo: bool) -> str:
+def _trial_class(trial: optuna.trial.FrozenTrial) -> str:
     """Extract the recommender class name from a completed trial."""
     return str(
         trial.user_attrs.get(

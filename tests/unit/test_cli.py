@@ -264,17 +264,20 @@ def test_train_exit2_on_recipe_error(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 2
 
 
-def test_train_exit5_on_signing_key_missing_without_dev_flag(
+def test_train_exit8_on_signing_key_missing_without_dev_flag(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """train exits 5 when RECOTEM_SIGNING_KEYS is not set (not dev mode)."""
+    """train exits 8 (config error) when RECOTEM_SIGNING_KEYS is not set.
+
+    After E-7 fix: signing_key_missing TrainingError maps to exit 8, not 4 or 5.
+    """
     yaml_path = _minimal_recipe_yaml(tmp_path, "no_key_recipe")
     monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
     monkeypatch.delenv("RECOTEM_ENV", raising=False)
     result = runner.invoke(app, ["train", str(yaml_path)])
-    # Should fail with ArtifactError (exit 5) or RecipeError/TrainingError
-    # The exact exit code depends on implementation; accept 2, 4, or 5
-    assert result.exit_code in (1, 2, 4, 5)
+    assert result.exit_code == 8, (
+        f"Missing RECOTEM_SIGNING_KEYS must produce exit 8, got {result.exit_code}"
+    )
 
 
 def test_train_exit3_when_fetch_raises_DataSourceError(
@@ -376,6 +379,137 @@ def test_map_exception_to_exit_TrainingError_is_exit4() -> None:
 
     exc = TrainingError("evaluation failed", code="no_completed_trials")
     assert _map_exception_to_exit(exc) == 4
+
+
+# ---------------------------------------------------------------------------
+# C-2: SystemExit collapse fix
+# ---------------------------------------------------------------------------
+
+
+def test_train_systemexit_with_none_code_does_not_collapse_to_zero(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """train must NOT collapse SystemExit(None) to exit 0.
+
+    The old 'exc.code or 0' collapsed SystemExit(None) and other falsy codes
+    into a false success.  After the fix, SystemExit(None) must produce a
+    non-zero exit.
+    """
+    from unittest.mock import patch
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "se_none")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    def _raises_systemexit_none(*_a, **_kw):
+        raise SystemExit(None)
+
+    with patch(
+        "recotem.training.pipeline.run_training", side_effect=_raises_systemexit_none
+    ):
+        result = runner.invoke(app, ["train", str(yaml_path)])
+
+    assert result.exit_code != 0, (
+        f"SystemExit(None) must produce non-zero exit, got {result.exit_code}"
+    )
+
+
+def test_train_systemexit_with_zero_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """train must exit 0 when run_training raises SystemExit(0).
+
+    Literal int 0 is the only code treated as success.
+    """
+    from unittest.mock import patch
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "se_zero")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    def _raises_systemexit_zero(*_a, **_kw):
+        raise SystemExit(0)
+
+    with patch(
+        "recotem.training.pipeline.run_training", side_effect=_raises_systemexit_zero
+    ):
+        result = runner.invoke(app, ["train", str(yaml_path)])
+
+    assert result.exit_code == 0, (
+        f"SystemExit(0) must produce exit 0, got {result.exit_code}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# E-1: serve wraps uvicorn errors
+# ---------------------------------------------------------------------------
+
+
+def test_serve_oserror_returns_dedicated_exit_code(tmp_path: Path, monkeypatch) -> None:
+    """serve must catch OSError from uvicorn.run and exit with a non-zero code.
+
+    A bind failure (port in use, permission denied) previously bubbled as an
+    unhandled exception.  After the fix it must be caught and map to exit 8
+    (configuration error).
+    """
+    from unittest.mock import patch
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_ENV", "test")
+
+    def _raises_oserror(*_a, **_kw):
+        raise OSError("address already in use")
+
+    with patch("uvicorn.run", side_effect=_raises_oserror):
+        result = runner.invoke(
+            app,
+            [
+                "serve",
+                "--recipes",
+                str(recipes_dir),
+                "--insecure-no-auth",
+            ],
+        )
+
+    assert result.exit_code == 8, (
+        f"OSError from uvicorn.run must map to exit 8 (config), got {result.exit_code}. "
+        f"Output: {result.stdout}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# E-7: exit code map new buckets
+# ---------------------------------------------------------------------------
+
+
+def test_lock_contested_maps_to_dedicated_exit_code() -> None:
+    """_map_exception_to_exit must return 6 for LockContestedError."""
+    from recotem.cli import _map_exception_to_exit
+    from recotem.training.lock import LockContestedError
+
+    exc = LockContestedError("recipe.yaml locked by pid 42")
+    assert _map_exception_to_exit(exc) == 6
+
+
+def test_http_fetch_error_maps_to_dedicated_exit_code() -> None:
+    """_map_exception_to_exit must return 7 for HttpFetchError."""
+    from recotem._http_fetch import HttpFetchError
+    from recotem.cli import _map_exception_to_exit
+
+    exc = HttpFetchError("SSRF guard: private IP rejected")
+    assert _map_exception_to_exit(exc) == 7
+
+
+def test_missing_signing_keys_maps_to_config_exit_code() -> None:
+    """_map_exception_to_exit must return 8 for TrainingError with code='signing_key_missing'.
+
+    When RECOTEM_SIGNING_KEYS is unset run_training raises TrainingError with
+    code='signing_key_missing'.  The CLI should map this to exit 8 (config
+    error) rather than exit 4 (generic TrainingError).
+    """
+    from recotem.cli import _map_exception_to_exit
+    from recotem.training.errors import TrainingError
+
+    exc = TrainingError("RECOTEM_SIGNING_KEYS is not set.", code="signing_key_missing")
+    assert _map_exception_to_exit(exc) == 8
 
 
 # ---------------------------------------------------------------------------

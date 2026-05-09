@@ -159,6 +159,28 @@ rm ./artifacts/my_recipe.abc12345.recotem
 
 ---
 
+## CLI flag reference
+
+### `recotem train` flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--no-lock` | `false` | Skip per-recipe POSIX file lock acquisition. Only safe when you guarantee no concurrent writers through another mechanism (e.g. scheduler-level mutex). |
+| `--fail-on-busy` | `false` | Exit 6 (`LockContestedError`) immediately if the recipe lock is held, instead of the default behaviour (exit 0, log `recipe_lock_contended_skipping`). Use this in orchestrators that treat non-zero as "retry elsewhere". |
+| `-q` / `--quiet` | `false` | Suppress per-trial output from Optuna. Reduces log volume during large search budgets. |
+| `-v` / `--verbose` | `false` | Dump per-trial hyperparameter values to the log. Useful for debugging search behaviour; avoid in production (can produce large log volumes). |
+| `--run-id <id>` | random 12-hex | Stable run identifier. Reuse the same value across invocations to resume a persistent Optuna study (requires `tuning.storage_path` set in the recipe). Pattern: `[A-Za-z0-9_.-]{1,64}`. If omitted, a fresh random id is generated each run. |
+| `--env-var KEY=VALUE` | — | Inject additional `RECOTEM_RECIPE_*` values for recipe env-var expansion without exporting them to the shell environment. The `KEY` must start with `RECOTEM_RECIPE_` and must not match the expansion blacklist. Repeatable: `--env-var A=x --env-var B=y`. See [recipe-reference.md](recipe-reference.md#environment-variable-expansion). |
+| `--dev-allow-unsigned` | `false` | Skip HMAC signing and use a deterministic in-memory dev key. Requires `RECOTEM_ENV=development` AND `--i-understand-this-loads-arbitrary-code`. Never use outside controlled local testing. |
+
+### `recotem inspect` flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dev-allow-unsigned` | `false` | Verify against the deterministic in-memory dev key (`dev:0000…`) when `RECOTEM_SIGNING_KEYS` is unset. Useful for inspecting artifacts produced by `recotem train --dev-allow-unsigned`. |
+
+---
+
 ## CLI exit codes
 
 `recotem train`, `serve`, `inspect`, `validate` all map exceptions to a
@@ -171,18 +193,22 @@ logic instead of grepping stderr.
 | 1 | Unknown error | Bug, environment issue, schema generation failure |
 | 2 | RecipeError | YAML syntax, schema violation, invalid `--env-var`, `--dev-allow-unsigned` without companion confirmation flag, `--dev-allow-unsigned` outside `RECOTEM_ENV=development` |
 | 3 | DataSourceError | Source fetch failed, sha256 mismatch, redirect cap, HTTP 4xx/5xx, body cap exceeded |
-| 4 | TrainingError | Includes subcodes `signing_key_missing`, `min_data_violation`, `time_column_parse_error`, `final_training_error`, `no_completed_trials`, `zero_score` |
+| 4 | TrainingError | Includes subcodes `signing_key_missing`, `min_data_violation`, `time_column_parse_error`, `final_training_error`, `no_completed_trials`, `zero_score`, `excessive_per_trial_timeouts` |
 | 5 | ArtifactError | Missing/invalid signing key, magic mismatch, kid unknown, HMAC mismatch, payload over cap, disallowed FQCN, header JSON over cap |
+| 6 | LockContestedError | Recipe lock held by another process when `--fail-on-busy` is set |
+| 7 | HttpFetchError | SSRF guard refused the destination, connect/read timeout, HTTP 4xx/5xx on HTTP/HTTPS source fetch |
+| 8 | Configuration error | Missing `RECOTEM_SIGNING_KEYS`, bind port already in use, other env-var misconfiguration |
 
-Lock contention with `--fail-on-busy` surfaces as exit 1 (the unknown-error
-bucket), not exit 4 — `LockContestedError` is raised outside the
-`TrainingError` hierarchy. Alert on the structured event
-`recipe_lock_contended_skipping` (or the stderr message `recipe lock
-already held`) rather than the exit code.
+`--fail-on-busy` surfaces as exit 6, not exit 4 — `LockContestedError` is
+raised outside the `TrainingError` hierarchy. Without `--fail-on-busy`
+(the default), a lock contention exits 0 with the structured event
+`recipe_lock_contended_skipping`. Alert on that event rather than the exit
+code when you need visibility into skipped runs without treating them as errors.
 
 On any non-zero exit, `recotem train` emits a single `train_error` JSON log
 event with `code=<subcode>` so log aggregators can alert by subcode without
-re-parsing exit strings.
+re-parsing exit strings. For non-domain exceptions (bugs, unexpected library
+errors) the code field is `internal_error`.
 
 ## Training pipeline events
 
@@ -200,8 +226,8 @@ as the basis for SLO and alerting rules.
 | `search_done` | tuning | `best_class`, `best_score`, `n_completed` |
 | `training_final_model` / `final_model_trained` | refit | `recommender` |
 | `artifact_written` | persist | `versioning`, `artifact`, `pointer` (append_sha), `kid` |
-| `train_done` | end | `name`, `run_id`, `exit_code`, `artifact`, `best_class`, `best_score`, `trials`, `trained_at`, `kid` |
-| `train_error` | failure | `error`, `code`, `recipe`, `run_id`, `exit_code` |
+| `train_done` | end | `name`, `run_id`, `exit_code`, `artifact`, `best_class`, `best_score`, `trials`, `n_orphaned`, `trained_at`, `kid` |
+| `train_error` | failure | `error`, `code` (`internal_error` for non-domain exceptions), `recipe`, `run_id`, `exit_code` |
 | `recipe_lock_contended_skipping` | start | `recipe`, `run_id` (default `--fail-on-busy=False` exits 0) |
 | `csv_source_redirect`, `csv_source_size_exceeded` | datasource | `path`, `status`, `cap` |
 
@@ -223,11 +249,10 @@ Defaults:
 - Non-blocking: a contended lock returns immediately and the run exits 0
   with `recipe_lock_contended_skipping` (cron-friendly: a slow run cannot
   pile up overlapping jobs).
-- `--fail-on-busy` flips this to a non-zero exit (exit 1, with the
-  stderr message `recipe lock already held`) so an orchestrator can route
-  the work elsewhere. The exit code is 1 rather than 4 because
-  `LockContestedError` is intentionally outside the `TrainingError`
-  hierarchy — it is an orchestration condition, not a training failure.
+- `--fail-on-busy` flips this to exit 6 (`LockContestedError`) so an
+  orchestrator can route the work elsewhere. `LockContestedError` is
+  intentionally outside the `TrainingError` hierarchy — it is an
+  orchestration condition, not a training failure.
 - `--no-lock` skips lock acquisition entirely. Only safe when you guarantee
   no concurrent writers via some other mechanism.
 
@@ -334,6 +359,8 @@ Available metrics:
 | `recotem_artifact_load_failures_total` | Counter | `recipe` |
 | `recotem_active_recipes` | Gauge | — |
 | `recotem_swap_total` | Counter | `recipe`, `result` |
+| `recotem_artifact_stat_failures_total` | Counter | `recipe` |
+| `recotem_watcher_unhandled_errors_total` | Counter | — |
 
 ---
 
@@ -403,6 +430,8 @@ The high-signal metrics for production alerting:
 | Recipe is unloaded | `recotem_model_loaded{recipe=...} == 0` for > `RECOTEM_WATCH_INTERVAL × 3` | page on-call |
 | Hot-swap failures | `rate(recotem_swap_total{result="error"}[5m]) > 0` | warn |
 | Artifact load failures since restart | `recotem_artifact_load_failures_total{recipe=...}` increase | warn (often paired with the unloaded alert above) |
+| Artifact stat failures (watcher poll) | `recotem_artifact_stat_failures_total{recipe=...}` increase | warn |
+| Watcher unhandled errors | `recotem_watcher_unhandled_errors_total` increase | warn |
 | Predict error rate | `rate(recotem_predict_total{status="error"}[5m]) / rate(recotem_predict_total[5m])` | warn at 1%, page at 10% |
 | Predict latency | `histogram_quantile(0.99, recotem_predict_latency_seconds_bucket)` | per-recipe SLO |
 | Active recipes | `recotem_active_recipes` drop > 0 since last scrape | warn (recipe removed or all stub) |

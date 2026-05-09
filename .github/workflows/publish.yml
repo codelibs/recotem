@@ -5,34 +5,42 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Least-privilege: read-only by default; each job adds only what it needs.
+permissions:
+  contents: read
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
+
       - name: Build sdist + wheel
         run: uv build
-      - uses: actions/upload-artifact@v4
+
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
 
   publish-pypi:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: pypi
       url: https://pypi.org/p/recotem
     permissions:
-      id-token: write
+      id-token: write   # Required for OIDC trusted publishing
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: dist
           path: dist/
+
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/

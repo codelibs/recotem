@@ -58,12 +58,15 @@ Exit code mapping for `restartPolicy: OnFailure`:
 
 | Code | Meaning | K8s action |
 |------|---------|-----------|
-| 0 | Success or skip | Job completes |
-| 2 | RecipeError | Retry (likely a config bug; fix the ConfigMap) |
+| 0 | Success or skip (lock contended without `--fail-on-busy`) | Job completes |
+| 2 | RecipeError | No retry (config bug; fix the ConfigMap) |
 | 3 | DataSourceError | Retry (transient network/auth) |
 | 4 | TrainingError | Retry up to `backoffLimit` |
 | 5 | ArtifactError | No retry (signing key config issue; fix Secret) |
-| 1 | Unexpected | Retry |
+| 6 | LockContestedError (`--fail-on-busy` set) | Retry or let orchestrator route |
+| 7 | HttpFetchError | Retry (transient SSRF/timeout/HTTP error) |
+| 8 | Configuration error | No retry (missing signing keys, bad env) |
+| 1 | Unexpected error | Retry |
 
 Set `backoffLimit: 2` for production CronJobs to avoid runaway retry loops on persistent data issues. The bundled Helm CronJob also sets `activeDeadlineSeconds: 3600` (1 h hard kill); raise it for slow Optuna budgets or data sources.
 
@@ -349,7 +352,14 @@ recipes:
 
 networkPolicy:
   enabled: true
-  ingressFromPodSelector: {}   # restrict by pod-label selector
+  # ingressFromPodSelector restricts which pods may reach recotem-serve.
+  # Empty map ({}) → no ingress rule is rendered → combined with
+  # policyTypes:[Ingress], this is the canonical Kubernetes "deny all
+  # inbound" pattern.  Set a label selector to allow specific scrapers,
+  # probes, or ingress controllers:
+  #   ingressFromPodSelector:
+  #     app.kubernetes.io/name: ingress-nginx
+  ingressFromPodSelector: {}
 
 hpa:
   enabled: false

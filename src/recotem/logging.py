@@ -22,7 +22,7 @@ import sys
 
 import structlog
 
-from recotem.serving.log_redaction import redact_sensitive_keys
+from recotem.log_redaction import redact_sensitive_keys
 
 # Re-export so callers can do ``from recotem.logging import get_logger``.
 get_logger = structlog.get_logger

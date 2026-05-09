@@ -35,7 +35,9 @@ RUN groupadd --gid 1000 appuser \
  && useradd --uid 1000 --gid 1000 --no-create-home --shell /sbin/nologin appuser
 
 # Install uv (universal Python package manager).
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Pinned to 0.7 to match astral-sh/setup-uv@v8.1.0 used in CI (test.yml).
+# Update by bumping the minor version here and in test.yml together.
+COPY --from=ghcr.io/astral-sh/uv:0.7 /uv /usr/local/bin/uv
 ENV UV_SYSTEM_PYTHON=1 \
     UV_NO_CACHE=1
 
@@ -84,8 +86,13 @@ USER appuser
 
 WORKDIR /workspace
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD recotem schema >/dev/null 2>&1 || exit 1
+# Default HEALTHCHECK probes the /health endpoint of the serve process.
+# This makes sense for the primary serve mode. For one-shot train jobs the
+# container exits before any healthcheck fires, so the probe does not cause
+# spurious failures. Operators can override with --no-healthcheck or a custom
+# HEALTHCHECK in their compose service / k8s liveness probe.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).status == 200 else 1)"
 
 ENTRYPOINT ["recotem"]
 CMD ["--help"]

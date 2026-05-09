@@ -1,6 +1,6 @@
 """FastAPI route handlers for the Recotem serving layer.
 
-Routes (spec Section 7):
+Routes:
   POST /predict/{name}   — single-user recommendations
   GET  /health           — per-recipe health (ok | degraded)
   GET  /models           — registry entries (header metadata, no key material)
@@ -82,7 +82,11 @@ def make_router(
         responses after the item-metadata join.
     """
     router = APIRouter()
-    _deny_set: frozenset[str] = frozenset(metadata_field_deny or [])
+    # Case-fold all deny entries so the comparison is case-insensitive.
+    # e.g. "internal_id" in the deny list also blocks "Internal_ID" in metadata.
+    _deny_set: frozenset[str] = frozenset(
+        s.lower() for s in (metadata_field_deny or [])
+    )
 
     # ------------------------------------------------------------------
     # Auth dependency (closure over api_keys)
@@ -257,5 +261,5 @@ def _lookup_metadata(
     return {
         k: (None if isinstance(v, float) and math.isnan(v) else v)
         for k, v in row.to_dict().items()
-        if k not in deny_set
+        if k.lower() not in deny_set
     }

@@ -499,6 +499,113 @@ def test_watcher_picks_up_runtime_added_yaml(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# T-7: append_sha pointer-file hot-swap
+# ---------------------------------------------------------------------------
+
+
+def _write_pointer_and_artifact(
+    artifact_dir: Path,
+    pointer_path: Path,
+    name: str = "ptr_test",
+) -> None:
+    """Write a signed artifact and a corresponding append_sha pointer file.
+
+    Creates:
+      - ``<artifact_dir>/<name>.deadbeef.recotem``  — real signed artifact
+      - ``pointer_path``                             — pointer file text
+    """
+    # Build the real artifact bytes using the existing test helper.
+    artifact_data = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={
+            "recipe_name": name,
+            "best_class": "TopPop",
+            "trained_at": "2026-01-01T00:00:00Z",
+        },
+    )
+    # Derive a short sha suffix (matches io.write_artifact behaviour)
+    import hashlib
+
+    sha8 = hashlib.sha256(artifact_data).hexdigest()[:8]
+    stem = pointer_path.stem  # without .recotem
+    sha_filename = f"{stem}.{sha8}.recotem"
+    sha_path = artifact_dir / sha_filename
+    sha_path.write_bytes(artifact_data)
+    # Pointer file contains the sha-suffixed filename + newline
+    pointer_path.write_text(sha_filename + "\n", encoding="ascii")
+
+
+def test_hot_swap_via_append_sha_pointer(tmp_path: Path) -> None:
+    """Watcher must load models when the artifact path is a pointer file.
+
+    Regression coverage for the ``versioning: append_sha`` path (the
+    documented default).  The recipe's ``output.path`` points to a small
+    ASCII pointer file; the real artifact lives at ``<stem>.<sha8>.recotem``
+    in the same directory.  The watcher delegates resolution to
+    ``resolve_artifact_pointer`` via ``_read_artifact_bytes``.
+    """
+    from recotem.serving.watcher import _RecipeWatchState
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+
+    # The recipe's output.path — this is a pointer file after write.
+    pointer_path = artifact_dir / "ptr_model.recotem"
+    _write_pointer_and_artifact(artifact_dir, pointer_path, name="ptr_test")
+
+    # Confirm the pointer file was created (small ASCII text, not a real artifact).
+    pointer_bytes = pointer_path.read_bytes()
+    assert len(pointer_bytes) < 512, "pointer file must be small"
+    assert pointer_bytes.strip().endswith(b".recotem"), (
+        f"unexpected pointer content: {pointer_bytes!r}"
+    )
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "ptr_test", pointer_path)
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    # Start with an empty last_sha256 so the watcher is forced to reload.
+    initial_states = {
+        "ptr_test": _RecipeWatchState(recipe=recipe, artifact_path=str(pointer_path)),
+    }
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+    watcher.start()
+
+    # Wait up to 2 s for the entry to appear and be loaded.
+    deadline = time.monotonic() + 2.0
+    loaded = False
+    while time.monotonic() < deadline:
+        entry = registry.get("ptr_test")
+        if entry is not None and entry.loaded and entry.last_load_error is None:
+            loaded = True
+            break
+        time.sleep(0.05)
+
+    watcher.stop()
+    watcher.join(timeout=2.0)
+
+    assert loaded, (
+        "Watcher must load a model when output.path is an append_sha pointer file; "
+        f"entry={registry.get('ptr_test')!r}"
+    )
+
+
 def test_watcher_marks_error_via_registry_set_load_error(tmp_path: Path) -> None:
     """When a hot-swap fails (corrupt artifact), the existing entry's
     last_load_error must be non-None after the watcher's next tick.

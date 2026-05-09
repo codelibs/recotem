@@ -1,6 +1,6 @@
 """ArtifactWatcher — background thread that polls recipe artifacts for changes.
 
-Design (spec Section 7, Watcher loop):
+Design (Watcher loop):
 - Runs as a daemon thread; started once during app lifespan.
 - Polls every ``watch_interval`` seconds with +-10% jitter.
 - For each known recipe, stats the artifact pointer via fsspec.
@@ -91,12 +91,18 @@ def _read_artifact_bytes(path: str, max_bytes: int) -> bytes:
         raise ArtifactError(f"cannot read artifact '{path}': {exc}") from exc
 
 
-def _stat_marker(path: str) -> Any:
+def _stat_marker(path: str, recipe_name: str = "<unknown>") -> Any:
     """Return an opaque change-marker for *path*.
 
     For local filesystem: (mtime, size) tuple.
     For object stores: ETag or VersionId from fsspec info.
-    Returns None on error (treats as "not found").
+
+    Returns ``None`` when the file does not exist (``FileNotFoundError``).
+    For all other errors (S3 throttle, IAM revoke, DNS failure, fsspec
+    import errors) logs a structured ``artifact_stat_failed`` warning,
+    increments ``recotem_artifact_stat_failures_total``, and still returns
+    ``None`` so the watcher loop can continue.  Repeated failures keep
+    emitting WARN — no rate-limiting at this level.
     """
     try:
         fs, fpath = fsspec.core.url_to_fs(path)
@@ -107,7 +113,16 @@ def _stat_marker(path: str) -> Any:
         mtime = info.get("mtime") or info.get("LastModified")
         size = info.get("size") or info.get("Size") or 0
         return (mtime, size)
-    except Exception:
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logger.warning(
+            "artifact_stat_failed",
+            recipe=recipe_name,
+            error_class=type(exc).__name__,
+            error=str(exc),
+        )
+        _metrics.inc_artifact_stat_failure(recipe_name)
         return None
 
 
@@ -153,6 +168,10 @@ class ArtifactWatcher(threading.Thread):
         and sha256 from the initial load.
     """
 
+    #: Number of consecutive unhandled poll-loop exceptions before the watcher
+    #: marks every known recipe as unhealthy.  Configurable for testing.
+    _UNHEALTHY_THRESHOLD: int = 5
+
     def __init__(
         self,
         registry: ModelRegistry,
@@ -160,6 +179,8 @@ class ArtifactWatcher(threading.Thread):
         serve_config: ServeConfig,
         key_ring: KeyRing | None,
         initial_states: dict[str, _RecipeWatchState] | None = None,
+        *,
+        unhealthy_threshold: int = 5,
     ) -> None:
         super().__init__(name="artifact-watcher", daemon=True)
         self._registry = registry
@@ -168,6 +189,8 @@ class ArtifactWatcher(threading.Thread):
         self._key_ring = key_ring
         self._stop_event = threading.Event()
         self._states: dict[str, _RecipeWatchState] = dict(initial_states or {})
+        self._consecutive_errors: int = 0
+        self._unhealthy_threshold: int = unhealthy_threshold
 
     def stop(self) -> None:
         """Request the watcher thread to exit on its next poll tick."""
@@ -188,10 +211,37 @@ class ArtifactWatcher(threading.Thread):
             try:
                 self._scan_recipes_dir()
                 self._poll_artifacts()
+                # Successful poll — reset consecutive-error counter.
+                self._consecutive_errors = 0
             except Exception:
-                logger.exception("artifact_watcher_unhandled_error")
+                self._consecutive_errors += 1
+                _metrics.inc_watcher_unhandled_error()
+                logger.exception(
+                    "artifact_watcher_unhandled_error",
+                    consecutive_errors=self._consecutive_errors,
+                    threshold=self._unhealthy_threshold,
+                )
+                if self._consecutive_errors >= self._unhealthy_threshold:
+                    self._mark_all_unhealthy()
 
         logger.info("artifact_watcher_stopped")
+
+    def _mark_all_unhealthy(self) -> None:
+        """Mark every known recipe as unhealthy after repeated poll failures.
+
+        Called when ``_consecutive_errors`` reaches ``_unhealthy_threshold``.
+        Sets ``last_load_error`` on every registry entry so ``/health`` and
+        callers can detect that the watcher itself is unable to poll.  The
+        stale models are *not* dropped — they keep serving while degraded.
+        """
+        logger.error(
+            "artifact_watcher_unhealthy",
+            consecutive_errors=self._consecutive_errors,
+            threshold=self._unhealthy_threshold,
+            message="watcher has failed repeatedly; marking all recipes unhealthy",
+        )
+        for name in list(self._states.keys()):
+            self._registry.set_load_error(name, "watcher unhealthy")
 
     # ------------------------------------------------------------------
     # Directory rescan
@@ -257,7 +307,7 @@ class ArtifactWatcher(threading.Thread):
 
         def _check(name: str) -> tuple[str, Any]:
             state = self._states[name]
-            marker = _stat_marker(state.artifact_path)
+            marker = _stat_marker(state.artifact_path, recipe_name=name)
             return name, marker
 
         with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_STATS) as pool:
@@ -421,10 +471,17 @@ class ArtifactWatcher(threading.Thread):
 
 
 def _extract_kid_safe(data: bytes) -> str:
-    """Best-effort extraction of kid from raw artifact bytes (never raises)."""
-    try:
-        from recotem.artifact.format import FIXED_PREFIX_SIZE, MAX_KID_LEN
+    """Best-effort extraction of kid from raw artifact bytes.
 
+    Catches only structural / encoding errors (``IndexError``,
+    ``UnicodeDecodeError``, ``ValueError``) that indicate a corrupt or
+    truncated artifact.  Programming bugs (``AttributeError``,
+    ``ImportError``, etc.) are allowed to propagate so the caller's existing
+    ``artifact_load_unexpected_error`` handler can surface them.
+    """
+    from recotem.artifact.format import FIXED_PREFIX_SIZE, MAX_KID_LEN
+
+    try:
         if len(data) < FIXED_PREFIX_SIZE:
             return "<unknown>"
         kid_len = data[FIXED_PREFIX_SIZE - 1]
@@ -435,7 +492,7 @@ def _extract_kid_safe(data: bytes) -> str:
         return data[FIXED_PREFIX_SIZE : FIXED_PREFIX_SIZE + kid_len].decode(
             "utf-8", errors="replace"
         )
-    except Exception:
+    except (IndexError, UnicodeDecodeError, ValueError):
         return "<unknown>"
 
 
@@ -483,7 +540,7 @@ def build_initial_states(
         artifact_path = recipe.output.path
         state = _RecipeWatchState(recipe=recipe, artifact_path=artifact_path)
         if recipe.name in loaded_entries:
-            marker = _stat_marker(artifact_path)
+            marker = _stat_marker(artifact_path, recipe_name=recipe.name)
             entry = loaded_entries[recipe.name]
             state.last_marker = marker
             loaded_marker = entry._loaded_marker

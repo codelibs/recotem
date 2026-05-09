@@ -1,7 +1,7 @@
 """HMAC-SHA256 signing, verification, and safe deserialization for Recotem artifacts.
 
-Security posture (from spec Section 8)
----------------------------------------
+Security posture
+----------------
 Pickle is the irspack-native serialization format and cannot be avoided for
 scipy sparse matrices and numpy arrays.  The risk is mitigated by four
 independent, layered controls:
@@ -44,16 +44,18 @@ from recotem.artifact.format import ArtifactError
 logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# FQCN allow-list (hand-enumerated per spec Section 8)
+# FQCN allow-list (hand-enumerated; see docs/security.md)
 # ---------------------------------------------------------------------------
 
 _ALLOWED_CLASSES: frozenset[tuple[str, str]] = frozenset(
     {
-        # Recotem compat wrapper.  Pickle records the class's *original*
-        # defining module (recotem.training._compat); recotem.serving._compat
-        # is a re-export alias used by readers that don't depend on training.
-        ("recotem.serving._compat", "IDMappedRecommender"),
-        ("recotem.training._compat", "IDMappedRecommender"),
+        # Recotem neutral wrapper.  Pickle records the class's defining module;
+        # since 2.0.0a0 this is recotem._idmap (package-level, independent of
+        # training or serving sub-packages).  The old paths
+        # (recotem.training._compat, recotem.serving._compat) are NOT in the
+        # allow-list — artifacts from earlier commits cannot be loaded, which
+        # is acceptable for a pre-release alpha.
+        ("recotem._idmap", "IDMappedRecommender"),
         # irspack id mapping
         ("irspack.utils.id_mapping", "IDMapper"),
         # irspack recommenders.  Pickle records the original defining

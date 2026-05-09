@@ -163,6 +163,188 @@ def test_run_training_does_not_emit_train_error_on_success(
 
 
 # ---------------------------------------------------------------------------
+# D4. train_done event carries all canonical fields (T-5)
+# ---------------------------------------------------------------------------
+
+
+def test_run_training_emits_train_done_event_with_canonical_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On successful training, a train_done log event must be emitted exactly
+    once with all canonical fields: name, run_id, best_class, best_score,
+    artifact (path), trained_at, kid, trials, exit_code.
+
+    We call _run_training_locked directly and mock out the heavyweight steps
+    (data fetch, split, search, final training, artifact write) so the test
+    is fast and deterministic.  The goal is to verify that the log emit
+    statement inside _run_training_locked carries the correct keys.
+    """
+    import numpy as np
+    import scipy.sparse as sps
+
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+    from recotem.training import pipeline as pipeline_mod
+    from recotem.training.pipeline import _run_training_locked
+    from recotem.training.search import SearchResult
+
+    spy_logger = MagicMock()
+    monkeypatch.setattr(pipeline_mod, "logger", spy_logger)
+
+    csv_file = tmp_path / "train_done_data.csv"
+    csv_file.write_text("user_id,item_id\nu1,i1\nu2,i2\n")
+
+    recipe = Recipe(
+        name="train_done_recipe",
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        training=TrainingConfig(
+            algorithms=["TopPop"],
+            n_trials=1,
+            split=SplitConfig(scheme="random", heldout_ratio=0.2, seed=42),
+        ),
+        output=OutputConfig(path=str(tmp_path / "train_done_recipe.recotem")),
+    )
+
+    kr = _make_key_ring()
+    artifact_path = str(tmp_path / "train_done_recipe.recotem")
+
+    fake_search_result = SearchResult(
+        best_class_name="TopPopRecommender",
+        best_params={},
+        best_score=0.42,
+        best_trial_number=0,
+        tried_algorithms=["TopPopRecommender"],
+        n_trials=1,
+        n_completed=1,
+        orphaned_count=0,
+        search_seed=42,
+    )
+
+    fake_recommender = MagicMock()
+
+    def _mock_write(payload_obj, header_dict, key_ring, fs_path, *, versioning):
+        return artifact_path
+
+    # Mock data fetch → tiny DataFrame.
+    import pandas as pd
+
+    mock_df = pd.DataFrame({"user_id": ["u1", "u2"], "item_id": ["i1", "i2"]})
+
+    X_sparse = sps.csr_matrix(np.ones((2, 2)))
+
+    with (
+        patch("recotem.training.pipeline._fetch_data", return_value=mock_df),
+        patch(
+            "recotem.training.pipeline.split_interactions",
+            return_value=(X_sparse, X_sparse, 1),
+        ),
+        patch("recotem.training.pipeline.build_evaluator", return_value=MagicMock()),
+        patch("recotem.training.pipeline.run_search", return_value=fake_search_result),
+        patch("recotem.training.pipeline._train_final", return_value=fake_recommender),
+    ):
+        _run_training_locked(
+            recipe=recipe,
+            key_ring=kr,
+            signing_key="active",
+            write_artifact_fn=_mock_write,
+            quiet=True,
+            verbose=False,
+            run_id="canonical-run-id",
+        )
+
+    # Inspect the train_done calls via the spy logger.
+    train_done_calls = [
+        call
+        for call in spy_logger.info.call_args_list
+        if call.args and call.args[0] == "train_done"
+    ]
+    assert len(train_done_calls) == 1, (
+        f"train_done must be emitted exactly once; got {len(train_done_calls)} calls. "
+        f"All info() calls: {spy_logger.info.call_args_list}"
+    )
+
+    kwargs = train_done_calls[0].kwargs
+    required_fields = {
+        "name",
+        "run_id",
+        "best_class",
+        "best_score",
+        "artifact",
+        "trained_at",
+        "kid",
+        "trials",
+        "exit_code",
+    }
+    missing = required_fields - set(kwargs)
+    assert not missing, (
+        f"train_done event is missing canonical fields: {missing}. "
+        f"Present fields: {set(kwargs)}"
+    )
+    assert kwargs["exit_code"] == 0
+    assert kwargs["name"] == "train_done_recipe"
+    assert kwargs["run_id"] == "canonical-run-id"
+    assert kwargs["kid"] == "active"
+    assert kwargs["best_class"] == "TopPopRecommender"
+    assert kwargs["best_score"] == 0.42
+    assert kwargs["artifact"] == artifact_path
+
+
+# ---------------------------------------------------------------------------
+# D5. Non-domain errors emit code='internal_error' (m-6)
+# ---------------------------------------------------------------------------
+
+
+def test_train_error_internal_error_code_for_keyerror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When an unexpected non-domain exception (e.g. KeyError) propagates through
+    run_training, the train_error log event must carry code='internal_error'
+    rather than the meaningless exception class name 'KeyError'.
+    """
+    from recotem.training import pipeline as pipeline_mod
+
+    spy_logger = MagicMock()
+    monkeypatch.setattr(pipeline_mod, "logger", spy_logger)
+
+    recipe = _make_recipe_good(tmp_path)
+    kr = _make_key_ring()
+
+    # Inject a raw KeyError from _run_training_locked.
+    with patch(
+        "recotem.training.pipeline._run_training_locked",
+        side_effect=KeyError("unexpected_key"),
+    ):
+        with pytest.raises(KeyError):
+            pipeline_mod.run_training(
+                recipe,
+                key_ring=kr,
+                signing_key="active",
+                no_lock=True,
+                quiet=True,
+            )
+
+    train_error_calls = [
+        call
+        for call in spy_logger.error.call_args_list
+        if call.args and call.args[0] == "train_error"
+    ]
+    assert train_error_calls, "train_error must be emitted on KeyError"
+    code = train_error_calls[0].kwargs.get("code")
+    assert code == "internal_error", (
+        f"Expected code='internal_error' for non-domain KeyError, got {code!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # D3. CLI train does not double-emit train_error (exactly once)
 # ---------------------------------------------------------------------------
 

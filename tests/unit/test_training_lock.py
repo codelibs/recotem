@@ -215,3 +215,31 @@ def test_lock_does_not_warn_on_local_path(tmp_path: Path) -> None:
             assert acquired is True
 
     assert not any(e.get("event") == "recipe_lock_local_only" for e in captured)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_remote_lock_path_uses_full_sha256_digest(tmp_path: Path, monkeypatch) -> None:
+    """_remote_lock_path must use the full 64-character SHA-256 hex digest,
+    not the truncated 32-character form used before the m-3 fix.
+
+    Cryptographic hygiene: truncating to 32 hex chars (16 bytes) reduces
+    collision resistance significantly — use the full 256-bit digest.
+    """
+    import hashlib
+
+    from recotem.training.lock import _remote_lock_path
+
+    monkeypatch.setenv("RECOTEM_LOCK_DIR", str(tmp_path / "locks"))
+    remote_uri = "s3://my-bucket/artifacts/my_recipe.recotem"
+
+    lock_path = _remote_lock_path(remote_uri)
+    stem = lock_path.stem  # filename without .lock suffix
+
+    # Full SHA-256 produces a 64-character hex string.
+    expected_digest = hashlib.sha256(remote_uri.encode("utf-8")).hexdigest()
+    assert len(stem) == 64, (
+        f"Lock file stem must be the full 64-char SHA-256 digest, got {len(stem)} chars: {stem!r}"
+    )
+    assert stem == expected_digest, (
+        f"Lock file stem {stem!r} does not match full digest {expected_digest!r}"
+    )

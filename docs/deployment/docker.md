@@ -10,13 +10,11 @@ Pushed by `.github/workflows/docker.yml` to `ghcr.io/codelibs/recotem`:
 |---|---|---|
 | `2.0.0`, `2.0.1`, ... (semver `{{version}}`) | immutable | production — pin here |
 | `2.0`, `2.1`, ... (semver `{{major}}.{{minor}}`) | mutable within a minor | rolling minor pin |
+| `latest` | mutable, tracks `main` | quick evaluation; do not use in production |
 | `main` (branch ref) | mutable, head of `main` | smoke-tests only |
 | `sha-<short>` | immutable | reproducing a specific commit |
 
-There is **no `:latest` tag**. The repository's tutorial `compose.yaml`
-references `:latest` for brevity; in production replace it with a semver
-tag (e.g. `2.0.0`). The Helm chart and `examples/k8s/` already pin
-`2.0.0`.
+`:latest` is updated on every push to `main`. The tutorial `compose.yaml` references `:latest`; in production always pin to a semver tag (e.g. `2.0.0`). The Helm chart and `examples/k8s/` already pin `2.0.0`.
 
 The image is multi-arch (`linux/amd64`, `linux/arm64`). SBOM and SLSA
 provenance attestations are attached at push time (`provenance: mode=max`,
@@ -37,7 +35,7 @@ services:
   # In production, replace with a CronJob (K8s) or cron entry on the host.
   # ------------------------------------------------------------------
   train:
-    image: ghcr.io/codelibs/recotem:2.0.0
+    image: ghcr.io/codelibs/recotem:latest    # pin to a semver tag in production
     command: recotem train /recipes/my_recipe.yaml
     working_dir: /workspace
     volumes:
@@ -52,7 +50,7 @@ services:
   # and hot-swaps models when train writes a new artifact.
   # ------------------------------------------------------------------
   serve:
-    image: ghcr.io/codelibs/recotem:2.0.0
+    image: ghcr.io/codelibs/recotem:latest    # pin to a semver tag in production
     command: recotem serve --recipes /recipes/
     working_dir: /workspace
     ports:
@@ -135,7 +133,7 @@ docker run --rm \
   -v recotem_artifacts:/workspace/artifacts \
   -v /opt/recotem/recipes:/recipes:ro \
   -e RECOTEM_SIGNING_KEYS="${RECOTEM_SIGNING_KEYS}" \
-  ghcr.io/codelibs/recotem:2.0.0 \
+  ghcr.io/codelibs/recotem:latest \
   recotem train /recipes/my_recipe.yaml
 ```
 
@@ -147,13 +145,20 @@ docker run --rm \
 | `RECOTEM_API_KEYS` | yes (serve) | — | `<kid>:sha256:<hex>,...` |
 | `RECOTEM_HOST` | no | `127.0.0.1` | Must be `0.0.0.0` inside Docker |
 | `RECOTEM_PORT` | no | `8080` | |
-| `RECOTEM_WATCH_INTERVAL` | no | `5` | Seconds between artifact polls |
+| `RECOTEM_WATCH_INTERVAL` | no | `5` | Seconds between artifact polls (clamped 1–30) |
 | `RECOTEM_LOG_FORMAT` | no | `auto`* | `json` recommended in containers |
-| `RECOTEM_ALLOWED_HOSTS` | no | `127.0.0.1,localhost` | Comma-separated |
+| `RECOTEM_ALLOWED_HOSTS` | no | `127.0.0.1,localhost` | Comma-separated. Whitespace-only or empty input falls back to default. |
 | `RECOTEM_ALLOWED_ORIGINS` | no | `""` (deny) | Comma-separated CORS origins |
-| `RECOTEM_MAX_ARTIFACT_BYTES` | no | `2147483648` (2 GiB) | |
+| `RECOTEM_MAX_ARTIFACT_BYTES` | no | `2147483648` (2 GiB) | Per-artifact size cap |
+| `RECOTEM_MAX_DOWNLOAD_BYTES` | no | `268435456` (256 MiB) | Cap on source-path body for HTTP/HTTPS, local, and object-store reads (clamped 1 MiB–16 GiB) |
+| `RECOTEM_HTTP_TIMEOUT_SECONDS` | no | `30` | Connect/read timeout for HTTP/HTTPS source fetch (clamped 1–600) |
+| `RECOTEM_HTTP_ALLOW_PRIVATE` | no | `""` (blocked) | Set to `1`/`true`/`yes`/`on` to allow fetches to RFC1918/loopback/link-local destinations. Leave unset in production to block SSRF against cloud-metadata services. |
 | `RECOTEM_DRAIN_SECONDS` | no | `30` | SIGTERM grace window |
-| `RECOTEM_ENV` | no | `""` | Set to `development` to unlock `--insecure-no-auth` |
+| `RECOTEM_ENV` | no | `""` | Set to `development` to unlock `--insecure-no-auth` and `--dev-allow-unsigned` |
+| `RECOTEM_ARTIFACT_ROOT` | no | `""` | If set, local `output.path` must resolve under this directory (symlink-escape guard) |
+| `RECOTEM_LOCK_DIR` | no | `""` | Override directory for per-recipe training lock files. Needed when `output.path` is a remote URI (lock files must be host-local). Falls back to a temp dir under the system temp directory. |
+| `RECOTEM_METADATA_FIELD_DENY` | no | `""` | Comma-separated column names stripped from `/predict` responses after the metadata join |
+| `RECOTEM_METRICS_ENABLED` | no | `""` | Set to `1`/`true`/`yes`/`on` to enable the Prometheus `/metrics` endpoint. Requires `recotem[metrics]` extra. |
 
 *`auto` switches to `console` for an interactive TTY and `json` otherwise.
 

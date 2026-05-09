@@ -278,6 +278,184 @@ def test_fetch_http_bytes_max_redirects_exceeded(httpserver) -> None:
 
 
 # ---------------------------------------------------------------------------
+# C12. DNS rebinding TOCTOU: assert_host_public is re-called on every redirect hop
+# ---------------------------------------------------------------------------
+
+
+def test_dns_rebinding_to_private_ip_rejected_at_redirect_hop(
+    monkeypatch: pytest.MonkeyPatch, httpserver
+) -> None:
+    """Simulate DNS rebinding: first resolution returns a public IP (passing the
+    SSRF check), then a 302 redirect is issued and the redirect target host
+    re-resolves to a private IP on the second call.
+
+    The security contract is: assert_host_public is called on EVERY hop (see
+    _http_fetch.py:239).  This test verifies that contract by counting
+    getaddrinfo invocations and checking that the redirect is rejected.
+
+    Strategy:
+    - httpserver serves /rebind and issues a 302 to http://rebind.internal/secret
+    - _resolve_host_addresses is monkeypatched:
+        * call 1 (initial URL host): return a public IP
+        * call 2 (redirect target host "rebind.internal"): return a private IP
+    - The fetch must raise HttpFetchError citing a private/internal address.
+    """
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
+
+    private_redirect_url = "http://rebind.internal/secret"
+    httpserver.expect_request("/rebind").respond_with_data(
+        b"",
+        status=302,
+        headers={"Location": private_redirect_url},
+    )
+
+    import recotem._http_fetch as _mod
+
+    original_resolve = _mod._resolve_host_addresses
+    call_count = [0]
+
+    def _rebind_resolve(host: str):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # First call: initial URL host → public IP (SSRF check passes)
+            return [ipaddress.ip_address("93.184.216.34")]
+        # Second call: redirect target "rebind.internal" → private RFC1918 IP
+        return [ipaddress.ip_address("10.0.0.1")]
+
+    with patch.object(_mod, "_resolve_host_addresses", side_effect=_rebind_resolve):
+        with pytest.raises(HttpFetchError, match="private/internal"):
+            fetch_http_bytes(
+                httpserver.url_for("/rebind"),
+                timeout=5,
+                max_bytes=65536,
+                allow_private=False,
+            )
+
+    # Verify that assert_host_public was called at least twice (once per hop).
+    assert call_count[0] >= 2, (
+        f"Expected at least 2 _resolve_host_addresses calls (one per hop), "
+        f"got {call_count[0]}. The SSRF re-check on redirect hops is broken."
+    )
+
+
+# ---------------------------------------------------------------------------
+# C13. HTTPS→HTTP scheme-changing redirect is rejected
+# ---------------------------------------------------------------------------
+
+
+def test_redirect_https_to_http_rejected(httpserver) -> None:
+    """A 302 redirect from https:// to http:// (TLS downgrade) must be refused.
+
+    We mock fetch_http_bytes to simulate the redirect because pytest_httpserver
+    only provides HTTP.  The scheme-change check happens before the next hop is
+    fetched — so we can drive it through the redirect loop with a mocked opener.
+    """
+
+    import recotem._http_fetch as _mod
+    from recotem._http_fetch import HttpFetchError
+
+    http_redirect_url = "http://example.com/downgraded"
+
+    # Build a fake response that returns 302 → http:// when the "https" URL is opened.
+    class _FakeResponse:
+        status = 302
+
+        class headers:
+            @staticmethod
+            def get(key):
+                if key == "Location":
+                    return http_redirect_url
+                return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, n):
+            return b""
+
+    original_opener_open = _mod._NO_REDIRECT_OPENER.open
+
+    call_count = [0]
+
+    def _fake_open(req, timeout=None):
+        call_count[0] += 1
+        return _FakeResponse()
+
+    with patch.object(_mod._NO_REDIRECT_OPENER, "open", side_effect=_fake_open):
+        with patch.object(_mod, "assert_host_public", return_value=None):
+            with pytest.raises(HttpFetchError, match="scheme-changing redirect"):
+                fetch_http_bytes(
+                    "https://example.com/start",
+                    timeout=5,
+                    max_bytes=65536,
+                    allow_private=True,
+                )
+
+
+# ---------------------------------------------------------------------------
+# C14. Circular redirect loop (A→B→A) is detected and rejected
+# ---------------------------------------------------------------------------
+
+
+def test_redirect_circular_loop_rejected(httpserver) -> None:
+    """A circular redirect chain (A→B→A) must raise HttpFetchError with
+    'Redirect loop' message when the visited-set detects the cycle.
+    """
+    # /loop_a → /loop_b → /loop_a → detected as loop
+    httpserver.expect_request("/loop_a").respond_with_data(
+        b"",
+        status=302,
+        headers={"Location": httpserver.url_for("/loop_b")},
+    )
+    httpserver.expect_request("/loop_b").respond_with_data(
+        b"",
+        status=302,
+        headers={"Location": httpserver.url_for("/loop_a")},
+    )
+
+    with pytest.raises(HttpFetchError, match="Redirect loop"):
+        fetch_http_bytes(
+            httpserver.url_for("/loop_a"),
+            timeout=10,
+            max_bytes=65536,
+            allow_private=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# C15. IPv6 link-local address (fe80::/10) is rejected
+# ---------------------------------------------------------------------------
+
+
+def test_ipv6_link_local_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """IPv6 link-local addresses (fe80::/10) must be refused when allow_private=False.
+
+    This covers the cloud-metadata endpoint on IPv6-only deployments and
+    link-local multicast / router addresses.
+    """
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
+    with pytest.raises(HttpFetchError, match="private/internal address"):
+        assert_host_public("http://[fe80::1]/x", allow_private=False)
+
+
+# ---------------------------------------------------------------------------
+# C16. IPv6 Unique Local Address (fc00::/7, e.g. fd00::/8) is rejected
+# ---------------------------------------------------------------------------
+
+
+def test_ipv6_ula_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """IPv6 ULA addresses (fc00::/7, commonly fd00::/8) must be refused when
+    allow_private=False.  These are the IPv6 equivalent of RFC1918 private space.
+    """
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
+    with pytest.raises(HttpFetchError, match="private/internal address"):
+        assert_host_public("http://[fd00::1]/x", allow_private=False)
+
+
+# ---------------------------------------------------------------------------
 # C11. fetch_http_bytes timeout actually fires
 # ---------------------------------------------------------------------------
 

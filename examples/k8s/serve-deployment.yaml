@@ -40,21 +40,28 @@ spec:
               app.kubernetes.io/name: recotem
               app.kubernetes.io/component: serve
 
+      # Pod-level security context — only fields valid at this scope.
+      # See https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#podsecuritycontext-v1-core
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities:
-          drop:
-            - ALL
 
       containers:
         - name: serve
           image: ghcr.io/codelibs/recotem:2.0.0
           imagePullPolicy: IfNotPresent
           command: ["recotem", "serve", "--recipes", "/recipes"]
+
+          # Container-level security context — fields like
+          # allowPrivilegeEscalation / readOnlyRootFilesystem / capabilities
+          # are only valid here, not under spec.securityContext.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
 
           env:
             - name: RECOTEM_HOST
@@ -69,6 +76,13 @@ spec:
               value: "production"
             - name: RECOTEM_DRAIN_SECONDS
               value: "30"
+            # TrustedHostMiddleware defaults to "127.0.0.1,localhost".
+            # External Service / Ingress traffic arrives with a different Host
+            # header and will be rejected with HTTP 400. Set the hosts you
+            # actually expose the API under (Service DNS, Ingress hostnames).
+            # Example:
+            #   - name: RECOTEM_ALLOWED_HOSTS
+            #     value: "recotem.example.com,recotem-serve.recotem.svc.cluster.local"
             # API keys and signing keys from Secret.
             # The Secret data keys match the env var names so what the app
             # reads, what kubectl shows, and what the Secret stores are all
@@ -89,10 +103,16 @@ spec:
               containerPort: 8080
               protocol: TCP
 
+          # Probes set Host: localhost so they pass TrustedHostMiddleware
+          # (default allowlist: 127.0.0.1,localhost) regardless of what
+          # RECOTEM_ALLOWED_HOSTS is configured to for external traffic.
           readinessProbe:
             httpGet:
               path: /health
               port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
@@ -102,6 +122,9 @@ spec:
             httpGet:
               path: /health
               port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
             initialDelaySeconds: 30
             periodSeconds: 30
             timeoutSeconds: 10

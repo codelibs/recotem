@@ -35,17 +35,25 @@ spec:
         spec:
           serviceAccountName: recotem
           restartPolicy: OnFailure
+          # Pod-level security context — only fields valid at this scope.
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
             runAsGroup: 1000
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
 
           containers:
             - name: train
               image: ghcr.io/codelibs/recotem:2.0.0
               imagePullPolicy: IfNotPresent
+              # Container-level security context — fields like
+              # allowPrivilegeEscalation / readOnlyRootFilesystem are only
+              # valid here, not under spec.securityContext.
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
               # Train all recipes in /recipes.
               command:
                 - /bin/sh

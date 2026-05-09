@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import structlog
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from recotem.datasource.base import DataSourceError, FetchContext
 
@@ -27,7 +27,7 @@ class BigQueryConfig(BaseModel, extra="forbid"):
     ``@param`` placeholders for dynamic values.
     """
 
-    type: str = Field(default="bigquery", pattern=r"^bigquery$")
+    type: Literal["bigquery"] = "bigquery"
     query: str
     query_parameters: dict[str, Any] | None = None
     project: str | None = None

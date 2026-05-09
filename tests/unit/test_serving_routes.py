@@ -207,13 +207,36 @@ def test_predict_503_recipe_not_loaded() -> None:
     assert response.status_code == 503
 
 
-def test_unhealthy_recipe_returns_503_not_404() -> None:
-    registry = _make_registry_with_recipe("broken_recipe")
-    entry = registry.get("broken_recipe")
+def test_stale_but_loaded_recipe_keeps_serving() -> None:
+    """A recipe whose latest hot-swap failed must keep serving the old model.
+
+    The watcher sets ``last_load_error`` on the existing entry without
+    dropping the recommender.  ``/predict`` must continue to return 200
+    so that a bad new artifact does not take down the endpoint.
+    """
+    registry = _make_registry_with_recipe("stale_recipe")
+    entry = registry.get("stale_recipe")
     assert entry is not None
-    entry.last_load_error = "hmac mismatch"
+    entry.last_load_error = "hmac mismatch on new artifact"
     client, _ = _make_test_client(registry=registry)
-    response = client.post("/predict/broken_recipe", json={"user_id": "user1"})
+    response = client.post("/predict/stale_recipe", json={"user_id": "user1"})
+    assert response.status_code == 200
+
+
+def test_initial_load_failure_returns_503() -> None:
+    """A recipe that never loaded (``loaded=False`` stub) must return 503."""
+    registry = ModelRegistry()
+    stub = ModelEntry(
+        name="never_loaded",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+        last_load_error="initial load failed: bad header",
+    )
+    registry.replace("never_loaded", stub)
+    client, _ = _make_test_client(registry=registry)
+    response = client.post("/predict/never_loaded", json={"user_id": "user1"})
     assert response.status_code == 503
 
 

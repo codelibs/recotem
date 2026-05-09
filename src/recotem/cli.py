@@ -459,11 +459,35 @@ def validate(
 
 @app.command()
 def schema() -> None:
-    """Emit the JSON Schema for the Recipe model (for IDE integration)."""
+    """Emit the JSON Schema for the Recipe model (for IDE integration).
+
+    ``Recipe.source`` is declared as ``Any`` to break the circular import
+    between recipe/models.py and datasource/registry.py, so a naive
+    ``Recipe.model_json_schema()`` would emit an empty ``{"title": "Source"}``
+    object — useless for IDE autocompletion.  This command rebuilds the
+    schema against a runtime subclass whose ``source`` field is the
+    discriminated union of every registered DataSource ``Config`` (see
+    ``build_source_config_union()``), so CSV / Parquet / BigQuery /
+    plugin-provided sources all appear with their full field definitions.
+    """
+    # Configure logging first so that ``datasource_plugin_registered`` debug
+    # lines emitted during plugin discovery are filtered to INFO+ and do not
+    # contaminate the JSON schema written to stdout.
+    _configure_logging_from_env()
+
     try:
+        from pydantic import create_model
+
+        from recotem.datasource.registry import build_source_config_union
         from recotem.recipe.models import Recipe
 
-        schema_dict = Recipe.model_json_schema()
+        source_union = build_source_config_union()
+        schema_recipe = create_model(
+            "Recipe",
+            __base__=Recipe,
+            source=(source_union, ...),
+        )
+        schema_dict = schema_recipe.model_json_schema()
         typer.echo(json.dumps(schema_dict, indent=2))
     except Exception as exc:
         _exit(_EXIT_UNKNOWN, f"Schema generation failed: {exc}")

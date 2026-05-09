@@ -209,6 +209,24 @@ spec:
 
 Expose externally via an Ingress or a LoadBalancer. Do not expose the pod port directly without a TLS-terminating proxy in front.
 
+> ⚠️ **`RECOTEM_ALLOWED_HOSTS` and Ingress.** TrustedHostMiddleware defaults
+> to `127.0.0.1,localhost` when `RECOTEM_ALLOWED_HOSTS` is empty — that is
+> just enough for the in-pod liveness/readiness probes (which use a
+> `Host: localhost` header). Any request reaching the pod under a different
+> hostname — typically the Ingress host — will return **400 Bad Request**.
+>
+> The bundled Helm chart (`helm/recotem/templates/deployment.yaml`)
+> auto-derives `RECOTEM_ALLOWED_HOSTS` from `ingress.hosts[*].host` when
+> `ingress.enabled=true`. If you bypass the chart, expose the service
+> under additional hostnames (internal Service DNS, custom LoadBalancer),
+> or run `helm template` and inject the env yourself, set the env var
+> explicitly:
+>
+> ```yaml
+> - name: RECOTEM_ALLOWED_HOSTS
+>   value: "api.example.com,api-internal.svc.cluster.local"
+> ```
+
 ## Recipe delivery patterns
 
 ### ConfigMap (static recipes)

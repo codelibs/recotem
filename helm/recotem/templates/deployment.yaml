@@ -58,11 +58,32 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
 
           env:
+            {{- /* RECOTEM_ALLOWED_HOSTS is rendered explicitly below so we can
+                   merge ingress hosts into it.  Skip it in the loop. */}}
             {{- range $key, $value := .Values.env }}
-            {{- if $value }}
+            {{- if and $value (ne $key "RECOTEM_ALLOWED_HOSTS") }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+            {{- end }}
+            {{- /* RECOTEM_ALLOWED_HOSTS:
+                   - explicit value in .Values.env wins (operator override),
+                   - else derive from ingress.hosts[*].host when ingress is enabled,
+                     so TrustedHostMiddleware does not 400 every external request,
+                   - else omit and let the app default ("127.0.0.1,localhost") apply. */}}
+            {{- $allowed := index .Values.env "RECOTEM_ALLOWED_HOSTS" }}
+            {{- if not $allowed }}
+            {{- if and .Values.ingress.enabled .Values.ingress.hosts }}
+            {{- $hosts := list }}
+            {{- range .Values.ingress.hosts }}
+            {{- if .host }}{{ $hosts = append $hosts .host }}{{ end }}
+            {{- end }}
+            {{- $allowed = join "," $hosts }}
+            {{- end }}
+            {{- end }}
+            {{- if $allowed }}
+            - name: RECOTEM_ALLOWED_HOSTS
+              value: {{ $allowed | quote }}
             {{- end }}
             # API keys and signing keys from Kubernetes Secret.
             # Secret data keys match the env var names (see values.yaml).

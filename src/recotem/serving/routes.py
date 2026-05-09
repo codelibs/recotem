@@ -113,22 +113,18 @@ def make_router(
 
         try:
             entry = registry.get(name)
-            if entry is None or entry.recommender is None:
+            # Only refuse predictions when the recipe has no usable model.
+            # ``last_load_error`` alone is *not* a 503 condition: when a fresh
+            # artifact fails to verify the watcher leaves the previous model
+            # loaded and only flags ``last_load_error`` (see watcher._mark_error
+            # — "stale-but-loaded keeps serving").  Surfacing that as 503 here
+            # would defeat the hot-swap availability contract.
+            if entry is None or not entry.loaded or entry.recommender is None:
                 raise HTTPException(
                     status_code=503,
                     detail={
                         "detail": f"Recipe '{name}' is not loaded or unhealthy",
                         "code": "recipe_unavailable",
-                    },
-                )
-            if entry.last_load_error is not None:
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "detail": (
-                            f"Recipe '{name}' is unhealthy: {entry.last_load_error}"
-                        ),
-                        "code": "recipe_unhealthy",
                     },
                 )
 

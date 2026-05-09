@@ -80,7 +80,15 @@ env:
   RECOTEM_ENV: "production"
   RECOTEM_MAX_ARTIFACT_BYTES: ""        # empty = default 2 GiB
   RECOTEM_ALLOWED_ORIGINS: ""           # empty = deny CORS
-  RECOTEM_ALLOWED_HOSTS: ""             # empty = default localhost only
+  # RECOTEM_ALLOWED_HOSTS gates TrustedHostMiddleware.  Leave empty when
+  # ingress.enabled=true: the chart auto-derives the value from
+  # ingress.hosts[*].host so external requests do not 400.  Set explicitly
+  # (comma-separated) to override — required when traffic reaches the pod
+  # under a hostname not listed in ingress.hosts (e.g. internal Service DNS,
+  # external LoadBalancer, ServiceMonitor scraping a custom hostname).
+  # The app's own default ("127.0.0.1,localhost") only matches probes; with
+  # an Ingress in front it must be widened.
+  RECOTEM_ALLOWED_HOSTS: ""
   RECOTEM_DRAIN_SECONDS: "30"
 
 # ── secrets ───────────────────────────────────────────────────────────────────

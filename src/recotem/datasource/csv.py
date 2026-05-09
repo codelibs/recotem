@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Literal
 from urllib.parse import urlparse
 
 import structlog
@@ -68,7 +68,10 @@ def _fetch_http_bytes(
 class CSVConfig(BaseModel, extra="forbid"):
     """Configuration schema for CSV sources."""
 
-    type: str = Field(default="csv", pattern=r"^csv$")
+    # ``Literal`` (not ``str`` + pattern) is required for the discriminated-
+    # union JSON Schema emitted by ``recotem schema``: pydantic refuses to
+    # discriminate on a non-Literal field.
+    type: Literal["csv"] = "csv"
     path: str
     delimiter: str = ","
     encoding: str = "utf-8"
@@ -250,7 +253,7 @@ class CSVSource:
 class ParquetConfig(BaseModel, extra="forbid"):
     """Configuration schema for Parquet sources."""
 
-    type: str = Field(default="parquet", pattern=r"^parquet$")
+    type: Literal["parquet"] = "parquet"
     path: str
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 

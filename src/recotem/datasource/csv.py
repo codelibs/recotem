@@ -14,12 +14,17 @@ from recotem._http_fetch import (
 )
 from recotem._http_fetch import (
     HttpFetchError,
+    assert_host_public,
     fetch_http_bytes,
     infer_compression,
     redact_url_userinfo,
     verify_sha256,
 )
-from recotem.config import get_http_timeout_seconds, get_max_download_bytes
+from recotem.config import (
+    get_http_allow_private,
+    get_http_timeout_seconds,
+    get_max_download_bytes,
+)
 from recotem.datasource.base import DataSourceError, FetchContext
 
 if TYPE_CHECKING:
@@ -277,6 +282,13 @@ class ParquetSource:
                 "pandas is required for ParquetSource. "
                 "Install it with: pip install recotem"
             ) from exc
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError as exc:
+            raise DataSourceError(
+                "pyarrow is required for ParquetSource. "
+                "Install it with: pip install recotem"
+            ) from exc
         self._config = config
 
     def probe(self) -> None:
@@ -396,7 +408,24 @@ def _probe_fsspec_path(path: str, *, kind: str) -> None:
     without loading any data.  Object-store backends require the same auth /
     network configuration to ``exists`` as to ``read``, so a successful exists
     check is a meaningful connectivity probe.
+
+    For ``http://`` / ``https://`` paths, calling ``fsspec.exists()`` would
+    bypass the SSRF guard, byte cap, sha256 check, and redirect-scheme policy
+    implemented in :func:`recotem._http_fetch.fetch_http_bytes`.  Instead,
+    only the host-public assertion is run here; the remaining controls fire at
+    actual fetch time.
     """
+    scheme = urlparse(path).scheme.lower()
+    if scheme in _NETWORK_SCHEMES:
+        try:
+            assert_host_public(path, allow_private=get_http_allow_private())
+        except HttpFetchError as exc:
+            raise DataSourceError(f"{kind} HTTP probe refused: {exc}") from exc
+        # Full byte-content validation (sha256, byte cap, redirect policy) runs
+        # at fetch time. Skipping fsspec.exists() here keeps `recotem validate`
+        # from bypassing _http_fetch's controls (CVE-class SSRF guard).
+        return
+
     try:
         import fsspec
     except ImportError as exc:

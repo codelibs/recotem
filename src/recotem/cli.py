@@ -145,6 +145,18 @@ def train(
             help="Extra KEY=VALUE pairs for recipe env expansion.",
         ),
     ] = None,
+    run_id_opt: Annotated[
+        str | None,
+        typer.Option(
+            "--run-id",
+            help=(
+                "Stable run identifier. Reuse the same value across "
+                "invocations to resume a persistent Optuna study "
+                "(requires `tuning.storage_path` set in the recipe). "
+                "Defaults to a fresh random id."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Fetch data, tune hyperparameters, train, and sign a model artifact."""
     _configure_logging_from_env()
@@ -172,9 +184,19 @@ def train(
     except Exception as exc:
         _exit(_map_exception_to_exit(exc), f"Recipe error: {exc}")
 
-    import uuid as _uuid
+    if run_id_opt is not None:
+        import re as _re
 
-    run_id = _uuid.uuid4().hex[:12]
+        if not _re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", run_id_opt):
+            _exit(
+                _EXIT_RECIPE,
+                "--run-id must match [A-Za-z0-9_.-]{1,64}.",
+            )
+        run_id = run_id_opt
+    else:
+        import uuid as _uuid
+
+        run_id = _uuid.uuid4().hex[:12]
 
     try:
         from recotem.training.pipeline import (

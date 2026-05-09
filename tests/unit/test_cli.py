@@ -314,6 +314,44 @@ def test_train_exit3_when_fetch_raises_DataSourceError(
     )
 
 
+# ---------------------------------------------------------------------------
+# recotem train --run-id validation
+# ---------------------------------------------------------------------------
+
+
+def test_train_run_id_rejects_path_traversal(tmp_path: Path, monkeypatch) -> None:
+    """train --run-id with a path-traversal value exits 2 (RecipeError)."""
+    yaml_path = _minimal_recipe_yaml(tmp_path, "run_id_escape")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    result = runner.invoke(app, ["train", str(yaml_path), "--run-id", "../escape"])
+    assert result.exit_code == 2
+
+
+def test_train_run_id_rejects_empty_string(tmp_path: Path, monkeypatch) -> None:
+    """train --run-id with an empty string exits 2 (RecipeError)."""
+    yaml_path = _minimal_recipe_yaml(tmp_path, "run_id_empty")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    result = runner.invoke(app, ["train", str(yaml_path), "--run-id", ""])
+    assert result.exit_code == 2
+
+
+def test_train_run_id_rejects_oversized_value(tmp_path: Path, monkeypatch) -> None:
+    """train --run-id with a value longer than 64 chars exits 2."""
+    yaml_path = _minimal_recipe_yaml(tmp_path, "run_id_long")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    oversized = "a" * 65
+    result = runner.invoke(app, ["train", str(yaml_path), "--run-id", oversized])
+    assert result.exit_code == 2
+
+
+def test_train_run_id_rejects_special_chars(tmp_path: Path, monkeypatch) -> None:
+    """train --run-id rejects values with shell-special characters."""
+    yaml_path = _minimal_recipe_yaml(tmp_path, "run_id_special")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    result = runner.invoke(app, ["train", str(yaml_path), "--run-id", "bad;id"])
+    assert result.exit_code == 2
+
+
 def test_map_exception_to_exit_DataSourceError_is_exit3() -> None:
     """_map_exception_to_exit must return 3 for DataSourceError.
 

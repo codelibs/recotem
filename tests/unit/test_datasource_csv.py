@@ -128,3 +128,55 @@ def test_parquet_missing_file_raises_DataSourceError(tmp_path: Path) -> None:
     source = ParquetSource(cfg)
     with pytest.raises(DataSourceError, match="not found"):
         source.fetch(_ctx())
+
+
+# ---------------------------------------------------------------------------
+# HTTP probe SSRF guard
+# ---------------------------------------------------------------------------
+
+
+def test_csv_probe_refuses_private_http_url(monkeypatch) -> None:
+    """CSVSource.probe() must raise DataSourceError for private-IP HTTP URLs.
+
+    assert_host_public() only does a DNS lookup (no network I/O beyond that),
+    so this test does not make any HTTP connection.
+    """
+    monkeypatch.delenv("RECOTEM_HTTP_ALLOW_PRIVATE", raising=False)
+    cfg = CSVConfig(type="csv", path="http://127.0.0.1/foo.csv")
+    source = CSVSource(cfg)
+    with pytest.raises(DataSourceError, match="HTTP probe refused"):
+        source.probe()
+
+
+def test_parquet_probe_refuses_private_http_url(monkeypatch) -> None:
+    """ParquetSource.probe() must raise DataSourceError for private-IP HTTP URLs."""
+    monkeypatch.delenv("RECOTEM_HTTP_ALLOW_PRIVATE", raising=False)
+    cfg = ParquetConfig(type="parquet", path="http://127.0.0.1/data.parquet")
+    source = ParquetSource(cfg)
+    with pytest.raises(DataSourceError, match="HTTP probe refused"):
+        source.probe()
+
+
+def test_csv_probe_http_allow_private_skips_fsspec(monkeypatch) -> None:
+    """With RECOTEM_HTTP_ALLOW_PRIVATE=1, probe() must return without calling fsspec.
+
+    Verifies that fsspec.core.url_to_fs is never invoked for HTTP/HTTPS paths —
+    not even in the "allow private" code path — confirming the early return.
+    """
+    import fsspec.core
+
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "1")
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("fsspec.core.url_to_fs must not be called for HTTP URLs")
+
+    monkeypatch.setattr(fsspec.core, "url_to_fs", _fail_if_called)
+
+    cfg = CSVConfig(
+        type="csv",
+        path="http://127.0.0.1/foo.csv",
+        sha256="a" * 64,
+    )
+    source = CSVSource(cfg)
+    # Should return without error and without touching fsspec
+    source.probe()

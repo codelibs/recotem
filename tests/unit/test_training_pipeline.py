@@ -430,6 +430,70 @@ def test_per_algorithm_trials_over_budget_scaled_down() -> None:
     assert all(v >= 1 for v in budgets.values())
 
 
+def test_per_algorithm_trials_enqueues_each_algo_to_guarantee_budget(
+    tmp_path: Path,
+) -> None:
+    """Regression: per_algorithm_trials must guarantee each algorithm
+    receives its budgeted number of trials. Previously the search relied on
+    TPESampler's categorical choice + post-hoc pruning, which let the
+    sampler keep picking a saturated algorithm and waste slots that were
+    nominally allocated to other algorithms. Fix: pre-enqueue per-class
+    trials so Optuna runs exactly the requested distribution."""
+    import numpy as np
+    import scipy.sparse as sps
+
+    from recotem.training.errors import SearchError
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+        mock_study = MagicMock()
+        # Fresh study: no prior trials. After optimize() runs (mocked, no-op),
+        # the enqueue loop has already populated the queue; we then trigger
+        # SearchError by leaving trials empty so we can assert enqueue calls
+        # without needing a fully-faked completed trial flow.
+        mock_study.trials = []
+        mock_study.optimize = MagicMock()
+        mock_study_fn.return_value = mock_study
+
+        X = sps.csr_matrix(np.ones((10, 5)))
+        evaluator = MagicMock()
+
+        with ProgressReporter(
+            n_trials=10, recipe_name="test", run_id="run-enqueue"
+        ) as rep:
+            with pytest.raises(SearchError):
+                run_search(
+                    algorithms=["IALS", "TopPop"],
+                    X_tv_train=X,
+                    evaluator=evaluator,
+                    n_trials=10,
+                    per_algorithm_trials={"IALS": 7, "TopPop": 3},
+                    per_trial_timeout_seconds=None,
+                    timeout_seconds=None,
+                    parallelism=1,
+                    storage_path="",
+                    random_seed=42,
+                    reporter=rep,
+                    recipe_name="test",
+                    run_id="run-enqueue",
+                )
+
+        # Collect every enqueue_trial call's first positional arg.
+        enqueued = [
+            call.args[0]["recommender_class_name"]
+            for call in mock_study.enqueue_trial.call_args_list
+        ]
+        ials_count = enqueued.count("IALSRecommender")
+        toppop_count = enqueued.count("TopPopRecommender")
+        assert ials_count == 7, (
+            f"expected 7 IALS trials enqueued, got {ials_count}: {enqueued}"
+        )
+        assert toppop_count == 3, (
+            f"expected 3 TopPop trials enqueued, got {toppop_count}: {enqueued}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # one structured log per trial
 # ---------------------------------------------------------------------------

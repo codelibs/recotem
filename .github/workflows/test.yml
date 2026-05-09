@@ -155,10 +155,12 @@ jobs:
             FAIL=1
           fi
 
-          # Pattern 3: literal signing key env var assignment
-          if grep -rEq 'RECOTEM_SIGNING_KEY=' "$LOG_DIR"; then
-            echo "FAIL: Found RECOTEM_SIGNING_KEY= in log output."
-            grep -rEn 'RECOTEM_SIGNING_KEY=' "$LOG_DIR" | head -5
+          # Pattern 3: literal signing key env var assignment.
+          # Matches both the historical singular spelling and the actual
+          # variable name RECOTEM_SIGNING_KEYS (plural).
+          if grep -rEq 'RECOTEM_SIGNING_KEYS?=' "$LOG_DIR"; then
+            echo "FAIL: Found RECOTEM_SIGNING_KEY(S)= in log output."
+            grep -rEn 'RECOTEM_SIGNING_KEYS?=' "$LOG_DIR" | head -5
             FAIL=1
           fi
 
@@ -166,6 +168,16 @@ jobs:
           if grep -rEq 'AWS_SECRET' "$LOG_DIR"; then
             echo "FAIL: Found AWS_SECRET in log output."
             grep -rEn 'AWS_SECRET' "$LOG_DIR" | head -5
+            FAIL=1
+          fi
+
+          # Pattern 5: bare signing-key entry (kid:<hex64>) leaked outside
+          # an env-var assignment. Signing keys use the format
+          # ``<kid>:<hex64>``; without this pattern, a leaked value with
+          # no surrounding variable name slips past patterns 1 and 3.
+          if grep -rEqi '\b[A-Za-z0-9_.-]+:[0-9a-f]{64}\b' "$LOG_DIR"; then
+            echo "FAIL: Found bare <kid>:<hex64> entry in log output."
+            grep -rEni '\b[A-Za-z0-9_.-]+:[0-9a-f]{64}\b' "$LOG_DIR" | head -5
             FAIL=1
           fi
 

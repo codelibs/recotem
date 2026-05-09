@@ -17,8 +17,10 @@ lock on Windows.  The spec targets Linux/macOS (Docker), so POSIX is primary.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -35,6 +37,20 @@ class LockContestedError(Exception):
 
 
 _LOCAL_SCHEMES = {"", "file"}
+
+
+def _remote_lock_path(output_str: str) -> Path:
+    """Derive a host-local lock-file path for a remote-scheme output URI.
+
+    ``Path("s3://bucket/key.recotem.lock")`` resolves to a relative path
+    rooted at the current working directory, which fails under Helm's
+    ``readOnlyRootFilesystem: true``. Map remote URIs to a stable path
+    under ``$RECOTEM_LOCK_DIR`` (preferred) or the system temp dir.
+    """
+    base_env = os.environ.get("RECOTEM_LOCK_DIR", "").strip()
+    base = Path(base_env) if base_env else Path(tempfile.gettempdir()) / "recotem-locks"
+    digest = hashlib.sha256(output_str.encode("utf-8")).hexdigest()[:32]
+    return base / f"{digest}.lock"
 
 
 @contextlib.contextmanager
@@ -77,22 +93,26 @@ def recipe_lock(
     output_str = str(output_path)
     scheme = urlparse(output_str).scheme.lower() if "://" in output_str else ""
     if scheme not in _LOCAL_SCHEMES:
-        # ``flock`` is a host-local primitive. For remote outputs the lock
-        # file is created at a host-local path derived from the URI and
-        # cannot coordinate writers running on different hosts/pods. Emit
-        # a structured warning so operators don't assume cross-host mutual
-        # exclusion. See docs/operations.md "Concurrent training" section.
+        # ``flock`` is a host-local primitive. For remote outputs derive a
+        # stable lock path under a writable host-local dir (Helm's root fs
+        # is read-only; ``Path("s3://...lock")`` would resolve under cwd
+        # and fail). The lock still cannot coordinate writers across hosts
+        # — surface that via the structured warning so operators don't
+        # assume distributed mutual exclusion. See
+        # docs/operations.md "Concurrent training" section.
+        lock_path = _remote_lock_path(output_str)
         logger.warning(
             "recipe_lock_local_only",
             scheme=scheme,
             output_path=output_str,
+            lock_path=str(lock_path),
             advice=(
                 "per-recipe flock is host-local; ensure single-writer via the "
                 "scheduler (CronJob concurrencyPolicy=Forbid, Argo mutex, etc.)"
             ),
         )
-
-    lock_path = Path(output_str + ".lock")
+    else:
+        lock_path = Path(output_str + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     if sys.platform == "win32":

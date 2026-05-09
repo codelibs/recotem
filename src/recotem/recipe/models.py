@@ -82,7 +82,18 @@ class TrainingConfig(BaseModel, extra="forbid"):
     cutoff: int = Field(default=20, ge=1)
     n_trials: int = Field(default=40, ge=1)
     per_algorithm_trials: dict[str, int] | None = None
-    per_trial_timeout_seconds: int | None = Field(default=None, ge=1)
+    per_trial_timeout_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Soft per-trial wall-clock cap. The trial runs in a daemon "
+            "thread; on timeout Optuna prunes the trial but the underlying "
+            "training thread keeps running until it finishes naturally "
+            "(CPU/memory remain spent). Use parallelism=1 and a generous "
+            "timeout, or rely on TrainingConfig.timeout_seconds for a hard "
+            "overall cap. See docs/recipe-reference.md."
+        ),
+    )
     timeout_seconds: int | None = Field(default=None, ge=1)
     parallelism: int = Field(default=1, ge=1)
     storage_path: str = ""

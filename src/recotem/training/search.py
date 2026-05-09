@@ -188,6 +188,29 @@ def run_search(
         load_if_exists=True,
     )
 
+    # Pre-enqueue trials per algorithm so each algorithm receives exactly
+    # its budgeted slot count. Without this, TPESampler can keep picking a
+    # saturated class once its budget is hit; the in-objective budget
+    # check then prunes those trials, but the global ``n_trials`` budget
+    # is consumed regardless, leaving other algorithms underused. Enqueued
+    # trials skip sampling for ``recommender_class_name`` and run in
+    # queued order. For resumed studies (load_if_exists), subtract any
+    # already-completed trials per class so we don't double-allocate.
+    if len(class_names) > 1:
+        already_completed: dict[str, int] = dict.fromkeys(class_names, 0)
+        for t in study.trials:
+            if t.state == optuna.trial.TrialState.COMPLETE:
+                cls = _trial_class(t, multi_algo=True)
+                if cls in already_completed:
+                    already_completed[cls] += 1
+        for cname in class_names:
+            remaining = max(0, budgets.get(cname, 0) - already_completed[cname])
+            for _ in range(remaining):
+                study.enqueue_trial(
+                    {"recommender_class_name": cname},
+                    skip_if_exists=False,
+                )
+
     has_per_trial_timeout = per_trial_timeout_seconds is not None
 
     trial_progress_cb = make_trial_callback(reporter)

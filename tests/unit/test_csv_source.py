@@ -235,6 +235,43 @@ def test_http_csv_fetch_follows_one_redirect() -> None:
         thread.join(timeout=2)
 
 
+def test_http_csv_fetch_scheme_changing_redirect_refused() -> None:
+    """A 302 that swaps http⇄https is refused (no TLS downgrade / surprise upgrade).
+
+    The starting URL is http://, so a redirect to https:// must be rejected
+    before any request is made to the new origin.  This guards against the
+    symmetric https→http TLS-strip case as well: the rejection compares the
+    original scheme to the new one rather than just allow-listing the network
+    schemes.
+    """
+
+    class SchemeChangeHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args, **kwargs) -> None:
+            return
+
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", "https://example.invalid/leaked.csv")
+            self.end_headers()
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), SchemeChangeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        cfg = CSVConfig(
+            type="csv",
+            path=f"http://{host}:{port}/data.csv",
+            sha256="0" * 64,
+        )
+        with pytest.raises(DataSourceError, match="scheme-changing"):
+            CSVSource(cfg).fetch(_ctx())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_http_csv_fetch_redirect_loop_detected() -> None:
     """A redirect cycle must trip the visited-set guard."""
 

@@ -338,28 +338,36 @@ def inspect(
     """
     _configure_logging_from_env()
 
+    import fsspec
+
+    from recotem.artifact.format import (
+        DEFAULT_MAX_PAYLOAD_BYTES,
+        ArtifactError,
+        parse_header_from_bytes,
+    )
+    from recotem.artifact.io import resolve_artifact_pointer
+
+    max_bytes = DEFAULT_MAX_PAYLOAD_BYTES
     try:
-        data = artifact.read_bytes()
+        # Bounded read so a 100 GiB file cannot OOM the CLI before the cap
+        # check fires; matches the serving-watcher protocol.
+        fs, resolved_path = fsspec.core.url_to_fs(str(artifact))
+        with fs.open(resolved_path, "rb") as fh:
+            data = fh.read(max_bytes + 1)
     except OSError as exc:
         _exit(_EXIT_ARTIFACT, f"Cannot read artifact '{artifact}': {exc}")
 
     try:
-        import fsspec
-
-        from recotem.artifact.format import (
-            DEFAULT_MAX_PAYLOAD_BYTES,
-            parse_header_from_bytes,
-        )
-        from recotem.artifact.io import resolve_artifact_pointer
-
         # Resolve pointer files written by the default ``append_sha`` versioning
         # mode so users can inspect via the recipe's output.path directly.
-        fs, resolved_path = fsspec.core.url_to_fs(str(artifact))
-        data, _resolved = resolve_artifact_pointer(
-            data, resolved_path, fs, DEFAULT_MAX_PAYLOAD_BYTES
-        )
+        data, _resolved = resolve_artifact_pointer(data, resolved_path, fs, max_bytes)
 
-        hdr = parse_header_from_bytes(data, DEFAULT_MAX_PAYLOAD_BYTES)
+        if len(data) > max_bytes:
+            raise ArtifactError(
+                f"artifact size {len(data)} exceeds cap {max_bytes}; refusing to load"
+            )
+
+        hdr = parse_header_from_bytes(data, max_bytes)
     except Exception as exc:
         _exit(_EXIT_ARTIFACT, f"Artifact parse failed: {exc}")
 

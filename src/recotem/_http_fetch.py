@@ -5,9 +5,10 @@ These helpers enforce the documented controls on every HTTP/HTTPS download:
 * sha256 byte-content verification (constant-time compare via :mod:`hmac`).
 * ``RECOTEM_MAX_DOWNLOAD_BYTES`` cap, streamed in 1 MiB chunks.
 * ``RECOTEM_HTTP_TIMEOUT_SECONDS`` connect/read timeout.
-* Manual redirect loop with a visited-set, ``MAX_REDIRECTS`` limit, and
-  scheme allow-list (``http`` / ``https`` only) so 302→file:// SSRF tricks
-  are refused.
+* Manual redirect loop with a visited-set, ``MAX_REDIRECTS`` limit, scheme
+  allow-list (``http`` / ``https`` only), and same-scheme constraint against
+  the original request — 302→file:// SSRF tricks and https→http TLS
+  downgrades are both refused.
 * URL userinfo redaction in log messages.
 
 All public helpers raise :class:`HttpFetchError` on failure; callers are
@@ -124,6 +125,7 @@ def fetch_http_bytes(
     correlation IDs such as recipe name, run id).
     """
     safe_url = redact_url_userinfo(url)
+    original_scheme = urlparse(url).scheme.lower()
     redirects = 0
     current_url = url
     visited: set[str] = set()
@@ -160,6 +162,17 @@ def fetch_http_bytes(
                             f"Refusing redirect from {safe_url} to disallowed "
                             f"scheme '{new_scheme}://' "
                             f"({redact_url_userinfo(current_url)})"
+                        )
+                    if new_scheme != original_scheme:
+                        # Reject scheme-changing redirects so an https:// pin
+                        # cannot be silently downgraded to http:// (TLS strip)
+                        # nor an http:// source promoted to https:// in a way
+                        # the recipe author did not opt into.
+                        raise HttpFetchError(
+                            f"Refusing scheme-changing redirect from "
+                            f"{safe_url} ({original_scheme}://) to "
+                            f"{redact_url_userinfo(current_url)} "
+                            f"({new_scheme}://)"
                         )
                     logger.info(
                         f"{log_event}_redirect",

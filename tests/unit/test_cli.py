@@ -230,6 +230,26 @@ def test_inspect_exit5_on_unknown_kid(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 5
 
 
+def test_inspect_caps_oversized_read(tmp_path: Path, monkeypatch) -> None:
+    """inspect refuses files exceeding the artifact size cap without pulling
+    them fully into memory.
+
+    The cap is monkeypatched down so the test can use a tiny file rather than
+    allocate gigabytes.  Guards the fix that swapped the CLI's unbounded
+    ``Path.read_bytes()`` for a bounded ``fh.read(max_bytes + 1)``.
+    """
+    artifact_path = tmp_path / "huge.recotem"
+    artifact_path.write_bytes(b"A" * 1024)
+
+    monkeypatch.setattr(
+        "recotem.artifact.format.DEFAULT_MAX_PAYLOAD_BYTES", 16, raising=True
+    )
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+    assert result.exit_code == 5
+    assert "exceeds cap" in (result.stdout + (result.stderr or ""))
+
+
 # ---------------------------------------------------------------------------
 # recotem train: exit code smoke tests
 # ---------------------------------------------------------------------------

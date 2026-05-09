@@ -58,6 +58,9 @@ export RECOTEM_SIGNING_KEYS="e2e-key:${SIGNING_KEY_HEX}"
 if [[ "${TUTORIAL_MODE}" == "1" ]]; then
     RECIPE="examples/tutorial-purchase-log/recipe.yaml"
     RECIPE_NAME="purchase_log"
+    # The tutorial CSV uses numeric user_ids ("1", "2", ...) — match the
+    # documented curl example in docs/getting-started.md.
+    PREDICT_USER_ID="1"
     # The tutorial recipe writes to ./artifacts/purchase_log.recotem (CWD-relative).
     mkdir -p artifacts
 else
@@ -98,6 +101,8 @@ output:
 RECIPE
 
     RECIPE="${WORKDIR}/recipe.yaml"
+    # Synthetic data above generates user IDs of the form "u0".."u99".
+    PREDICT_USER_ID="u0"
 fi
 
 # ---------------------------------------------------------------------------
@@ -169,7 +174,7 @@ echo "[e2e] Calling /predict/${RECIPE_NAME}..."
 PREDICT=$(curl -sf \
     -X POST \
     -H "Content-Type: application/json" \
-    -d '{"user_id": "u0", "cutoff": 5}' \
+    -d "{\"user_id\": \"${PREDICT_USER_ID}\", \"cutoff\": 5}" \
     "http://127.0.0.1:${SERVE_PORT}/predict/${RECIPE_NAME}")
 echo "[e2e] /predict response: ${PREDICT}"
 

@@ -236,10 +236,11 @@ def read_artifact(
     """
     fs, resolved_path = fsspec.core.url_to_fs(fs_path)
 
-    # Read all bytes once
+    # Read at most max_bytes+1 in a single call: caps memory before any cap
+    # check while still letting us tell "exactly at the cap" from "over it".
     try:
         with fs.open(resolved_path, "rb") as fh:
-            raw = fh.read()
+            raw = fh.read(max_bytes + 1)
     except FileNotFoundError as exc:
         raise ArtifactError(f"artifact not found: {fs_path}") from exc
     except OSError as exc:
@@ -317,7 +318,7 @@ def resolve_artifact_pointer(
 
     try:
         with fs.open(target_path, "rb") as fh:
-            artifact_raw = fh.read()
+            artifact_raw = fh.read(max_bytes + 1)
     except FileNotFoundError as exc:
         raise ArtifactError(
             f"pointer {path!r} references missing artifact {target_path!r}"

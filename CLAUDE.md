@@ -85,9 +85,10 @@ uv run recotem train examples/tutorial-purchase-log/recipe.yaml
 uv run recotem serve --recipes ./recipes/ --port 8080
 
 # Predict
-curl -H "X-API-Key: <plaintext>" \
-     -d '{"user_id":"u1","cutoff":10}' \
-     http://localhost:8080/predict/news_articles
+curl -X POST http://localhost:8080/predict/news_articles \
+     -H "X-API-Key: <plaintext>" \
+     -H "Content-Type: application/json" \
+     -d '{"user_id":"u1","cutoff":10}'
 ```
 
 ## Recipe model
@@ -175,7 +176,7 @@ uv run ruff format --check src tests
 
 `.github/workflows/`:
 - `test.yml` — ruff + pytest unit/integration + e2e + secrets-in-logs grep
-- `release.yml` — build + push multi-arch image to ghcr.io on main + tags;
+- `docker.yml` — build + push multi-arch image to ghcr.io on main + tags;
   build-only on PRs
 - `codeql.yml` — Python CodeQL, push/PR + weekly schedule
 

@@ -7,7 +7,7 @@ A recipe is a YAML file that defines what data to fetch, how to train, and where
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | yes | Endpoint name. Pattern: `^[A-Za-z0-9_-]{1,64}$`. Becomes `/predict/{name}`. |
-| `source` | object | yes | Data source config. `type` field is the discriminator. |
+| `source` | object | yes | Data source config. `type` field is the discriminator (`csv`, `parquet`, `bigquery`, or any plugin). Validated in two stages: the rest of the recipe is parsed first, then the source dict is dispatched to the plugin's `Config` class. As a result, errors in `source.*` surface *after* errors elsewhere in the recipe; an unknown `source.type` raises a `DataSourceError` listing all registered type names. |
 | `schema` | object | yes | Column mapping. |
 | `cleansing` | object | no | Data quality gates. |
 | `item_metadata` | object | no | Metadata joined into predict responses. |
@@ -37,13 +37,13 @@ source:
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `path` | string | required | Local path, `s3://`, `gs://`, or `az://`. See [Path rules](#path-rules). |
-| `delimiter` | string | `","` | Single character. CSV only. |
+| `delimiter` | string | `","` | Passed straight to pandas `sep=`. Multi-character separators trigger pandas' Python parser (slower); a single character uses the C parser. CSV only. |
 | `encoding` | string | `"utf-8"` | Any encoding accepted by pandas. |
 | `header` | int | `0` | Row number of the header. |
-| `dtype` | map | `{}` | Key = column name, value = pandas dtype string. |
+| `dtype` | map | `null` | Key = column name, value = pandas dtype string. |
 | `sha256` | string | optional (required when `path` is `http://` or `https://`) | 64-char lowercase hex; verified against the fetched bytes; mismatch raises `DataSourceError` |
 
-For Parquet files use `type: parquet`. The `delimiter`, `encoding`, and `header` fields are ignored.
+For Parquet files use `type: parquet`. Only `path` and (optional) `sha256` are accepted — `delimiter`, `encoding`, `header`, and `dtype` are not valid keys on a parquet source and will fail recipe load.
 
 ### `source.type: bigquery`
 
@@ -64,7 +64,7 @@ source:
 |-------|------|---------|-------|
 | `query` | string | required | SQL. Trusted code — not env-expanded. Use `@param` for dynamic values. |
 | `query_parameters` | map | `{}` | BigQuery named parameters bound to `@name` placeholders. |
-| `project` | string | `""` | GCP project ID. Falls back to ADC ambient project. |
+| `project` | string | `null` | GCP project ID. Falls back to ADC ambient project. |
 
 Install the extra: `pip install "recotem[bigquery]"`.
 
@@ -104,9 +104,9 @@ cleansing:
 |-------|------|---------|-------|
 | `drop_null_ids` | bool | `true` | Drop rows where `user_id` or `item_id` is null. |
 | `dedup` | string | `keep_last` | How to handle duplicate (user, item) pairs. |
-| `min_rows` | int | `1000` | Minimum row count after cleansing. |
-| `min_users` | int | `10` | Minimum distinct user count. |
-| `min_items` | int | `10` | Minimum distinct item count. |
+| `min_rows` | int | `null` (no check) | Minimum row count after cleansing. |
+| `min_users` | int | `null` (no check) | Minimum distinct user count. |
+| `min_items` | int | `null` (no check) | Minimum distinct item count. |
 
 Violation of any `min_*` threshold exits with code 4 and `"code": "min_data_violation"` in the JSON error line.
 
@@ -115,8 +115,10 @@ Violation of any `min_*` threshold exits with code 4 and `"code": "min_data_viol
 | Value | Behaviour |
 |-------|-----------|
 | `keep_first` | Keep the first occurrence of each (user, item) pair. |
-| `keep_last` | Keep the last occurrence (by row order or time if `time_column` is set). |
+| `keep_last` | Keep the last occurrence of each (user, item) pair by row order in the source DataFrame. |
 | `none` | No deduplication. |
+
+`keep_first` / `keep_last` use the row order returned by the data source — they do **not** sort by `time_column`. If you need time-ordered deduplication, sort in the source query (BigQuery `ORDER BY ts`) or pre-sort the CSV before training.
 
 ---
 
@@ -167,21 +169,23 @@ training:
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `algorithms` | list[string] | required | `IALS`, `CosineKNN`, `TopPop`, `RP3beta`, `DenseSLIM`, `TruncatedSVD`, `BPRFM`. |
-| `metric` | string | required | Evaluation metric. |
-| `cutoff` | int | required | Recommendation list length for evaluation. |
-| `n_trials` | int | required | Total Optuna trial budget (must be ≥ 1). |
-| `per_algorithm_trials` | map | `{}` | Per-algorithm trial overrides. Sum need not equal `n_trials`. |
-| `per_trial_timeout_seconds` | int | `null` | Soft per-trial time cap (Optuna callback). |
+| `algorithms` | list[string] | required | `IALS`, `CosineKNN` (alias `CosinekNN`), `TopPop`, `RP3beta`, `DenseSLIM`, `TruncatedSVD`, `BPRFM`. Full irspack class names (e.g. `IALSRecommender`) are also accepted. Hyperparameter ranges come from each recommender's `default_suggest_parameter` in irspack — they are not user-tunable from the recipe. |
+| `metric` | string | `ndcg` | One of `ndcg`, `map`, `recall`, `hit`. |
+| `cutoff` | int | `20` | Recommendation list length for evaluation (must be ≥ 1). |
+| `n_trials` | int | `40` | Total Optuna trial budget (must be ≥ 1). |
+| `per_algorithm_trials` | map | `null` | Per-algorithm trial overrides. Sum need not equal `n_trials`; if it exceeds `n_trials` budgets are scaled down proportionally and the last algorithm absorbs rounding remainder. Unknown algorithm keys are silently ignored. |
+| `per_trial_timeout_seconds` | int | `null` | Soft per-trial wall-clock cap. Implemented by running the trial in a worker thread; if it overshoots, Optuna prunes the trial but the underlying thread is daemonised and may continue until it finishes naturally (CPU/memory still spent). |
 | `timeout_seconds` | int | `null` | Overall tuning wall-clock cap. |
-| `parallelism` | int | `1` | In-process worker threads sharing the Optuna study. |
-| `storage_path` | string | `""` | Empty = in-memory (no resume). SQLite path enables resume. **Must be local FS** — SQLite over NFS corrupts. Postgres/Redis URLs are also accepted. |
-| `split.scheme` | string | required | `random`, `time_global`, or `time_user`. |
-| `split.heldout_ratio` | float | required | Fraction of interactions held out. Must be in (0, 1). |
-| `split.test_user_ratio` | float | `1.0` | Fraction of users included in the test split. |
+| `parallelism` | int | `1` | Optuna `n_jobs` (Python threads, not processes). Algorithms whose hot loop is GIL-bound see little speed-up; native-code learners (IALS, RP3beta) benefit most. |
+| `storage_path` | string | `""` | Empty = in-memory (no resume). A bare path becomes a SQLite URL (`sqlite:///<path>`); explicit `sqlite://`, `postgresql://`, `postgres://`, and `mysql://` URLs are also accepted. Study name is `recotem_<recipe_name>_<run_id>` and `load_if_exists=True`, so a fresh `run_id` per train invocation always starts a new study (resume requires reusing the same `run_id`). **SQLite over NFS corrupts** — keep SQLite databases on a local filesystem. |
+| `split.scheme` | string | `random` | `random`, `time_global`, or `time_user`. |
+| `split.heldout_ratio` | float | `0.1` | Fraction of interactions held out. Must be in (0, 1). |
+| `split.test_user_ratio` | float | `1.0` | Fraction of users included in the test split. Must be in (0, 1]. |
 | `split.seed` | int | `42` | Random seed. |
 
-`time_user` and `time_global` require `schema.time_column`. Missing `time_column` with these schemes exits with code 2.
+`time_user` and `time_global` require `schema.time_column`. Missing `time_column` with these schemes is a recipe validation error and exits with code 2.
+
+If a search produces no completed trials, training exits with code 4 and `"code": "no_completed_trials"`. If every completed trial scores exactly 0.0, exit 4 with `"code": "zero_score"` (typically caused by too short a `per_trial_timeout_seconds` or a too-small validation set).
 
 ---
 
@@ -230,13 +234,19 @@ Local paths are resolved to absolute. If `RECOTEM_ARTIFACT_ROOT` is set,
 
 ## Environment variable expansion
 
-Syntax: `${RECOTEM_RECIPE_VAR}`. Only variables matching the prefix `RECOTEM_RECIPE_*` are expanded by default. Additional variables can be injected with `recotem train --env-var KEY=value`.
+Syntax: `${RECOTEM_RECIPE_VAR}`. Only variables matching the prefix `RECOTEM_RECIPE_*` are expanded. Matching is case-insensitive (the *upper-cased* name is checked against the prefix and blacklist). Additional values can be injected with `recotem train --env-var KEY=value`; the `KEY` must still match the `RECOTEM_RECIPE_*` prefix and pass the blacklist check.
 
 Blacklisted (never expanded regardless of prefix): `RECOTEM_SIGNING_KEY`, `RECOTEM_API_KEYS`, and any name matching `*_SECRET*`, `*_PASSWORD*`, `AWS_*`, `GOOGLE_*`, `GCP_*`.
 
-Expansion is **never** performed inside `source.query` or `source.query_parameters`.
+Expansion is **never** performed inside any key named `query` or `query_parameters` at any nesting level (not just under `source`). All other strings — including `source.path`, `output.path`, and `item_metadata.path` — are expanded.
 
-A missing or blacklisted variable produces a `RecipeError`. The error message redacts the variable value.
+Expansion is single-pass and runs once at YAML load time. There is no escape syntax (a literal `${...}` in the YAML cannot be preserved unless the variable name fails the prefix check, which raises an error), no default-value syntax (`${VAR:-default}` is not supported and would attempt to expand the literal name `VAR:-default`), and substituted values are not re-scanned for further `${...}` references.
+
+A missing, malformed, or blacklisted variable produces a `RecipeError` (exit 2). The error message names the variable but never includes its value.
+
+### Loading a directory of recipes
+
+`recotem serve --recipes <dir>` and `load_recipes_directory()` enumerate only direct `*.yaml` children of `<dir>` (non-recursive). Subdirectories are ignored. Each recipe file must remain inside the directory after `realpath` resolution — symlinks pointing outside are rejected. Two recipes with the same `name` field abort the load.
 
 ---
 

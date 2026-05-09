@@ -109,11 +109,17 @@ The plaintext is shown only once at generation time. If lost, generate a new key
 
 ## Recovery from a corrupt artifact
 
-If an artifact is corrupt (truncated write, disk error, storage-side corruption), `recotem serve` logs an error and marks the recipe as `loaded: false`:
+If an artifact is corrupt (truncated write, disk error, storage-side corruption), `recotem serve` logs an error and marks the recipe as `loaded: false`. At startup the event name is `initial_artifact_parse_failed` (or `initial_artifact_read_failed`); during watcher hot-swaps it is `artifact_load_failed`:
 
 ```json
-{"event": "artifact_load_error", "recipe": "my_recipe", "error": "magic bytes mismatch", "kid": null}
+{"event": "artifact_load_failed", "name": "my_recipe", "error": "magic bytes mismatch", "kid": "<unknown>"}
 ```
+
+The `kid` field reads `"<unknown>"` only when the artifact is too short to
+hold a full kid (truncated writes, zero-byte files). For a tampered or
+wrong-magic file of the expected length, the parsed kid string is shown
+verbatim instead — useful for grepping which signing key the offending
+artifact was written with.
 
 The server continues running and returns 503 for that recipe's `/predict/{name}` endpoint.
 
@@ -152,6 +158,108 @@ rm ./artifacts/my_recipe.abc12345.recotem
 ```
 
 ---
+
+## CLI exit codes
+
+`recotem train`, `serve`, `inspect`, `validate` all map exceptions to a
+small set of exit codes. Use these in CI / cron / Kubernetes Job restart
+logic instead of grepping stderr.
+
+| Code | Meaning | Typical cause |
+|------|---------|---------------|
+| 0 | Success | — |
+| 1 | Unknown error | Bug, environment issue, schema generation failure |
+| 2 | RecipeError | YAML syntax, schema violation, invalid `--env-var`, `--dev-allow-unsigned` without companion confirmation flag, `--dev-allow-unsigned` outside `RECOTEM_ENV=development` |
+| 3 | DataSourceError | Source fetch failed, sha256 mismatch, redirect cap, HTTP 4xx/5xx, body cap exceeded |
+| 4 | TrainingError | Includes subcodes `signing_key_missing`, `min_data_violation`, `time_column_parse_error`, `final_training_error`, `no_completed_trials`, `zero_score` |
+| 5 | ArtifactError | Missing/invalid signing key, magic mismatch, kid unknown, HMAC mismatch, payload over cap, disallowed FQCN, header JSON over cap |
+
+Lock contention with `--fail-on-busy` surfaces as exit 1 (the unknown-error
+bucket), not exit 4 — `LockContestedError` is raised outside the
+`TrainingError` hierarchy. Alert on the structured event
+`recipe_lock_contended_skipping` (or the stderr message `recipe lock
+already held`) rather than the exit code.
+
+On any non-zero exit, `recotem train` emits a single `train_error` JSON log
+event with `code=<subcode>` so log aggregators can alert by subcode without
+re-parsing exit strings.
+
+## Training pipeline events
+
+A successful training run emits these structured events in order. Use them
+as the basis for SLO and alerting rules.
+
+| Event | Phase | Significant fields |
+|-------|-------|--------------------|
+| `training_started` | start | `recipe`, `run_id` |
+| `fetching_data` | datasource | — |
+| `data_fetched` | datasource | `n_rows` |
+| `data_cleansed` | cleansing | `n_rows`, `drop_count` |
+| `splitting_data` / `split_done` | split | `val_offset` |
+| `search_started` | tuning | `algorithms`, `n_trials` |
+| `search_done` | tuning | `best_class`, `best_score`, `n_completed` |
+| `training_final_model` / `final_model_trained` | refit | `recommender` |
+| `artifact_written` | persist | `versioning`, `artifact`, `pointer` (append_sha), `kid` |
+| `train_done` | end | `name`, `run_id`, `exit_code`, `artifact`, `best_class`, `best_score`, `trials`, `trained_at`, `kid` |
+| `train_error` | failure | `error`, `code`, `recipe`, `run_id`, `exit_code` |
+| `recipe_lock_contended_skipping` | start | `recipe`, `run_id` (default `--fail-on-busy=False` exits 0) |
+| `csv_source_redirect`, `csv_source_size_exceeded` | datasource | `path`, `status`, `cap` |
+
+## Concurrent training and persistent search storage
+
+`recotem train` acquires a per-recipe POSIX `flock` at
+`<recipe.output.path>.lock` before any work. Defaults:
+
+- Non-blocking: a contended lock returns immediately and the run exits 0
+  with `recipe_lock_contended_skipping` (cron-friendly: a slow run cannot
+  pile up overlapping jobs).
+- `--fail-on-busy` flips this to a non-zero exit (exit 1, with the
+  stderr message `recipe lock already held`) so an orchestrator can route
+  the work elsewhere. The exit code is 1 rather than 4 because
+  `LockContestedError` is intentionally outside the `TrainingError`
+  hierarchy — it is an orchestration condition, not a training failure.
+- `--no-lock` skips lock acquisition entirely. Only safe when you guarantee
+  no concurrent writers via some other mechanism.
+
+For multi-process Optuna search (parallelism on a single host or a
+distributed cluster), set `training.storage_path` in the recipe. Accepted
+forms: a bare path → SQLite, or a URL beginning with `sqlite://`,
+`postgresql://`, `postgres://`, or `mysql://`. Recotem opens the study
+with `load_if_exists=True` so multiple `recotem train` invocations against
+the same recipe converge on a shared trial pool rather than duplicating
+work.
+The study name is `recotem_<recipe.name>_<run_id>` and `run_id` is a
+fresh random hex per `recotem train` invocation, so by default each call
+opens a fresh study. To resume a study across processes, share the same
+`storage_path` and invoke `recotem.training.run_training(...)` directly
+from a wrapper script that pins `run_id`.
+
+## Atomic write guarantees
+
+`recotem train` writes artifacts via a tempfile in the same directory,
+`fsync()`s the data, then `os.replace()`s — POSIX-atomic on local FS so
+readers never see a partial file. On object stores (S3 / GCS / Azure)
+the artifact is written with `put_object` semantics (last-write-wins);
+in `versioning: append_sha` mode the immutable sha-suffixed object is
+written first, then the small pointer object is overwritten. A reader
+that opens the pointer mid-rotation sees either the old or the new
+target name, never a partial pointer.
+
+## SIGTERM / drain sequence
+
+When uvicorn receives `SIGTERM` (or `SIGINT`):
+
+1. uvicorn stops accepting new connections.
+2. The FastAPI lifespan exits: `ArtifactWatcher.stop()` is called and the
+   poll thread exits on its next tick (≤ `RECOTEM_WATCH_INTERVAL` seconds);
+   the recurring `--insecure-no-auth` / `--dev-allow-unsigned` warning task
+   is cancelled.
+3. In-flight requests are given up to `RECOTEM_DRAIN_SECONDS` (default 30)
+   to complete; uvicorn then closes remaining connections.
+4. A final `serve_shutdown` event is logged with `drain_seconds`.
+
+For Kubernetes, set `terminationGracePeriodSeconds` ≥ `RECOTEM_DRAIN_SECONDS + 5`
+to allow the watcher tick plus the drain window before SIGKILL.
 
 ## Sizing `recotem serve` memory
 
@@ -209,6 +317,96 @@ Available metrics:
 
 ---
 
+## Watcher and registry semantics
+
+`ArtifactWatcher` runs as a daemon thread inside the serve process:
+
+- Polls every `RECOTEM_WATCH_INTERVAL` seconds (clamped 1–30) with ±10%
+  jitter. Up to 16 stat() calls are issued in parallel via a thread pool.
+- A change is detected from the artifact pointer's mtime/size (local FS) or
+  ETag/VersionId (object stores). When the marker changes the watcher reads
+  the full bytes once, computes sha256, and **only reloads if the sha256
+  also changed** — so replacing a file with identical content bumps mtime
+  but does not trigger an unnecessary swap.
+- Recipes directory is rescanned each tick: new `*.yaml` files trigger
+  `recipe_discovered` + an immediate forced load; removed files trigger
+  `recipe_removed` and the entry is dropped from the registry.
+- On any failure during reload (`artifact_load_failed`,
+  `artifact_load_unexpected_error`), the existing entry remains served and
+  its `last_load_error` field is set so `/health` shows the staleness while
+  `/predict` continues to return the previous good model.
+- On `_stat_marker` returning None (file disappeared), the existing entry
+  keeps serving and an `artifact_disappeared` warning is logged once.
+
+### Initial load failure
+
+When an artifact fails to load at startup the recipe is still registered as
+a stub (`loaded=false`, `error=<reason>`). The server starts, `/health`
+reports `degraded`, and `/predict/{name}` returns 503. This is intentional:
+a partial outage is recoverable by retraining without restarting the
+process.
+
+The startup-only event variants are:
+
+| Event | Trigger |
+|-------|---------|
+| `initial_artifact_read_failed` / `initial_artifact_read_error` | I/O failure or cap exceeded |
+| `initial_artifact_parse_failed` | Magic / version / header structural error |
+| `initial_artifact_hmac_failed` | HMAC mismatch or unknown kid |
+| `initial_artifact_deserialize_failed` | FQCN allow-list rejection or payload decode error |
+| `initial_artifact_hmac_skipped_dev` | `--dev-allow-unsigned` |
+
+## Backups and disaster recovery
+
+Artifacts are self-contained, signed binaries — back them up like any other
+binary asset:
+
+- **Local FS**: snapshot the artifact root (or the directory containing
+  every recipe's `output.path`). `versioning: append_sha` preserves prior
+  versions automatically; the pointer file is the only mutable bit.
+- **Object stores**: enable bucket versioning. Combined with `append_sha`
+  this gives you immutable per-train-run history.
+- **Recipes**: commit the recipes directory to version control. Together
+  with `RECOTEM_SIGNING_KEYS` (stored separately in a secrets manager),
+  the recipe + key reproduce any artifact via `recotem train`.
+
+After a host failure, restoring `recotem serve` requires only the recipes
+directory and the signing keys. Re-run training to regenerate any missing
+artifacts; the watcher picks them up without restart.
+
+## Monitoring SLIs
+
+The high-signal metrics for production alerting:
+
+| Signal | Source | Alert threshold (suggested) |
+|--------|--------|-----------------------------|
+| Recipe is unloaded | `recotem_model_loaded{recipe=...} == 0` for > `RECOTEM_WATCH_INTERVAL × 3` | page on-call |
+| Hot-swap failures | `rate(recotem_swap_total{result="error"}[5m]) > 0` | warn |
+| Artifact load failures since restart | `recotem_artifact_load_failures_total{recipe=...}` increase | warn (often paired with the unloaded alert above) |
+| Predict error rate | `rate(recotem_predict_total{status="error"}[5m]) / rate(recotem_predict_total[5m])` | warn at 1%, page at 10% |
+| Predict latency | `histogram_quantile(0.99, recotem_predict_latency_seconds_bucket)` | per-recipe SLO |
+| Active recipes | `recotem_active_recipes` drop > 0 since last scrape | warn (recipe removed or all stub) |
+
+Pair these with the structured log events `artifact_load_failed`,
+`artifact_disappeared`, `recipe_not_loaded_at_startup`, `auth_invalid_key`
+for context on the underlying cause.
+
+## Upgrades
+
+Recotem follows semver. Within a major version (`2.x`):
+
+- Recipes remain valid; the recipe loader is backward-compatible.
+- The artifact format version is `1`. Older readers refuse newer formats
+  with `unsupported format version`. When the format bumps, retrain after
+  upgrading the writer; readers can be upgraded first.
+- The FQCN allow-list is frozen per release; changes appear in the
+  CHANGELOG. Re-train if your artifacts encode a class that has been
+  removed.
+
+For zero-downtime upgrade of the serve fleet, deploy new pods with both
+the old and new signing kids configured (rotation-style), let new pods
+become healthy, then drain old pods (relying on `RECOTEM_DRAIN_SECONDS`).
+
 ## Troubleshooting
 
 ### `recotem serve` starts but recipe is `loaded: false`
@@ -249,7 +447,7 @@ The cleaned dataset fell below a threshold. The JSON error line includes observe
 
 Lower `cleansing.min_rows` in the recipe or investigate why fewer rows arrived from the source.
 
-### `recotem train` exits 4 with `all_scores_zero`
+### `recotem train` exits 4 with `zero_score`
 
 All Optuna trials scored 0.0. Common causes:
 

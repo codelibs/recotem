@@ -152,12 +152,18 @@ systemctl enable --now recotem-serve.service
 
 When `recotem train` writes a new artifact, the serve process detects it at the next poll and hot-swaps — no service restart needed.
 
+## Timezone
+
+`cron` uses the system timezone (`/etc/localtime`); set `CRON_TZ=UTC` at the
+top of the crontab if you want explicit UTC. The systemd timer above pins
+`OnCalendar=… UTC` which is independent of system tz.
+
 ## Lock contention
 
-If a cron job fires while a previous training run is still active on the same host, the second invocation acquires no lock and exits 0 (skip). This is the default and is safe for standard cron setups. Pass `--fail-on-busy` if you want the scheduler to alert on overlap:
+If a cron job fires while a previous training run is still active on the same host, the second invocation acquires no lock and exits 0 (skip). This is the default and is safe for standard cron setups but means **the scheduler sees a successful run when nothing was actually trained** — point alerting at the structured `train_skipped` log line, not just the exit code, or pass `--fail-on-busy`:
 
 ```bash
 recotem train --fail-on-busy /etc/recotem/recipes/my_recipe.yaml
 ```
 
-Exit will be non-zero when the lock is held, which most monitoring systems treat as a failure.
+Exit will be non-zero when the lock is held, which most monitoring systems treat as a failure. Pair this with a cron schedule whose interval comfortably exceeds the p99 training duration; `recotem train --quiet` log lines include the run duration for sizing.

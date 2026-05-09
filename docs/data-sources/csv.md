@@ -27,10 +27,10 @@ source:
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `path` | string | required | Local path, `s3://`, `gs://`, or `az://`. |
-| `delimiter` | string | `","` | Single character. |
+| `delimiter` | string | `","` | Passed straight to pandas `sep=`. Multi-character values switch pandas to its slower Python parser. |
 | `encoding` | string | `"utf-8"` | Any encoding accepted by pandas. |
 | `header` | int | `0` | Row number containing column names. |
-| `dtype` | map | `{}` | Explicit column type overrides. |
+| `dtype` | map | `null` | Explicit column type overrides. |
 
 Compressed files (`.gz`, `.bz2`, `.zip`, `.xz`) are decompressed transparently.
 
@@ -40,12 +40,9 @@ Compressed files (`.gz`, `.bz2`, `.zip`, `.xz`) are decompressed transparently.
 source:
   type: parquet
   path: s3://my-bucket/interactions.parquet
-  dtype:
-    user_id: str
-    item_id: str
 ```
 
-`delimiter`, `encoding`, and `header` are ignored for Parquet. All other fields are the same as CSV.
+Parquet sources accept only `path` and the optional `sha256` integrity pin. `delimiter`, `encoding`, `header`, and `dtype` are not valid keys on a parquet source and will fail recipe load.
 
 ## Path schemes
 
@@ -70,9 +67,22 @@ sha256: 945fc769205a5976d38c5783500ae473afbb04608043b703951a699993c8f8be
 path: file:///mnt/data/interactions.csv
 ```
 
-Embedded credentials in URIs (e.g. `s3://AKIA...:secret@bucket/`) are
+Embedded credentials in URIs (e.g. `https://user:pass@host/file.csv`) are
 rejected at recipe load. Credentials must come from the environment
 (instance profile, ADC, `AWS_*` env vars, etc.).
+
+The userinfo check is scheme-blind: any URI parsed by `urllib.parse` as
+having `username` or `password` is rejected, regardless of scheme. This
+means object-store paths must not contain a `@` before the host — for
+example `gs://bucket@project/file.csv` is rejected even though `@` is
+not used for credentials in GCS URIs. Use the canonical form
+`gs://bucket/path/file.csv` and rely on Application Default Credentials
+or the service-account file referenced by `GOOGLE_APPLICATION_CREDENTIALS`.
+
+`${RECOTEM_RECIPE_*}` env-var expansion **is** performed inside `path`
+fields (and is the recommended way to inject bucket names, dates, or
+runtime-specific path components). Expansion is suppressed only inside
+`query` / `query_parameters`.
 
 `output.path` is more restrictive — `http://`, `https://`, `ftp://`,
 `ftps://`, and `memory://` are rejected because writes are not supported
@@ -89,13 +99,19 @@ When `source.path` (or `item_metadata.path`) uses `http://` or `https://`:
   deps required. Up to 5 redirects are followed (using a custom opener
   that bypasses urllib's default redirect handler), with TLS verification
   always on for `https://`. Redirects to non-`http(s)://` schemes are
-  rejected.
+  rejected, as are redirect loops (visited URLs are tracked).
 - The downloaded payload is capped at `RECOTEM_MAX_DOWNLOAD_BYTES` (default
-  256 MiB; clamped to [1 MiB, 16 GiB]).
+  256 MiB; clamped to [1 MiB, 16 GiB]). The cap is checked *during* the
+  read, not afterwards — once the limit is exceeded the connection is
+  dropped and `DataSourceError` is raised; partial bytes are not parsed.
 - The connect/read timeout is `RECOTEM_HTTP_TIMEOUT_SECONDS` (default 30,
   clamped to [1, 600]).
 - `recotem validate` issues a HEAD-like check (`fs.exists()` for non-network
-  schemes); the integrity check is performed at fetch time, not validate.
+  schemes; for HTTP(S) the URL is accepted at recipe-load only — no probe
+  fetch is issued). The integrity check happens at fetch time, not validate.
+- On sha256 mismatch the error message shows only the first 8 hex characters
+  of each digest (`got 1a2b3c4d…, expected 5e6f7a8b…`) to avoid leaking the
+  expected ground truth into shared logs.
 
 Compute the sha256 once when authoring the recipe:
 
@@ -114,6 +130,15 @@ internal reproducibility audits even when the network is not involved.
 On non-network paths, when `sha256` is unset, pandas streams via fsspec
 without buffering the full file (preserving large-file performance).
 
+Symlinks at `source.path` are followed implicitly (no resolution check;
+the symlink-escape guard applies only to `output.path` under
+`RECOTEM_ARTIFACT_ROOT`). If the underlying file is replaced between
+`recotem validate` and `recotem train`, training simply re-reads the new
+file at fetch time — there is no caching. Conversely, the running
+`recotem serve` process never re-reads `source.path`; it only reads the
+artifact, so source-file mutation has no effect on a deployed model
+until the next train run.
+
 ## dtype overrides
 
 By default, user and item ID columns are read as whatever type pandas infers. If your IDs look like integers (`1234`, `5678`) but you want them treated as strings, add explicit overrides:
@@ -126,6 +151,8 @@ dtype:
 
 This ensures consistent string-coercion between training and serving. Recotem string-coerces both columns internally after load, but setting `dtype: str` avoids pandas misparse of leading-zero IDs like `"0042"`.
 
+`dtype` keys that do not match a column in the CSV are silently ignored by pandas — typos will not raise. Confirm dtypes by re-reading a few rows manually if the parse looks off.
+
 ## Errors and exit codes
 
 | Error | Exit | Message pattern |
@@ -136,7 +163,11 @@ This ensures consistent string-coercion between training and serving. Recotem st
 | Parse error | 3 | `DataSourceError: ParserError: Error tokenizing data...` |
 | Corrupt Parquet | 3 | `DataSourceError: ArrowInvalid: ...` |
 | Rejected scheme | 2 | `RecipeError: path scheme 'http' is not allowed` |
-| Embedded credentials | 2 | `RecipeError: embedded credentials in path are not allowed` |
+| Embedded credentials | 2 | `RecipeError: 'source.path' contains embedded credentials in the URI. Use environment-based authentication instead.` |
+| sha256 mismatch | 3 | `DataSourceError: sha256 mismatch: got <8 hex>…, expected <8 hex>…` |
+| Download cap exceeded | 3 | `DataSourceError: Download size cap exceeded fetching <url>: > <bytes> bytes (RECOTEM_MAX_DOWNLOAD_BYTES).` |
+| HTTP redirect to disallowed scheme | 3 | `DataSourceError: Refusing redirect from <url> to disallowed scheme '<scheme>://'` |
+| HTTP redirect loop / over cap | 3 | `DataSourceError: Redirect loop detected …` / `Too many redirects (>5) …` |
 
 ## Encoding tips
 

@@ -49,6 +49,27 @@ The internet-facing boundary is `recotem serve`. `recotem train` has no inbound 
 | Unrecognised plugin loading arbitrary code | Conflicting plugin `type_name` fails startup; installed plugins are treated as trusted code (pin versions) |
 | Unauthenticated external access | Default bind `127.0.0.1`; `--insecure-no-auth` gated by `RECOTEM_ENV=development`; `TrustedHostMiddleware` blocks unrecognized hosts |
 
+## Network-source fetch behaviour
+
+`recotem train` fetches `http://` and `https://` source paths via stdlib
+`urllib`. The fetch path enforces:
+
+- **Redirect cap**: at most 5 redirects (urllib's default 30 is overridden);
+  visited-URL set detects redirect loops; redirects to non-`http`/`https`
+  schemes are refused (e.g. `file://`, `gopher://`).
+- **Cert validation**: stdlib `urllib` default — system trust store, no opt-out.
+- **No proxy auto-discovery override**: respects `HTTP(S)_PROXY` env vars but
+  does not use any other auto-detection.
+- **User-Agent header**: set to a fixed Recotem string so origin servers can
+  identify the client.
+- **URL userinfo redaction**: any `https://user:pass@host/...` form is logged
+  as `https://[REDACTED]@host/...` in `csv_source_*` events. The recipe
+  loader rejects userinfo-bearing URLs at parse time anyway.
+- **Body cap**: streamed read, refuses past `RECOTEM_MAX_DOWNLOAD_BYTES` mid-stream.
+- **Timeout**: `RECOTEM_HTTP_TIMEOUT_SECONDS` per request (clamped 1–600).
+- **sha256 mandatory**: refused at recipe-load time when the scheme is
+  network and `sha256` is unset; verified post-fetch via `hmac.compare_digest`.
+
 ## Operator responsibilities for network sources
 
 Recipes are operator-authored and live inside the Recotem trust boundary.
@@ -78,28 +99,29 @@ The risk is mitigated by four layered controls:
 
 1. Magic bytes, format version, and size checks before any deserialization.
 2. HMAC-SHA256 signature verification with multi-kid support and constant-time compare; keys never logged.
-3. Hand-enumerated FQCN allow-list — RCE backstop independent of HMAC.
+3. Hand-enumerated FQCN allow-list plus a narrow module-prefix allow-list scoped to `numpy.*` and `scipy.sparse.*`, with an explicit deny-list overlaid on those prefixes — RCE backstop independent of HMAC.
 4. Signing key is required for both train and serve, with no env-default. A misconfigured deployment fails closed rather than loading arbitrary files.
 
-The FQCN allow-list permits only these classes. Any other class triggers `ArtifactError` before construction:
+The FQCN allow-list permits only these classes. Any other class outside both this list and the module-prefix allow-list triggers `ArtifactError` before construction:
 
 ```
 recotem.serving._compat.IDMappedRecommender
+recotem.training._compat.IDMappedRecommender
 irspack.utils.id_mapping.IDMapper
-irspack.recommenders.IALSRecommender
-irspack.recommenders.CosineKNNRecommender
-irspack.recommenders.TopPopRecommender
-irspack.recommenders.RP3betaRecommender
-irspack.recommenders.DenseSLIMRecommender
-irspack.recommenders.TruncatedSVDRecommender
-irspack.recommenders.BPRFMRecommender
+irspack.recommenders.ials.IALSRecommender
+irspack.recommenders.knn.CosineKNNRecommender
+irspack.recommenders.toppop.TopPopRecommender
+irspack.recommenders.rp3.RP3betaRecommender
+irspack.recommenders.dense_slim.DenseSLIMRecommender
+irspack.recommenders.truncsvd.TruncatedSVDRecommender
+irspack.recommenders.bpr.BPRFMRecommender
 numpy.ndarray
 numpy.dtype
 numpy.core.multiarray._reconstruct
 numpy.core.multiarray.scalar
-scipy.sparse.csr_matrix
-scipy.sparse.csc_matrix
-scipy.sparse.coo_matrix
+scipy.sparse._csr.csr_matrix
+scipy.sparse._csc.csc_matrix
+scipy.sparse._coo.coo_matrix
 builtins.int
 builtins.float
 builtins.bool
@@ -109,12 +131,29 @@ builtins.dict
 builtins.str
 builtins.bytes
 builtins.complex
+builtins.set
+builtins.frozenset
 collections.OrderedDict
 ```
 
 This list is frozen per Recotem release. Changes ship with a CHANGELOG entry.
 
-Module-prefix allow-listing is explicitly rejected by the spec: it admits gadgets such as `numpy.testing.run_module_suite` or callable proxies in `numpy.distutils`. The FQCN list is exact and per-class.
+In addition to the FQCN list, classes from any module under the prefixes
+`numpy.*` and `scipy.sparse.*` are permitted, because numpy and scipy
+reorganise their internal layout between releases (e.g. `numpy.core.*` →
+`numpy._core.*` in 2.x) and reconstruction helpers move between
+submodules. To keep the prefix allow-list tight, the following submodules
+are explicitly **denied** even though they fall under an allowed prefix —
+they expose code-execution gadgets, callable proxies, file-IO
+constructors, test runners, or build helpers:
+
+```
+numpy.testing[.*]      numpy.distutils[.*]   numpy.f2py[.*]
+numpy.ctypeslib[.*]    numpy.lib[.*]         numpy.compat[.*]
+scipy.sparse.linalg[.*]   scipy.sparse.tests[.*]   scipy.sparse.csgraph[.*]
+```
+
+Deny overrides allow. HMAC verification remains the primary defence; the prefix list is the secondary layer scoped to the scientific stack only.
 
 `recotem inspect <artifact>` runs the full HMAC verify path and prints the header JSON without invoking the deserializer. It is safe to run on untrusted artifacts.
 
@@ -214,10 +253,66 @@ Two unsafe flags exist and are gated by `RECOTEM_ENV`:
 
 | Flag | Requirement | Effect |
 |------|-------------|--------|
-| `--insecure-no-auth` | `RECOTEM_ENV` in `development`, `dev`, `test` | Disables API key check; forces `127.0.0.1` bind; repeating warn banner every 60 s |
+| `--insecure-no-auth` | `RECOTEM_ENV` in `development`, `dev`, `test` | Disables API key check; also disables the no-auth → `127.0.0.1` forced bind so `RECOTEM_HOST` is honoured (e.g. for dev containers); repeating warn banner every 60 s |
 | `--dev-allow-unsigned` | `RECOTEM_ENV=development` AND `--i-understand-this-loads-arbitrary-code` | Skips HMAC verify; never use outside controlled testing |
 
 Both flags are rejected at startup in any environment not matching the requirement, with an explicit error message.
+
+`--dev-allow-unsigned` is strictly more dangerous than `--insecure-no-auth`:
+on the train side it signs artifacts with a deterministic in-memory dev key
+(`dev:0000…`); on the serve side it loads any artifact, including ones
+produced by another developer or a hostile process. Treat any artifact
+written under this flag as untrusted and never copy it into a production
+environment.
+
+## Authentication failure events
+
+| Event | Trigger | Status |
+|-------|---------|--------|
+| `auth_missing_header` | Request with no `X-API-Key` header (and `RECOTEM_API_KEYS` is non-empty) | 401, code `missing_api_key` |
+| `auth_invalid_key` | Header present but no kid hashes match | 401, code `invalid_api_key` |
+
+Both events log `path=<request.url.path>` only; the candidate header value
+is never logged in any form. The matching kid is attached to
+`request.state.kid` (and to subsequent log lines via `structlog.contextvars`)
+on success.
+
+## Predict response: information leakage
+
+`POST /predict/{name}` returns:
+
+- 503 (`recipe_unavailable` / `recipe_unhealthy`) — recipe stub or stale entry; visible without auth context only at `/health`.
+- 404 (`user_not_found`) — `user_id` was not in training data. This response distinguishes "known user, no recommendations" from "unknown user". If user-existence is sensitive in your application, mask 404 responses at your reverse proxy and return a generic empty-recommendation body.
+- 200 — recommendations, optionally joined with item metadata. Field stripping is configured via `RECOTEM_METADATA_FIELD_DENY` (case-sensitive column names). Use this to keep PII columns out of API responses even when they are present in the metadata file.
+
+`cutoff` is bounded at `[1, 1000]` by the request schema; oversized requests
+receive a 422 from FastAPI before reaching the recommender.
+
+## Rate limiting and DoS
+
+Recotem itself does not implement request-rate limiting. Operators must front
+`recotem serve` with a reverse proxy (nginx `limit_req`, Caddy
+`rate_limit`, ALB / Cloud Armor) and apply per-IP / per-API-key quotas.
+`/predict` is CPU-bound; sustained request rates above the recommender's
+inference throughput will queue under uvicorn and cause request latency
+to climb before HTTP 429 would naturally back off — measure and cap at the
+proxy.
+
+## Signing-key entropy and storage
+
+- **Generation**: `recotem keygen --type signing` derives keys from
+  `os.urandom(32)`, i.e. 256 bits of OS entropy. Reject any operator
+  attempt to use a shorter or non-random value — `KeyRing` enforces exactly
+  32 bytes after hex-decoding and refuses anything else with `ArtifactError`.
+- **Storage**: same controls as `RECOTEM_API_KEYS` (see "Secrets handling"
+  above). On a multi-tenant host, prefer a secrets manager that injects
+  the env var at process start rather than a static `.env` file.
+- **Key compromise**: rotate immediately. The four-step procedure is in
+  [operations.md → Signing key rotation](operations.md#signing-key-rotation).
+  After all artifacts have been re-signed with the new kid, remove the
+  compromised kid from `RECOTEM_SIGNING_KEYS` so any artifact still
+  carrying it fails verification (event `artifact_kid_unknown` /
+  `artifact_hmac_mismatch`).
 
 ## Plugin trust
 
@@ -234,12 +329,13 @@ Recotem does not sandbox plugins. A malicious plugin can read env vars, includin
 
 ## Network exposure
 
-By default, `recotem serve` binds to `127.0.0.1`. To expose externally:
+By default, `recotem serve` binds to `127.0.0.1`. When `RECOTEM_API_KEYS` is empty the bind is **forced** to `127.0.0.1` regardless of `RECOTEM_HOST` — the only way to bind to another interface is to either configure `RECOTEM_API_KEYS` or pass `--insecure-no-auth` (which is itself gated on `RECOTEM_ENV`). To expose externally:
 
-1. Set `RECOTEM_HOST=0.0.0.0`.
-2. Set `RECOTEM_ALLOWED_HOSTS` to the exact hostnames clients will use.
-3. Set `RECOTEM_ALLOWED_ORIGINS` if browser clients send CORS requests.
-4. Put a TLS-terminating reverse proxy (nginx, Caddy, ALB, Cloud Run) in front.
+1. Configure `RECOTEM_API_KEYS` (otherwise the bind is forced to `127.0.0.1`).
+2. Set `RECOTEM_HOST=0.0.0.0`.
+3. Set `RECOTEM_ALLOWED_HOSTS` to the exact hostnames clients will use.
+4. Set `RECOTEM_ALLOWED_ORIGINS` if browser clients send CORS requests.
+5. Put a TLS-terminating reverse proxy (nginx, Caddy, ALB, Cloud Run) in front.
 
 `recotem serve` does not terminate TLS. Do not expose it directly on a public port without a TLS proxy.
 

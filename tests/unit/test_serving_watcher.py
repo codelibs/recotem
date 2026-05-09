@@ -299,3 +299,73 @@ def test_yaml_deleted_removes_entry_from_registry(tmp_path: Path) -> None:
 
     # The entry should have been removed
     assert registry.get("removable") is None
+
+
+# ---------------------------------------------------------------------------
+# _load_metadata_safe (regression tests for the load_item_metadata call)
+# ---------------------------------------------------------------------------
+
+
+def test_load_metadata_safe_returns_dataframe_when_item_metadata_present(
+    tmp_path: Path,
+) -> None:
+    """_load_metadata_safe must pass `fields` and `on_field_missing` through.
+
+    Regression: previously this function called ``load_item_metadata(config)``
+    without ``fields``, which raised ``TypeError`` at runtime the moment any
+    recipe defined ``item_metadata``. Existing watcher tests all set
+    ``recipe.item_metadata = None`` so the broken branch was never reached.
+    """
+    import pandas as pd
+
+    from recotem.serving.watcher import _load_metadata_safe
+
+    csv_path = tmp_path / "items.csv"
+    pd.DataFrame({"item_id": ["i1", "i2", "i3"], "title": ["A", "B", "C"]}).to_csv(
+        csv_path, index=False
+    )
+
+    item_metadata = MagicMock()
+    item_metadata.type = "csv"
+    item_metadata.path = str(csv_path)
+    item_metadata.item_id_column = "item_id"
+    item_metadata.fields = ["title"]
+    item_metadata.on_field_missing = "error"
+
+    recipe = MagicMock()
+    recipe.item_metadata = item_metadata
+
+    df = _load_metadata_safe(recipe, "test")
+    assert df is not None
+    assert list(df.columns) == ["title"]
+    assert df.index.name == "item_id"
+    assert sorted(df.index.tolist()) == ["i1", "i2", "i3"]
+
+
+def test_load_metadata_safe_returns_none_on_missing_field_with_on_field_missing_error(
+    tmp_path: Path, caplog
+) -> None:
+    """A missing column with on_field_missing=error is swallowed (logged)."""
+    import logging
+
+    import pandas as pd
+
+    from recotem.serving.watcher import _load_metadata_safe
+
+    csv_path = tmp_path / "items.csv"
+    pd.DataFrame({"item_id": ["i1"], "title": ["A"]}).to_csv(csv_path, index=False)
+
+    item_metadata = MagicMock()
+    item_metadata.type = "csv"
+    item_metadata.path = str(csv_path)
+    item_metadata.item_id_column = "item_id"
+    item_metadata.fields = ["missing_column"]
+    item_metadata.on_field_missing = "error"
+
+    recipe = MagicMock()
+    recipe.item_metadata = item_metadata
+
+    with caplog.at_level(logging.WARNING):
+        df = _load_metadata_safe(recipe, "test")
+
+    assert df is None

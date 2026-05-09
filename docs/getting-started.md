@@ -102,8 +102,19 @@ docker compose down -v
 ## Path B — pip install
 
 ```bash
-pip install recotem
+pip install recotem            # or: uv pip install recotem
 ```
+
+Verify the install resolves the entry-point:
+
+```bash
+recotem --help                 # should list train, serve, inspect, validate, schema, keygen
+recotem validate examples/tutorial-purchase-log/recipe.yaml
+```
+
+`validate` parses the recipe, instantiates the data source, and runs its
+optional `probe()` (HTTP HEAD for the tutorial CSV) — a fast way to catch
+network or recipe problems before launching `train`.
 
 ### 1. Generate keys
 
@@ -165,6 +176,9 @@ curl -sX POST http://127.0.0.1:8080/predict/purchase_log \
 | `DataSourceError: HTTP 404 fetching …` | URL changed | Verify the URL in a browser; restore the v1.0.0 tag |
 | `ArtifactError: RECOTEM_SIGNING_KEYS not set` | Step 1 not exported | Re-run the export and try again |
 | `401 Unauthorized` on /predict | Wrong API key plaintext | Use the `plaintext` line from `keygen --type api`, not the `hash` |
+| `503 recipe_unavailable` on /predict immediately after train | Watcher has not polled yet | Wait up to `RECOTEM_WATCH_INTERVAL` seconds (default 5; tutorial sets 10). Check `/health`. |
+| Path B: artifact written to wrong directory | Recipe `output.path` is CWD-relative | Run `recotem train` from the repo root (or edit `output.path` to an absolute path). |
+| `recotem: command not found` after pip install | `pip` installed to a venv not on `PATH` | Use `python -m recotem ...`, or activate the venv (`uv run recotem ...`). |
 
 ## Next steps
 

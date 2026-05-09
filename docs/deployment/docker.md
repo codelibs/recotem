@@ -2,6 +2,27 @@
 
 Recotem ships as a single Docker image. `recotem train` and `recotem serve` are separate commands in the same image.
 
+## Image tags
+
+Pushed by `.github/workflows/docker.yml` to `ghcr.io/codelibs/recotem`:
+
+| Tag pattern | Mutability | Use for |
+|---|---|---|
+| `2.0.0`, `2.0.1`, ... (semver `{{version}}`) | immutable | production — pin here |
+| `2.0`, `2.1`, ... (semver `{{major}}.{{minor}}`) | mutable within a minor | rolling minor pin |
+| `main` (branch ref) | mutable, head of `main` | smoke-tests only |
+| `sha-<short>` | immutable | reproducing a specific commit |
+
+There is **no `:latest` tag**. The repository's tutorial `compose.yaml`
+references `:latest` for brevity; in production replace it with a semver
+tag (e.g. `2.0.0`). The Helm chart and `examples/k8s/` already pin
+`2.0.0`.
+
+The image is multi-arch (`linux/amd64`, `linux/arm64`). SBOM and SLSA
+provenance attestations are attached at push time (`provenance: mode=max`,
+`sbom: true`); verify with `cosign verify-attestation` if your supply-chain
+policy requires it.
+
 ## compose.yaml walkthrough
 
 The repository includes `compose.yaml` (the Docker Compose v2 default
@@ -16,7 +37,7 @@ services:
   # In production, replace with a CronJob (K8s) or cron entry on the host.
   # ------------------------------------------------------------------
   train:
-    image: ghcr.io/codelibs/recotem:2
+    image: ghcr.io/codelibs/recotem:2.0.0
     command: recotem train /recipes/my_recipe.yaml
     working_dir: /workspace
     volumes:
@@ -31,7 +52,7 @@ services:
   # and hot-swaps models when train writes a new artifact.
   # ------------------------------------------------------------------
   serve:
-    image: ghcr.io/codelibs/recotem:2
+    image: ghcr.io/codelibs/recotem:2.0.0
     command: recotem serve --recipes /recipes/
     working_dir: /workspace
     ports:
@@ -78,7 +99,17 @@ RECOTEM_API_KEYS=client-a:sha256:dd0eeff...,client-b:sha256:1122334...
 docker compose --env-file .env up -d serve
 ```
 
-**RECOTEM_HOST must be 0.0.0.0 inside Docker.** The default `127.0.0.1` only binds loopback and is unreachable from outside the container.
+**RECOTEM_HOST must be 0.0.0.0 inside Docker.** The default `127.0.0.1` only binds loopback and is unreachable from outside the container. Note also that when `RECOTEM_API_KEYS` is empty, the server forces `127.0.0.1` regardless of `RECOTEM_HOST` — pass `--insecure-no-auth` with `RECOTEM_ENV` in `{development,dev,test}` to override (development only).
+
+**Volume permissions (UID 1000).** The image runs as `appuser` (UID/GID 1000). Bind-mounted host directories that the container writes to (e.g. `./artifacts/`) must be writable by UID 1000:
+
+```bash
+mkdir -p ./artifacts && chown 1000:1000 ./artifacts
+```
+
+Named Docker volumes (as in `compose.yaml`) are pre-created with the right ownership and need no chown. The container also has `readOnlyRootFilesystem` semantics in mind — `/tmp` is the only writable location outside mounted volumes.
+
+**Image-level HEALTHCHECK.** The Dockerfile declares its own `HEALTHCHECK` that runs `recotem schema` every 30 s. This proves the binary is callable but does **not** check `/health`. The Compose-level healthcheck shown above (HTTP `GET /health`) is the one orchestrators should rely on; it overrides the image default for the `serve` service.
 
 **Bind port only on localhost on the host if you put a reverse proxy in front:**
 
@@ -93,7 +124,7 @@ Replace the one-shot `train` service with a cron wrapper or use the host cron to
 
 ```bash
 # Host cron — runs inside existing serve container's shared volume
-0 3 * * * docker compose -f /opt/recotem/docker-compose.yaml run --rm train
+0 3 * * * docker compose -f /opt/recotem/compose.yaml run --rm train
 ```
 
 Or run the `train` image as a separate, throwaway container that shares the artifact volume:
@@ -104,7 +135,7 @@ docker run --rm \
   -v recotem_artifacts:/workspace/artifacts \
   -v /opt/recotem/recipes:/recipes:ro \
   -e RECOTEM_SIGNING_KEYS="${RECOTEM_SIGNING_KEYS}" \
-  ghcr.io/codelibs/recotem:2 \
+  ghcr.io/codelibs/recotem:2.0.0 \
   recotem train /recipes/my_recipe.yaml
 ```
 
@@ -117,14 +148,14 @@ docker run --rm \
 | `RECOTEM_HOST` | no | `127.0.0.1` | Must be `0.0.0.0` inside Docker |
 | `RECOTEM_PORT` | no | `8080` | |
 | `RECOTEM_WATCH_INTERVAL` | no | `5` | Seconds between artifact polls |
-| `RECOTEM_LOG_FORMAT` | no | `console`* | `json` recommended in containers |
+| `RECOTEM_LOG_FORMAT` | no | `auto`* | `json` recommended in containers |
 | `RECOTEM_ALLOWED_HOSTS` | no | `127.0.0.1,localhost` | Comma-separated |
 | `RECOTEM_ALLOWED_ORIGINS` | no | `""` (deny) | Comma-separated CORS origins |
 | `RECOTEM_MAX_ARTIFACT_BYTES` | no | `2147483648` (2 GiB) | |
 | `RECOTEM_DRAIN_SECONDS` | no | `30` | SIGTERM grace window |
 | `RECOTEM_ENV` | no | `""` | Set to `development` to unlock `--insecure-no-auth` |
 
-*Default switches to `json` automatically when stderr is not a TTY.
+*`auto` switches to `console` for an interactive TTY and `json` otherwise.
 
 ## Health check
 

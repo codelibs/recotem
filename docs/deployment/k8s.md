@@ -29,7 +29,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: train
-              image: ghcr.io/codelibs/recotem:2
+              image: ghcr.io/codelibs/recotem:2.0.0
               command: ["recotem", "train", "/recipes/my_recipe.yaml"]
               volumeMounts:
                 - name: recipes
@@ -65,7 +65,14 @@ Exit code mapping for `restartPolicy: OnFailure`:
 | 5 | ArtifactError | No retry (signing key config issue; fix Secret) |
 | 1 | Unexpected | Retry |
 
-Set `backoffLimit: 2` for production CronJobs to avoid runaway retry loops on persistent data issues.
+Set `backoffLimit: 2` for production CronJobs to avoid runaway retry loops on persistent data issues. The bundled Helm CronJob also sets `activeDeadlineSeconds: 3600` (1 h hard kill); raise it for slow Optuna budgets or data sources.
+
+When `failOnBusy: false` (the chart default), a lock collision from
+`concurrencyPolicy: Forbid` is impossible at the K8s layer, but if you set
+`concurrencyPolicy: Allow` the in-process file lock will exit 0 on the
+second invocation. The CronJob will be marked Succeeded — set
+`failOnBusy: true` (which appends `--fail-on-busy`) if your alerting needs
+to see overlapping runs.
 
 ## Deployment (serve)
 
@@ -87,7 +94,7 @@ spec:
     spec:
       containers:
         - name: serve
-          image: ghcr.io/codelibs/recotem:2
+          image: ghcr.io/codelibs/recotem:2.0.0
           command: ["recotem", "serve", "--recipes", "/recipes/"]
           ports:
             - containerPort: 8080
@@ -139,6 +146,49 @@ spec:
 ```
 
 Note on multiple replicas: each pod holds its own in-memory copy of every model and runs its own watcher thread. This is intentional — there is no shared cache. With 2 GiB max artifact size and 10 recipes, plan for up to 20 GiB per pod before allocating replicas.
+
+### Pod security context
+
+The Helm chart applies a hardened security context by default:
+
+```yaml
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+securityContext:                 # container-level
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: [ALL] }
+```
+
+`readOnlyRootFilesystem: true` requires every writable path to be a tmpfs or
+volume mount; the chart mounts an `emptyDir` at `/tmp`. Add similar mounts
+if a plugin or fsspec backend writes elsewhere (e.g. GCS FUSE cache).
+
+### Rolling updates and warm-up
+
+Each new pod re-fetches and HMAC-verifies every artifact at startup before
+the readinessProbe passes (default `initialDelaySeconds: 10`). With many
+recipes or large artifacts, increase `initialDelaySeconds` and tune
+`maxSurge` / `maxUnavailable` so the rollout does not run below the
+desired-replica count. The watcher polls on a shared interval inside each
+pod — when `train` writes a new artifact, **all** replicas pick it up
+within `RECOTEM_WATCH_INTERVAL` seconds; no rollout is needed for hot-swap.
+
+### Secret rotation
+
+Changing data in the `recotem-auth` Secret does **not** trigger a pod
+rollout — the env vars are evaluated once at process start. After rotating
+either key, run:
+
+```bash
+kubectl rollout restart deployment/recotem-serve -n recotem
+```
+
+Use the multi-kid pattern from `docs/operations.md` to keep both old and
+new keys active during the rollout window.
 
 ## Service
 
@@ -203,50 +253,71 @@ Recipes themselves can also live in object storage; mount them via an init conta
 
 ## Helm chart values
 
-The Helm chart in `helm/recotem/` provides a `serve` Deployment, `CronJob` template, `NetworkPolicy`, `PDB`, and optional `HPA`.
+The Helm chart in `helm/recotem/` provides a `serve` Deployment, optional
+`CronJob` template, `NetworkPolicy`, `PodDisruptionBudget`, `ServiceAccount`,
+and optional `HorizontalPodAutoscaler`.
 
-Key values:
+Key values (excerpt from `helm/recotem/values.yaml`):
 
 ```yaml
 image:
   repository: ghcr.io/codelibs/recotem
-  tag: "2"
+  tag: "2.0.0"
+  pullPolicy: IfNotPresent
 
-serve:
-  replicaCount: 2
-  resources:
-    requests:
-      memory: "4Gi"
-      cpu: "500m"
-    limits:
-      memory: "8Gi"
+# serve Deployment
+replicaCount: 2
 
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 4Gi
+
+# train CronJob (disabled by default — set enabled: true to schedule it)
 train:
-  schedule: "0 3 * * *"
+  enabled: false
+  schedule: "0 2 * * *"
   concurrencyPolicy: Forbid
+  failOnBusy: false
 
+# Reference an existing Kubernetes Secret containing both
+#   RECOTEM_SIGNING_KEYS and RECOTEM_API_KEYS as data keys.
 secrets:
-  signingKeys: ""     # set via --set or external secrets operator
-  apiKeys: ""
+  secretName: recotem-auth
 
 recipes:
-  source: configmap   # configmap | pvc | objectStore
-  configmap:
+  mountPath: /recipes
+  source: configMap   # configMap | pvc | objectStore
+  configMap:
     name: recotem-recipes
+    managed: false    # set true to let the chart manage the ConfigMap from .data
+    data: {}
   pvc:
     claimName: recotem-recipes
+    readOnly: true
   objectStore:
-    bucket: s3://my-bucket/recipes/
+    initContainer: {} # provide a sync init container spec
 
 networkPolicy:
   enabled: true
-  ingressFrom: []     # restrict by namespace/pod selector
+  ingressFromPodSelector: {}   # restrict by pod-label selector
 
-autoscaling:
+hpa:
   enabled: false
   minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
+```
+
+Create the auth Secret before installing the chart, e.g.:
+
+```bash
+kubectl create secret generic recotem-auth \
+  --from-literal=RECOTEM_SIGNING_KEYS='prod-2026-q2:<hex64>' \
+  --from-literal=RECOTEM_API_KEYS='client-a:sha256:<hex64>'
 ```
 
 Render and inspect before applying:

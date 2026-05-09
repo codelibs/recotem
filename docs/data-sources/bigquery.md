@@ -14,7 +14,7 @@ DataSourceError: BigQuery source requires 'recotem[bigquery]'. Install with: pip
 
 ## Authentication
 
-Recotem uses Application Default Credentials (ADC). No credentials are embedded in recipes.
+Recotem uses Application Default Credentials (ADC). No credentials are embedded in recipes. The `google-cloud-bigquery` client itself walks the standard ADC chain (`GOOGLE_APPLICATION_CREDENTIALS` → `gcloud` user creds → metadata server) — Recotem does not consult any of these env vars directly.
 
 Set up ADC with one of:
 
@@ -29,9 +29,11 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
 # No action needed. The metadata server provides credentials automatically.
 ```
 
+`source.project` (recipe field) is forwarded as the BigQuery client's billing project. When omitted, the client uses the ADC ambient project (`gcloud config get project` for user creds, or the service account's project). There is no recipe field for `location` — BigQuery infers location from the dataset referenced in the query.
+
 Required IAM role on the BigQuery dataset: `roles/bigquery.dataViewer` + `roles/bigquery.jobUser` on the project.
 
-For the Storage Read API (used for large result sets): `roles/bigquery.readSessionUser`.
+For the Storage Read API (used for large result sets): `roles/bigquery.readSessionUser`. This role is **optional** — the fetch path tries `create_bqstorage_client=True` first and silently falls back to the standard REST API on any failure (slower for large results but functionally complete).
 
 Recommended minimum set for a service account used by Recotem:
 
@@ -71,7 +73,18 @@ source:
     event_name: "purchase"
 ```
 
-Parameter types are inferred from the Python type of the value (`str`, `int`, `float`, `bool`).
+Parameter types are inferred from the Python type of the value:
+
+| YAML / Python type | BigQuery type |
+|--------------------|---------------|
+| `bool` (`true` / `false`) | `BOOL` |
+| `int` | `INT64` |
+| `float` | `FLOAT64` |
+| `str` | `STRING` |
+
+`bool` is checked before `int` (so YAML `true` does not become `INT64 1`). Lists, dicts, `null`, dates, and timestamps are **not** supported and raise `DataSourceError` whenever the parameter dispatcher runs — that means both at `recotem validate` (via `probe()`) and at fetch time. Encode dates as `STRING` (e.g. `"2026-04-01"`) and parse them in SQL with `PARSE_DATE`, or compute date ranges in SQL via `CURRENT_DATE()` / `DATE_SUB()` (see the GA4 example below).
+
+YAML quoting matters: `lookback_days: 30` is `INT64`, `lookback_days: "30"` is `STRING`. Mismatching the SQL parameter type fails the dry-run with a `Query parameter '@lookback_days' has type STRING which differs from declared type INT64`-style message.
 
 ## GA4 events_* pattern
 
@@ -128,6 +141,7 @@ All BigQuery exceptions are wrapped in `DataSourceError` and produce exit 3. The
 
 ## Notes
 
-- `recotem validate recipes/my_recipe.yaml` probes ADC authentication and runs a `LIMIT 1` dry-run against the query before any training starts.
+- `recotem validate recipes/my_recipe.yaml` probes ADC authentication and submits the query as a BigQuery dry-run job (`use_query_cache=False`) before any training starts. Dry-run jobs are not billed and do not execute the query. The dry-run also validates `query_parameters` types — invalid types surface here rather than at fetch.
+- The dry-run does **not** expose its `total_bytes_processed` estimate to the user. Recotem also does not set `maximum_bytes_billed`, so a runaway query is bounded only by your project's BigQuery quotas. Add `--maximum-bytes-billed`-style guard rails at the GCP project level if cost runaway is a concern.
 - Query results are streamed via the Storage Read API when available. Very large result sets (> 10 M rows) should be pre-aggregated in your data warehouse before handing off to Recotem.
-- `GOOGLE_*` and `GCP_*` env vars are blacklisted from recipe `${...}` expansion. Cloud credentials must come from ADC, not from the recipe file.
+- `GOOGLE_*` and `GCP_*` env vars are blacklisted from recipe `${...}` expansion (case-insensitive). Cloud credentials must come from ADC, not from the recipe file. `source.query` and `source.query_parameters` are unconditionally exempt from `${...}` expansion regardless of variable name.

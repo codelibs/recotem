@@ -450,7 +450,11 @@ def _load_metadata_safe(recipe: Any, recipe_name: str) -> Any:
     try:
         from recotem.metadata.loader import load_item_metadata
 
-        return load_item_metadata(recipe.item_metadata)
+        return load_item_metadata(
+            recipe.item_metadata,
+            recipe.item_metadata.fields,
+            on_field_missing=recipe.item_metadata.on_field_missing,
+        )
     except Exception as exc:
         logger.warning("metadata_load_failed", name=recipe_name, error=str(exc))
         return None

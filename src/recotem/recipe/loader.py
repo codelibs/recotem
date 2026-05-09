@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import structlog
 import yaml
@@ -61,16 +62,36 @@ def _validate_output_path(path: str, field_name: str) -> None:
             f"'{field_name}' uses scheme '{scheme}://' which does not support "
             "writes. Use a bare local path, file://, s3://, gs://, or az://."
         )
+    if scheme == "file" and parsed.netloc not in ("", "localhost"):
+        raise RecipeError(
+            f"'{field_name}' uses 'file://{parsed.netloc}/...' which is "
+            "ambiguous as a local path. Use 'file:///absolute/path' "
+            "(empty host) instead."
+        )
 
 
-def _check_local_output_containment(path_str: str) -> None:
+def _local_output_path(output_path: str) -> Path | None:
+    """Return the local Path for a local-write output, else None.
+
+    Handles bare absolute paths and ``file:///abs/path`` URIs.
+    """
+    parsed = urlparse(output_path)
+    scheme = (parsed.scheme or "").lower()
+    if scheme == "":
+        return Path(output_path)
+    if scheme == "file":
+        return Path(url2pathname(parsed.path))
+    return None
+
+
+def _check_local_output_containment(local_path: Path) -> None:
     """If RECOTEM_ARTIFACT_ROOT is set, assert resolved path lies under it."""
     artifact_root_env = os.environ.get("RECOTEM_ARTIFACT_ROOT", "")
     if not artifact_root_env:
         return
 
     artifact_root = Path(artifact_root_env).resolve()
-    resolved = Path(path_str).resolve()
+    resolved = local_path.resolve()
 
     try:
         resolved.relative_to(artifact_root)
@@ -269,12 +290,10 @@ def load_recipe(
     # Enforce sha256 integrity pin for network-scheme paths.
     _enforce_sha256_for_network_paths(recipe)
 
-    # Local output path containment check.
-    output_path = recipe.output.path
-    _parsed_output = urlparse(output_path)
-    if not _parsed_output.scheme:
-        # Local path — apply RECOTEM_ARTIFACT_ROOT containment.
-        _check_local_output_containment(output_path)
+    # Local output path containment check (covers bare paths and file:// URIs).
+    local_output = _local_output_path(recipe.output.path)
+    if local_output is not None:
+        _check_local_output_containment(local_output)
 
     logger.info("recipe_loaded", name=recipe.name, path=str(p))
     return recipe

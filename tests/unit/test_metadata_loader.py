@@ -12,6 +12,7 @@ Tests:
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pandas as pd
@@ -19,14 +20,23 @@ import pytest
 
 from recotem.metadata.loader import load_item_metadata
 
+pytest_plugins = ("pytest_httpserver",)
+
 
 class _Config:
     """Minimal config object for load_item_metadata."""
 
-    def __init__(self, type_: str, path: str, item_id_column: str = "item_id"):
+    def __init__(
+        self,
+        type_: str,
+        path: str,
+        item_id_column: str = "item_id",
+        sha256: str | None = None,
+    ):
         self.type = type_
         self.path = path
         self.item_id_column = item_id_column
+        self.sha256 = sha256
 
 
 def _write_csv(tmp_path: Path, content: str, filename: str = "meta.csv") -> Path:
@@ -211,3 +221,97 @@ def test_parquet_metadata_loads_correctly(tmp_path: Path) -> None:
     )
     assert "i1" in df.index
     assert df.loc["i1", "title"] == "T1"
+
+
+# ---------------------------------------------------------------------------
+# HTTP fetch: sha256 verification, byte cap, redirect controls
+# (mirrors the controls already enforced for source.path; see
+#  docs/recipe-reference.md and docs/security.md.)
+# ---------------------------------------------------------------------------
+
+
+def _csv_body() -> bytes:
+    return b"item_id,title\ni1,Foo\ni2,Bar\n"
+
+
+def test_http_metadata_sha256_match_loads(httpserver) -> None:
+    body = _csv_body()
+    digest = hashlib.sha256(body).hexdigest()
+    httpserver.expect_request("/items.csv").respond_with_data(
+        body, content_type="text/csv"
+    )
+    url = httpserver.url_for("/items.csv")
+    df = load_item_metadata(
+        _Config("csv", url, sha256=digest),
+        fields=["title"],
+    )
+    assert "i1" in df.index
+    assert df.loc["i1", "title"] == "Foo"
+
+
+def test_http_metadata_sha256_mismatch_raises(httpserver) -> None:
+    body = _csv_body()
+    bad_digest = "0" * 64
+    httpserver.expect_request("/items.csv").respond_with_data(
+        body, content_type="text/csv"
+    )
+    url = httpserver.url_for("/items.csv")
+    with pytest.raises((ValueError, Exception), match="sha256"):
+        load_item_metadata(
+            _Config("csv", url, sha256=bad_digest),
+            fields=["title"],
+        )
+
+
+def test_http_metadata_byte_cap_exceeded_raises(httpserver, monkeypatch) -> None:
+    """Body larger than RECOTEM_MAX_DOWNLOAD_BYTES is refused.
+
+    The cap is clamped to a minimum of 1 MiB by config.get_max_download_bytes,
+    so the test body must exceed 1 MiB to actually hit the limit.
+    """
+    big_body = b"item_id,title\n" + (b"a" * (2 * 1024 * 1024))  # > 1 MiB
+    httpserver.expect_request("/items.csv").respond_with_data(
+        big_body, content_type="text/csv"
+    )
+    url = httpserver.url_for("/items.csv")
+    monkeypatch.setenv("RECOTEM_MAX_DOWNLOAD_BYTES", "1")  # clamps to 1 MiB
+    digest = hashlib.sha256(big_body).hexdigest()
+    with pytest.raises((ValueError, Exception), match="cap|exceed"):
+        load_item_metadata(
+            _Config("csv", url, sha256=digest),
+            fields=["title"],
+        )
+
+
+def test_http_metadata_redirect_to_disallowed_scheme_refused(
+    httpserver, tmp_path
+) -> None:
+    """A 302 redirect to a non-http(s) scheme is refused (no SSRF helper)."""
+    target = tmp_path / "leak.csv"
+    target.write_bytes(_csv_body())
+    httpserver.expect_request("/items.csv").respond_with_data(
+        b"",
+        status=302,
+        headers={"Location": f"file://{target}"},
+    )
+    url = httpserver.url_for("/items.csv")
+    digest = hashlib.sha256(_csv_body()).hexdigest()
+    with pytest.raises((ValueError, Exception), match="scheme|disallowed"):
+        load_item_metadata(
+            _Config("csv", url, sha256=digest),
+            fields=["title"],
+        )
+
+
+def test_local_metadata_sha256_mismatch_raises(tmp_path) -> None:
+    """Local files with a sha256 set are also content-verified before parsing."""
+    csv_file = _write_csv(
+        tmp_path,
+        "item_id,title\ni1,Title1\ni2,Title2\n",
+    )
+    bad_digest = "0" * 64
+    with pytest.raises((ValueError, Exception), match="sha256"):
+        load_item_metadata(
+            _Config("csv", str(csv_file), sha256=bad_digest),
+            fields=["title"],
+        )

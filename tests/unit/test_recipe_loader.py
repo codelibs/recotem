@@ -352,6 +352,51 @@ def test_local_output_path_inside_artifact_root_accepted(
     assert recipe.name == "inside_root"
 
 
+def test_file_scheme_output_path_outside_artifact_root_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """file:// must not bypass RECOTEM_ARTIFACT_ROOT containment."""
+    artifact_root = tmp_path / "allowed"
+    artifact_root.mkdir()
+    outside = tmp_path / "outside.recotem"
+    monkeypatch.setenv("RECOTEM_ARTIFACT_ROOT", str(artifact_root))
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="file_outside_root",
+        output_path=f"file://{outside}",
+    )
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="outside"):
+        load_recipe(p)
+
+
+def test_file_scheme_output_path_inside_artifact_root_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """file://<path> resolved under RECOTEM_ARTIFACT_ROOT is allowed."""
+    artifact_root = tmp_path / "allowed"
+    artifact_root.mkdir()
+    inside = artifact_root / "model.recotem"
+    monkeypatch.setenv("RECOTEM_ARTIFACT_ROOT", str(artifact_root))
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="file_inside_root",
+        output_path=f"file://{inside}",
+    )
+    p = _write_recipe(tmp_path, content)
+    recipe = load_recipe(p)
+    assert recipe.name == "file_inside_root"
+
+
+def test_file_scheme_output_path_with_host_rejected(tmp_path: Path) -> None:
+    """file://host/path (UNC-style) is ambiguous for local containment; reject."""
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="file_with_host",
+        output_path="file://example.com/tmp/out.recotem",
+    )
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="host|netloc|local path"):
+        load_recipe(p)
+
+
 # ---------------------------------------------------------------------------
 # Duplicate recipe names
 # ---------------------------------------------------------------------------

@@ -39,7 +39,7 @@ from recotem.serving.registry import ModelEntry, ModelRegistry
 from recotem.serving.routes import make_router
 from recotem.serving.watcher import (
     ArtifactWatcher,
-    _load_metadata_safe,
+    _load_metadata,
     _read_artifact_bytes,
     _sha256_bytes,
     _stat_marker,
@@ -403,7 +403,15 @@ def _try_load_artifact(
 
     metadata_df = None
     if recipe.item_metadata is not None:
-        metadata_df = _load_metadata_safe(recipe, recipe.name)
+        try:
+            metadata_df = _load_metadata(recipe, recipe.name)
+        except Exception as exc:
+            logger.warning(
+                "initial_artifact_metadata_failed",
+                name=recipe.name,
+                error=str(exc),
+            )
+            return _failed_entry(recipe, f"metadata load failed: {exc}")
 
     marker = _stat_marker(artifact_path)
     entry = ModelEntry(

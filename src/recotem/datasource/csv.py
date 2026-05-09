@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import urllib.error
-import urllib.request
 from io import BytesIO
 from typing import TYPE_CHECKING, ClassVar
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 import structlog
 from pydantic import BaseModel, Field
 
+from recotem._http_fetch import (
+    NETWORK_SCHEMES as _NETWORK_SCHEMES,
+)
+from recotem._http_fetch import (
+    HttpFetchError,
+    fetch_http_bytes,
+    infer_compression,
+    redact_url_userinfo,
+    verify_sha256,
+)
 from recotem.config import get_http_timeout_seconds, get_max_download_bytes
 from recotem.datasource.base import DataSourceError, FetchContext
 
@@ -21,87 +27,16 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-_NETWORK_SCHEMES: frozenset[str] = frozenset({"http", "https"})
-
-_COMPRESSION_MAP: dict[str, str] = {
-    ".gz": "gzip",
-    ".bz2": "bz2",
-    ".zip": "zip",
-    ".xz": "xz",
-}
-
-# Schemes where urlparse's "userinfo" actually means credentials. For other
-# schemes (gs://bucket@project/..., s3://...) the @ is part of the path.
-_USERINFO_SCHEMES: frozenset[str] = frozenset({"http", "https", "ftp", "ftps"})
-
-
-def _redact_url_userinfo(path: str) -> str:
-    """Strip any userinfo from URL-shaped *path* before logging.
-
-    Only redacts for HTTP(S) / FTP(S); object-store schemes like
-    ``gs://bucket@project/...`` use ``@`` in their idiomatic syntax.
-    """
-    parsed = urlparse(path)
-    if parsed.scheme.lower() not in _USERINFO_SCHEMES:
-        return path
-    if not parsed.username and not parsed.password:
-        return path
-    netloc = parsed.hostname or ""
-    if parsed.port is not None:
-        netloc = f"{netloc}:{parsed.port}"
-    return urlunparse(parsed._replace(netloc=netloc))
-
-
-def _infer_compression(path: str) -> str | None:
-    """Pandas-style compression hint from path extension. Returns None if plain."""
-    lower_path = urlparse(path).path.lower() if "://" in path else path.lower()
-    for ext, codec in _COMPRESSION_MAP.items():
-        if lower_path.endswith(ext):
-            return codec
-    return None
+_redact_url_userinfo = redact_url_userinfo
+_infer_compression = infer_compression
 
 
 def _verify_sha256(actual: bytes, expected_hex: str) -> None:
-    """hmac.compare_digest the sha256 of *actual* vs *expected_hex*."""
-    digest = hashlib.sha256(actual).hexdigest()
-    if not hmac.compare_digest(digest, expected_hex):
-        # Show only first 8 chars on each side to avoid leaking ground truth.
-        raise DataSourceError(
-            f"sha256 mismatch: got {digest[:8]}…, expected {expected_hex[:8]}…"
-        )
-
-
-_USER_AGENT = "recotem/2"
-_CHUNK_SIZE = 1 * 1024 * 1024  # 1 MiB
-_MAX_REDIRECTS = 5
-
-
-class _NoFollowRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Override urllib's default redirect handler so 3xx responses surface.
-
-    `_fetch_http_bytes` implements its own redirect loop with a lower cap
-    (`_MAX_REDIRECTS`) and visited-set loop detection. With the default
-    handler installed, `urlopen` would silently follow redirects up to
-    urllib's own cap of 10 and our manual loop would be dead code.
-
-    We override every ``http_error_3xx`` method to return the raw response
-    object rather than following the redirect or raising an ``HTTPError``.
-    Returning the response from an ``http_error_*`` handler causes urllib to
-    hand it back to the caller intact, which is exactly what our loop needs.
-    """
-
-    def _passthrough(self, req, fp, code, msg, headers):  # type: ignore[override]
-        """Return the 3xx response directly so the caller can inspect it."""
-        return fp
-
-    http_error_301 = _passthrough  # type: ignore[assignment]
-    http_error_302 = _passthrough  # type: ignore[assignment]
-    http_error_303 = _passthrough  # type: ignore[assignment]
-    http_error_307 = _passthrough  # type: ignore[assignment]
-    http_error_308 = _passthrough  # type: ignore[assignment]
-
-
-_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoFollowRedirectHandler())
+    """sha256 verification that raises :class:`DataSourceError` on mismatch."""
+    try:
+        verify_sha256(actual, expected_hex)
+    except HttpFetchError as exc:
+        raise DataSourceError(str(exc)) from exc
 
 
 def _get_max_download_bytes() -> int:
@@ -117,96 +52,17 @@ def _fetch_http_bytes(
     recipe_name: str,
     run_id: str,
 ) -> bytes:
-    """GET *url* via stdlib urllib. Streams into memory with a byte cap.
-
-    Follows up to ``_MAX_REDIRECTS`` redirects (urllib default is 30; we cap
-    lower to keep the path predictable). Raises :class:`DataSourceError` on
-    any HTTP, network, or cap-exceeded failure.
-    """
-    safe_url = _redact_url_userinfo(url)
-    redirects = 0
-    current_url = url
-    visited: set[str] = set()
-    while True:
-        if redirects > _MAX_REDIRECTS:
-            raise DataSourceError(
-                f"Too many redirects (>{_MAX_REDIRECTS}) fetching {safe_url}"
-            )
-        if current_url in visited:
-            raise DataSourceError(f"Redirect loop detected fetching {safe_url}")
-        visited.add(current_url)
-
-        req = urllib.request.Request(
-            current_url,
-            headers={"User-Agent": _USER_AGENT, "Accept": "*/*"},
-            method="GET",
+    """Wrap :func:`recotem._http_fetch.fetch_http_bytes` with DataSourceError."""
+    try:
+        return fetch_http_bytes(
+            url,
+            timeout=timeout,
+            max_bytes=max_bytes,
+            log_event="csv_source",
+            log_context={"recipe": recipe_name, "run_id": run_id},
         )
-        try:
-            with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
-                status = getattr(resp, "status", 200)
-                # Manual redirect handling (we capped lower than urllib's default)
-                if status in (301, 302, 303, 307, 308):
-                    location = resp.headers.get("Location")
-                    if not location:
-                        raise DataSourceError(
-                            f"HTTP {status} from {safe_url} without Location header"
-                        )
-                    redirects += 1
-                    current_url = urllib.request.urljoin(current_url, location)
-                    new_scheme = urlparse(current_url).scheme.lower()
-                    if new_scheme not in {"http", "https"}:
-                        raise DataSourceError(
-                            f"Refusing redirect from {safe_url} to disallowed "
-                            f"scheme '{new_scheme}://' "
-                            f"({_redact_url_userinfo(current_url)})"
-                        )
-                    logger.info(
-                        "csv_source_redirect",
-                        recipe=recipe_name,
-                        run_id=run_id,
-                        from_=safe_url,
-                        to=_redact_url_userinfo(current_url),
-                        status=status,
-                    )
-                    continue
-                if status >= 400:
-                    raise DataSourceError(f"HTTP {status} fetching {safe_url}")
-                buf = bytearray()
-                while True:
-                    chunk = resp.read(_CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    if len(buf) + len(chunk) > max_bytes:
-                        logger.warning(
-                            "csv_source_size_exceeded",
-                            recipe=recipe_name,
-                            run_id=run_id,
-                            path=safe_url,
-                            bytes_read=len(buf) + len(chunk),
-                            cap=max_bytes,
-                        )
-                        raise DataSourceError(
-                            f"Download size cap exceeded fetching {safe_url}: "
-                            f"> {max_bytes} bytes (RECOTEM_MAX_DOWNLOAD_BYTES)."
-                        )
-                    buf.extend(chunk)
-                return bytes(buf)
-        except urllib.error.HTTPError as exc:
-            # urllib.request follows redirects up to its own limit; HTTPError
-            # is raised for terminal 4xx/5xx.
-            raise DataSourceError(
-                f"HTTP {exc.code} fetching {safe_url}: {exc.reason}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise DataSourceError(
-                f"URL error fetching {safe_url}: {exc.reason}"
-            ) from exc
-        except DataSourceError:
-            raise
-        except Exception as exc:  # pragma: no cover - defensive
-            raise DataSourceError(
-                f"Unexpected error fetching {safe_url}: {exc}"
-            ) from exc
+    except HttpFetchError as exc:
+        raise DataSourceError(str(exc)) from exc
 
 
 class CSVConfig(BaseModel, extra="forbid"):

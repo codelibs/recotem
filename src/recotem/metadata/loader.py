@@ -9,14 +9,31 @@ where the item-id is null, and returns a ``pandas.DataFrame`` indexed by the
 The returned DataFrame contains exactly the columns listed in *fields* (in
 order); it does not include the item-id column as a data column — only as the
 index.
+
+For HTTP/HTTPS paths, the same controls applied to ``source.path`` are
+enforced here too: sha256 byte-content verification, ``RECOTEM_MAX_DOWNLOAD_BYTES``
+cap, ``RECOTEM_HTTP_TIMEOUT_SECONDS`` timeout, capped redirect loop with a
+scheme allow-list, and userinfo redaction in logs. See
+``docs/security.md`` for the threat model.
 """
 
 from __future__ import annotations
 
+from io import BytesIO
 from typing import Literal
+from urllib.parse import urlparse
 
 import pandas as pd
 import structlog
+
+from recotem._http_fetch import (
+    NETWORK_SCHEMES,
+    HttpFetchError,
+    fetch_http_bytes,
+    redact_url_userinfo,
+    verify_sha256,
+)
+from recotem.config import get_http_timeout_seconds, get_max_download_bytes
 
 logger = structlog.get_logger(__name__)
 
@@ -74,11 +91,12 @@ def load_item_metadata(
     file_type: str = getattr(config, "type", "")
     path: str = getattr(config, "path", "")
     item_id_col: str = getattr(config, "item_id_column", "item_id")
+    sha256: str | None = getattr(config, "sha256", None)
 
     # -----------------------------------------------------------------------
     # Read file
     # -----------------------------------------------------------------------
-    df = _read_file(file_type, path)
+    df = _read_file(file_type, path, sha256=sha256)
 
     # -----------------------------------------------------------------------
     # Validate item-id column exists
@@ -170,20 +188,86 @@ def load_item_metadata(
 # ---------------------------------------------------------------------------
 
 
-def _read_file(file_type: str, path: str) -> pd.DataFrame:
-    """Read a CSV or Parquet file via fsspec/pandas."""
+def _read_file(file_type: str, path: str, *, sha256: str | None = None) -> pd.DataFrame:
+    """Read a CSV or Parquet file via fsspec/pandas.
+
+    For HTTP/HTTPS paths and for any path with a ``sha256`` pin, the bytes
+    are read fully into memory and content-verified before parsing — this is
+    the only place where the documented integrity / byte-cap / redirect
+    controls apply to item metadata.
+    """
+    if file_type not in {"parquet", "csv", "tsv"}:
+        raise ValueError(
+            f"unsupported metadata file type {file_type!r}; expected 'csv' or 'parquet'"
+        )
+
+    scheme = urlparse(path).scheme.lower()
+    safe_path = redact_url_userinfo(path)
+
+    if scheme in NETWORK_SCHEMES:
+        try:
+            data = fetch_http_bytes(
+                path,
+                timeout=get_http_timeout_seconds(),
+                max_bytes=get_max_download_bytes(),
+                log_event="metadata_source",
+            )
+        except HttpFetchError as exc:
+            raise ValueError(
+                f"failed to fetch metadata file {safe_path!r}: {exc}"
+            ) from exc
+        if sha256 is not None:
+            try:
+                verify_sha256(data, sha256)
+            except HttpFetchError as exc:
+                raise ValueError(
+                    f"metadata sha256 verification failed for {safe_path!r}: {exc}"
+                ) from exc
+        return _parse_bytes(file_type, data, safe_path)
+
+    if sha256 is not None:
+        try:
+            import fsspec
+
+            with fsspec.open(path, "rb") as fh:
+                data = fh.read()
+        except Exception as exc:
+            raise ValueError(
+                f"failed to read metadata file {safe_path!r}: {exc}"
+            ) from exc
+        try:
+            verify_sha256(data, sha256)
+        except HttpFetchError as exc:
+            raise ValueError(
+                f"metadata sha256 verification failed for {safe_path!r}: {exc}"
+            ) from exc
+        return _parse_bytes(file_type, data, safe_path)
+
     if file_type == "parquet":
         try:
             return pd.read_parquet(path)
         except Exception as exc:
-            raise ValueError(f"failed to read parquet file {path!r}: {exc}") from exc
-    elif file_type in {"csv", "tsv"}:
-        sep = "\t" if file_type == "tsv" else ","
+            raise ValueError(
+                f"failed to read parquet file {safe_path!r}: {exc}"
+            ) from exc
+    sep = "\t" if file_type == "tsv" else ","
+    try:
+        return pd.read_csv(path, sep=sep, dtype=str)
+    except Exception as exc:
+        raise ValueError(f"failed to read csv file {safe_path!r}: {exc}") from exc
+
+
+def _parse_bytes(file_type: str, data: bytes, safe_path: str) -> pd.DataFrame:
+    """Parse already-fetched bytes as CSV/TSV/Parquet."""
+    if file_type == "parquet":
         try:
-            return pd.read_csv(path, sep=sep, dtype=str)
+            return pd.read_parquet(BytesIO(data))
         except Exception as exc:
-            raise ValueError(f"failed to read csv file {path!r}: {exc}") from exc
-    else:
-        raise ValueError(
-            f"unsupported metadata file type {file_type!r}; expected 'csv' or 'parquet'"
-        )
+            raise ValueError(
+                f"failed to parse parquet file {safe_path!r}: {exc}"
+            ) from exc
+    sep = "\t" if file_type == "tsv" else ","
+    try:
+        return pd.read_csv(BytesIO(data), sep=sep, dtype=str)
+    except Exception as exc:
+        raise ValueError(f"failed to parse csv file {safe_path!r}: {exc}") from exc

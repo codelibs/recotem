@@ -306,10 +306,10 @@ def test_yaml_deleted_removes_entry_from_registry(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_load_metadata_safe_returns_dataframe_when_item_metadata_present(
+def test_load_metadata_returns_dataframe_when_item_metadata_present(
     tmp_path: Path,
 ) -> None:
-    """_load_metadata_safe must pass `fields` and `on_field_missing` through.
+    """_load_metadata must pass `fields` and `on_field_missing` through.
 
     Regression: previously this function called ``load_item_metadata(config)``
     without ``fields``, which raised ``TypeError`` at runtime the moment any
@@ -318,7 +318,7 @@ def test_load_metadata_safe_returns_dataframe_when_item_metadata_present(
     """
     import pandas as pd
 
-    from recotem.serving.watcher import _load_metadata_safe
+    from recotem.serving.watcher import _load_metadata
 
     csv_path = tmp_path / "items.csv"
     pd.DataFrame({"item_id": ["i1", "i2", "i3"], "title": ["A", "B", "C"]}).to_csv(
@@ -329,28 +329,104 @@ def test_load_metadata_safe_returns_dataframe_when_item_metadata_present(
     item_metadata.type = "csv"
     item_metadata.path = str(csv_path)
     item_metadata.item_id_column = "item_id"
+    item_metadata.sha256 = None
     item_metadata.fields = ["title"]
     item_metadata.on_field_missing = "error"
 
     recipe = MagicMock()
     recipe.item_metadata = item_metadata
 
-    df = _load_metadata_safe(recipe, "test")
+    df = _load_metadata(recipe, "test")
     assert df is not None
     assert list(df.columns) == ["title"]
     assert df.index.name == "item_id"
     assert sorted(df.index.tolist()) == ["i1", "i2", "i3"]
 
 
-def test_load_metadata_safe_returns_none_on_missing_field_with_on_field_missing_error(
-    tmp_path: Path, caplog
-) -> None:
-    """A missing column with on_field_missing=error is swallowed (logged)."""
-    import logging
-
+def test_hot_swap_metadata_failure_marks_last_load_error(tmp_path: Path) -> None:
+    """If item_metadata load raises during a hot-swap, the watcher must keep
+    the previous entry and surface the error via ``last_load_error`` so
+    ``/health`` reports the misconfiguration."""
     import pandas as pd
 
-    from recotem.serving.watcher import _load_metadata_safe
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    metadata_csv = tmp_path / "items.csv"
+    pd.DataFrame({"item_id": ["i1"], "title": ["A"]}).to_csv(metadata_csv, index=False)
+
+    yaml_path = recipes_dir / "with_metadata.yaml"
+    yaml_path.write_text(
+        f"""\
+name: with_metadata
+source:
+  type: csv
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+item_metadata:
+  type: csv
+  path: {metadata_csv}
+  fields: [missing_column]
+  on_field_missing: error
+output:
+  path: {artifact_path}
+"""
+    )
+
+    registry = ModelRegistry()
+    good_entry = _make_entry("with_metadata")
+    good_entry.artifact_path = str(artifact_path)
+    registry.replace("with_metadata", good_entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    initial_states = build_initial_states([recipe], {"with_metadata": good_entry})
+    initial_states["with_metadata"].last_sha256 = ""  # force reload
+    initial_states["with_metadata"].last_marker = None  # force marker change
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+    watcher.start()
+    try:
+        time.sleep(0.5)
+    finally:
+        watcher.stop()
+        watcher.join(timeout=2.0)
+
+    entry = registry.get("with_metadata")
+    assert entry is not None
+    assert entry.last_load_error is not None, (
+        "metadata load failure must propagate to last_load_error"
+    )
+    assert "missing_column" in entry.last_load_error
+
+
+def test_load_metadata_raises_on_missing_field_with_on_field_missing_error(
+    tmp_path: Path,
+) -> None:
+    """`on_field_missing="error"` must surface as an exception, not a silent
+    None. Otherwise the model registers as ``loaded=True`` with no metadata,
+    and ``/health`` cannot detect the misconfiguration."""
+    import pandas as pd
+    import pytest
+
+    from recotem.serving.watcher import _load_metadata
 
     csv_path = tmp_path / "items.csv"
     pd.DataFrame({"item_id": ["i1"], "title": ["A"]}).to_csv(csv_path, index=False)
@@ -359,13 +435,12 @@ def test_load_metadata_safe_returns_none_on_missing_field_with_on_field_missing_
     item_metadata.type = "csv"
     item_metadata.path = str(csv_path)
     item_metadata.item_id_column = "item_id"
+    item_metadata.sha256 = None
     item_metadata.fields = ["missing_column"]
     item_metadata.on_field_missing = "error"
 
     recipe = MagicMock()
     recipe.item_metadata = item_metadata
 
-    with caplog.at_level(logging.WARNING):
-        df = _load_metadata_safe(recipe, "test")
-
-    assert df is None
+    with pytest.raises(ValueError, match="missing_column"):
+        _load_metadata(recipe, "test")

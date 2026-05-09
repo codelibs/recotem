@@ -387,7 +387,7 @@ class ArtifactWatcher(threading.Thread):
 
         metadata_df = None
         if recipe.item_metadata is not None:
-            metadata_df = _load_metadata_safe(recipe, name)
+            metadata_df = _load_metadata(recipe, name)
 
         return ModelEntry(
             name=name,
@@ -436,19 +436,22 @@ def _extract_kid_safe(data: bytes) -> str:
         return "<unknown>"
 
 
-def _load_metadata_safe(recipe: Any, recipe_name: str) -> Any:
-    """Load item metadata, returning None on any failure (logs WARNING)."""
-    try:
-        from recotem.metadata.loader import load_item_metadata
+def _load_metadata(recipe: Any, recipe_name: str) -> Any:
+    """Load item metadata; raises on any failure so the caller can mark the
+    model as not-loaded.
 
-        return load_item_metadata(
-            recipe.item_metadata,
-            recipe.item_metadata.fields,
-            on_field_missing=recipe.item_metadata.on_field_missing,
-        )
-    except Exception as exc:
-        logger.warning("metadata_load_failed", name=recipe_name, error=str(exc))
-        return None
+    Silent fallback to ``None`` is intentionally avoided: a recipe that
+    declares ``item_metadata`` but cannot load it is misconfigured, and
+    masking the failure as ``loaded=True`` with no metadata leaves
+    ``/health`` blind to the problem.
+    """
+    from recotem.metadata.loader import load_item_metadata
+
+    return load_item_metadata(
+        recipe.item_metadata,
+        recipe.item_metadata.fields,
+        on_field_missing=recipe.item_metadata.on_field_missing,
+    )
 
 
 # ---------------------------------------------------------------------------

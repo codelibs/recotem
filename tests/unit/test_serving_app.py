@@ -408,6 +408,78 @@ def test_failed_load_recipe_returns_503_on_predict(tmp_path: Path) -> None:
     assert response.status_code == 503
 
 
+def test_initial_load_metadata_field_missing_with_on_field_missing_error_marks_failed(
+    tmp_path: Path,
+) -> None:
+    """A recipe whose ``item_metadata`` declares a missing field with
+    ``on_field_missing: error`` must register at startup as
+    ``loaded=false`` with a metadata-related error visible via ``/health``."""
+    import pickle  # noqa: S403  (test fixture: payload is built locally)
+
+    import pandas as pd
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+    from tests.conftest import ACTIVE_KEY_HEX, build_raw_artifact
+
+    cfg = _minimal_config(tmp_path)
+    recipes_dir = Path(cfg.recipes_dir)  # type: ignore[arg-type]
+
+    artifact_path = tmp_path / "model.recotem"
+    payload = pickle.dumps({"recommender": "stub"}, protocol=4)  # noqa: S301
+    artifact_path.write_bytes(
+        build_raw_artifact(
+            kid="active",
+            key_hex=ACTIVE_KEY_HEX,
+            header_dict={
+                "recipe_name": "with_bad_metadata",
+                "best_class": "TopPop",
+                "trained_at": "2026-01-01T00:00:00Z",
+            },
+            payload_bytes=payload,
+        )
+    )
+
+    metadata_csv = tmp_path / "items.csv"
+    pd.DataFrame({"item_id": ["i1"], "title": ["A"]}).to_csv(metadata_csv, index=False)
+
+    yaml_path = recipes_dir / "with_bad_metadata.yaml"
+    yaml_path.write_text(
+        f"""\
+name: with_bad_metadata
+source:
+  type: csv
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+item_metadata:
+  type: csv
+  path: {metadata_csv}
+  fields: [missing_column]
+  on_field_missing: error
+output:
+  path: {artifact_path}
+"""
+    )
+
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+
+    assert "with_bad_metadata" in body["recipes"]
+    entry = body["recipes"]["with_bad_metadata"]
+    assert entry["loaded"] is False, (
+        f"expected metadata error to mark recipe not-loaded; got {entry}"
+    )
+    assert "metadata" in (entry.get("error") or "").lower()
+
+
 def test_failed_load_recipe_excluded_from_models_listing(tmp_path: Path) -> None:
     """/models lists only successfully loaded recipes; stubs are hidden
     (operators see them via /health instead)."""

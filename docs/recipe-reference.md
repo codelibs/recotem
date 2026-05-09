@@ -137,7 +137,7 @@ item_metadata:
 | `type` | string | required | `csv` or `parquet`. |
 | `path` | string | required | See [Path rules](#path-rules). |
 | `fields` | list[string] | required | Non-empty. Only listed fields are returned in predict responses. |
-| `on_field_missing` | string | `error` | What to do if a `fields` entry is absent in the file. `error` fails startup; `null` fills with `null`. |
+| `on_field_missing` | string | `error` | What to do if a `fields` entry is absent in the file. `error` fails the model load (at startup the recipe registers as `loaded=false` with `last_load_error` set; on hot-swap the previous model keeps serving and the failure is surfaced via `/health` and the `recotem_artifact_load_failures_total` metric); `null` fills the column with `null`. |
 | `sha256` | string | optional (required when `path` is `http://` or `https://`) | 64-char lowercase hex; verified against the fetched bytes; mismatch raises `DataSourceError` |
 
 Server-side field suppression is also available via `RECOTEM_METADATA_FIELD_DENY` (comma-separated column names), applied as a post-join column drop.
@@ -178,10 +178,16 @@ training:
 | `timeout_seconds` | int | `null` | Overall tuning wall-clock cap. |
 | `parallelism` | int | `1` | Optuna `n_jobs` (Python threads, not processes). Algorithms whose hot loop is GIL-bound see little speed-up; native-code learners (IALS, RP3beta) benefit most. |
 | `storage_path` | string | `""` | Empty = in-memory (no resume). A bare path becomes a SQLite URL (`sqlite:///<path>`); explicit `sqlite://`, `postgresql://`, `postgres://`, and `mysql://` URLs are also accepted. Study name is `recotem_<recipe_name>_<run_id>` and `load_if_exists=True`, so a fresh `run_id` per train invocation always starts a new study (resume requires reusing the same `run_id`). **SQLite over NFS corrupts** — keep SQLite databases on a local filesystem. |
-| `split.scheme` | string | `random` | `random`, `time_global`, or `time_user`. |
+| `split.scheme` | string | `random` | `random`, `time_global`, or `time_user`. See semantics below. |
 | `split.heldout_ratio` | float | `0.1` | Fraction of interactions held out. Must be in (0, 1). |
 | `split.test_user_ratio` | float | `1.0` | Fraction of users included in the test split. Must be in (0, 1]. |
-| `split.seed` | int | `42` | Random seed. |
+| `split.seed` | int | `42` | Random seed for the split (passed to irspack as `random_state`). |
+
+Split scheme semantics:
+
+- `random` — interactions are held out uniformly at random per user. `time_column` is unused.
+- `time_user` — for each user, the most recent `heldout_ratio` of that user's interactions (ranked by `time_column`) are held out. Cutoff is computed per user.
+- `time_global` — a single global cutoff at the `1 - heldout_ratio` quantile of `time_column` over the whole dataset; every interaction at or after the cutoff is held out, regardless of user. Users with no post-cutoff interactions become train-only.
 
 `time_user` and `time_global` require `schema.time_column`. Missing `time_column` with these schemes is a recipe validation error and exits with code 2.
 

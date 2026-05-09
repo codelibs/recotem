@@ -314,6 +314,16 @@ pip install "recotem[metrics]"
 
 The `/metrics` endpoint is opt-in and off by default. Set `RECOTEM_METRICS_ENABLED=true` to activate.
 
+> **Network exposure.** Both `/metrics` and `/health` are unauthenticated by
+> design — the same posture Prometheus and Kubernetes liveness/readiness
+> probes expect. The endpoints surface recipe names, kid IDs, load-error
+> strings, model-load timestamps, and predict-latency histograms.
+> **Restrict them with the cluster's NetworkPolicy** (`/metrics` to the
+> Prometheus namespace, `/health` to kubelet probes) rather than relying
+> on the API-key middleware. The `helm/recotem` chart's NetworkPolicy
+> template ships with a deny-all baseline; allow only the scrapers and
+> probes you actually need.
+
 Available metrics:
 
 | Metric | Type | Labels |

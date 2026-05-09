@@ -18,6 +18,7 @@ from typing import Any
 
 import optuna
 import scipy.sparse as sps
+import structlog
 from irspack import Evaluator
 from optuna.samplers import TPESampler
 
@@ -27,6 +28,8 @@ from recotem.training.algorithms import get_recommender_cls, resolve_algorithm_n
 from recotem.training.errors import SearchError, ZeroScoreError
 from recotem.training.evaluate import get_score
 from recotem.training.progress import ProgressReporter, make_trial_callback
+
+logger = structlog.get_logger(__name__)
 
 # Suppress Optuna's noisy logging (we emit our own structured events).
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -79,13 +82,33 @@ class SearchResult:
 
 def _make_storage(storage_path: str) -> optuna.storages.BaseStorage | None:
     """Return an Optuna storage instance for *storage_path*, or ``None`` for
-    in-memory storage (empty string or whitespace-only)."""
+    in-memory storage (empty string or whitespace-only).
+
+    Raises
+    ------
+    SearchError
+        If *storage_path* is a SQLAlchemy URL embedding userinfo
+        (``user:pass@host``).  Embedded credentials end up in SQLAlchemy
+        exception traces and the redaction processor only redacts by
+        dict key, so URL-shaped values would slip past it.  Operators
+        should use environment-driven credentials (e.g. ``PGPASSFILE``)
+        instead.
+    """
+    from urllib.parse import urlparse  # noqa: PLC0415
+
     path = storage_path.strip()
     if not path:
         return None
 
     # Postgres or other SQLAlchemy-backed URL
     if re.match(r"^(postgresql|postgres|mysql|sqlite)\b", path):
+        parsed = urlparse(path)
+        if parsed.username or parsed.password:
+            raise SearchError(
+                "tuning.storage_path must not embed credentials "
+                "(user:pass@host).  Use a credential file or env-driven "
+                "auth (PGPASSFILE, ~/.pgpass, sqlalchemy.url env) instead."
+            )
         return optuna.storages.RDBStorage(path)
 
     # Bare file path -> SQLite
@@ -259,7 +282,22 @@ def run_search(
             thread.join(timeout=float(timeout_val))
 
             if thread.is_alive():
-                # Thread still running; prune the trial.
+                # The learn thread is still running and CANNOT be killed —
+                # irspack's recommenders execute in C extensions that don't
+                # honour Python's interpreter-level interrupt.  We prune the
+                # Optuna trial so the search keeps making progress, but the
+                # orphaned thread continues to consume memory / CPU until it
+                # finishes its current learn step.  Operators should treat
+                # repeated occurrences as a sign that ``per_trial_timeout_seconds``
+                # is too aggressive for this dataset+algorithm combination.
+                logger.warning(
+                    "per_trial_timeout_thread_orphaned",
+                    recipe=recipe_name,
+                    run_id=run_id,
+                    trial=trial.number,
+                    class_name=class_name,
+                    timeout_seconds=per_trial_timeout_seconds,
+                )
                 raise optuna.TrialPruned(
                     f"Trial {trial.number} exceeded per_trial_timeout_seconds "
                     f"({per_trial_timeout_seconds}s)."
@@ -352,8 +390,12 @@ def _compute_budgets(
     * Explicit ``0`` for a class: that class is **skipped** (budget 0).
     * Explicit positive value: respected literally if it fits; if the sum of
       explicit values exceeds ``n_trials`` the positive values are scaled
-      down proportionally (each remains ≥ 1; the last non-zero entry absorbs
-      rounding remainder so the total equals ``n_trials``).
+      down proportionally (each remains ≥ 1 *when at least n_trials slots
+      exist* — see the next bullet for the n_trials-too-small case).
+    * If ``n_trials`` is smaller than the number of explicit-positive
+      classes, the first ``n_trials`` of those classes get one trial each
+      and the rest get 0.  This preserves ``sum(budgets) == n_trials`` and
+      gives every trial slot to a real algorithm rather than dropping any.
     * Class in ``class_names`` but absent from ``per_algorithm_trials``:
       shares whatever budget is left after honouring explicit values.
     * If every class is explicitly 0 *and* nothing is unspecified, the
@@ -390,6 +432,17 @@ def _compute_budgets(
 
     if explicit_sum > n_trials:
         nonzero_explicit = [c for c in explicit_classes if resolved[c] > 0]
+
+        # Edge case: fewer slots than non-zero classes.  We cannot give every
+        # class ≥ 1 *and* keep the total at n_trials.  Prefer "total ==
+        # n_trials" (Optuna stops there anyway) — give 1 trial each to the
+        # first n_trials non-zero classes and 0 to the remainder.  This keeps
+        # the contract sum(budgets) == n_trials intact.
+        if n_trials < len(nonzero_explicit):
+            for idx, c in enumerate(nonzero_explicit):
+                budgets[c] = 1 if idx < n_trials else 0
+            return budgets
+
         scale = n_trials / explicit_sum
         allocated = 0
         for c in explicit_classes:

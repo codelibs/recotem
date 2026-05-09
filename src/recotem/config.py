@@ -49,11 +49,18 @@ _INSECURE_ALLOWED_ENVS: frozenset[str] = frozenset({"development", "dev", "test"
 
 
 def _split_csv_env(name: str, default: list[str]) -> list[str]:
-    """Return a CSV-split, stripped, empty-skipping env value, or *default*."""
+    """Return a CSV-split, stripped, empty-skipping env value, or *default*.
+
+    Falls back to *default* when the env value is unset, empty, or contains
+    only separators/whitespace (e.g. ``" , , "``).  Never returns an empty
+    list when *default* is non-empty — handing ``[]`` to
+    ``TrustedHostMiddleware`` would silently 400 every request.
+    """
     raw = os.environ.get(name, "").strip()
     if not raw:
         return list(default)
-    return [item.strip() for item in raw.split(",") if item.strip()]
+    parts = [item.strip() for item in raw.split(",") if item.strip()]
+    return parts if parts else list(default)
 
 
 def _clamped_int_env(name: str, default: int, lo: int, hi: int) -> int:
@@ -369,3 +376,20 @@ def get_http_timeout_seconds() -> int:
         _MIN_HTTP_TIMEOUT_SECONDS,
         _MAX_HTTP_TIMEOUT_SECONDS,
     )
+
+
+_TRUTHY_ENV_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+
+
+def get_http_allow_private() -> bool:
+    """Return True if HTTP fetches to private/loopback/link-local IPs are allowed.
+
+    Defaults to False (secure-by-default).  Set ``RECOTEM_HTTP_ALLOW_PRIVATE``
+    to ``1`` / ``true`` / ``yes`` / ``on`` to allow recipes whose
+    ``source.path`` resolves to RFC1918 / loopback / link-local / reserved
+    addresses.  Operators with internal HTTP origins (lab CI, intranet
+    mirrors) opt in explicitly; production deployments leave it off so a
+    malicious recipe cannot hit cloud-metadata services or sibling pods.
+    """
+    raw = os.environ.get("RECOTEM_HTTP_ALLOW_PRIVATE", "").strip().lower()
+    return raw in _TRUTHY_ENV_VALUES

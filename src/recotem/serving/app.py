@@ -160,6 +160,18 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         yield
 
         watcher.stop()
+        # Join with a bounded timeout so we don't block process shutdown if
+        # the watcher is wedged inside an fsspec call.  The watcher is a
+        # daemon thread, so the process can still exit if join() times out;
+        # the timeout exists to give in-flight stat/read calls a chance to
+        # finish cleanly before the host tears down their underlying sockets.
+        watcher_join_timeout = max(1.0, min(5.0, float(serve_config.drain_seconds)))
+        watcher.join(timeout=watcher_join_timeout)
+        if watcher.is_alive():
+            logger.warning(
+                "artifact_watcher_join_timeout",
+                timeout=watcher_join_timeout,
+            )
         if banner_task is not None:
             banner_task.cancel()
         logger.info(

@@ -160,57 +160,72 @@ def run_training(
     if run_id is None:
         run_id = uuid.uuid4().hex[:12]
 
-    # Resolve KeyRing if the caller didn't pass one.
-    if key_ring is None:
-        from recotem.artifact.signing import KeyRing  # noqa: PLC0415
+    try:
+        # Resolve KeyRing if the caller didn't pass one.
+        if key_ring is None:
+            from recotem.artifact.signing import KeyRing  # noqa: PLC0415
 
-        if dev_allow_unsigned:
-            key_ring = KeyRing("dev:" + ("0" * 64))
-        else:
-            import os  # noqa: PLC0415
+            if dev_allow_unsigned:
+                key_ring = KeyRing("dev:" + ("0" * 64))
+            else:
+                import os  # noqa: PLC0415
 
-            raw = os.environ.get("RECOTEM_SIGNING_KEYS", "").strip()
-            if not raw:
-                raise TrainingError(
-                    "RECOTEM_SIGNING_KEYS is not set.  Run "
-                    "`recotem keygen --type signing` to generate one, or "
-                    "pass --dev-allow-unsigned for local development.",
-                    code="signing_key_missing",
-                )
-            key_ring = KeyRing(raw)
-    if signing_key is None:
-        signing_key = key_ring.active_kid
+                raw = os.environ.get("RECOTEM_SIGNING_KEYS", "").strip()
+                if not raw:
+                    raise TrainingError(
+                        "RECOTEM_SIGNING_KEYS is not set.  Run "
+                        "`recotem keygen --type signing` to generate one, or "
+                        "pass --dev-allow-unsigned for local development.",
+                        code="signing_key_missing",
+                    )
+                key_ring = KeyRing(raw)
+        if signing_key is None:
+            signing_key = key_ring.active_kid
 
-    # Acquire the per-recipe lock unless suppressed.
-    if no_lock:
-        return _run_training_locked(
-            recipe=recipe,
-            key_ring=key_ring,
-            signing_key=signing_key,
-            write_artifact_fn=write_artifact_fn,
-            quiet=quiet,
-            verbose=verbose,
-            run_id=run_id,
-        )
-    from recotem.training.lock import recipe_lock  # noqa: PLC0415
-
-    with recipe_lock(recipe.output.path, fail_on_busy=fail_on_busy) as acquired:
-        if not acquired:
-            logger.info(
-                "recipe_lock_contended_skipping",
-                recipe=recipe.name,
+        # Acquire the per-recipe lock unless suppressed.
+        if no_lock:
+            return _run_training_locked(
+                recipe=recipe,
+                key_ring=key_ring,
+                signing_key=signing_key,
+                write_artifact_fn=write_artifact_fn,
+                quiet=quiet,
+                verbose=verbose,
                 run_id=run_id,
             )
-            return None
-        return _run_training_locked(
-            recipe=recipe,
-            key_ring=key_ring,
-            signing_key=signing_key,
-            write_artifact_fn=write_artifact_fn,
-            quiet=quiet,
-            verbose=verbose,
+        from recotem.training.lock import recipe_lock  # noqa: PLC0415
+
+        with recipe_lock(recipe.output.path, fail_on_busy=fail_on_busy) as acquired:
+            if not acquired:
+                logger.info(
+                    "recipe_lock_contended_skipping",
+                    recipe=recipe.name,
+                    run_id=run_id,
+                )
+                return None
+            return _run_training_locked(
+                recipe=recipe,
+                key_ring=key_ring,
+                signing_key=signing_key,
+                write_artifact_fn=write_artifact_fn,
+                quiet=quiet,
+                verbose=verbose,
+                run_id=run_id,
+            )
+    except Exception as exc:
+        # Canonical end-of-train marker for failure path.  Library callers
+        # of run_training() get this event regardless of whether they wrap
+        # the call themselves; pairs with the train_done event emitted
+        # inside _run_training_locked on success.
+        logger.error(
+            "train_error",
+            recipe=recipe.name,
             run_id=run_id,
+            error=str(exc),
+            code=getattr(exc, "code", None) or type(exc).__name__,
+            trained_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
+        raise
 
 
 def _run_training_locked(

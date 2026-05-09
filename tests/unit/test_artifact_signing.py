@@ -400,3 +400,65 @@ def test_bprfm_class_is_explicitly_allowed() -> None:
     from recotem.artifact.signing import _is_allowed
 
     assert _is_allowed("irspack.recommenders.bpr", "BPRFMRecommender") is True
+
+
+# ---------------------------------------------------------------------------
+# H1. kid bytes tamper rejected
+# ---------------------------------------------------------------------------
+
+
+def test_kid_bytes_tampered_rejected() -> None:
+    """Replacing the kid field bytes in a valid artifact (keeping same length)
+    must cause HMAC verification to fail with ArtifactError.
+
+    The HMAC scope includes kid_bytes || header_json || payload, so swapping
+    the kid bytes from 'active' to a different 6-byte string invalidates the
+    digest even if both kids are registered in the KeyRing.
+
+    We parse the tampered bytes directly with parse_header_from_bytes and then
+    call verify_hmac manually to stay independent of the I/O layer.
+    """
+    from recotem.artifact.format import parse_header_from_bytes
+    from recotem.artifact.signing import KeyRing
+    from recotem.artifact.signing import verify_hmac as _verify_hmac
+    from tests.conftest import ACTIVE_KEY_HEX, OLD_KEY_HEX, build_raw_artifact
+
+    # Build a valid artifact signed with 'active'
+    raw = build_raw_artifact("active", ACTIVE_KEY_HEX)
+
+    # Locate the kid bytes in the artifact.
+    # Layout: MAGIC(8) + VERSION+RESERVED(4) + KID_LEN(1) + kid_bytes(K) + HMAC(32) + ...
+    kid_len_offset = 12  # 8 (MAGIC) + 2 (VERSION) + 2 (RESERVED)
+    kid_len = raw[kid_len_offset]  # should be 6 for "active"
+    assert kid_len == 6, f"expected kid length 6 for 'active', got {kid_len}"
+
+    kid_start = kid_len_offset + 1
+    kid_end = kid_start + kid_len
+
+    # Original kid is b"active" (6 bytes).  Replace with b"stoxxx" (also 6 bytes).
+    # Both are registered in the two-kid KeyRing below, but the HMAC was computed
+    # over b"active", so the mismatch must be detected.
+    tampered = bytearray(raw)
+    assert raw[kid_start:kid_end] == b"active"
+    tampered[kid_start:kid_end] = b"stoxxx"
+    tampered_bytes = bytes(tampered)
+
+    # Build a KeyRing that has both 'active' and 'stoxxx' so the kid lookup in
+    # verify_hmac succeeds, but the HMAC will fail because the scope is different.
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}", f"stoxxx:{OLD_KEY_HEX}")
+
+    # Parse the tampered artifact header
+    hdr = parse_header_from_bytes(tampered_bytes, max_payload_bytes=10 * 1024 * 1024)
+    payload = tampered_bytes[hdr.payload_offset :]
+
+    # verify_hmac must reject: the stored digest was computed over b"active",
+    # but the kid field now reads b"stoxxx", so the scope diverges.
+    with pytest.raises(ArtifactError, match="HMAC"):
+        _verify_hmac(
+            kr,
+            hdr.kid,
+            hdr.kid.encode("utf-8"),
+            hdr.header_data,
+            payload,
+            hdr.hmac_digest,
+        )

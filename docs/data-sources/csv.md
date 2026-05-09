@@ -106,6 +106,15 @@ When `source.path` (or `item_metadata.path`) uses `http://` or `https://`:
   dropped and `DataSourceError` is raised; partial bytes are not parsed.
 - The connect/read timeout is `RECOTEM_HTTP_TIMEOUT_SECONDS` (default 30,
   clamped to [1, 600]).
+- The destination host is resolved before each request (and on every
+  redirect). If any address resolves to a private (RFC1918), loopback,
+  link-local (`169.254.0.0/16`, AWS IMDSv1 / GCP metadata server),
+  reserved, multicast, or unspecified address, the fetch is refused with
+  `DataSourceError`. Operators with internal HTTP origins opt in via
+  `RECOTEM_HTTP_ALLOW_PRIVATE=1` (`true` / `yes` / `on` also accepted).
+  Production clusters leave it unset — the SSRF guard blocks a malicious
+  recipe from reaching cloud-metadata services even when the operator
+  has not curated the recipe directory.
 - `recotem validate` issues a HEAD-like check (`fs.exists()` for non-network
   schemes; for HTTP(S) the URL is accepted at recipe-load only — no probe
   fetch is issued). The integrity check happens at fetch time, not validate.

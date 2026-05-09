@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
+import socket
 import urllib.error
 import urllib.request
 from urllib.parse import urlparse, urlunparse
@@ -40,6 +42,86 @@ MAX_REDIRECTS = 5
 NETWORK_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
 _USERINFO_SCHEMES: frozenset[str] = frozenset({"http", "https", "ftp", "ftps"})
+
+
+def _resolve_host_addresses(host: str) -> list[ipaddress._BaseAddress]:
+    """Return all numeric IP addresses *host* resolves to.
+
+    Accepts both already-numeric input (``"127.0.0.1"``, ``"::1"``) and
+    DNS names.  Returns an empty list if resolution fails — callers treat
+    that as "cannot verify, refuse" rather than "implicitly safe".
+    """
+    try:
+        return [ipaddress.ip_address(host)]
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return []
+    addrs: list[ipaddress._BaseAddress] = []
+    seen: set[str] = set()
+    for family, _, _, _, sockaddr in infos:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            continue
+        ip_str = sockaddr[0]
+        if ip_str in seen:
+            continue
+        seen.add(ip_str)
+        try:
+            addrs.append(ipaddress.ip_address(ip_str))
+        except ValueError:
+            continue
+    return addrs
+
+
+def _is_address_internal(addr: ipaddress._BaseAddress) -> bool:
+    """Return True if *addr* is RFC1918 / loopback / link-local / reserved.
+
+    Covers the SSRF risk surface: cloud metadata (169.254.169.254 link-local),
+    internal services (10/8, 172.16/12, 192.168/16, fc00::/7), localhost, and
+    multicast / unspecified ranges.
+    """
+    return bool(
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+    )
+
+
+def assert_host_public(url: str, *, allow_private: bool) -> None:
+    """Raise :class:`HttpFetchError` if *url*'s host resolves to a private IP.
+
+    No-op when *allow_private* is True — operators of internal-only
+    deployments can opt in via ``RECOTEM_HTTP_ALLOW_PRIVATE=1``.
+
+    Refuses when DNS resolution fails outright; callers prefer a clear
+    refusal over racing against a potentially-poisoned resolver.
+    """
+    if allow_private:
+        return
+    parsed = urlparse(url)
+    host = parsed.hostname
+    safe_url = redact_url_userinfo(url)
+    if not host:
+        raise HttpFetchError(f"Refusing fetch to URL without a host: {safe_url}")
+    addrs = _resolve_host_addresses(host)
+    if not addrs:
+        raise HttpFetchError(
+            f"Refusing fetch to {safe_url}: hostname does not resolve. "
+            "Set RECOTEM_HTTP_ALLOW_PRIVATE=1 to bypass for offline tests."
+        )
+    for addr in addrs:
+        if _is_address_internal(addr):
+            raise HttpFetchError(
+                f"Refusing fetch to private/internal address for {safe_url} "
+                f"(resolved to {addr}). Set RECOTEM_HTTP_ALLOW_PRIVATE=1 to "
+                "allow internal HTTP origins."
+            )
+
 
 _COMPRESSION_MAP: dict[str, str] = {
     ".gz": "gzip",
@@ -113,6 +195,7 @@ def fetch_http_bytes(
     max_bytes: int,
     log_event: str = "http_fetch",
     log_context: dict[str, object] | None = None,
+    allow_private: bool | None = None,
 ) -> bytes:
     """GET *url*, returning the body bytes.
 
@@ -123,7 +206,18 @@ def fetch_http_bytes(
     *log_event* is the structlog event name used for redirect / cap-exceeded
     log lines; *log_context* is merged into those log records (caller-provided
     correlation IDs such as recipe name, run id).
+
+    *allow_private* controls the SSRF guard: when False (default), the fetch
+    refuses any host that resolves to a private / loopback / link-local /
+    reserved IP.  Pass ``None`` to consult :func:`recotem.config.get_http_allow_private`
+    (the production wiring).  Pass ``True``/``False`` directly only from
+    tests that need deterministic behaviour.
     """
+    if allow_private is None:
+        from recotem.config import get_http_allow_private  # noqa: PLC0415
+
+        allow_private = get_http_allow_private()
+
     safe_url = redact_url_userinfo(url)
     original_scheme = urlparse(url).scheme.lower()
     redirects = 0
@@ -139,6 +233,10 @@ def fetch_http_bytes(
         if current_url in visited:
             raise HttpFetchError(f"Redirect loop detected fetching {safe_url}")
         visited.add(current_url)
+
+        # SSRF guard: re-resolve and re-check on every hop so that a 302 to a
+        # CNAME pointing into RFC1918 is refused, not just the original URL.
+        assert_host_public(current_url, allow_private=allow_private)
 
         req = urllib.request.Request(
             current_url,

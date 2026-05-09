@@ -152,6 +152,36 @@ class ModelRegistry:
         with self._lock:
             self._entries.pop(name, None)
 
+    def set_load_error(self, name: str, error: str | None) -> bool:
+        """Record the latest artifact-load failure (if any) on the entry.
+
+        Holds the registry lock so the watcher's failure annotation never
+        races with ``replace()`` / readers iterating ``list()``.  Returns
+        True when the entry exists, False when there is nothing to mark
+        (caller can decide whether that is worth logging).
+        """
+        with self._lock:
+            entry = self._entries.get(name)
+            if entry is None:
+                return False
+            entry.last_load_error = error
+            return True
+
+    def update_loaded_marker(self, name: str, marker: tuple[Any, str]) -> bool:
+        """Update the watcher's internal ``_loaded_marker`` on the entry.
+
+        Same locking contract as :meth:`set_load_error` — keeps watcher
+        state mutations on a registered entry inside the registry lock so
+        contracts hold even if a future change moves to a finer-grained
+        lock.
+        """
+        with self._lock:
+            entry = self._entries.get(name)
+            if entry is None:
+                return False
+            entry._loaded_marker = marker
+            return True
+
     # ------------------------------------------------------------------
     # Health / observability helpers
     # ------------------------------------------------------------------

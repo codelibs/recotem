@@ -167,3 +167,81 @@ def test_health_snapshot_shows_last_load_error() -> None:
     reg.replace("broken", entry)
     snap = reg.health_snapshot()
     assert snap["broken"].get("error") == "hmac mismatch"
+
+
+# ---------------------------------------------------------------------------
+# E1–E4: set_load_error and update_loaded_marker
+# ---------------------------------------------------------------------------
+
+
+def test_registry_set_load_error_marks_existing_entry() -> None:
+    """set_load_error sets last_load_error on an existing entry and returns True."""
+    reg = ModelRegistry()
+    entry = _make_entry("recipe_err")
+    reg.replace("recipe_err", entry)
+
+    result = reg.set_load_error("recipe_err", "hmac mismatch during hot-swap")
+
+    assert result is True
+    assert reg.get("recipe_err").last_load_error == "hmac mismatch during hot-swap"
+
+
+def test_registry_set_load_error_no_op_on_missing_entry() -> None:
+    """set_load_error returns False (no-op) when the entry does not exist."""
+    reg = ModelRegistry()
+
+    result = reg.set_load_error("nonexistent", "some error")
+
+    assert result is False
+
+
+def test_registry_set_load_error_clears_when_none() -> None:
+    """Passing None to set_load_error clears a previously-set error."""
+    reg = ModelRegistry()
+    entry = _make_entry("recipe_clr")
+    entry.last_load_error = "previous error"
+    reg.replace("recipe_clr", entry)
+
+    reg.set_load_error("recipe_clr", None)
+
+    assert reg.get("recipe_clr").last_load_error is None
+
+
+def test_registry_update_loaded_marker_writes_under_lock() -> None:
+    """update_loaded_marker is safe under concurrent read/write.
+
+    We run 100 iterations of concurrent readers and a writer to verify that
+    the marker tuple is always a valid tuple (no partial-write tearing).
+    """
+    reg = ModelRegistry()
+    entry = _make_entry("shared_marker")
+    reg.replace("shared_marker", entry)
+
+    errors: list[str] = []
+
+    def _reader() -> None:
+        for _ in range(100):
+            e = reg.get("shared_marker")
+            if e is None:
+                errors.append("entry disappeared")
+                return
+            m = e._loaded_marker
+            # A valid marker is always a 2-tuple
+            if not (isinstance(m, tuple) and len(m) == 2):
+                errors.append(f"unexpected marker type/length: {m!r}")
+            time.sleep(0.0001)
+
+    def _writer() -> None:
+        for i in range(50):
+            reg.update_loaded_marker("shared_marker", (i, f"sha{i:04d}" * 16))
+            time.sleep(0.0001)
+
+    readers = [threading.Thread(target=_reader) for _ in range(4)]
+    writer = threading.Thread(target=_writer)
+    threads = readers + [writer]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    assert errors == [], f"Concurrent marker access errors: {errors}"

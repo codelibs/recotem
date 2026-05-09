@@ -444,3 +444,108 @@ def test_load_metadata_raises_on_missing_field_with_on_field_missing_error(
 
     with pytest.raises(ValueError, match="missing_column"):
         _load_metadata(recipe, "test")
+
+
+# ---------------------------------------------------------------------------
+# G1. Watcher picks up a YAML + artifact added at runtime
+# ---------------------------------------------------------------------------
+
+
+def test_watcher_picks_up_runtime_added_yaml(tmp_path: Path) -> None:
+    """Mirror of test_yaml_deleted_removes_entry_from_registry:
+    watcher starts with an empty recipes dir; a YAML + valid artifact are
+    added after the watcher starts.  Within 0.5s the entry should appear
+    in the registry.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+    watcher.start()
+    # Give the watcher one tick to observe the empty directory
+    time.sleep(0.1)
+
+    # Now create the artifact and YAML
+    artifact_path = tmp_path / "new_model.recotem"
+    _write_valid_artifact(artifact_path)
+    _write_recipe_yaml(recipes_dir, "new_recipe", artifact_path)
+
+    # Wait for watcher to pick it up
+    deadline = time.monotonic() + 2.0
+    found = False
+    while time.monotonic() < deadline:
+        if registry.get("new_recipe") is not None and registry.get("new_recipe").loaded:
+            found = True
+            break
+        time.sleep(0.05)
+
+    watcher.stop()
+    watcher.join(timeout=2.0)
+
+    assert found, "Watcher must pick up a YAML+artifact added at runtime within 2s"
+
+
+# ---------------------------------------------------------------------------
+# G2. Watcher marks error via registry.set_load_error on load failure
+# ---------------------------------------------------------------------------
+
+
+def test_watcher_marks_error_via_registry_set_load_error(tmp_path: Path) -> None:
+    """When a hot-swap fails (corrupt artifact), the existing entry's
+    last_load_error must be non-None after the watcher's next tick.
+
+    This is essentially a re-assertion of the existing malformed-swap test,
+    but focussed on the set_load_error path rather than the raw attribute.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "error_recipe", artifact_path)
+
+    registry = ModelRegistry()
+    good_entry = _make_entry("error_recipe")
+    good_entry.artifact_path = str(artifact_path)
+    registry.replace("error_recipe", good_entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    initial_states = build_initial_states([recipe], {"error_recipe": good_entry})
+    initial_states["error_recipe"].last_sha256 = ""  # force reload
+
+    # Corrupt the artifact before the watcher ticks
+    artifact_path.write_bytes(b"this is not a valid artifact")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+    watcher.start()
+    try:
+        time.sleep(0.5)
+    finally:
+        watcher.stop()
+        watcher.join(timeout=2.0)
+
+    entry = registry.get("error_recipe")
+    assert entry is not None
+    assert entry.last_load_error is not None, (
+        "Watcher must set last_load_error via registry.set_load_error on failed load"
+    )

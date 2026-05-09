@@ -196,7 +196,7 @@ def _read_file(file_type: str, path: str, *, sha256: str | None = None) -> pd.Da
     the only place where the documented integrity / byte-cap / redirect
     controls apply to item metadata.
     """
-    if file_type not in {"parquet", "csv", "tsv"}:
+    if file_type not in {"parquet", "csv"}:
         raise ValueError(
             f"unsupported metadata file type {file_type!r}; expected 'csv' or 'parquet'"
         )
@@ -250,15 +250,14 @@ def _read_file(file_type: str, path: str, *, sha256: str | None = None) -> pd.Da
             raise ValueError(
                 f"failed to read parquet file {safe_path!r}: {exc}"
             ) from exc
-    sep = "\t" if file_type == "tsv" else ","
     try:
-        return pd.read_csv(path, sep=sep, dtype=str)
+        return pd.read_csv(path, dtype=str)
     except Exception as exc:
         raise ValueError(f"failed to read csv file {safe_path!r}: {exc}") from exc
 
 
 def _parse_bytes(file_type: str, data: bytes, safe_path: str) -> pd.DataFrame:
-    """Parse already-fetched bytes as CSV/TSV/Parquet."""
+    """Parse already-fetched bytes as CSV or Parquet."""
     if file_type == "parquet":
         try:
             return pd.read_parquet(BytesIO(data))
@@ -266,8 +265,7 @@ def _parse_bytes(file_type: str, data: bytes, safe_path: str) -> pd.DataFrame:
             raise ValueError(
                 f"failed to parse parquet file {safe_path!r}: {exc}"
             ) from exc
-    sep = "\t" if file_type == "tsv" else ","
     try:
-        return pd.read_csv(BytesIO(data), sep=sep, dtype=str)
+        return pd.read_csv(BytesIO(data), dtype=str)
     except Exception as exc:
         raise ValueError(f"failed to parse csv file {safe_path!r}: {exc}") from exc

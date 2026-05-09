@@ -47,6 +47,19 @@ ACTIVE_KEY_HEX: str = "aa" * 32  # 64 hex chars = 32 bytes, deterministic
 OLD_KEY_HEX: str = "bb" * 32
 
 
+@pytest.fixture(autouse=True)
+def _allow_loopback_http_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests use ``http.server`` / ``pytest-httpserver`` which bind to 127.0.0.1.
+
+    Production defaults to refusing private/loopback fetches (see
+    ``RECOTEM_HTTP_ALLOW_PRIVATE`` in :mod:`recotem.config`).  Setting it to
+    ``1`` here keeps existing HTTP tests working.  Tests that exercise the
+    SSRF guard explicitly call ``monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")``
+    or ``monkeypatch.delenv(..., raising=False)``.
+    """
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "1")
+
+
 @pytest.fixture(scope="session")
 def signing_key_bytes() -> bytes:
     """Deterministic 32-byte signing key for 'active' kid."""

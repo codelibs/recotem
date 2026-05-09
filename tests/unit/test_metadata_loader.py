@@ -348,3 +348,24 @@ def test_custom_item_id_column_missing_raises(tmp_path: Path) -> None:
             _Config("csv", str(csv_file), item_id_column="product_id"),
             fields=["title"],
         )
+
+
+# ---------------------------------------------------------------------------
+# I1. _read_file rejects unsupported type 'tsv'
+# ---------------------------------------------------------------------------
+
+
+def test_read_file_rejects_tsv_type(tmp_path: Path) -> None:
+    """_read_file must raise ValueError for unsupported file types like 'tsv'.
+
+    The dead TSV branch was removed; attempting to load a 'tsv' type should
+    fail with a clear error rather than silently succeeding or raising
+    an AttributeError deep in pandas.
+    """
+    from recotem.metadata.loader import _read_file
+
+    tsv_path = tmp_path / "x.tsv"
+    tsv_path.write_text("item_id\ttitle\ni1\tItem One\n")
+
+    with pytest.raises(ValueError, match="unsupported metadata file type"):
+        _read_file("tsv", str(tsv_path), sha256=None)

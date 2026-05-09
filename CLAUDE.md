@@ -114,8 +114,9 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
 
 - HMAC scope: `kid_bytes || header_json || payload`. Tampering anywhere fails verify.
 - Header JSON carries `recipe_name`, `recipe_hash`, `best_class`, `best_params`,
-  `best_score`, `metric`, `cutoff`, `tuning`, `data_stats`. Inspectable without
-  deserialisation via `recotem inspect`.
+  `best_score`, `metric`, `cutoff`, `tuning`, `data_stats`, `recotem_version`,
+  `irspack_version`, `trained_at`. Inspectable without deserialisation via
+  `recotem inspect`.
 - Multi-kid `KeyRing` (env: `RECOTEM_SIGNING_KEYS=kid1:hex,kid2:hex`) enables
   zero-downtime key rotation. Operations doc has the four-step procedure.
 - Payload uses Python's native binary serialisation because irspack's
@@ -165,7 +166,8 @@ uv run ruff format --check src tests
 | `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. |
 | `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Cap on HTTP/HTTPS source-path body. Clamped [1 MiB, 16 GiB]. |
 | `RECOTEM_HTTP_TIMEOUT_SECONDS` | 30 | Connect/read timeout for HTTP/HTTPS source fetch. Clamped [1, 600]. |
-| `RECOTEM_ALLOWED_HOSTS` | 127.0.0.1,localhost | TrustedHostMiddleware list. |
+| `RECOTEM_HTTP_ALLOW_PRIVATE` | (empty) | Truthy (`1`/`true`/`yes`/`on`) opts the HTTP fetcher into accepting private/loopback/link-local destinations. Default refuses RFC1918 / `127.0.0.0/8` / `169.254.0.0/16` to block SSRF on cloud-metadata services. |
+| `RECOTEM_ALLOWED_HOSTS` | 127.0.0.1,localhost | TrustedHostMiddleware list. Whitespace-only comma input falls back to default. |
 | `RECOTEM_ALLOWED_ORIGINS` | (empty) | CORS allow-list. Empty = deny. |
 | `RECOTEM_ENV` | (empty) | Gates `--insecure-no-auth` and `--dev-allow-unsigned`. |
 | `RECOTEM_DRAIN_SECONDS` | 30 | SIGTERM grace window. |
@@ -174,6 +176,7 @@ uv run ruff format --check src tests
 | `RECOTEM_RECIPE_*` | — | Allow-listed for `${...}` recipe expansion. |
 | `RECOTEM_METADATA_FIELD_DENY` | (empty) | Comma-separated columns stripped from `/predict` responses. |
 | `RECOTEM_METRICS_ENABLED` | (empty) | Opt-in Prometheus `/metrics` endpoint. Truthy values: `1`, `true`, `yes`, `on`. Requires `recotem[metrics]` extra. |
+| `RECOTEM_LOCK_DIR` | (empty) | Override directory for per-recipe training lock files. Local outputs always lock at `<output_path>.lock`; remote outputs (`s3://`, `gs://`, ...) need a host-local path and fall back to `<tempdir>/recotem-locks/`. `flock` is host-local — across hosts use scheduler-level mutex (`concurrencyPolicy: Forbid`). |
 
 ## CI
 

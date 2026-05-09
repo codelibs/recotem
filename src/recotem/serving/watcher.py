@@ -338,10 +338,10 @@ class ArtifactWatcher(threading.Thread):
             return
 
         new_marker = marker if marker is not None else _stat_marker(artifact_path)
+        entry._loaded_marker = (new_marker, sha256)
         self._registry.replace(name, entry)
         state.last_sha256 = sha256
         state.last_marker = new_marker
-        entry._loaded_marker = (new_marker, sha256)
         _metrics.set_model_loaded(name, True)
         _metrics.record_swap(name, ok=True)
         _metrics.set_active_recipes(sum(1 for e in self._registry.list() if e.loaded))
@@ -400,10 +400,13 @@ class ArtifactWatcher(threading.Thread):
         )
 
     def _mark_error(self, name: str, error: str) -> None:
-        """Mark last_load_error on the existing registry entry (if any)."""
-        entry = self._registry.get(name)
-        if entry is not None:
-            entry.last_load_error = error
+        """Mark last_load_error on the existing registry entry (if any).
+
+        Goes through ``ModelRegistry.set_load_error`` so the mutation is
+        serialised under the registry's lock — readers calling
+        ``health_snapshot()`` see a consistent (loaded, error) pair.
+        """
+        self._registry.set_load_error(name, error)
 
     def _record_load_failure(self, name: str, error: str) -> None:
         """Mark the entry's load error and increment the failure metrics."""

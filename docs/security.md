@@ -81,13 +81,17 @@ Specific operator responsibilities:
 - **Choose `https://` over `http://` on the public internet.** TLS prevents
   a network attacker from swapping bytes; `sha256` detects the swap, but
   TLS prevents it from happening in the first place.
-- **Avoid pointing recipes at metadata services.** URLs like
-  `http://169.254.169.254/...` (AWS IMDSv1) or
-  `http://metadata.google.internal/...` will be fetched by `recotem train`
-  and could leak instance-role credentials into your dataset. This is
-  operator misuse; Recotem does not block such URLs (since it cannot
-  distinguish "metadata service" from "internal artifact server" in
-  general).
+- **Metadata services and private networks are blocked by default.**
+  `recotem train` resolves the host of every HTTP/HTTPS source URL and
+  refuses to connect when it lands on a private (RFC1918), loopback,
+  link-local (`169.254.0.0/16` covers AWS IMDSv1 and GCP
+  `metadata.google.internal`), reserved, multicast, or unspecified
+  address. The check re-runs on every redirect so a CNAME-pointed-inwards
+  trick is also refused. Operators with a legitimate internal HTTP
+  origin (lab CI mirror, intranet artifact server) opt in by setting
+  `RECOTEM_HTTP_ALLOW_PRIVATE=1`. Production deployments leave it unset
+  so a malicious recipe cannot hit cloud-metadata services or sibling
+  pods even if the operator forgot to scrub the recipe directory.
 - **Compute and pin sha256 once, then alert on changes.** A mismatch is
   the signal. Don't bypass it by silently regenerating during CI.
 

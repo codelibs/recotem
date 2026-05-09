@@ -775,3 +775,79 @@ def test_DataSourceError_from_fetch_propagates_unchanged(tmp_path: Path) -> None
             _fetch_data(recipe, run_id="test-m21b")
 
     assert exc_info.value is original
+
+
+# ---------------------------------------------------------------------------
+# J1. per_trial_timeout_seconds orphaned-thread warning log
+# ---------------------------------------------------------------------------
+
+
+def test_per_trial_timeout_orphans_thread_warns(tmp_path: Path) -> None:
+    """When per_trial_timeout_seconds is very short and the recommender's
+    learn takes longer, the watcher thread is orphaned and a
+    per_trial_timeout_thread_orphaned structlog event must be emitted.
+    """
+    import time
+
+    import numpy as np
+    import scipy.sparse as sps
+    import structlog.testing
+
+    from recotem.training.errors import SearchError
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    # Build a fake recommender class whose learn_with_optimizer sleeps > timeout
+    class _SlowRecommender:
+        """Fake recommender that sleeps during learn_with_optimizer."""
+
+        learnt_config: dict = {}
+
+        def __init__(self, X, **kwargs):
+            self._X = X
+
+        @staticmethod
+        def default_suggest_parameter(trial, space):
+            return {}
+
+        def learn_with_optimizer(self, evaluator, trial):
+            time.sleep(2)  # exceed timeout=0.1
+
+        def learn(self):
+            return self
+
+    with patch(
+        "recotem.training.search.get_recommender_cls",
+        return_value=_SlowRecommender,
+    ):
+        X = sps.csr_matrix(np.ones((5, 3)))
+        evaluator = MagicMock()
+
+        with structlog.testing.capture_logs() as cap:
+            with ProgressReporter(
+                n_trials=2, recipe_name="timeout_test", run_id="run-timeout"
+            ) as rep:
+                with pytest.raises((SearchError, Exception)):
+                    run_search(
+                        algorithms=["TopPopRecommender"],
+                        X_tv_train=X,
+                        evaluator=evaluator,
+                        n_trials=2,
+                        per_algorithm_trials=None,
+                        per_trial_timeout_seconds=1,  # 1s, but learn sleeps 2s
+                        timeout_seconds=5,
+                        parallelism=1,
+                        storage_path="",
+                        random_seed=0,
+                        reporter=rep,
+                        recipe_name="timeout_test",
+                        run_id="run-timeout",
+                    )
+
+    orphan_events = [
+        e for e in cap if e.get("event") == "per_trial_timeout_thread_orphaned"
+    ]
+    assert orphan_events, (
+        "Expected at least one per_trial_timeout_thread_orphaned log event; "
+        f"captured events: {[e.get('event') for e in cap]}"
+    )

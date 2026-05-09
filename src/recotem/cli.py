@@ -173,12 +173,8 @@ def train(
         _exit(_map_exception_to_exit(exc), f"Recipe error: {exc}")
 
     import uuid as _uuid
-    from datetime import UTC, datetime
-
-    import structlog as _structlog
 
     run_id = _uuid.uuid4().hex[:12]
-    train_log = _structlog.get_logger("recotem.cli.train")
 
     try:
         from recotem.training.pipeline import (
@@ -197,16 +193,10 @@ def train(
     except SystemExit as exc:
         raise typer.Exit(code=exc.code or 0) from exc
     except Exception as exc:
+        # The canonical train_error event is emitted inside run_training so
+        # library callers receive it too — we only need to map the exception
+        # to the operator-visible exit code here.
         code = _map_exception_to_exit(exc)
-        train_log.error(
-            "train_error",
-            error=str(exc),
-            code=getattr(exc, "code", None) or type(exc).__name__,
-            recipe=loaded_recipe.name,
-            run_id=run_id,
-            exit_code=code,
-            trained_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        )
         _exit(code, f"Training failed: {exc}")
 
 

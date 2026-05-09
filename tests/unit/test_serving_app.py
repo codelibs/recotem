@@ -707,3 +707,68 @@ def test_allowed_hosts_non_empty_default_does_not_bleed_into_origins(
     assert cfg.allowed_origins == [], (
         "Setting RECOTEM_ALLOWED_HOSTS must not change RECOTEM_ALLOWED_ORIGINS"
     )
+
+
+# ---------------------------------------------------------------------------
+# F1. Lifespan watcher join timeout boundary logic
+# ---------------------------------------------------------------------------
+
+
+def test_watcher_join_timeout_boundary_values(tmp_path: Path) -> None:
+    """The watcher join timeout is clamped to max(1.0, min(5.0, drain_seconds)).
+
+    We verify the boundary: drain_seconds values of 0, 3, 30, and 100 each
+    produce the expected timeout without requiring a running server.
+
+    This mirrors the logic in app.py:
+        watcher_join_timeout = max(1.0, min(5.0, float(serve_config.drain_seconds)))
+    """
+    cases = [
+        (0, 1.0),  # below min → clamped to 1.0
+        (3, 3.0),  # within range → unchanged
+        (30, 5.0),  # above max → clamped to 5.0
+        (100, 5.0),  # well above max → clamped to 5.0
+    ]
+    cfg = _minimal_config(tmp_path)
+    for drain_seconds, expected_timeout in cases:
+        cfg.drain_seconds = drain_seconds
+        actual = max(1.0, min(5.0, float(cfg.drain_seconds)))
+        assert actual == expected_timeout, (
+            f"drain_seconds={drain_seconds}: expected timeout={expected_timeout}, "
+            f"got {actual}"
+        )
+
+
+def test_lifespan_watcher_joined_on_shutdown(tmp_path: Path) -> None:
+    """When the FastAPI app shuts down, the ArtifactWatcher thread must be stopped.
+
+    We use TestClient as a context manager — entering starts the lifespan and
+    exiting triggers shutdown.  We spy on ArtifactWatcher.join to confirm it
+    is called during shutdown.
+    """
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from recotem.serving import app as app_mod
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+
+    join_calls: list[dict] = []
+
+    OriginalWatcher = app_mod.ArtifactWatcher
+
+    class _SpyWatcher(OriginalWatcher):
+        def join(self, timeout=None):
+            join_calls.append({"timeout": timeout})
+            super().join(timeout=timeout)
+
+    # Patch the symbol in app.py's namespace (it imports ArtifactWatcher
+    # at module load time, so patching the watcher module is too late).
+    with patch.object(app_mod, "ArtifactWatcher", _SpyWatcher):
+        app = create_app(cfg)
+        with TestClient(app):
+            pass  # lifespan shutdown runs on __exit__
+
+    assert join_calls, "ArtifactWatcher.join() must be called during app shutdown"

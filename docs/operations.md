@@ -208,7 +208,17 @@ as the basis for SLO and alerting rules.
 ## Concurrent training and persistent search storage
 
 `recotem train` acquires a per-recipe POSIX `flock` at
-`<recipe.output.path>.lock` before any work. Defaults:
+`<recipe.output.path>.lock` before any work. The lock is **host-local**:
+`flock` only coordinates processes on the same host, so when
+`output.path` is a remote URI (`s3://`, `gs://`, `http(s)://`, …) the
+lock file is created at a host-local path derived from the URI and does
+*not* prevent another pod or another node from writing the same artifact
+concurrently. Use the scheduler (Kubernetes `concurrencyPolicy: Forbid`,
+Argo `synchronization.mutex`, Airflow `max_active_runs=1`, etc.) for
+cross-host single-writer guarantees; Recotem logs `recipe_lock_local_only`
+on every remote-scheme run so the limitation is visible.
+
+Defaults:
 
 - Non-blocking: a contended lock returns immediately and the run exits 0
   with `recipe_lock_contended_skipping` (cron-friendly: a slow run cannot

@@ -160,7 +160,9 @@ top of the crontab if you want explicit UTC. The systemd timer above pins
 
 ## Lock contention
 
-If a cron job fires while a previous training run is still active on the same host, the second invocation acquires no lock and exits 0 (skip). This is the default and is safe for standard cron setups but means **the scheduler sees a successful run when nothing was actually trained** — point alerting at the structured `train_skipped` log line, not just the exit code, or pass `--fail-on-busy`:
+If a cron job fires while a previous training run is still active **on the same host**, the second invocation acquires no lock and exits 0 (skip). The lock uses POSIX `flock`, which is host-local — it does **not** coordinate runs across multiple machines, and with an `s3://` / `gs://` `output.path` it does not coordinate across pods either (see `docs/deployment/k8s.md`). Run `recotem train` from a single host (or guard cross-host concurrency in your scheduler) when you need single-writer semantics. Recotem logs `recipe_lock_local_only` whenever the output is a remote URI.
+
+This is the default and is safe for standard cron setups but means **the scheduler sees a successful run when nothing was actually trained** — point alerting at the structured `train_skipped` log line, not just the exit code, or pass `--fail-on-busy`:
 
 ```bash
 recotem train --fail-on-busy /etc/recotem/recipes/my_recipe.yaml

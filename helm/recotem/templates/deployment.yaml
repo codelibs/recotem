@@ -34,8 +34,13 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
 
-      {{- /* Object store init container to sync recipes before serve starts */}}
-      {{- if and (eq .Values.recipes.source "objectStore") .Values.recipes.objectStore.initContainer }}
+      {{- /* Object store init container to sync recipes before serve starts.
+             Empty initContainer with source=objectStore would mount an empty
+             emptyDir over /recipes, so fail the chart render instead. */}}
+      {{- if eq .Values.recipes.source "objectStore" }}
+      {{- if not .Values.recipes.objectStore.initContainer }}
+      {{- fail "recipes.source=objectStore requires recipes.objectStore.initContainer to be set" }}
+      {{- end }}
       initContainers:
         - name: sync-recipes
           {{- toYaml .Values.recipes.objectStore.initContainer | nindent 10 }}
@@ -128,6 +133,8 @@ spec:
             readOnly: {{ .Values.recipes.pvc.readOnly }}
           {{- else if eq .Values.recipes.source "objectStore" }}
           emptyDir: {}
+          {{- else }}
+          {{- fail (printf "recipes.source must be one of configMap|pvc|objectStore, got %q" .Values.recipes.source) }}
           {{- end }}
         {{- if .Values.artifacts.enabled }}
         - name: artifacts

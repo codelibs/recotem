@@ -155,6 +155,105 @@ def test_dev_allow_unsigned_accepted_in_development(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# --insecure-no-auth must override configured API keys
+# ---------------------------------------------------------------------------
+
+
+def test_insecure_no_auth_overrides_configured_api_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``insecure_no_auth=True`` and ``api_keys`` is non-empty,
+    ``create_app`` must pass ``api_keys=[]`` to ``make_router`` so the
+    X-API-Key header is not enforced. Otherwise the flag is documented
+    but silently ineffective whenever ``RECOTEM_API_KEYS`` is still set
+    in the environment."""
+    import hashlib
+
+    from recotem.config import ApiKeyEntry
+    from recotem.serving import app as app_module
+
+    cfg = _minimal_config(tmp_path)
+    cfg.insecure_no_auth = True
+    cfg.api_keys = [
+        ApiKeyEntry(kid="leftover", sha256_hex=hashlib.sha256(b"x").hexdigest())
+    ]
+
+    captured: dict = {}
+    real_make_router = app_module.make_router
+
+    def _spy(*args, **kwargs):
+        captured["api_keys"] = kwargs.get("api_keys")
+        return real_make_router(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "make_router", _spy)
+    app_module.create_app(cfg)
+
+    assert captured["api_keys"] == [], (
+        "insecure_no_auth must clear router api_keys; otherwise the flag "
+        "does not actually disable authentication when RECOTEM_API_KEYS is set."
+    )
+
+
+def test_insecure_no_auth_security_posture_marks_auth_disabled(
+    tmp_path: Path,
+) -> None:
+    """The ``security.posture`` log line must report ``auth_enabled=False``
+    when ``insecure_no_auth`` is active, even if ``api_keys`` is non-empty."""
+    import hashlib
+
+    import structlog.testing
+
+    from recotem.artifact.signing import KeyRing
+    from recotem.config import ApiKeyEntry, ServeConfig
+    from recotem.serving.app import _emit_security_posture
+
+    cfg = ServeConfig()
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.api_keys = [
+        ApiKeyEntry(kid="leftover", sha256_hex=hashlib.sha256(b"x").hexdigest())
+    ]
+    cfg.host = "127.0.0.1"
+    cfg.allowed_hosts = ["*"]
+    cfg.allowed_origins = []
+
+    kr = KeyRing("test:" + "aa" * 32)
+    with structlog.testing.capture_logs() as captured:
+        _emit_security_posture(cfg, kr)
+
+    posture = next(e for e in captured if e.get("event") == "security.posture")
+    assert posture["auth_enabled"] is False
+    assert posture["unsafe_mode"] is True
+
+
+def test_normal_mode_passes_configured_api_keys_to_router(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without ``insecure_no_auth``, the configured api_keys must reach the router."""
+    import hashlib
+
+    from recotem.config import ApiKeyEntry
+    from recotem.serving import app as app_module
+
+    entry = ApiKeyEntry(kid="k1", sha256_hex=hashlib.sha256(b"x").hexdigest())
+    cfg = _minimal_config(tmp_path)
+    cfg.insecure_no_auth = False
+    cfg.api_keys = [entry]
+
+    captured: dict = {}
+    real_make_router = app_module.make_router
+
+    def _spy(*args, **kwargs):
+        captured["api_keys"] = kwargs.get("api_keys")
+        return real_make_router(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "make_router", _spy)
+    app_module.create_app(cfg)
+
+    assert captured["api_keys"] == [entry]
+
+
+# ---------------------------------------------------------------------------
 # empty keys forces localhost bind
 # ---------------------------------------------------------------------------
 

@@ -20,6 +20,11 @@ import contextlib
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
+
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
 class LockContestedError(Exception):
@@ -27,6 +32,9 @@ class LockContestedError(Exception):
     ``fail_on_busy=True`` was requested."""
 
     code = "lock_contested"
+
+
+_LOCAL_SCHEMES = {"", "file"}
 
 
 @contextlib.contextmanager
@@ -66,7 +74,25 @@ def recipe_lock(
     LockContestedError
         Only when *fail_on_busy* is ``True`` and the lock cannot be acquired.
     """
-    lock_path = Path(str(output_path) + ".lock")
+    output_str = str(output_path)
+    scheme = urlparse(output_str).scheme.lower() if "://" in output_str else ""
+    if scheme not in _LOCAL_SCHEMES:
+        # ``flock`` is a host-local primitive. For remote outputs the lock
+        # file is created at a host-local path derived from the URI and
+        # cannot coordinate writers running on different hosts/pods. Emit
+        # a structured warning so operators don't assume cross-host mutual
+        # exclusion. See docs/operations.md "Concurrent training" section.
+        logger.warning(
+            "recipe_lock_local_only",
+            scheme=scheme,
+            output_path=output_str,
+            advice=(
+                "per-recipe flock is host-local; ensure single-writer via the "
+                "scheduler (CronJob concurrencyPolicy=Forbid, Argo mutex, etc.)"
+            ),
+        )
+
+    lock_path = Path(output_str + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     if sys.platform == "win32":

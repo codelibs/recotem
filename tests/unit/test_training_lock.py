@@ -97,3 +97,40 @@ def test_lock_released_after_context(tmp_path: Path) -> None:
         assert lock_path.exists()
     # After context exit, the lock file should be removed
     assert not lock_path.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_lock_warns_on_remote_scheme(tmp_path: Path, monkeypatch) -> None:
+    """For ``s3://`` / ``gs://`` outputs, ``flock`` cannot coordinate writers
+    across hosts/pods. ``recipe_lock`` must surface this as a structured
+    warning so operators do not assume distributed mutual exclusion.
+    Regression test for the gap between the lock implementation and
+    docs/deployment/k8s.md guidance."""
+    import structlog.testing
+
+    # Run inside tmp_path so the synthesised lock file (e.g. "s3:/bucket/...")
+    # lands in an isolated dir rather than CWD.
+    monkeypatch.chdir(tmp_path)
+    remote = "s3://my-bucket/artifacts/my_recipe.recotem"
+
+    with structlog.testing.capture_logs() as captured:
+        with recipe_lock(remote) as acquired:
+            assert acquired is True
+
+    warnings = [e for e in captured if e.get("event") == "recipe_lock_local_only"]
+    assert warnings, "remote-scheme output must emit recipe_lock_local_only warning"
+    assert warnings[0]["scheme"] == "s3"
+    assert warnings[0]["log_level"] == "warning"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_lock_does_not_warn_on_local_path(tmp_path: Path) -> None:
+    """Plain filesystem paths (the common case) must not emit the warning."""
+    import structlog.testing
+
+    output_path = tmp_path / "model.recotem"
+    with structlog.testing.capture_logs() as captured:
+        with recipe_lock(output_path) as acquired:
+            assert acquired is True
+
+    assert not any(e.get("event") == "recipe_lock_local_only" for e in captured)

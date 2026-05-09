@@ -32,6 +32,21 @@ spec:
             {{- toYaml .Values.podSecurityContext | nindent 12 }}
           restartPolicy: OnFailure
 
+          {{- /* Mirror the serve Deployment: when recipes.source=objectStore,
+                 sync the bucket into the shared emptyDir before train runs.
+                 Without this, train would loop over an empty /recipes. */}}
+          {{- if eq .Values.recipes.source "objectStore" }}
+          {{- if not .Values.recipes.objectStore.initContainer }}
+          {{- fail "recipes.source=objectStore requires recipes.objectStore.initContainer to be set" }}
+          {{- end }}
+          initContainers:
+            - name: sync-recipes
+              {{- toYaml .Values.recipes.objectStore.initContainer | nindent 14 }}
+              volumeMounts:
+                - name: recipes
+                  mountPath: {{ .Values.recipes.mountPath }}
+          {{- end }}
+
           containers:
             - name: train
               image: {{ include "recotem.image" . }}
@@ -48,15 +63,25 @@ spec:
                   done
               {{- else }}
               # Train all *.yaml recipes in the recipes directory.
+              # Fail explicitly when the directory is empty so a misconfigured
+              # objectStore sync (or wrong PVC) surfaces as a CronJob failure
+              # rather than a silent exit 0.
               command:
                 - /bin/sh
                 - -c
                 - |
-                  set -e
+                  set -eu
+                  shopt -s nullglob 2>/dev/null || true
+                  count=0
                   for recipe in {{ .Values.recipes.mountPath }}/*.yaml; do
                     [ -f "$recipe" ] || continue
+                    count=$((count + 1))
                     recotem train "$recipe"{{ if .Values.train.failOnBusy }} --fail-on-busy{{ end }}
                   done
+                  if [ "$count" -eq 0 ]; then
+                    echo "no recipe files found under {{ .Values.recipes.mountPath }}" >&2
+                    exit 1
+                  fi
               {{- end }}
               securityContext:
                 {{- toYaml .Values.securityContext | nindent 16 }}
@@ -100,8 +125,10 @@ spec:
               persistentVolumeClaim:
                 claimName: {{ .Values.recipes.pvc.claimName }}
                 readOnly: true
-              {{- else }}
+              {{- else if eq .Values.recipes.source "objectStore" }}
               emptyDir: {}
+              {{- else }}
+              {{- fail (printf "recipes.source must be one of configMap|pvc|objectStore, got %q" .Values.recipes.source) }}
               {{- end }}
             {{- if .Values.artifacts.enabled }}
             - name: artifacts

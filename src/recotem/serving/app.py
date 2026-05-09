@@ -191,9 +191,13 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         )
 
     # 10. Routes.
+    # ``--insecure-no-auth`` must short-circuit the X-API-Key check even when
+    # ``RECOTEM_API_KEYS`` is still set in the environment, otherwise the flag
+    # is documented but silently ineffective.
+    router_api_keys = [] if serve_config.insecure_no_auth else serve_config.api_keys
     router = make_router(
         registry=registry,
-        api_keys=serve_config.api_keys,
+        api_keys=router_api_keys,
         metadata_field_deny=serve_config.metadata_field_deny,
     )
     app.include_router(router)
@@ -255,7 +259,9 @@ def _emit_security_posture(serve_config: ServeConfig, key_ring: KeyRing | None) 
 
     logger.info(
         "security.posture",
-        auth_enabled=bool(serve_config.api_keys),
+        auth_enabled=(
+            bool(serve_config.api_keys) and not serve_config.insecure_no_auth
+        ),
         bind_host=serve_config.host,
         signing_keys=signing_keys,
         signing_kids=kids,

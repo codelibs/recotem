@@ -147,3 +147,35 @@ class EchoSource:
         ]
 
         return pd.DataFrame(rows, columns=["user_id", "item_id", "timestamp"])
+
+    # ── optional DataSource protocol ──────────────────────────────────────────
+
+    def probe(self) -> dict:
+        """Lightweight connectivity / auth check called by ``recotem validate``.
+
+        EchoSource is entirely synthetic (no network, no filesystem), so
+        probe() simply validates the config constraints without generating
+        data.
+
+        Returns
+        -------
+        dict
+            A small status dict for logging by ``recotem validate``.
+
+        Raises
+        ------
+        DataSourceError
+            If the config is self-contradictory (n_rows > n_users * n_items).
+        """
+        cfg = self._config
+        max_possible = cfg.n_users * cfg.n_items
+        if cfg.n_rows > max_possible:
+            raise DataSourceError(
+                f"EchoSource: n_rows ({cfg.n_rows}) exceeds n_users * n_items "
+                f"({max_possible}).  Reduce n_rows or increase n_users/n_items."
+            )
+        return {
+            "status": "ok",
+            "rows_to_emit": cfg.n_rows,
+            "items": cfg.n_items,
+        }

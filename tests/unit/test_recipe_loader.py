@@ -741,3 +741,80 @@ output:
     p = _write_recipe(tmp_path, content)
     recipe = load_recipe(p)
     assert recipe.source.sha256 is None
+
+
+# ---------------------------------------------------------------------------
+# item_metadata.item_id_column — end-to-end through the YAML loader
+# ---------------------------------------------------------------------------
+
+
+def test_item_metadata_item_id_column_custom_propagates_through_yaml(
+    tmp_path: Path,
+) -> None:
+    """A recipe YAML with item_metadata.item_id_column: 'product_id' must
+    produce Recipe.item_metadata.item_id_column == 'product_id' after load.
+
+    Regression baseline for the field addition in ItemMetadataConfig: the loader
+    must correctly round-trip the new field from YAML bytes to the pydantic model.
+    """
+    out = tmp_path / "custom_id_col.recotem"
+    content = f"""\
+name: custom_id_col
+source:
+  type: csv
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+item_metadata:
+  type: csv
+  path: /tmp/items.csv
+  fields: [title]
+  item_id_column: product_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
+    p = _write_recipe(tmp_path, content)
+    recipe = load_recipe(p)
+    assert recipe.item_metadata is not None
+    assert recipe.item_metadata.item_id_column == "product_id", (
+        f"Expected 'product_id', got {recipe.item_metadata.item_id_column!r}"
+    )
+
+
+def test_item_metadata_item_id_column_default_when_omitted_in_yaml(
+    tmp_path: Path,
+) -> None:
+    """When item_id_column is omitted from the YAML, the field defaults to 'item_id'.
+
+    Regression: ensures the default is preserved end-to-end through the loader
+    so existing recipes without the field continue to behave identically.
+    """
+    out = tmp_path / "default_id_col.recotem"
+    content = f"""\
+name: default_id_col
+source:
+  type: csv
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+item_metadata:
+  type: csv
+  path: /tmp/items.csv
+  fields: [title]
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
+    p = _write_recipe(tmp_path, content)
+    recipe = load_recipe(p)
+    assert recipe.item_metadata is not None
+    assert recipe.item_metadata.item_id_column == "item_id", (
+        f"Expected default 'item_id', got {recipe.item_metadata.item_id_column!r}"
+    )

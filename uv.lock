@@ -2213,7 +2213,7 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-az = [
+azure = [
     { name = "adlfs" },
 ]
 bigquery = [
@@ -2245,7 +2245,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "adlfs", marker = "extra == 'az'", specifier = ">=2024.6,<2026" },
+    { name = "adlfs", marker = "extra == 'azure'", specifier = ">=2024.6,<2026" },
     { name = "db-dtypes", marker = "extra == 'bigquery'", specifier = ">=1.2,<2" },
     { name = "fastapi", specifier = ">=0.120,<0.140" },
     { name = "fsspec", specifier = ">=2024.6,<2026" },
@@ -2267,7 +2267,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.12,<0.20" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<0.40" },
 ]
-provides-extras = ["bigquery", "s3", "gcs", "az", "metrics"]
+provides-extras = ["bigquery", "s3", "gcs", "azure", "metrics"]
 
 [package.metadata.requires-dev]
 dev = [

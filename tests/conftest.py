@@ -17,12 +17,27 @@ from __future__ import annotations
 
 import json
 import struct
+import sys
 import textwrap
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import pytest
+
+# ---------------------------------------------------------------------------
+# Make example plugins importable without requiring a separate `pip install`.
+# The echo-source plugin lives under examples/plugins/echo-source/src/ and is
+# not installed in the main project venv, but its source is always present in
+# the repository.  Adding its src/ to sys.path lets unit tests import it
+# directly without needing a separate installation step.
+# ---------------------------------------------------------------------------
+
+_ECHO_SRC = (
+    Path(__file__).parent.parent / "examples" / "plugins" / "echo-source" / "src"
+)
+if _ECHO_SRC.is_dir() and str(_ECHO_SRC) not in sys.path:
+    sys.path.insert(0, str(_ECHO_SRC))
 
 # ---------------------------------------------------------------------------
 # Signing key fixtures

@@ -597,3 +597,113 @@ def test_failed_load_recipe_excluded_from_models_listing(tmp_path: Path) -> None
     assert response.status_code == 200
     names = [m.get("name") for m in response.json()]
     assert "broken" not in names
+
+
+# ---------------------------------------------------------------------------
+# ServeConfig.allowed_hosts parsing — RECOTEM_ALLOWED_HOSTS edge cases (M5)
+# ---------------------------------------------------------------------------
+
+
+def test_allowed_hosts_unset_returns_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When RECOTEM_ALLOWED_HOSTS is unset, allowed_hosts defaults to
+    ['127.0.0.1', 'localhost'] — never an empty list."""
+    monkeypatch.delenv("RECOTEM_ALLOWED_HOSTS", raising=False)
+    cfg = ServeConfig.from_env()
+    assert cfg.allowed_hosts == ["127.0.0.1", "localhost"]
+
+
+def test_allowed_hosts_empty_string_returns_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When RECOTEM_ALLOWED_HOSTS='' (explicitly empty), allowed_hosts must
+    fall back to the documented default rather than yielding an empty list.
+    An empty list would cause TrustedHostMiddleware to accept all hosts (via
+    the old 'or [\"*\"]' fallback) — a security footgun."""
+    monkeypatch.setenv("RECOTEM_ALLOWED_HOSTS", "")
+    cfg = ServeConfig.from_env()
+    assert cfg.allowed_hosts == ["127.0.0.1", "localhost"], (
+        f"Expected default on empty string, got {cfg.allowed_hosts!r}"
+    )
+
+
+def test_allowed_hosts_single_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A single hostname is returned as a one-element list."""
+    monkeypatch.setenv("RECOTEM_ALLOWED_HOSTS", "example.com")
+    cfg = ServeConfig.from_env()
+    assert cfg.allowed_hosts == ["example.com"]
+
+
+def test_allowed_hosts_multiple_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A comma-separated list is split and stripped correctly."""
+    monkeypatch.setenv("RECOTEM_ALLOWED_HOSTS", "a,b,c")
+    cfg = ServeConfig.from_env()
+    assert cfg.allowed_hosts == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------------------
+# Regression: csv-list env vars that must still default to EMPTY (not inherit
+# the RECOTEM_ALLOWED_HOSTS non-empty default).  The allowed_hosts fix must be
+# narrowly scoped — other csv-list vars must keep their own defaults.
+# ---------------------------------------------------------------------------
+
+
+def test_allowed_origins_empty_string_stays_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_ALLOWED_ORIGINS='' must remain [] (CORS default-deny).
+
+    The allowed_hosts fix introduced a non-empty default for RECOTEM_ALLOWED_HOSTS
+    inside _split_csv_env.  This test ensures that fix is scoped to
+    RECOTEM_ALLOWED_HOSTS only: RECOTEM_ALLOWED_ORIGINS must NEVER fall back to
+    a non-empty list — an empty string means 'deny all' for CORS.
+    """
+    monkeypatch.setenv("RECOTEM_ALLOWED_ORIGINS", "")
+    monkeypatch.delenv("RECOTEM_ALLOWED_HOSTS", raising=False)
+    cfg = ServeConfig.from_env()
+    assert cfg.allowed_origins == [], (
+        "RECOTEM_ALLOWED_ORIGINS='' must stay empty (CORS default-deny); "
+        f"got {cfg.allowed_origins!r}"
+    )
+
+
+def test_allowed_origins_unset_stays_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When RECOTEM_ALLOWED_ORIGINS is unset, CORS must remain denied (empty list)."""
+    monkeypatch.delenv("RECOTEM_ALLOWED_ORIGINS", raising=False)
+    cfg = ServeConfig.from_env()
+    assert cfg.allowed_origins == [], (
+        f"RECOTEM_ALLOWED_ORIGINS unset must yield [], got {cfg.allowed_origins!r}"
+    )
+
+
+def test_api_keys_empty_string_stays_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_API_KEYS='' must yield an empty api_keys list (auth disabled / localhost bind).
+
+    Guards against a future refactor accidentally applying the RECOTEM_ALLOWED_HOSTS
+    non-empty fallback to API keys, which would produce a malformed entry and
+    break the server startup with a confusing ValueError.
+    """
+    monkeypatch.setenv("RECOTEM_API_KEYS", "")
+    cfg = ServeConfig.from_env()
+    assert cfg.api_keys == [], (
+        f"RECOTEM_API_KEYS='' must yield empty api_keys, got {cfg.api_keys!r}"
+    )
+
+
+def test_allowed_hosts_non_empty_default_does_not_bleed_into_origins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify allowed_hosts and allowed_origins are independently parsed.
+
+    Setting only RECOTEM_ALLOWED_HOSTS must not affect RECOTEM_ALLOWED_ORIGINS.
+    """
+    monkeypatch.setenv("RECOTEM_ALLOWED_HOSTS", "example.com")
+    monkeypatch.delenv("RECOTEM_ALLOWED_ORIGINS", raising=False)
+    cfg = ServeConfig.from_env()
+    assert cfg.allowed_hosts == ["example.com"]
+    assert cfg.allowed_origins == [], (
+        "Setting RECOTEM_ALLOWED_HOSTS must not change RECOTEM_ALLOWED_ORIGINS"
+    )

@@ -41,7 +41,7 @@ spec:
                 - name: RECOTEM_SIGNING_KEYS
                   valueFrom:
                     secretKeyRef:
-                      name: recotem-secrets
+                      name: recotem-auth
                       key: RECOTEM_SIGNING_KEYS
           volumes:
             - name: recipes
@@ -82,16 +82,23 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: recotem-serve
+  labels:
+    app.kubernetes.io/name: recotem
+    app.kubernetes.io/component: serve
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: recotem-serve
+      app.kubernetes.io/name: recotem
+      app.kubernetes.io/component: serve
   template:
     metadata:
       labels:
-        app: recotem-serve
+        app.kubernetes.io/name: recotem
+        app.kubernetes.io/component: serve
     spec:
+      # terminationGracePeriodSeconds >= RECOTEM_DRAIN_SECONDS + 5 (default 30+5=35)
+      terminationGracePeriodSeconds: 35
       containers:
         - name: serve
           image: ghcr.io/codelibs/recotem:2.0.0
@@ -114,28 +121,40 @@ spec:
               value: "json"
             - name: RECOTEM_WATCH_INTERVAL
               value: "30"
+            - name: RECOTEM_DRAIN_SECONDS
+              value: "30"
             - name: RECOTEM_SIGNING_KEYS
               valueFrom:
                 secretKeyRef:
-                  name: recotem-secrets
+                  name: recotem-auth
                   key: RECOTEM_SIGNING_KEYS
             - name: RECOTEM_API_KEYS
               valueFrom:
                 secretKeyRef:
-                  name: recotem-secrets
+                  name: recotem-auth
                   key: RECOTEM_API_KEYS
           readinessProbe:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 5
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
+              httpHeaders:
+                - name: Host
+                  value: localhost
             initialDelaySeconds: 30
             periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
       volumes:
         - name: recipes
           configMap:
@@ -200,7 +219,8 @@ metadata:
   name: recotem-serve
 spec:
   selector:
-    app: recotem-serve
+    app.kubernetes.io/name: recotem
+    app.kubernetes.io/component: serve
   ports:
     - port: 80
       targetPort: 8080

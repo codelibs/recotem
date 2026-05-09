@@ -289,3 +289,37 @@ def test_itemmetadata_sha256_invalid_rejected() -> None:
         ItemMetadataConfig(
             type="csv", path="/tmp/x.csv", sha256="not-hex", fields=["title"]
         )
+
+
+# ---------------------------------------------------------------------------
+# ItemMetadataConfig: item_id_column field
+# ---------------------------------------------------------------------------
+
+
+def test_item_metadata_item_id_column_default_is_item_id() -> None:
+    cfg = ItemMetadataConfig(type="csv", path="/tmp/meta.csv", fields=["title"])
+    assert cfg.item_id_column == "item_id"
+
+
+def test_item_metadata_item_id_column_custom_value_round_trips() -> None:
+    cfg = ItemMetadataConfig(
+        type="csv",
+        path="/tmp/meta.csv",
+        fields=["title"],
+        item_id_column="product_id",
+    )
+    assert cfg.item_id_column == "product_id"
+
+
+def test_item_metadata_item_id_column_empty_string_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ItemMetadataConfig(
+            type="csv", path="/tmp/meta.csv", fields=["title"], item_id_column=""
+        )
+
+
+def test_item_metadata_item_id_column_whitespace_only_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ItemMetadataConfig(
+            type="csv", path="/tmp/meta.csv", fields=["title"], item_id_column="   "
+        )

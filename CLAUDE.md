@@ -160,7 +160,7 @@ uv run ruff format --check src tests
 |---|---|---|
 | `RECOTEM_SIGNING_KEYS` | (required) | `kid:hex64,kid2:hex64` for HMAC sign/verify (64 hex = 32 bytes). |
 | `RECOTEM_API_KEYS` | (empty) | `kid:sha256:hex64,...` for serve auth. Empty forces 127.0.0.1 bind. |
-| `RECOTEM_HOST` / `RECOTEM_PORT` | 0.0.0.0 / 8080 | uvicorn bind. Overridden by 127.0.0.1 when no API keys. |
+| `RECOTEM_HOST` / `RECOTEM_PORT` | 127.0.0.1 / 8080 | uvicorn bind. Must be `0.0.0.0` inside Docker; overridden to 127.0.0.1 when no API keys are set. |
 | `RECOTEM_WATCH_INTERVAL` | 5 | Watcher poll seconds (clamped 1–30). |
 | `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. |
 | `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Cap on HTTP/HTTPS source-path body. Clamped [1 MiB, 16 GiB]. |
@@ -173,6 +173,7 @@ uv run ruff format --check src tests
 | `RECOTEM_ARTIFACT_ROOT` | (empty) | If set, local `output.path` must lie under it. |
 | `RECOTEM_RECIPE_*` | — | Allow-listed for `${...}` recipe expansion. |
 | `RECOTEM_METADATA_FIELD_DENY` | (empty) | Comma-separated columns stripped from `/predict` responses. |
+| `RECOTEM_METRICS_ENABLED` | (empty) | Opt-in Prometheus `/metrics` endpoint. Truthy values: `1`, `true`, `yes`, `on`. Requires `recotem[metrics]` extra. |
 
 ## CI
 

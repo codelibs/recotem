@@ -177,9 +177,11 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     )
 
     # 9. Middlewares.
+    # allowed_hosts is always non-empty after ServeConfig.from_env() because
+    # _split_csv_env falls back to _DEFAULT_ALLOWED_HOSTS on empty/unset input.
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=serve_config.allowed_hosts or ["*"],
+        allowed_hosts=serve_config.allowed_hosts,
     )
 
     if serve_config.allowed_origins:

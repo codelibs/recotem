@@ -315,3 +315,36 @@ def test_local_metadata_sha256_mismatch_raises(tmp_path) -> None:
             _Config("csv", str(csv_file), sha256=bad_digest),
             fields=["title"],
         )
+
+
+# ---------------------------------------------------------------------------
+# custom item_id_column
+# ---------------------------------------------------------------------------
+
+
+def test_custom_item_id_column_resolves_correct_column(tmp_path: Path) -> None:
+    """Loader uses config.item_id_column to locate item identifiers."""
+    csv_file = _write_csv(
+        tmp_path,
+        "product_id,title\np1,Widget A\np2,Widget B\n",
+    )
+    df = load_item_metadata(
+        _Config("csv", str(csv_file), item_id_column="product_id"),
+        fields=["title"],
+    )
+    assert df.index.name == "product_id"
+    assert "p1" in df.index
+    assert df.loc["p1", "title"] == "Widget A"
+
+
+def test_custom_item_id_column_missing_raises(tmp_path: Path) -> None:
+    """Loader raises ValueError when item_id_column is not present in the file."""
+    csv_file = _write_csv(
+        tmp_path,
+        "item_id,title\ni1,Title1\n",
+    )
+    with pytest.raises(ValueError, match="item_id_column"):
+        load_item_metadata(
+            _Config("csv", str(csv_file), item_id_column="product_id"),
+            fields=["title"],
+        )

@@ -466,10 +466,10 @@ def _fetch_data(recipe: Recipe, run_id: str) -> pd.DataFrame:
     except TrainingError:
         raise
     except Exception as exc:
-        raise TrainingError(
-            f"Data fetch failed: {exc}",
-            code="datasource_error",
-        ) from exc
+        # Unexpected exceptions from the datasource path map to DataSourceError
+        # (exit 3), not TrainingError (exit 4), per the documented exit-code
+        # contract in docs/operations.md.
+        raise DataSourceError(f"Data fetch failed: {exc}") from exc
 
     return df
 

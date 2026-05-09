@@ -90,7 +90,7 @@ def load_item_metadata(
 
     file_type: str = getattr(config, "type", "")
     path: str = getattr(config, "path", "")
-    item_id_col: str = getattr(config, "item_id_column", "item_id")
+    item_id_col: str = config.item_id_column
     sha256: str | None = getattr(config, "sha256", None)
 
     # -----------------------------------------------------------------------

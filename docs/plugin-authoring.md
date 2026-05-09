@@ -13,14 +13,16 @@ below.
 ```python
 from __future__ import annotations
 
+import random
 from typing import ClassVar
+
 import pandas as pd
 from pydantic import BaseModel, Field
 from recotem.datasource.base import DataSourceError, FetchContext
 
 
 class EchoSource:
-    """Returns a fixed DataFrame — useful for testing and CI."""
+    """Returns a synthetic DataFrame — useful for testing and CI."""
 
     # 1. type_name: discriminator value matched against the recipe YAML
     #    `source.type` field.  Must be a non-empty string and unique across
@@ -36,9 +38,10 @@ class EchoSource:
     #    `extra="forbid"` with no `type` field will fail recipe load with an
     #    "unexpected key" error.
     class Config(BaseModel):
-        n_rows: int = Field(default=100, ge=1)
         n_users: int = Field(default=10, ge=1)
         n_items: int = Field(default=20, ge=1)
+        n_rows: int = Field(default=100, ge=1)
+        seed: int = Field(default=42)
 
     # 3. extras_required: pip extras to suggest when optional dependencies
     #    are missing.  Leave empty if the plugin has no optional deps.
@@ -50,13 +53,44 @@ class EchoSource:
     def fetch(self, ctx: FetchContext) -> pd.DataFrame:
         """Return a DataFrame whose columns include those named in
         the recipe `schema` block (user_column, item_column, optional
-        time_column)."""
-        import random
-        rng = random.Random(42)
-        return pd.DataFrame({
-            "user_id": [f"u{rng.randint(0, self._config.n_users)}" for _ in range(self._config.n_rows)],
-            "item_id": [f"i{rng.randint(0, self._config.n_items)}" for _ in range(self._config.n_rows)],
-        })
+        time_column).
+
+        Returns a DataFrame with columns: user_id (str), item_id (str),
+        timestamp (int epoch seconds).
+        """
+        cfg = self._config
+        max_possible = cfg.n_users * cfg.n_items
+        if cfg.n_rows > max_possible:
+            raise DataSourceError(
+                f"EchoSource: n_rows ({cfg.n_rows}) exceeds n_users * n_items "
+                f"({max_possible}).  Reduce n_rows or increase n_users/n_items."
+            )
+        rng = random.Random(cfg.seed)
+        users = [f"user_{i}" for i in range(cfg.n_users)]
+        items = [f"item_{j}" for j in range(cfg.n_items)]
+        all_pairs = [(u, v) for u in users for v in items]
+        sampled = rng.sample(all_pairs, cfg.n_rows)
+        base_ts = 1_700_000_000
+        rows = [
+            {"user_id": u, "item_id": v, "timestamp": base_ts + idx}
+            for idx, (u, v) in enumerate(sampled)
+        ]
+        return pd.DataFrame(rows, columns=["user_id", "item_id", "timestamp"])
+
+    def probe(self) -> dict:
+        """Optional. Called by recotem validate to test connectivity.
+
+        Should be cheap — never load full data.
+        Raise DataSourceError on failure.
+        """
+        cfg = self._config
+        max_possible = cfg.n_users * cfg.n_items
+        if cfg.n_rows > max_possible:
+            raise DataSourceError(
+                f"EchoSource: n_rows ({cfg.n_rows}) exceeds n_users * n_items "
+                f"({max_possible})."
+            )
+        return {"status": "ok", "rows_to_emit": cfg.n_rows, "items": cfg.n_items}
 ```
 
 ### Rules
@@ -138,7 +172,7 @@ class's `type_name` attribute. By convention, keep them the same.
 ## Install and use
 
 ```bash
-pip install ./recotem-echo-source
+uv pip install -e examples/plugins/echo-source/
 ```
 
 Verify discovery by running `recotem validate` against a recipe that uses the
@@ -158,13 +192,15 @@ name: echo_test
 
 source:
   type: echo
-  n_rows: 500
   n_users: 50
   n_items: 100
+  n_rows: 500
+  seed: 42        # optional; omit to use the default seed
 
 schema:
   user_column: user_id
   item_column: item_id
+  time_column: timestamp   # EchoSource emits integer epoch-second timestamps
 
 training:
   algorithms: [TopPop]
@@ -234,11 +270,12 @@ its `type_name`.
 `recotem validate` calls it for a lightweight connectivity / auth check:
 
 ```python
-def probe(self) -> None:
+def probe(self) -> dict:
     """Optional. Called by recotem validate to test connectivity.
 
     Should be cheap (LIMIT 1, dry-run, fs.exists, ...) — never load full data.
-    Raise DataSourceError on failure.
+    Raise DataSourceError on failure.  Return a small status dict that
+    recotem validate logs (e.g. {"status": "ok", "rows_to_emit": n_rows}).
     """
     ...
 ```
@@ -256,10 +293,10 @@ Test `fetch()` directly without the CLI:
 from recotem_echo import EchoSource
 from recotem.datasource.base import FetchContext
 
-source = EchoSource(EchoSource.Config(n_rows=200))
+source = EchoSource(EchoSource.Config(n_users=20, n_items=50, n_rows=200))
 ctx = FetchContext(recipe_name="test", run_id="abc")
 df = source.fetch(ctx)
-assert {"user_id", "item_id"}.issubset(df.columns)
+assert {"user_id", "item_id", "timestamp"}.issubset(df.columns)
 assert len(df) == 200
 ```
 

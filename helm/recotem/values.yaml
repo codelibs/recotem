@@ -15,6 +15,11 @@ imagePullSecrets: []
 # ── serve deployment ──────────────────────────────────────────────────────────
 replicaCount: 2
 
+# terminationGracePeriodSeconds must be >= RECOTEM_DRAIN_SECONDS + 5 to allow
+# the watcher tick plus the full drain window before SIGKILL.
+# Default RECOTEM_DRAIN_SECONDS=30, so this is set to 35.
+terminationGracePeriodSeconds: 35
+
 nameOverride: ""
 fullnameOverride: ""
 

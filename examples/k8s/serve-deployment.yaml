@@ -30,6 +30,9 @@ spec:
         app.kubernetes.io/component: serve
     spec:
       serviceAccountName: recotem
+      # terminationGracePeriodSeconds must be >= RECOTEM_DRAIN_SECONDS + 5.
+      # Default RECOTEM_DRAIN_SECONDS=30, so 35 is the minimum recommended value.
+      terminationGracePeriodSeconds: 35
       # Spread replicas across nodes for availability.
       topologySpreadConstraints:
         - maxSkew: 1

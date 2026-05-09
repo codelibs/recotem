@@ -121,6 +121,17 @@ class ItemMetadataConfig(BaseModel, extra="forbid"):
         default="error",
         pattern=r"^(error|null)$",
     )
+    item_id_column: str = Field(
+        default="item_id",
+        description="Column name in the metadata source that holds the item id",
+    )
+
+    @field_validator("item_id_column")
+    @classmethod
+    def _validate_item_id_column(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("item_id_column must not be empty or whitespace-only")
+        return v
 
 
 # ---------------------------------------------------------------------------

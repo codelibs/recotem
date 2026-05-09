@@ -714,3 +714,64 @@ def test_run_training_uses_get_source_class_for_fetch(tmp_path: Path) -> None:
     # get_source_class must have been called with the recipe's source type.
     mock_gsc.assert_called_once_with("csv")
     assert len(df) == 2
+
+
+# ---------------------------------------------------------------------------
+# M21 — unexpected exception inside datasource path -> DataSourceError (exit 3)
+# ---------------------------------------------------------------------------
+
+
+def test_unexpected_exception_in_fetch_raises_DataSourceError_not_TrainingError(
+    tmp_path: Path,
+) -> None:
+    """An unexpected exception raised by source_instance.fetch() must be
+    wrapped as DataSourceError (exit 3), not TrainingError (exit 4).
+
+    The documented exit-code contract in docs/operations.md maps datasource
+    failures to exit 3.  Before this fix _fetch_data wrapped them as
+    TrainingError(code='datasource_error'), which the CLI mapped to exit 4.
+    """
+    from recotem.datasource.base import DataSourceError
+    from recotem.training.pipeline import _fetch_data
+
+    recipe = _make_recipe(tmp_path)
+
+    # Simulate an unexpected runtime error from the data source (e.g. network
+    # timeout, unexpected library exception, etc.) that is NOT a DataSourceError.
+    boom = RuntimeError("connection refused")
+    mock_source = MagicMock()
+    mock_source.fetch.side_effect = boom
+    mock_source_cls = MagicMock(return_value=mock_source)
+
+    with patch(
+        "recotem.datasource.registry.get_source_class",
+        return_value=mock_source_cls,
+    ):
+        with pytest.raises(DataSourceError) as exc_info:
+            _fetch_data(recipe, run_id="test-m21")
+
+    assert "Data fetch failed" in str(exc_info.value)
+    assert exc_info.value.__cause__ is boom
+
+
+def test_DataSourceError_from_fetch_propagates_unchanged(tmp_path: Path) -> None:
+    """A DataSourceError raised by fetch() must pass through _fetch_data
+    unchanged (not double-wrapped)."""
+    from recotem.datasource.base import DataSourceError
+    from recotem.training.pipeline import _fetch_data
+
+    recipe = _make_recipe(tmp_path)
+
+    original = DataSourceError("auth token expired")
+    mock_source = MagicMock()
+    mock_source.fetch.side_effect = original
+    mock_source_cls = MagicMock(return_value=mock_source)
+
+    with patch(
+        "recotem.datasource.registry.get_source_class",
+        return_value=mock_source_cls,
+    ):
+        with pytest.raises(DataSourceError) as exc_info:
+            _fetch_data(recipe, run_id="test-m21b")
+
+    assert exc_info.value is original

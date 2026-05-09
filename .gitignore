@@ -39,5 +39,12 @@ recipes/local/
 *.recotem.lock
 *.recotem.tmp
 
+# Stray local directories created by fsspec when a remote-scheme path (s3://,
+# gs://, az://) is resolved without a proper backend.  These are never valid
+# outputs and must not be committed.
+s3:/
+gs:/
+az:/
+
 # Tools
 .serena/

@@ -277,6 +277,69 @@ def test_train_exit5_on_signing_key_missing_without_dev_flag(
     assert result.exit_code in (1, 2, 4, 5)
 
 
+def test_train_exit3_when_fetch_raises_DataSourceError(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """train must exit 3 (DataSourceError) when _fetch_data raises DataSourceError.
+
+    Before the M21 fix, _fetch_data wrapped unexpected exceptions in
+    TrainingError(code='datasource_error') which the CLI mapped to exit 4.
+    The fix changed the wrapping to DataSourceError, which the CLI maps to exit 3.
+    This test exercises the full CLI→pipeline→exit-code path for datasource failures.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from recotem.datasource.base import DataSourceError
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "fetch_fail_recipe")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    # Simulate a DataSourceError raised during _fetch_data (e.g. network error,
+    # missing file — anything the datasource pipeline converts to DataSourceError).
+    boom = DataSourceError("simulated network timeout")
+
+    mock_source = MagicMock()
+    mock_source.fetch.side_effect = boom
+    mock_source_cls = MagicMock(return_value=mock_source)
+
+    with patch(
+        "recotem.datasource.registry.get_source_class",
+        return_value=mock_source_cls,
+    ):
+        result = runner.invoke(app, ["train", str(yaml_path)])
+
+    assert result.exit_code == 3, (
+        f"DataSourceError from _fetch_data must produce exit 3, got {result.exit_code}. "
+        f"Output: {result.stdout}"
+    )
+
+
+def test_map_exception_to_exit_DataSourceError_is_exit3() -> None:
+    """_map_exception_to_exit must return 3 for DataSourceError.
+
+    Direct unit test of the mapping function to confirm DataSourceError → exit 3
+    is wired correctly, independent of the full CLI stack.
+    """
+    from recotem.cli import _map_exception_to_exit
+    from recotem.datasource.base import DataSourceError
+
+    exc = DataSourceError("auth failed")
+    assert _map_exception_to_exit(exc) == 3
+
+
+def test_map_exception_to_exit_TrainingError_is_exit4() -> None:
+    """_map_exception_to_exit must return 4 for TrainingError (not DataSourceError).
+
+    Ensures that the DataSourceError fix did not accidentally change the
+    TrainingError mapping in the exit-code table.
+    """
+    from recotem.cli import _map_exception_to_exit
+    from recotem.training.errors import TrainingError
+
+    exc = TrainingError("evaluation failed", code="no_completed_trials")
+    assert _map_exception_to_exit(exc) == 4
+
+
 # ---------------------------------------------------------------------------
 # recotem serve smoke
 # ---------------------------------------------------------------------------

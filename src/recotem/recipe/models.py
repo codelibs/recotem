@@ -89,13 +89,6 @@ class TrainingConfig(BaseModel, extra="forbid"):
     split: SplitConfig = Field(default_factory=SplitConfig)
 
 
-class VersioningEnum(str):
-    """Versioning strategy for output artifacts."""
-
-    always_overwrite = "always_overwrite"
-    append_sha = "append_sha"
-
-
 class OutputConfig(BaseModel, extra="forbid"):
     """Artifact output path and versioning policy."""
 

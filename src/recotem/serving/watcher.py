@@ -27,7 +27,6 @@ import hashlib
 import json
 import random
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,13 +72,6 @@ def _read_artifact_bytes(path: str, max_bytes: int) -> bytes:
 
     try:
         fs, fpath = fsspec.core.url_to_fs(path)
-        info = fs.info(fpath)
-        size = info.get("size") or info.get("Size") or 0
-        if size and size > max_bytes:
-            raise ArtifactError(
-                f"artifact at '{path}' is {size} bytes, "
-                f"exceeds cap {max_bytes}; refusing read"
-            )
         with fs.open(fpath, "rb") as fh:
             data = fh.read(max_bytes + 1)
         if len(data) > max_bytes:
@@ -190,14 +182,7 @@ class ArtifactWatcher(threading.Thread):
         while not self._stop_event.is_set():
             jitter = self._config.watch_interval * 0.1 * (random.random() * 2 - 1)
             sleep_secs = max(0.1, self._config.watch_interval + jitter)
-            deadline = time.monotonic() + sleep_secs
-            while not self._stop_event.is_set():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                time.sleep(min(0.5, remaining))
-
-            if self._stop_event.is_set():
+            if self._stop_event.wait(sleep_secs):
                 break
 
             try:
@@ -297,63 +282,63 @@ class ArtifactWatcher(threading.Thread):
                 if marker == state.last_marker:
                     continue
 
-                self._load_recipe(name, state, force=False)
+                self._load_recipe(name, state, force=False, marker=marker)
 
     # ------------------------------------------------------------------
     # Load / verify / replace
     # ------------------------------------------------------------------
 
-    def _load_recipe(self, name: str, state: _RecipeWatchState, *, force: bool) -> None:
-        """Read, verify, deserialize, and atomically replace the entry for *name*."""
+    def _load_recipe(
+        self,
+        name: str,
+        state: _RecipeWatchState,
+        *,
+        force: bool,
+        marker: Any = None,
+    ) -> None:
+        """Read, verify, deserialize, and atomically replace the entry for *name*.
+
+        *marker* is the change-marker that triggered this load (from the
+        polling pre-stat).  Reusing it avoids a second stat() round-trip
+        per cycle — important on object stores where stat is a network call.
+        """
         artifact_path = state.artifact_path
         max_bytes = self._config.max_artifact_bytes
 
         try:
             data = _read_artifact_bytes(artifact_path, max_bytes)
         except ArtifactError as exc:
-            self._mark_error(name, f"read failed: {exc}")
-            _metrics.inc_artifact_load_failure(name)
-            _metrics.record_swap(name, ok=False)
+            self._record_load_failure(name, f"read failed: {exc}")
             return
         except Exception as exc:
-            self._mark_error(name, f"unexpected read error: {exc}")
-            _metrics.inc_artifact_load_failure(name)
-            _metrics.record_swap(name, ok=False)
+            self._record_load_failure(name, f"unexpected read error: {exc}")
             return
 
         sha256 = _sha256_bytes(data)
 
         if not force and sha256 == state.last_sha256:
-            state.last_marker = _stat_marker(artifact_path)
+            if marker is not None:
+                state.last_marker = marker
             return
 
         try:
             entry = self._build_entry(name, state.recipe, data, artifact_path)
         except ArtifactError as exc:
-            kid = _extract_kid_safe(data)
             logger.error(
                 "artifact_load_failed",
                 name=name,
-                kid=kid,
+                kid=_extract_kid_safe(data),
                 error=str(exc),
             )
-            self._mark_error(name, str(exc))
-            _metrics.inc_artifact_load_failure(name)
-            _metrics.record_swap(name, ok=False)
+            self._record_load_failure(name, str(exc))
             return
         except Exception as exc:
-            logger.error(
-                "artifact_load_unexpected_error",
-                name=name,
-                error=str(exc),
-            )
-            self._mark_error(name, str(exc))
-            _metrics.inc_artifact_load_failure(name)
-            _metrics.record_swap(name, ok=False)
+            logger.error("artifact_load_unexpected_error", name=name, error=str(exc))
+            self._record_load_failure(name, str(exc))
             return
 
+        new_marker = marker if marker is not None else _stat_marker(artifact_path)
         self._registry.replace(name, entry)
-        new_marker = _stat_marker(artifact_path)
         state.last_sha256 = sha256
         state.last_marker = new_marker
         entry._loaded_marker = (new_marker, sha256)
@@ -419,6 +404,12 @@ class ArtifactWatcher(threading.Thread):
         entry = self._registry.get(name)
         if entry is not None:
             entry.last_load_error = error
+
+    def _record_load_failure(self, name: str, error: str) -> None:
+        """Mark the entry's load error and increment the failure metrics."""
+        self._mark_error(name, error)
+        _metrics.inc_artifact_load_failure(name)
+        _metrics.record_swap(name, ok=False)
 
 
 # ---------------------------------------------------------------------------

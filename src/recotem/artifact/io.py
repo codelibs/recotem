@@ -118,44 +118,38 @@ def write_artifact(
     if versioning == "always_overwrite":
         final_path = resolved_path
         _write_atomic(fs, resolved_path, artifact_bytes, is_local)
-    else:
-        # append_sha mode
-        sha8 = hashlib.sha256(artifact_bytes).hexdigest()[:8]
-        # Derive the sha-suffixed artifact path
-        base = resolved_path
-        # Strip trailing ".recotem" if present so we can re-append cleanly
-        if base.endswith(".recotem"):
-            stem = base[: -len(".recotem")]
-        else:
-            stem = base
-        sha_path = f"{stem}.{sha8}.recotem"
-
-        # Write sha-suffixed artifact first
-        _write_atomic(fs, sha_path, artifact_bytes, is_local)
-
-        # Write pointer file (contains basename of sha-suffixed artifact)
-        sha_basename = os.path.basename(sha_path)
-        pointer_bytes = (sha_basename + "\n").encode("utf-8")
-        _write_atomic(fs, resolved_path, pointer_bytes, is_local)
-
-        final_path = sha_path
-        logger.info(
-            "artifact_written",
-            versioning="append_sha",
-            artifact=sha_path,
-            pointer=resolved_path,
-            kid=kid,
-        )
-
-    if versioning == "always_overwrite":
         logger.info(
             "artifact_written",
             versioning="always_overwrite",
             artifact=resolved_path,
             kid=kid,
         )
+        return final_path
 
-    return final_path
+    # append_sha mode
+    sha8 = hashlib.sha256(artifact_bytes).hexdigest()[:8]
+    # Strip trailing ".recotem" if present so we can re-append cleanly
+    base = resolved_path
+    if base.endswith(".recotem"):
+        stem = base[: -len(".recotem")]
+    else:
+        stem = base
+    sha_path = f"{stem}.{sha8}.recotem"
+
+    # Write sha-suffixed artifact first, then the pointer file
+    _write_atomic(fs, sha_path, artifact_bytes, is_local)
+    sha_basename = os.path.basename(sha_path)
+    pointer_bytes = (sha_basename + "\n").encode("utf-8")
+    _write_atomic(fs, resolved_path, pointer_bytes, is_local)
+
+    logger.info(
+        "artifact_written",
+        versioning="append_sha",
+        artifact=sha_path,
+        pointer=resolved_path,
+        kid=kid,
+    )
+    return sha_path
 
 
 def _is_local_fs(fs: fsspec.AbstractFileSystem) -> bool:

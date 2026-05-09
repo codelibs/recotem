@@ -48,6 +48,29 @@ _SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _INSECURE_ALLOWED_ENVS: frozenset[str] = frozenset({"development", "dev", "test"})
 
 
+def _split_csv_env(name: str, default: list[str]) -> list[str]:
+    """Return a CSV-split, stripped, empty-skipping env value, or *default*."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return list(default)
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _clamped_int_env(name: str, default: int, lo: int, hi: int) -> int:
+    """Return an integer env value clamped to ``[lo, hi]``, falling back to *default*.
+
+    On unset / empty / unparseable input, returns *default* unchanged.
+    """
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(lo, min(hi, value))
+
+
 # ---------------------------------------------------------------------------
 # ApiKeyEntry — parsed "<kid>:sha256:<hex64>"
 # ---------------------------------------------------------------------------
@@ -226,20 +249,9 @@ class ServeConfig:
                     f"got {max_bytes_env!r}: {exc}"
                 ) from exc
 
-        # RECOTEM_ALLOWED_ORIGINS
-        origins_env = os.environ.get("RECOTEM_ALLOWED_ORIGINS", "").strip()
-        cfg.allowed_origins = (
-            [o.strip() for o in origins_env.split(",") if o.strip()]
-            if origins_env
-            else []
-        )
-
-        # RECOTEM_ALLOWED_HOSTS
-        hosts_env = os.environ.get("RECOTEM_ALLOWED_HOSTS", "").strip()
-        cfg.allowed_hosts = (
-            [h.strip() for h in hosts_env.split(",") if h.strip()]
-            if hosts_env
-            else list(_DEFAULT_ALLOWED_HOSTS)
+        cfg.allowed_origins = _split_csv_env("RECOTEM_ALLOWED_ORIGINS", [])
+        cfg.allowed_hosts = _split_csv_env(
+            "RECOTEM_ALLOWED_HOSTS", _DEFAULT_ALLOWED_HOSTS
         )
 
         # RECOTEM_ENV
@@ -256,11 +268,7 @@ class ServeConfig:
                     f"got {drain_env!r}: {exc}"
                 ) from exc
 
-        # RECOTEM_METADATA_FIELD_DENY
-        deny_env = os.environ.get("RECOTEM_METADATA_FIELD_DENY", "").strip()
-        cfg.metadata_field_deny = (
-            [f.strip() for f in deny_env.split(",") if f.strip()] if deny_env else []
-        )
+        cfg.metadata_field_deny = _split_csv_env("RECOTEM_METADATA_FIELD_DENY", [])
 
         return cfg
 
@@ -345,31 +353,19 @@ _MAX_HTTP_TIMEOUT_SECONDS = 600
 
 def get_max_download_bytes() -> int:
     """Return RECOTEM_MAX_DOWNLOAD_BYTES, clamped to [1 MiB, 16 GiB]."""
-    raw = os.environ.get("RECOTEM_MAX_DOWNLOAD_BYTES", "")
-    if not raw:
-        return DEFAULT_MAX_DOWNLOAD_BYTES
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_MAX_DOWNLOAD_BYTES
-    if value < _MIN_DOWNLOAD_BYTES:
-        return _MIN_DOWNLOAD_BYTES
-    if value > _MAX_DOWNLOAD_BYTES:
-        return _MAX_DOWNLOAD_BYTES
-    return value
+    return _clamped_int_env(
+        "RECOTEM_MAX_DOWNLOAD_BYTES",
+        DEFAULT_MAX_DOWNLOAD_BYTES,
+        _MIN_DOWNLOAD_BYTES,
+        _MAX_DOWNLOAD_BYTES,
+    )
 
 
 def get_http_timeout_seconds() -> int:
     """Return RECOTEM_HTTP_TIMEOUT_SECONDS, clamped to [1, 600]."""
-    raw = os.environ.get("RECOTEM_HTTP_TIMEOUT_SECONDS", "")
-    if not raw:
-        return DEFAULT_HTTP_TIMEOUT_SECONDS
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_HTTP_TIMEOUT_SECONDS
-    if value < _MIN_HTTP_TIMEOUT_SECONDS:
-        return _MIN_HTTP_TIMEOUT_SECONDS
-    if value > _MAX_HTTP_TIMEOUT_SECONDS:
-        return _MAX_HTTP_TIMEOUT_SECONDS
-    return value
+    return _clamped_int_env(
+        "RECOTEM_HTTP_TIMEOUT_SECONDS",
+        DEFAULT_HTTP_TIMEOUT_SECONDS,
+        _MIN_HTTP_TIMEOUT_SECONDS,
+        _MAX_HTTP_TIMEOUT_SECONDS,
+    )

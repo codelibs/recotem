@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import re
 import threading
-import time
 from typing import Any
 
 import optuna
@@ -71,53 +70,6 @@ class SearchResult:
         self.n_trials = n_trials
         self.n_completed = n_completed
         self.search_seed = search_seed
-
-
-# ---------------------------------------------------------------------------
-# Per-trial timeout via Optuna callback
-# ---------------------------------------------------------------------------
-
-
-class _PerTrialTimeoutCallback:
-    """Optuna callback that prunes a trial that has run too long.
-
-    Implemented as a wall-clock tracker: ``on_trial_complete`` is never called
-    for pruned trials in older Optuna versions, so we track the trial start
-    time via ``study._storage`` hooks indirectly.  The simpler approach is to
-    use the ``trial.should_prune()`` path: a separate thread raises
-    ``TrialPruned`` inside the objective by setting a per-trial flag.
-
-    Actually the cleanest portable approach for Optuna 3.x is to check the
-    elapsed time from inside the objective function, but we cannot modify the
-    objective easily from the callback.  Instead, we store trial start times
-    when the callback is invoked and, if the trial time exceeds the budget,
-    we report pruned on the *next* callback invocation.
-
-    For simplicity and Optuna 3.x compatibility: the per-trial timeout is
-    enforced by wrapping the objective at objective-call time with a thread
-    that raises ``TrialPruned`` via ``trial.report(nan, 0)`` followed by
-    ``raise TrialPruned()``.  This is handled in ``run_search`` where we
-    wrap the per-class objective.
-    """
-
-    def __init__(self, per_trial_timeout_seconds: float) -> None:
-        self._timeout = per_trial_timeout_seconds
-        self._start_times: dict[int, float] = {}
-        self._lock = threading.Lock()
-
-    def record_start(self, trial_number: int) -> None:
-        with self._lock:
-            self._start_times[trial_number] = time.monotonic()
-
-    def elapsed(self, trial_number: int) -> float:
-        with self._lock:
-            start = self._start_times.get(trial_number)
-        if start is None:
-            return 0.0
-        return time.monotonic() - start
-
-    def is_over_budget(self, trial_number: int) -> bool:
-        return self.elapsed(trial_number) > self._timeout
 
 
 # ---------------------------------------------------------------------------
@@ -225,11 +177,7 @@ def run_search(
         load_if_exists=True,
     )
 
-    per_trial_timeout_cb = (
-        _PerTrialTimeoutCallback(per_trial_timeout_seconds)
-        if per_trial_timeout_seconds is not None
-        else None
-    )
+    has_per_trial_timeout = per_trial_timeout_seconds is not None
 
     trial_progress_cb = make_trial_callback(reporter)
 
@@ -255,14 +203,10 @@ def run_search(
 
         rec_cls = get_recommender_cls(class_name)
 
-        # Record start time for per-trial timeout.
-        if per_trial_timeout_cb is not None:
-            per_trial_timeout_cb.record_start(trial.number)
-
         params: dict[str, Any] = rec_cls.default_suggest_parameter(trial, {})
 
         # Per-trial timeout: run the learn in a thread so we can interrupt.
-        if per_trial_timeout_cb is not None:
+        if has_per_trial_timeout:
             result_holder: list[Any] = []
             exc_holder: list[BaseException] = []
 
@@ -323,18 +267,9 @@ def run_search(
 
     best_trial = study.best_trial
 
-    # Extract best class name and params.
-    best_params_raw = dict(best_trial.params)
-    best_class_name: str = str(
-        best_trial.user_attrs.get(
-            "recommender_class_name",
-            best_params_raw.pop("recommender_class_name", class_names[0]),
-        )
+    best_class_name, best_params_raw = extract_class_and_clean_params(
+        best_trial, default_class=class_names[0]
     )
-
-    # Clean up Optuna bookkeeping keys from params.
-    best_params_raw.pop("recommender_class_name", None)
-    best_params_raw.pop("optimizer_name", None)
 
     # Merge learnt_config attributes (prefixed params stored as user_attrs).
     best_params: dict[str, Any] = {}
@@ -428,3 +363,30 @@ def _trial_class(trial: optuna.trial.FrozenTrial, multi_algo: bool) -> str:
             trial.params.get("recommender_class_name", "unknown"),
         )
     )
+
+
+# Keys Optuna may inject into trial.params that should not be forwarded as
+# recommender constructor arguments.
+_TRIAL_BOOKKEEPING_KEYS = ("recommender_class_name", "optimizer_name")
+
+
+def extract_class_and_clean_params(
+    trial: Any,
+    default_class: str,
+) -> tuple[str, dict[str, Any]]:
+    """Return ``(class_name, params_without_bookkeeping)`` for *trial*.
+
+    Reads ``recommender_class_name`` from ``trial.user_attrs`` first, falling
+    back to ``trial.params`` and finally to *default_class*.  Returns a fresh
+    dict copy of ``trial.params`` with the Optuna bookkeeping keys removed.
+    """
+    params = dict(trial.params)
+    class_name = str(
+        trial.user_attrs.get(
+            "recommender_class_name",
+            params.get("recommender_class_name", default_class),
+        )
+    )
+    for key in _TRIAL_BOOKKEEPING_KEYS:
+        params.pop(key, None)
+    return class_name, params

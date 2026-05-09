@@ -177,7 +177,7 @@ def run_training(
                     "pass --dev-allow-unsigned for local development.",
                     code="signing_key_missing",
                 )
-            key_ring = KeyRing(*[e.strip() for e in raw.split(",") if e.strip()])
+            key_ring = KeyRing(raw)
     if signing_key is None:
         signing_key = key_ring.active_kid
 
@@ -525,11 +525,6 @@ def _cleanse(
         before = len(df)
         df = df.drop_duplicates(subset=[user_col, item_col], keep="last")
         drop_count += before - len(df)
-    # "none": no dedup
-    # NOTE: a "sum_weight" mode existed in earlier drafts but was never
-    # plumbed through to the sparse-matrix builder, so it was removed from
-    # the schema.  Reintroduce only when the training pipeline can actually
-    # consume per-interaction weights end-to-end.
 
     # 5. Min-data preconditions.
     n_rows = len(df)

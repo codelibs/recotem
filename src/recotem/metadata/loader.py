@@ -141,6 +141,17 @@ def load_item_metadata(
     # Select and reorder to exactly *fields*, then set index
     # -----------------------------------------------------------------------
     df = df[[item_id_col, *fields]].copy()
+    # Drop duplicate item-ids before set_index — a non-unique index turns
+    # df.loc[item_id] from a Series into a DataFrame slice, which silently
+    # zeros out the metadata join in routes._lookup_metadata.
+    dup_count = int(df[item_id_col].duplicated().sum())
+    if dup_count > 0:
+        logger.warning(
+            "metadata_duplicate_item_ids_dropped",
+            path=path,
+            drop_count=dup_count,
+        )
+        df = df.drop_duplicates(subset=[item_id_col], keep="first")
     df = df.set_index(item_id_col)
     df.index.name = item_id_col
 

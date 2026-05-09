@@ -200,17 +200,12 @@ def make_trial_callback(
     The callback is called with ``(study, trial)`` after each trial.
     """
 
+    from recotem.training.search import extract_class_and_clean_params  # noqa: PLC0415
+
     def _callback(study, trial) -> None:  # type: ignore[no-untyped-def]
-        params = dict(trial.params)
-        algorithm: str = str(
-            trial.user_attrs.get(
-                "recommender_class_name",
-                params.pop("recommender_class_name", "unknown"),
-            )
+        algorithm, params = extract_class_and_clean_params(
+            trial, default_class="unknown"
         )
-        # Strip internal Optuna bookkeeping keys from the displayed params.
-        params.pop("optimizer_name", None)
-        params.pop("recommender_class_name", None)
 
         score: float | None = None
         if trial.value is not None:

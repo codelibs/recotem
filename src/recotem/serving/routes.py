@@ -10,6 +10,7 @@ Routes (spec Section 7):
 
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from typing import TYPE_CHECKING, Annotated, Any
@@ -255,18 +256,10 @@ def _lookup_metadata(
     """
     try:
         row = meta_df.loc[item_id]
-        # row is a pandas Series; convert to dict.
-        d = row.to_dict()
-        if deny_set:
-            d = {k: v for k, v in d.items() if k not in deny_set}
-        # Coerce NaN → None for JSON serialization.
-        import math
-
-        return {
-            k: (None if isinstance(v, float) and math.isnan(v) else v)
-            for k, v in d.items()
-        }
     except KeyError:
         return {}
-    except Exception:
-        return {}
+    return {
+        k: (None if isinstance(v, float) and math.isnan(v) else v)
+        for k, v in row.to_dict().items()
+        if k not in deny_set
+    }

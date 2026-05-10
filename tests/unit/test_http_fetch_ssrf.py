@@ -20,6 +20,7 @@ import ipaddress
 import socket
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch
 
@@ -778,6 +779,270 @@ def test_https_to_file_redirect_rejected() -> None:
     assert any(kw in err for kw in ("scheme", "redirect", "file", "disallowed")), (
         f"HttpFetchError must mention scheme change or disallowed redirect; "
         f"got: {exc_info.value!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# S-E: Bogon network ranges (CGNAT, benchmark, TEST-NET, NAT64, Documentation)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "ip,label",
+    [
+        ("100.64.0.1", "CGNAT (RFC6598) first host"),
+        ("100.64.169.254", "CGNAT (RFC6598) IMDS-lookalike"),
+        ("100.127.255.254", "CGNAT (RFC6598) last host"),
+        ("198.18.0.1", "Benchmark (RFC2544)"),
+        ("198.19.255.254", "Benchmark (RFC2544) last host"),
+        ("192.0.2.1", "TEST-NET-1 (RFC5737)"),
+        ("198.51.100.1", "TEST-NET-2 (RFC5737)"),
+        ("203.0.113.1", "TEST-NET-3 (RFC5737)"),
+    ],
+)
+def test_assert_host_public_rejects_bogon_ipv4(
+    ip: str, label: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bogon IPv4 ranges must be refused by assert_host_public.
+
+    These ranges are IANA-reserved but not always flagged by Python's
+    is_private / is_reserved, so a separate bogon membership check is needed.
+    """
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
+    with pytest.raises(HttpFetchError, match="private/internal address"):
+        assert_host_public(f"http://{ip}/path", allow_private=False)
+
+
+@pytest.mark.parametrize(
+    "ip,label",
+    [
+        ("2001:db8::1", "Documentation prefix (RFC3849)"),
+        ("2001:db8:ffff:ffff::1", "Documentation prefix last host"),
+        ("64:ff9b::1.2.3.4", "NAT64 well-known prefix (RFC6052)"),
+    ],
+)
+def test_assert_host_public_rejects_bogon_ipv6(
+    ip: str, label: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bogon IPv6 ranges must be refused by assert_host_public."""
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
+    with pytest.raises(HttpFetchError, match="private/internal address"):
+        assert_host_public(f"http://[{ip}]/path", allow_private=False)
+
+
+def test_assert_host_public_rejects_ipv4_mapped_cgnat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IPv4-mapped IPv6 form of a CGNAT address must also be rejected.
+
+    ``::ffff:100.64.0.1`` wraps the CGNAT range inside an IPv4-mapped IPv6
+    address.  The bogon check must unwrap to the embedded IPv4 and refuse.
+    """
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
+    with pytest.raises(HttpFetchError, match="private/internal address"):
+        assert_host_public("http://[::ffff:100.64.0.1]/path", allow_private=False)
+
+
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "8.8.8.8",
+        "93.184.216.34",
+        "2606:4700:4700::1111",
+    ],
+)
+def test_assert_host_public_allows_public_ips_regression(
+    ip: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Known-public IPs must still pass after bogon list addition (regression guard).
+
+    Verifies that the bogon membership checks do not introduce false positives
+    for genuinely public addresses.
+    """
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
+
+    def _stub_getaddrinfo(host, port, *args, **kwargs):
+        if ":" in ip:
+            return [(socket.AF_INET6, None, None, None, (ip, 0, 0, 0))]
+        return [(socket.AF_INET, None, None, None, (ip, 0))]
+
+    with patch("socket.getaddrinfo", side_effect=_stub_getaddrinfo):
+        # Should not raise — public IPs must pass through
+        assert_host_public(f"http://{ip}/", allow_private=False)
+
+
+def test_in_bogon_ipv4_mapped_cgnat_unwraps_correctly() -> None:
+    """``_in_bogon`` must detect CGNAT in IPv4-mapped IPv6 form.
+
+    This unit test targets the helper directly to verify that the embedded
+    IPv4 address is evaluated against _BOGON_V4 rather than the IPv6
+    representation against _BOGON_V6.
+    """
+    from recotem._http_fetch import _in_bogon
+
+    cgnat_mapped = ipaddress.ip_address("::ffff:100.64.0.1")
+    assert _in_bogon(cgnat_mapped) is True
+
+    public_mapped = ipaddress.ip_address("::ffff:8.8.8.8")
+    assert _in_bogon(public_mapped) is False
+
+
+# ---------------------------------------------------------------------------
+# C-4: verify_sha256 mismatch raises HttpFetchError (unit) + fetch integration
+# ---------------------------------------------------------------------------
+
+
+def test_verify_sha256_mismatch_raises_http_fetch_error() -> None:
+    """verify_sha256 must raise HttpFetchError when the digest does not match.
+
+    The function uses hmac.compare_digest for constant-time comparison so
+    timing attacks cannot leak the correct hash.  This test drives the
+    mismatch path with known data.
+    """
+    from recotem._http_fetch import verify_sha256
+
+    body = b"hello world"
+    wrong_hex = "a" * 64  # all-'a' hex — clearly wrong for "hello world"
+    with pytest.raises(HttpFetchError, match="sha256 mismatch"):
+        verify_sha256(body, wrong_hex)
+
+
+def test_verify_sha256_correct_digest_does_not_raise() -> None:
+    """verify_sha256 must NOT raise when the digest matches."""
+    import hashlib
+
+    from recotem._http_fetch import verify_sha256
+
+    body = b"correct content bytes"
+    correct_hex = hashlib.sha256(body).hexdigest()
+    # Should not raise
+    verify_sha256(body, correct_hex)
+
+
+def test_fetch_http_bytes_then_verify_sha256_mismatch(httpserver) -> None:
+    """fetch_http_bytes + verify_sha256 combo: mismatch raises HttpFetchError.
+
+    fetch_http_bytes does not accept a sha256 parameter; callers (csv.py,
+    metadata loader) call verify_sha256 on the returned bytes separately.
+    This test drives the full pattern: fetch succeeds but the post-fetch
+    sha256 check raises HttpFetchError when the digest is wrong.
+    """
+    from recotem._http_fetch import verify_sha256
+
+    body = b"user_id,item_id\nu1,i1\nu2,i2\n"
+    httpserver.expect_request("/data.csv").respond_with_data(body, status=200)
+
+    actual_bytes = fetch_http_bytes(
+        httpserver.url_for("/data.csv"),
+        timeout=5,
+        max_bytes=65536,
+        allow_private=True,
+    )
+    assert actual_bytes == body  # fetch itself succeeded
+
+    wrong_sha256 = "c" * 64  # clearly wrong for any realistic body
+    with pytest.raises(HttpFetchError, match="sha256 mismatch"):
+        verify_sha256(actual_bytes, wrong_sha256)
+
+
+def test_fetch_http_bytes_then_verify_sha256_correct_passes(httpserver) -> None:
+    """verify_sha256 must NOT raise when the digest matches the fetched bytes."""
+    import hashlib
+
+    from recotem._http_fetch import verify_sha256
+
+    body = b"some_content_to_hash"
+    httpserver.expect_request("/ok.csv").respond_with_data(body, status=200)
+
+    actual_bytes = fetch_http_bytes(
+        httpserver.url_for("/ok.csv"),
+        timeout=5,
+        max_bytes=65536,
+        allow_private=True,
+    )
+    correct_hex = hashlib.sha256(actual_bytes).hexdigest()
+    # Must not raise
+    verify_sha256(actual_bytes, correct_hex)
+
+
+# ---------------------------------------------------------------------------
+# S-G: _PinnedHTTPSHandler passes ssl.SSLContext to _PinnedHTTPSConnection
+# ---------------------------------------------------------------------------
+
+
+def test_pinned_https_handler_passes_ssl_context_to_connection() -> None:
+    """``_build_pinned_opener`` must pass an ``ssl.SSLContext`` instance to
+    ``_PinnedHTTPSConnection.__init__`` via the ``context`` keyword argument.
+
+    Without this, the default urllib behaviour creates a new (and potentially
+    less-strict) SSLContext inside the connection, discarding the one created
+    by the handler — meaning SNI / cert verification settings from
+    ssl.create_default_context() could be silently ignored.
+    """
+    import ssl
+
+    import recotem._http_fetch as _mod
+
+    received_contexts: list[object] = []
+    original_init = _mod._PinnedHTTPSConnection.__init__
+
+    def _spy_init(self, host, *args, pinned_ip, **kwargs):
+        received_contexts.append(kwargs.get("context"))
+        # Call the real __init__ but skip the actual connect — we just want
+        # to capture the kwargs; create_connection would fail (no real server).
+        original_init(self, host, *args, pinned_ip=pinned_ip, **kwargs)
+
+    with patch.object(_mod._PinnedHTTPSConnection, "__init__", _spy_init):
+        opener = _mod._build_pinned_opener("93.184.216.34")
+        # Trigger the builder by calling https_open via the opener internals.
+        # We call do_open indirectly: build a fake request and let the opener's
+        # HTTPS handler call _builder — then intercept the resulting
+        # _PinnedHTTPSConnection init.  Extracting the handler and calling its
+        # _builder directly is simplest.
+        https_handler = next(
+            h for h in opener.handlers if isinstance(h, urllib.request.HTTPSHandler)
+        )
+        # Simulate what do_open does: it calls _builder(host) to create the
+        # connection.  We reach into the closure by calling https_open with a
+        # minimal fake request and a patched do_open that just calls _builder.
+
+        class _FakeReq:
+            type = "https"
+            host = "example.com:443"
+            get_host = lambda self: "example.com:443"  # noqa: E731
+            unverifiable = False
+            timeout = 5
+            headers = {}
+
+            def get_full_url(self):
+                return "https://example.com/"
+
+        _builder_captured: list[object] = []
+
+        def _capture_builder(builder, req, **kw):
+            _builder_captured.append(builder)
+            # Call builder to trigger _PinnedHTTPSConnection.__init__
+            try:
+                builder("example.com")
+            except Exception:
+                pass  # we only care that __init__ was called
+            return None  # abort before actual connect
+
+        with patch.object(https_handler, "do_open", side_effect=_capture_builder):
+            try:
+                https_handler.https_open(_FakeReq())
+            except Exception:
+                pass
+
+    # After https_open was invoked, check that the _builder called __init__
+    # with a context kwarg that is an ssl.SSLContext instance.
+    assert received_contexts, (
+        "_PinnedHTTPSConnection.__init__ must be called when https_open triggers the builder"
+    )
+    ctx = received_contexts[0]
+    assert isinstance(ctx, ssl.SSLContext), (
+        f"_PinnedHTTPSConnection must receive an ssl.SSLContext instance "
+        f"via the 'context' kwarg; got {type(ctx).__name__!r}"
     )
 
 

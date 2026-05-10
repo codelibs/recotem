@@ -6,7 +6,6 @@ A secondary blacklist blocks sensitive variable names regardless of prefix.
 
 from __future__ import annotations
 
-import fnmatch
 import os
 import re
 
@@ -22,28 +21,54 @@ _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 # Required prefix for any expandable variable.
 _ALLOWED_PREFIX = "RECOTEM_RECIPE_"
 
-# Blacklist patterns (case-insensitive glob).  A variable whose *upper-cased*
-# name matches any of these is rejected even if it satisfies the prefix.
-# Defence-in-depth: the RECOTEM_RECIPE_* prefix check fires first, but this
-# list ensures that even a validly-prefixed variable containing a credential
-# keyword is blocked (e.g. RECOTEM_RECIPE_MY_TOKEN, RECOTEM_RECIPE_MY_KEY).
-_BLACKLIST_PATTERNS: tuple[str, ...] = (
-    "RECOTEM_SIGNING_KEY",
-    "RECOTEM_API_KEYS",
-    "*_SECRET*",
-    "*_PASSWORD*",
-    "*_TOKEN*",
-    "*_KEY*",
-    "AWS_*",
-    "GOOGLE_*",
-    "GCP_*",
+# Substring-based blacklist: if any of these substrings appears in the
+# uppercased variable name, the variable is blocked even if it satisfies the
+# RECOTEM_RECIPE_* prefix check.
+#
+# Using substring matching instead of glob word-boundary patterns closes the
+# gap where e.g. RECOTEM_RECIPE_APIKEY (no underscore before KEY) passed the
+# old glob *_KEY* filter.
+_BLACKLIST_SUBSTRINGS: tuple[str, ...] = (
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "TOKEN",
+    "KEY",
+    "AUTH",
+    "BEARER",
+    "CRED",
+    "PRIVATE",
+)
+
+# Prefix-based blacklist: names whose uppercased form starts with any of these
+# are blocked unconditionally (cloud credential env vars).
+_BLACKLIST_PREFIXES: tuple[str, ...] = (
+    "AWS_",
+    "GCP_",
+    "GOOGLE_",
+    "AZURE_",
+)
+
+# Exact names (uppercased) that are always blocked regardless of prefix.
+_BLACKLIST_EXACT: frozenset[str] = frozenset(
+    {"RECOTEM_SIGNING_KEY", "RECOTEM_API_KEYS"}
 )
 
 
 def _is_blacklisted(name: str) -> bool:
-    """Return True if *name* (case-insensitive) matches any blacklist pattern."""
+    """Return True if *name* (case-insensitive) matches any blacklist rule.
+
+    Rules (checked in order — first match wins):
+    1. Exact match against ``_BLACKLIST_EXACT``.
+    2. Name uppercased starts with any prefix in ``_BLACKLIST_PREFIXES``.
+    3. Uppercased name contains any substring in ``_BLACKLIST_SUBSTRINGS``.
+    """
     upper = name.upper()
-    return any(fnmatch.fnmatchcase(upper, pat) for pat in _BLACKLIST_PATTERNS)
+    if upper in _BLACKLIST_EXACT:
+        return True
+    if any(upper.startswith(p) for p in _BLACKLIST_PREFIXES):
+        return True
+    return any(s in upper for s in _BLACKLIST_SUBSTRINGS)
 
 
 def _is_allowed(name: str) -> bool:

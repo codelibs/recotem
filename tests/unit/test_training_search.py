@@ -357,6 +357,59 @@ def test_excessive_orphan_trials_raises_training_error() -> None:
 
 
 # ---------------------------------------------------------------------------
+# T-3: run_search raises SearchError(no_active_algorithms) when _compute_budgets
+#       returns all-zero after patching (bypassing the fallback guard)
+# ---------------------------------------------------------------------------
+
+
+def test_run_search_all_zero_budget_raises_search_error_no_active() -> None:
+    """When _compute_budgets returns all 0 budgets, run_search must raise
+    SearchError with code='no_active_algorithms'.
+
+    The real _compute_budgets has a fallback: if every explicitly-set class
+    has budget 0 and there are no unspecified classes, it reverts to the
+    even split.  To exercise the active_classes=[] guard in run_search we
+    patch _compute_budgets to return an all-zero dict directly.
+
+    This test validates that the guard raises correctly before an Optuna study
+    is created or any expensive work begins.
+    """
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    X = sps.csr_matrix(np.ones((5, 3)))
+    evaluator = MagicMock()
+
+    def _zero_budgets(class_names, n_trials, per_algorithm_trials):
+        return {name: 0 for name in class_names}
+
+    with patch("recotem.training.search._compute_budgets", side_effect=_zero_budgets):
+        with ProgressReporter(
+            n_trials=1, recipe_name="no_active_test", run_id="r_na"
+        ) as rep:
+            with pytest.raises(SearchError) as exc_info:
+                run_search(
+                    algorithms=["TopPop"],
+                    X_tv_train=X,
+                    evaluator=evaluator,
+                    n_trials=1,
+                    per_algorithm_trials={"TopPopRecommender": 0},
+                    per_trial_timeout_seconds=None,
+                    timeout_seconds=None,
+                    parallelism=1,
+                    storage_path="",
+                    random_seed=42,
+                    reporter=rep,
+                    recipe_name="no_active_test",
+                    run_id="r_na",
+                )
+
+    assert exc_info.value.code == "no_active_algorithms", (
+        f"Expected code='no_active_algorithms', got {exc_info.value.code!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # MAJOR-6: _make_storage error message must reference training.storage_path
 # ---------------------------------------------------------------------------
 

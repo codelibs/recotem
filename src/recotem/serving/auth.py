@@ -142,6 +142,15 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
     raw_header: str | None = request.headers.get(_API_KEY_HEADER)
     if raw_header is None:
         logger.warning("auth_missing_header", path=request.url.path)
+        # Constant-time equalisation: run the scrypt KDF on a fixed-length
+        # dummy value so that the missing-header response time is
+        # indistinguishable from the short-key and normal hashing paths.
+        # Without this call an attacker can distinguish the ~0 ms missing-
+        # header branch from the ~0.5 ms KDF branch via response latency —
+        # leaking whether a header was sent at all, which narrows the attack
+        # surface from "any header" to "header present but wrong".
+        # Same rationale as the oversized/short-key branches below.
+        _hash_api_key("\x00" * _API_KEY_MIN_LEN)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
             detail={"detail": "X-API-Key header required", "code": "missing_api_key"},

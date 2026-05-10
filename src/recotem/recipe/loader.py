@@ -40,6 +40,24 @@ _OUTPUT_ALLOWED_SCHEMES: frozenset[str] = frozenset(
     {"", "file", "s3", "gs", "az", "abfs", "abfss"}
 )
 
+# Allow-list of supported schemes for input paths (source.path, item_metadata.path).
+# Compared to output, http/https are permitted (they go through SSRF-guarded fetch).
+# All other novel or vendor-specific schemes are rejected by default.
+#
+# Entries:
+#   ""       — bare local path
+#   "file"   — file:// URI
+#   "s3"     — Amazon S3
+#   "gs"     — Google Cloud Storage
+#   "az"     — Azure Blob Storage
+#   "abfs"   — Azure Data Lake Storage Gen2
+#   "abfss"  — Azure Data Lake Storage Gen2 over TLS
+#   "http"   — HTTP (SSRF-guarded; sha256 required separately)
+#   "https"  — HTTPS (SSRF-guarded; sha256 required separately)
+_INPUT_ALLOWED_SCHEMES: frozenset[str] = frozenset(
+    {"", "file", "s3", "gs", "az", "abfs", "abfss", "http", "https"}
+)
+
 # Schemes that involve an unauthenticated network fetch. Used by the
 # sha256-required post-validator (added in Task 4).
 _NETWORK_SCHEMES: frozenset[str] = frozenset({"http", "https"})
@@ -50,8 +68,21 @@ def _network_scheme(path: str) -> bool:
     return urlparse(path).scheme.lower() in _NETWORK_SCHEMES
 
 
+# Schemes for which a `user:pass@host` component is treated as embedded
+# credentials and must be rejected.  Object-store schemes (s3, gs, az, abfs,
+# abfss) use `@` in their canonical addressing syntax (e.g. GCS
+# `gs://project@bucket/key`) and must NOT be subject to userinfo checks.
+# Aligned with `_USERINFO_SCHEMES` in `_http_fetch.py`.
+_USERINFO_REJECT_SCHEMES: frozenset[str] = frozenset({"http", "https", "ftp", "ftps"})
+
+
 def _check_userinfo(path: str, field_name: str) -> None:
     parsed = urlparse(path)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in _USERINFO_REJECT_SCHEMES:
+        # Object-store and bare paths: `@` may be part of the addressing
+        # syntax (e.g. `gs://project@bucket/key`); skip the credentials check.
+        return
     if parsed.username or parsed.password:
         raise RecipeError(
             f"'{field_name}' contains embedded credentials in the URI. "
@@ -60,8 +91,33 @@ def _check_userinfo(path: str, field_name: str) -> None:
 
 
 def _validate_input_path(path: str, field_name: str) -> None:
-    """Validate an input-side path (source.path, item_metadata.path)."""
+    """Validate an input-side path (source.path, item_metadata.path).
+
+    Enforces an allow-list of permitted schemes and rejects chained-scheme
+    paths (e.g. ``simplecache::https://…``) which cannot be safely validated
+    via ``urlparse``.
+    """
+    # Chained-scheme paths (fsspec protocol chaining syntax) are rejected
+    # because urlparse cannot extract the effective scheme from them and they
+    # may reference transient caching protocols wrapping disallowed backends.
+    if "::" in path:
+        raise RecipeError(
+            f"'{field_name}' uses a chained scheme (contains '::'). "
+            "Chained fsspec protocols are not permitted in recipes."
+        )
+
     _check_userinfo(path, field_name)
+
+    parsed = urlparse(path)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in _INPUT_ALLOWED_SCHEMES:
+        allowed_display = ", ".join(
+            sorted(f"{s}://" if s else "(bare path)" for s in _INPUT_ALLOWED_SCHEMES)
+        )
+        raise RecipeError(
+            f"'{field_name}' uses scheme '{scheme}://' which is not supported "
+            f"for input paths. Allowed: {allowed_display}"
+        )
 
 
 def _validate_output_path(path: str, field_name: str) -> None:
@@ -178,7 +234,8 @@ def _check_recipe_file_containment(recipe_path: Path, recipes_root: Path) -> Non
 # ---------------------------------------------------------------------------
 
 # Fields that must never have env expansion applied (query / query_parameters
-# on any source dict).
+# on any source dict).  This global set is kept as a baseline; plugin-declared
+# ``no_expand_fields`` are merged in during source-node expansion.
 _NO_EXPAND_KEYS: frozenset[str] = frozenset({"query", "query_parameters"})
 
 
@@ -187,11 +244,14 @@ def _expand_node(
     *,
     extra_allowed: dict[str, str] | None,
     _in_no_expand: bool = False,
+    _extra_no_expand: frozenset[str] = frozenset(),
 ) -> Any:
     """Recursively walk a parsed YAML node and expand env-var references.
 
     Expansion is skipped entirely inside ``query`` and ``query_parameters``
-    keys at any nesting level.
+    keys at any nesting level, plus any keys listed in *_extra_no_expand*
+    (populated from the source plugin's ``no_expand_fields`` class variable
+    when processing the ``source`` subtree).
     """
     if isinstance(node, str):
         if _in_no_expand:
@@ -199,18 +259,69 @@ def _expand_node(
         return expand_env_vars(node, extra_allowed=extra_allowed)
     if isinstance(node, dict):
         result: dict[str, Any] = {}
+        combined_no_expand = _NO_EXPAND_KEYS | _extra_no_expand
         for k, v in node.items():
-            in_no_expand = _in_no_expand or (k in _NO_EXPAND_KEYS)
+            in_no_expand = _in_no_expand or (k in combined_no_expand)
             result[k] = _expand_node(
-                v, extra_allowed=extra_allowed, _in_no_expand=in_no_expand
+                v,
+                extra_allowed=extra_allowed,
+                _in_no_expand=in_no_expand,
+                _extra_no_expand=_extra_no_expand,
             )
         return result
     if isinstance(node, list):
         return [
-            _expand_node(item, extra_allowed=extra_allowed, _in_no_expand=_in_no_expand)
+            _expand_node(
+                item,
+                extra_allowed=extra_allowed,
+                _in_no_expand=_in_no_expand,
+                _extra_no_expand=_extra_no_expand,
+            )
             for item in node
         ]
     return node
+
+
+def _expand_with_source_no_expand(
+    raw_data: dict[str, Any],
+    *,
+    extra_allowed: dict[str, str] | None,
+) -> dict[str, Any]:
+    """Expand env-var references in *raw_data*, honouring plugin ``no_expand_fields``.
+
+    The ``source`` subtree is expanded separately so that the source plugin's
+    ``no_expand_fields`` class attribute can be consulted before the recursive
+    walk descends into source-specific fields.
+
+    All other top-level keys are expanded with no additional restrictions
+    beyond the global ``_NO_EXPAND_KEYS``.
+    """
+    result: dict[str, Any] = {}
+    for key, value in raw_data.items():
+        if key == "source" and isinstance(value, dict):
+            # Determine extra protected fields from the plugin's class var.
+            extra_no_expand: frozenset[str] = frozenset()
+            type_name = value.get("type")
+            if type_name:
+                try:
+                    from recotem.datasource.registry import get_source_class
+
+                    src_cls = get_source_class(str(type_name))
+                    extra_no_expand = frozenset(
+                        getattr(src_cls, "no_expand_fields", frozenset())
+                    )
+                except Exception:
+                    # Unknown source type — will be caught by later validation;
+                    # fall back to global _NO_EXPAND_KEYS only.
+                    pass
+            result[key] = _expand_node(
+                value,
+                extra_allowed=extra_allowed,
+                _extra_no_expand=extra_no_expand,
+            )
+        else:
+            result[key] = _expand_node(value, extra_allowed=extra_allowed)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -304,9 +415,10 @@ def load_recipe(
     if not isinstance(raw_data, dict):
         raise RecipeError(f"Recipe '{p}' must be a YAML mapping at the top level.")
 
-    # Env expansion (never touches query / query_parameters).
+    # Env expansion (never touches query / query_parameters, and honours
+    # plugin-declared no_expand_fields for the source subtree).
     try:
-        expanded = _expand_node(raw_data, extra_allowed=extra_allowed)
+        expanded = _expand_with_source_no_expand(raw_data, extra_allowed=extra_allowed)
     except RecipeError:
         raise
     except Exception as exc:

@@ -1167,6 +1167,169 @@ def test_artifact_stat_future_raise_increments_failure_metric(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# T-1: _poll_artifacts concurrent stat count bounded by _MAX_CONCURRENT_STATS
+# ---------------------------------------------------------------------------
+
+
+def test_poll_artifacts_concurrent_stat_bounded_by_max(tmp_path: Path) -> None:
+    """_poll_artifacts must not exceed _MAX_CONCURRENT_STATS=16 concurrent stats.
+
+    Strategy:
+    - Build 30 recipe entries (well above the ceiling of 16).
+    - Monkeypatch _stat_marker to sleep briefly so futures can pile up, and
+      to count peak concurrent invocations via a threading.Semaphore.
+    - Call _poll_artifacts() directly once.
+    - Assert peak concurrent calls never exceeded _MAX_CONCURRENT_STATS.
+    """
+    import threading
+    import time as _time
+
+    from recotem.serving.watcher import (
+        _MAX_CONCURRENT_STATS,
+        ArtifactWatcher,
+        _RecipeWatchState,
+    )
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    # Create 30 stub states with unique paths
+    n = 30
+    states: dict[str, _RecipeWatchState] = {}
+    for i in range(n):
+        artifact_path = tmp_path / f"model_{i}.recotem"
+        recipe = MagicMock()
+        recipe.name = f"recipe_{i}"
+        recipe.output = MagicMock()
+        recipe.output.path = str(artifact_path)
+        recipe.item_metadata = None
+        state = _RecipeWatchState(recipe=recipe, artifact_path=str(artifact_path))
+        state.last_marker = (
+            "old"  # force no reload (marker unchanged if stat returns same)
+        )
+        states[f"recipe_{i}"] = state
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=states,
+    )
+
+    concurrent_count = [0]
+    peak_concurrent = [0]
+    count_lock = threading.Lock()
+
+    real_stat_marker = __import__(
+        "recotem.serving.watcher", fromlist=["_stat_marker"]
+    )._stat_marker
+
+    def _slow_stat(path: str, recipe_name: str = "<unknown>"):
+        with count_lock:
+            concurrent_count[0] += 1
+            if concurrent_count[0] > peak_concurrent[0]:
+                peak_concurrent[0] = concurrent_count[0]
+        _time.sleep(0.05)
+        with count_lock:
+            concurrent_count[0] -= 1
+        # Return the same marker so _load_recipe is not triggered
+        return "old"
+
+    from unittest.mock import patch
+
+    with patch("recotem.serving.watcher._stat_marker", side_effect=_slow_stat):
+        watcher._poll_artifacts()
+
+    watcher._executor.shutdown(wait=False)
+
+    assert peak_concurrent[0] <= _MAX_CONCURRENT_STATS, (
+        f"Peak concurrent stat calls {peak_concurrent[0]} exceeded "
+        f"_MAX_CONCURRENT_STATS={_MAX_CONCURRENT_STATS}. "
+        "The executor must bound parallelism."
+    )
+    assert peak_concurrent[0] > 1, (
+        f"Expected concurrent execution (peak > 1), got {peak_concurrent[0]}. "
+        "The test may not be measuring concurrency correctly."
+    )
+
+
+# ---------------------------------------------------------------------------
+# T-2: same-tick add + remove both reflected after one _scan_recipes_dir call
+# ---------------------------------------------------------------------------
+
+
+def test_scan_recipes_dir_add_and_remove_in_same_tick(tmp_path: Path) -> None:
+    """_scan_recipes_dir in one tick must handle simultaneous add + remove.
+
+    Setup:
+    - Preload watcher with one recipe ('old_recipe').
+    - Before calling _scan_recipes_dir again:
+      - Delete old_recipe.yaml from the recipes_dir.
+      - Write new_recipe.yaml (with a valid artifact).
+    - After one _scan_recipes_dir call:
+      - 'old_recipe' must be absent from the registry.
+      - 'new_recipe' must have a stub entry in the registry (even if artifact
+        load fails because the artifact file may not exist).
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    # ── Create OLD recipe ────────────────────────────────────────────────────
+    old_artifact = tmp_path / "old_model.recotem"
+    _write_valid_artifact(old_artifact)
+    old_yaml = _write_recipe_yaml(recipes_dir, "old_recipe", old_artifact)
+
+    from recotem.recipe.loader import load_recipe
+
+    old_recipe = load_recipe(old_yaml)
+
+    registry = ModelRegistry()
+    old_entry = _make_entry("old_recipe")
+    old_entry.artifact_path = str(old_artifact)
+    registry.replace("old_recipe", old_entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    initial_states = build_initial_states([old_recipe], {"old_recipe": old_entry})
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+
+    # ── Within the same tick: remove old, add new ────────────────────────────
+    old_yaml.unlink()
+
+    new_artifact = tmp_path / "new_model.recotem"
+    _write_valid_artifact(new_artifact)
+    _write_recipe_yaml(recipes_dir, "new_recipe", new_artifact)
+
+    # ── Single _scan_recipes_dir call ────────────────────────────────────────
+    watcher._scan_recipes_dir()
+
+    watcher._executor.shutdown(wait=False)
+
+    # old_recipe must be removed
+    assert registry.get("old_recipe") is None, (
+        "old_recipe must be removed after its YAML is deleted in _scan_recipes_dir"
+    )
+    # new_recipe must be discovered (stub inserted even if artifact load fails)
+    new_entry = registry.get("new_recipe")
+    assert new_entry is not None, (
+        "new_recipe must be registered in the registry after _scan_recipes_dir "
+        "discovers its YAML, even before artifact is fully loaded"
+    )
+
+
 def test_startup_stat_failure_logs_real_recipe_name(
     tmp_path: Path,
 ) -> None:

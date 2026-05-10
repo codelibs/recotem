@@ -15,10 +15,15 @@ imagePullSecrets: []
 # ── serve deployment ──────────────────────────────────────────────────────────
 replicaCount: 2
 
-# terminationGracePeriodSeconds must be >= RECOTEM_DRAIN_SECONDS + 5 to allow
-# the watcher tick plus the full drain window before SIGKILL.
-# Default RECOTEM_DRAIN_SECONDS=30, so this is set to 35.
-terminationGracePeriodSeconds: 35
+# preStopSleepSeconds: seconds the preStop hook sleeps before SIGTERM is sent,
+# giving kube-proxy time to propagate the endpoint removal and eliminate
+# 503/RST spikes during rolling updates.
+preStopSleepSeconds: 5
+
+# terminationGracePeriodSeconds must be >= preStopSleepSeconds +
+# RECOTEM_DRAIN_SECONDS + buffer (5 s) to allow the full drain window before
+# SIGKILL fires.  Default: 5 (preStop) + 30 (drain) + 5 (buffer) = 40.
+terminationGracePeriodSeconds: 40
 
 nameOverride: ""
 fullnameOverride: ""
@@ -180,9 +185,15 @@ train:
   # Cron schedule — default daily at 02:00 UTC.
   schedule: "0 2 * * *"
 
-  # Comma-separated list of recipe YAML paths to train, relative to recipes.mountPath.
-  # If empty, the CronJob iterates all *.yaml files in the directory.
-  recipeFiles: ""
+  # List of recipe YAML paths to train, relative to recipes.mountPath.
+  # Use YAML list syntax (preferred):
+  #   recipeFiles:
+  #     - "news.yaml"
+  #     - "products.yaml"
+  # Legacy comma-separated string ("news.yaml,products.yaml") is also accepted
+  # but deprecated — migrate to list form. If empty, the CronJob iterates all
+  # *.yaml files in the directory.
+  recipeFiles: []
 
   # Additional environment variables for the train job (non-secret).
   env:

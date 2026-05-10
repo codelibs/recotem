@@ -169,6 +169,105 @@ def test_processor_is_callable_with_standard_signature() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# S-A: substring-based key redaction (no underscore boundary required)
+# ---------------------------------------------------------------------------
+
+
+def test_redact_key_with_auth_substring() -> None:
+    """Key containing 'auth' substring must be redacted."""
+    # "auth" as a substring — e.g. a field named "auth_header" or "reauth"
+    result = _invoke({"auth_header": "Bearer token", "event": "e"})
+    assert result["auth_header"] == _REDACTED
+
+
+def test_redact_key_with_apikey_no_underscore() -> None:
+    """Key 'apikey' (no underscore before 'key') must be redacted by substring check."""
+    result = _invoke({"apikey": "abc123", "event": "e"})
+    assert result["apikey"] == _REDACTED
+
+
+def test_redact_key_with_bearer_substring() -> None:
+    """Key containing 'bearer' must be redacted."""
+    result = _invoke({"bearer_token": "tok", "event": "e"})
+    assert result["bearer_token"] == _REDACTED
+
+
+def test_redact_key_with_cred_substring() -> None:
+    """Key containing 'cred' must be redacted."""
+    result = _invoke({"cred_file": "/path/to/creds.json", "event": "e"})
+    assert result["cred_file"] == _REDACTED
+
+
+def test_redact_key_with_private_substring() -> None:
+    """Key containing 'private' must be redacted."""
+    result = _invoke({"private_key": "rsa-key-data", "event": "e"})
+    assert result["private_key"] == _REDACTED
+
+
+def test_non_sensitive_key_not_redacted_no_false_positive() -> None:
+    """Keys like 'created_at', 'score', 'name' must not be redacted."""
+    result = _invoke({"created_at": "2026-01-01", "score": 0.9, "recipe_name": "news"})
+    assert result["created_at"] == "2026-01-01"
+    assert result["score"] == 0.9
+    assert result["recipe_name"] == "news"
+
+
+# ---------------------------------------------------------------------------
+# S-J: value-side high-entropy scrubbing
+# ---------------------------------------------------------------------------
+
+
+def test_value_scrub_hex64_in_error_message() -> None:
+    """A 64-hex-char substring in a string value must be replaced with [REDACTED-HEX64].
+
+    Scenario: RECOTEM_SIGNING_KEYS value leaks into an error string and ends up
+    as the value of a non-sensitive key (e.g. 'error').
+    """
+    hex64 = "a" * 64
+    result = _invoke({"error": f"RECOTEM_SIGNING_KEYS=foo:{hex64} is malformed"})
+    assert hex64 not in result["error"], (
+        f"64-hex-char substring must be scrubbed from value; got: {result['error']!r}"
+    )
+    assert "[REDACTED-HEX64]" in result["error"]
+
+
+def test_value_scrub_base64url43_in_string_value() -> None:
+    """A 43-char base64url substring in a string value must be replaced with
+    [REDACTED-B64URL43].
+    """
+    b64url43 = "A" * 43
+    result = _invoke({"info": f"api key is {b64url43} from config"})
+    assert b64url43 not in result["info"], (
+        f"43-char base64url substring must be scrubbed; got: {result['info']!r}"
+    )
+    assert "[REDACTED-B64URL43]" in result["info"]
+
+
+def test_value_scrub_multiple_hex64_in_one_string() -> None:
+    """Multiple 64-hex-char occurrences in one value are all scrubbed."""
+    hex64 = "b" * 64
+    raw = f"key1={hex64} key2={hex64}"
+    result = _invoke({"msg": raw})
+    assert result["msg"].count("[REDACTED-HEX64]") == 2, (
+        f"Both hex64 occurrences must be scrubbed; got: {result['msg']!r}"
+    )
+
+
+def test_value_scrub_already_redacted_value_untouched() -> None:
+    """A value that is already '[REDACTED]' must not be double-processed."""
+    result = _invoke({"safe_key": "[REDACTED]"})
+    assert result["safe_key"] == "[REDACTED]"
+
+
+def test_value_scrub_non_string_value_untouched() -> None:
+    """Non-string values (int, float, bool) are returned unchanged by scrubber."""
+    result = _invoke({"score": 0.42, "count": 7, "flag": True, "event": "e"})
+    assert result["score"] == 0.42
+    assert result["count"] == 7
+    assert result["flag"] is True
+
+
 def test_redact_processor_is_first_in_chain() -> None:
     """configure_logging must place _redact_sensitive_keys first in the chain.
 

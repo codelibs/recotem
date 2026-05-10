@@ -200,15 +200,20 @@ instead, so callable / file-IO gadgets such as `numpy.frompyfunc`,
 `numpy.vectorize`, `numpy.piecewise`, and `scipy.sparse.load_npz` are
 blocked even though they live "under" the same package.
 
-Other numpy submodules that previously fell under an allowed prefix and
-were deny-listed are now simply outside the allow-list (they are not
-on the prefix list at all): `numpy.testing`, `numpy.distutils`,
-`numpy.f2py`, `numpy.ctypeslib`, `numpy.lib`, `numpy.compat`,
-`numpy.random`, `numpy.linalg`, `numpy.fft`, `numpy.polynomial`,
-`scipy.sparse.linalg`, `scipy.sparse.tests`, `scipy.sparse.csgraph`,
-`scipy.sparse._compressed`, `scipy.sparse._data_matrix`. The deny-list
-is retained as a defence-in-depth trip-wire in case a future patch
-broadens the prefix allow-list.
+A deny-list removes high-risk submodules that fall under an allowed prefix
+but expose code-execution gadgets (test runners, build helpers, foreign
+function bindings, file-IO constructors). The following modules are
+explicitly deny-listed as a defence-in-depth trip-wire independent of
+the prefix allow-list:
+
+- `numpy.testing`, `numpy.distutils`, `numpy.f2py`, `numpy.ctypeslib`,
+  `numpy.lib`, `numpy.compat`
+- `scipy.sparse.linalg`, `scipy.sparse.tests`, `scipy.sparse.csgraph`
+
+Submodules not on any prefix (e.g. `numpy.random`, `numpy.linalg`,
+`numpy.fft`, `numpy.polynomial`) are blocked implicitly — they are neither
+on the FQCN list nor the prefix allow-list, so they never reach the
+deny-list check.
 
 HMAC verification remains the primary defence; the prefix allow-list is
 the secondary layer scoped to the scientific stack only.

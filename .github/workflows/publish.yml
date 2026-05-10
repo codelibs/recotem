@@ -42,7 +42,8 @@ jobs:
       name: pypi
       url: https://pypi.org/p/recotem
     permissions:
-      id-token: write   # Required for OIDC trusted publishing
+      id-token: write      # Required for OIDC trusted publishing
+      attestations: write  # Required for Sigstore attestations (pypa/gh-action-pypi-publish v1.10+)
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -52,3 +53,4 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          generate-attestations: true

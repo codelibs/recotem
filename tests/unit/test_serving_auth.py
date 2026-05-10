@@ -530,6 +530,45 @@ def test_oversized_header_invokes_scrypt_for_constant_time() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# S-H: missing-header branch — scrypt warm-up for constant-time equalisation
+# ---------------------------------------------------------------------------
+
+
+def test_missing_header_invokes_scrypt_for_constant_time() -> None:
+    """When the ``X-API-Key`` header is absent, ``_hash_api_key`` (scrypt) must
+    be invoked exactly once on a fixed-length dummy value so that the
+    missing-header response time is indistinguishable from the normal hashing
+    path.
+
+    Without this dummy call, an attacker can distinguish the ~0 ms
+    missing-header branch from the ~0.5 ms KDF branch via response latency —
+    leaking whether a header was sent at all.  This narrows the timing oracle
+    from "any request" to "requests with a header present", which is a
+    meaningful information leak.
+    """
+    from unittest.mock import patch
+
+    import recotem.serving.auth as auth_module
+    from recotem.serving.auth import verify_api_key
+
+    entry = _make_entry("k1", "full_length_key_32_bytes_exactly!")
+    # Missing-header request: no "x-api-key" key in headers dict.
+    request = _make_request(api_key=None)
+
+    with patch.object(
+        auth_module, "_hash_api_key", wraps=auth_module._hash_api_key
+    ) as hash_spy:
+        with pytest.raises(HTTPException) as exc_info:
+            verify_api_key(request, [entry])
+
+    assert exc_info.value.status_code == 401
+    assert hash_spy.call_count == 1, (
+        f"Expected exactly 1 _hash_api_key call (constant-time equalisation) "
+        f"on the missing-header path, got {hash_spy.call_count}."
+    )
+
+
 def test_verify_api_key_uses_compare_digest_at_runtime() -> None:
     """``hmac.compare_digest`` must be invoked during a normal verify call.
 

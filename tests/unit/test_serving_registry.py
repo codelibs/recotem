@@ -308,3 +308,113 @@ def test_update_loaded_marker_returns_false_for_missing() -> None:
     reg = ModelRegistry()
     result = reg.update_loaded_marker("does_not_exist", ("mtime", "sha256"))
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# I-D: models_dict() — hmac/key not in header schema, strip removed
+# ---------------------------------------------------------------------------
+
+
+def test_models_dict_returns_all_header_fields() -> None:
+    """models_dict() must include all header fields without dropping any.
+
+    The artifact header JSON never contains 'hmac' or 'key' fields — those
+    live in separate binary regions.  After the I-D fix the misleading filter
+    is removed and all header fields pass through.
+    """
+    header = {
+        "recipe_name": "test_recipe",
+        "recipe_hash": "abc123",
+        "best_class": "TopPopRecommender",
+        "best_params": {},
+        "best_score": 0.75,
+        "metric": "ndcg",
+        "cutoff": 10,
+        "tuning": {},
+        "data_stats": {"n_users": 100, "n_items": 50, "n_interactions": 500},
+        "recotem_version": "2.0.0",
+        "irspack_version": "0.3.0",
+        "trained_at": "2026-01-01T00:00:00Z",
+    }
+    entry = ModelEntry(
+        name="test_recipe",
+        recommender=MagicMock(),
+        header=header,
+        kid="active",
+    )
+    result = entry.models_dict()
+
+    # All header keys must be present.
+    for key in header:
+        assert key in result, f"models_dict() dropped header field {key!r}"
+
+    # Mandatory additions must also be present.
+    assert result["kid"] == "active"
+    assert result["name"] == "test_recipe"
+
+
+def test_models_dict_does_not_strip_hmac_key_if_present() -> None:
+    """If a header somehow contains 'hmac' or 'key' (defensive), they are retained.
+
+    The artifact format never puts these in header_json, but a future extension
+    or test fixture might add them.  The old filter would silently drop them;
+    after the I-D fix they pass through unchanged so callers see the full dict.
+    """
+    header_with_extras = {
+        "recipe_name": "defensive_test",
+        "best_score": 0.5,
+        # These would never appear from the real artifact writer, but confirm
+        # no silent data loss occurs if they did.
+        "hmac": "should_not_be_dropped",
+        "key": "also_not_dropped",
+    }
+    entry = ModelEntry(
+        name="defensive_test",
+        recommender=MagicMock(),
+        header=header_with_extras,
+        kid="active",
+    )
+    result = entry.models_dict()
+
+    # Nothing should be silently dropped.
+    assert result.get("hmac") == "should_not_be_dropped", (
+        "models_dict() must not strip 'hmac' from header"
+    )
+    assert result.get("key") == "also_not_dropped", (
+        "models_dict() must not strip 'key' from header"
+    )
+
+
+def test_models_dict_normal_header_has_no_hmac_or_key() -> None:
+    """A normally-constructed ModelEntry header does not contain 'hmac' or 'key'.
+
+    This documents the invariant: the artifact format stores HMAC and kid in
+    binary fields, never in header_json.  Confirms the strip was genuinely dead
+    code, not a security guard against real header content.
+    """
+    # Standard header as produced by artifact/io.py.
+    standard_header = {
+        "recipe_name": "normal",
+        "best_class": "TopPopRecommender",
+        "best_score": 0.9,
+        "trained_at": "2026-01-01T00:00:00Z",
+    }
+    entry = ModelEntry(
+        name="normal",
+        recommender=MagicMock(),
+        header=standard_header,
+        kid="active",
+    )
+    result = entry.models_dict()
+
+    assert "hmac" not in standard_header, (
+        "A real artifact header must never contain an 'hmac' field"
+    )
+    assert "key" not in standard_header, (
+        "A real artifact header must never contain a 'key' field"
+    )
+    # The result is the header plus kid/name — nothing more, nothing less.
+    expected_keys = set(standard_header.keys()) | {"kid", "name"}
+    assert set(result.keys()) == expected_keys, (
+        f"models_dict() added unexpected keys: {set(result.keys()) - expected_keys}"
+    )

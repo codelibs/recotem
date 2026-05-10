@@ -92,7 +92,7 @@ WORKDIR /workspace
 # spurious failures. Operators can override with --no-healthcheck or a custom
 # HEALTHCHECK in their compose service / k8s liveness probe.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).status == 200 else 1)"
+    CMD ["python", "-c", "import os,sys,urllib.request; port=os.environ.get('RECOTEM_PORT','8080'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/health',timeout=3).status==200 else 1)"]
 
 ENTRYPOINT ["recotem"]
 CMD ["--help"]

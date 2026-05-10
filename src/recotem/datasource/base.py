@@ -61,6 +61,21 @@ class DataSource(Protocol):
     extras_required:
         List of pip extras to suggest when optional dependencies are missing
         (e.g. ``["bigquery"]``).
+    no_expand_fields:
+        A ``frozenset[str]`` of field names inside the source config whose
+        string values must **never** receive ``${RECOTEM_RECIPE_*}``
+        environment-variable expansion.  Plugin authors should list any fields
+        that carry raw SQL, parameterised queries, or other content where
+        ``${}`` should be treated as literals (e.g. ``{"sql",
+        "query_parameters"}``).
+
+        The built-in ``query`` and ``query_parameters`` keys are already
+        protected globally via ``_NO_EXPAND_KEYS`` in ``loader.py``, but
+        declaring them here provides defence-in-depth and documents the
+        contract for future maintainers who might remove the global set.
+
+        Default: ``frozenset()`` — no additional protected fields beyond the
+        global ``_NO_EXPAND_KEYS``.
 
     Instance methods
     ----------------
@@ -81,6 +96,7 @@ class DataSource(Protocol):
     type_name: ClassVar[str]
     Config: ClassVar[type[BaseModel]]
     extras_required: ClassVar[list[str]]
+    no_expand_fields: ClassVar[frozenset[str]]
 
     def fetch(self, ctx: FetchContext) -> pd.DataFrame: ...
 

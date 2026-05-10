@@ -79,7 +79,7 @@ uv sync --all-extras
 uv run recotem keygen --type signing
 uv run recotem keygen --type api
 
-export RECOTEM_SIGNING_KEYS="active:<hex>"
+export RECOTEM_SIGNING_KEYS="dev:<hex64>"
 export RECOTEM_API_KEYS="key1:sha256:<hex64>"
 
 # Train from a recipe
@@ -122,7 +122,7 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
   `irspack_version`, `trained_at`. Inspectable without deserialisation via
   `recotem inspect`.
 - Multi-kid `KeyRing` (env: `RECOTEM_SIGNING_KEYS=kid1:hex,kid2:hex`) enables
-  zero-downtime key rotation. Operations doc has the four-step procedure.
+  zero-downtime key rotation. Operations doc has the four-step procedure (Step 4 includes verification).
 - Payload uses Python's native binary serialisation because irspack's
   `IDMappedRecommender` carries scipy sparse matrices and numpy arrays. Defence
   in depth: HMAC verify before any byte is interpreted, plus a hand-enumerated
@@ -192,7 +192,7 @@ uv run ruff format --check src tests
 | `RECOTEM_HTTP_ALLOW_PRIVATE` | (empty) | Truthy (`1`/`true`/`yes`/`on`) opts the HTTP fetcher into accepting private/loopback/link-local destinations. Default refuses RFC1918 / `127.0.0.0/8` / `169.254.0.0/16` to block SSRF on cloud-metadata services. |
 | `RECOTEM_ALLOWED_HOSTS` | 127.0.0.1,localhost | TrustedHostMiddleware list. Whitespace-only comma input falls back to default. |
 | `RECOTEM_ALLOWED_ORIGINS` | (empty) | CORS allow-list. Empty = deny. |
-| `RECOTEM_ENV` | (empty) | Gates `--insecure-no-auth` and `--dev-allow-unsigned`. |
+| `RECOTEM_ENV` | (empty) | `--insecure-no-auth` permitted when set to `development`, `dev`, or `test`; `--dev-allow-unsigned` permitted only when set to `development`. See `docs/security.md`. |
 | `RECOTEM_DRAIN_SECONDS` | 30 | SIGTERM grace window. |
 | `RECOTEM_LOG_FORMAT` | auto | `auto` / `json` / `console`. |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | 512 MiB | Per-payload cap (post-HMAC-verify) for serve-side deserialization. Clamped [1 MiB, 16 GiB]. Smaller than `RECOTEM_MAX_ARTIFACT_BYTES` to bound deserialization memory expansion. |

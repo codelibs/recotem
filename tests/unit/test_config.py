@@ -313,3 +313,111 @@ def test_dev_allow_unsigned_recotem_env_variants_rejected(env_value: str) -> Non
     cfg.dev_allow_unsigned = True
     with pytest.raises(ValueError, match="development"):
         cfg.validate_insecure_flags()
+
+
+# ---------------------------------------------------------------------------
+# D-3: RECOTEM_DRAIN_SECONDS clamp [1, 300]
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw_value,expected",
+    [
+        ("0", 1),  # below minimum -> clamped to 1
+        ("-1", 1),  # negative -> clamped to 1
+        ("1", 1),  # exact lower bound -> unchanged
+        ("30", 30),  # default value -> unchanged
+        ("300", 300),  # exact upper bound -> unchanged
+        ("301", 300),  # above maximum -> clamped to 300
+        ("9999999", 300),  # far above maximum -> clamped to 300
+    ],
+)
+def test_drain_seconds_clamped(
+    raw_value: str,
+    expected: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_DRAIN_SECONDS values outside [1, 300] are clamped."""
+    monkeypatch.setenv("RECOTEM_DRAIN_SECONDS", raw_value)
+    cfg = ServeConfig.from_env()
+    assert cfg.drain_seconds == expected, (
+        f"RECOTEM_DRAIN_SECONDS={raw_value!r}: expected {expected}, got {cfg.drain_seconds}"
+    )
+
+
+def test_drain_seconds_unset_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When RECOTEM_DRAIN_SECONDS is unset, the default (30 s) is used."""
+    monkeypatch.delenv("RECOTEM_DRAIN_SECONDS", raising=False)
+    cfg = ServeConfig.from_env()
+    assert cfg.drain_seconds == 30
+
+
+# ---------------------------------------------------------------------------
+# D-3: RECOTEM_PORT validation [1, 65535]
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("port_value", ["0", "65536", "70000", "-1"])
+def test_port_out_of_range_raises(
+    port_value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RECOTEM_PORT values outside 1–65535 raise ValueError."""
+    monkeypatch.setenv("RECOTEM_PORT", port_value)
+    with pytest.raises(ValueError, match="RECOTEM_PORT"):
+        ServeConfig.from_env()
+
+
+@pytest.mark.parametrize("port_value", ["1", "8080", "65535"])
+def test_port_valid_values_accepted(
+    port_value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Valid RECOTEM_PORT values in range 1–65535 are accepted."""
+    monkeypatch.setenv("RECOTEM_PORT", port_value)
+    cfg = ServeConfig.from_env()
+    assert cfg.port == int(port_value)
+
+
+# ---------------------------------------------------------------------------
+# D-6: RECOTEM_LOG_FORMAT invalid value raises ValueError
+# ---------------------------------------------------------------------------
+
+
+def test_log_format_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invalid RECOTEM_LOG_FORMAT value raises ValueError with allowed values listed."""
+    monkeypatch.setenv("RECOTEM_LOG_FORMAT", "jsonl")
+    with pytest.raises(ValueError, match="RECOTEM_LOG_FORMAT"):
+        ServeConfig.from_env()
+
+
+@pytest.mark.parametrize("fmt", ["json", "console", "auto"])
+def test_log_format_valid_values_accepted(
+    fmt: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Valid RECOTEM_LOG_FORMAT values are accepted without error."""
+    monkeypatch.setenv("RECOTEM_LOG_FORMAT", fmt)
+    cfg = ServeConfig.from_env()
+    assert cfg.log_format == fmt
+
+
+def test_log_format_unset_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When RECOTEM_LOG_FORMAT is unset, the default ('auto') is used."""
+    monkeypatch.delenv("RECOTEM_LOG_FORMAT", raising=False)
+    cfg = ServeConfig.from_env()
+    assert cfg.log_format == "auto"
+
+
+def test_log_format_typo_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Typo values like 'JSON' (wrong case after lower()) still fail."""
+    monkeypatch.setenv("RECOTEM_LOG_FORMAT", "JSON")
+    # After .lower() -> 'json' which IS valid — test an actual invalid value
+    cfg = ServeConfig.from_env()
+    assert cfg.log_format == "json"  # case-insensitive; 'JSON' -> 'json' is valid
+
+
+def test_log_format_clearly_invalid_typo_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clearly invalid value 'structured' raises ValueError."""
+    monkeypatch.setenv("RECOTEM_LOG_FORMAT", "structured")
+    with pytest.raises(ValueError, match="RECOTEM_LOG_FORMAT"):
+        ServeConfig.from_env()

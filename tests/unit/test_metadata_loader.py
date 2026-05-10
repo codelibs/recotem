@@ -565,3 +565,93 @@ def test_literal_nan_item_id_preserved(tmp_path: Path) -> None:
     # The null row (empty cell) must be dropped
     assert len(df) == 2, f"Expected 2 rows (nan + i1), got {len(df)}: {list(df.index)}"
     assert df.loc["nan", "title"] == "NaN Product"
+
+
+# ---------------------------------------------------------------------------
+# I-A: sha256 path byte cap — metadata loader
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_sha256_path_over_byte_cap_raises(tmp_path: Path, monkeypatch) -> None:
+    """Metadata CSV with sha256 set that exceeds the byte cap must raise ValueError.
+
+    Previously fh.read() (no limit) was used in the sha256 verification branch;
+    now fh.read(cap + 1) is used and the size is checked before sha256 verify.
+    The stat-based check_size_cap() is best-effort and may be silent on some
+    filesystems, so this second line of defence is essential.
+    """
+    import hashlib
+
+    from recotem.metadata import loader as loader_module
+
+    csv_file = _write_csv(
+        tmp_path,
+        "item_id,title\n" + f"i{1},Product {1}\n" * 200,
+        "big_meta.csv",
+    )
+    content = csv_file.read_text()
+    real_sha256 = hashlib.sha256(content.encode()).hexdigest()
+
+    # Patch cap in the loader's own namespace (it imports get_max_download_bytes
+    # directly, so patching recotem.config is not sufficient).
+    monkeypatch.setattr(loader_module, "get_max_download_bytes", lambda: 512)
+
+    with pytest.raises(ValueError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
+        load_item_metadata(
+            _Config("csv", str(csv_file), sha256=real_sha256),
+            fields=["title"],
+        )
+
+
+def test_metadata_sha256_path_within_byte_cap_passes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Metadata CSV with sha256 set that is within the cap must be accepted."""
+    import hashlib
+
+    from recotem.metadata import loader as loader_module
+
+    csv_file = _write_csv(tmp_path, "item_id,title\ni1,Alpha\ni2,Beta\n")
+    content = csv_file.read_text()
+    real_sha256 = hashlib.sha256(content.encode()).hexdigest()
+
+    # 64 KiB cap — well above the tiny file.
+    monkeypatch.setattr(loader_module, "get_max_download_bytes", lambda: 65536)
+
+    df = load_item_metadata(
+        _Config("csv", str(csv_file), sha256=real_sha256),
+        fields=["title"],
+    )
+    assert "i1" in df.index and "i2" in df.index
+
+
+def test_metadata_sha256_cap_fires_when_stat_silent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Metadata sha256-path cap fires even when check_size_cap (stat) is silent.
+
+    Simulates a filesystem where check_size_cap is a no-op, confirming that
+    the fh.read(cap+1) enforcement inside the sha256 branch is the independent
+    safety net.
+    """
+    import hashlib
+
+    from recotem.metadata import loader as loader_module
+
+    csv_file = _write_csv(
+        tmp_path,
+        "item_id,title\n" + "i1,Alpha\n" * 100,
+        "nostat_meta.csv",
+    )
+    content = csv_file.read_text()
+    real_sha256 = hashlib.sha256(content.encode()).hexdigest()
+
+    # Make stat-based check silent and set cap below the file size.
+    monkeypatch.setattr(loader_module, "check_size_cap", lambda *_a, **_kw: None)
+    monkeypatch.setattr(loader_module, "get_max_download_bytes", lambda: 64)
+
+    with pytest.raises(ValueError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
+        load_item_metadata(
+            _Config("csv", str(csv_file), sha256=real_sha256),
+            fields=["title"],
+        )

@@ -77,11 +77,12 @@ class EchoSource:
         ]
         return pd.DataFrame(rows, columns=["user_id", "item_id", "timestamp"])
 
-    def probe(self) -> dict:
+    def probe(self) -> None:
         """Optional. Called by recotem validate to test connectivity.
 
         Should be cheap — never load full data.
         Raise DataSourceError on failure.
+        Return value is ignored by recotem (Protocol declares -> None).
         """
         cfg = self._config
         max_possible = cfg.n_users * cfg.n_items
@@ -90,7 +91,8 @@ class EchoSource:
                 f"EchoSource: n_rows ({cfg.n_rows}) exceeds n_users * n_items "
                 f"({max_possible})."
             )
-        return {"status": "ok", "rows_to_emit": cfg.n_rows, "items": cfg.n_items}
+        # discarded by recotem validate — kept here for illustration only
+        return {"status": "ok", "rows_to_emit": cfg.n_rows, "items": cfg.n_items}  # type: ignore[return-value]
 ```
 
 ### Rules

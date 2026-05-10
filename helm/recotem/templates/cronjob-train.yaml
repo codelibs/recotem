@@ -53,14 +53,26 @@ spec:
               imagePullPolicy: {{ .Values.image.pullPolicy }}
               {{- if .Values.train.recipeFiles }}
               # Train specific recipe files listed in .Values.train.recipeFiles.
+              # recipeFiles must be a YAML list (e.g. ["a.yaml","b.yaml"]).
+              # String values (legacy comma-separated) are also accepted via
+              # IFS splitting but are deprecated — migrate to the list form.
               command:
                 - /bin/sh
                 - -c
                 - |
                   set -e
-                  for recipe in {{ .Values.train.recipeFiles }}; do
+                  {{- if kindIs "slice" .Values.train.recipeFiles }}
+                  {{- range $r := .Values.train.recipeFiles }}
+                  recotem train {{ $.Values.recipes.mountPath }}/{{ $r }}{{ if $.Values.train.failOnBusy }} --fail-on-busy{{ end }}
+                  {{- end }}
+                  {{- else }}
+                  IFS=, read -ra _recipes <<< {{ .Values.train.recipeFiles | quote }}
+                  for recipe in "${_recipes[@]}"; do
+                    recipe="${recipe// /}"
+                    [ -n "$recipe" ] || continue
                     recotem train {{ .Values.recipes.mountPath }}/${recipe}{{ if .Values.train.failOnBusy }} --fail-on-busy{{ end }}
                   done
+                  {{- end }}
               {{- else }}
               # Train all *.yaml recipes in the recipes directory.
               # Fail explicitly when the directory is empty so a misconfigured

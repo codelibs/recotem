@@ -339,3 +339,262 @@ def test_payload_exceeds_max_payload_bytes_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ArtifactError, match="payload size"):
         parse_header_from_bytes(raw, max_payload_bytes=tiny_cap)
+
+
+# ---------------------------------------------------------------------------
+# S-D: write-time RECOTEM_ARTIFACT_ROOT containment (TOCTOU guard)
+# ---------------------------------------------------------------------------
+
+
+def test_write_artifact_toctou_symlink_swap_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_write_atomic must re-verify containment just before os.replace.
+
+    Setup:
+    1. Create an artifact root and a legitimate output directory inside it.
+    2. Set RECOTEM_ARTIFACT_ROOT.
+    3. Monkeypatch os.fsync to swap the output directory to an outside-root
+       symlink *after* the file has been written to the temp path but
+       *before* os.replace — simulating a TOCTOU attack.
+    4. Assert that _write_artifact (which calls _write_atomic) raises
+       ArtifactError rather than completing the rename.
+    """
+    import os as _os
+
+    from recotem.artifact.io import _write_atomic
+
+    artifact_root = tmp_path / "root"
+    artifact_root.mkdir()
+    inside_dir = artifact_root / "models"
+    inside_dir.mkdir()
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+
+    monkeypatch.setenv("RECOTEM_ARTIFACT_ROOT", str(artifact_root))
+
+    # Where we intend to write
+    dest = str(inside_dir / "model.recotem")
+
+    real_fsync = _os.fsync
+    original_inside_dir_resolved = inside_dir.resolve()
+
+    def _evil_fsync(fd: int) -> None:
+        """After the temp file is written, replace inside_dir with a symlink out."""
+        real_fsync(fd)
+        # Remove the real directory and replace with a symlink pointing outside root.
+        import shutil
+
+        shutil.rmtree(str(inside_dir), ignore_errors=True)
+        inside_dir.symlink_to(outside_dir)
+
+    monkeypatch.setattr(_os, "fsync", _evil_fsync)
+
+    with pytest.raises((ArtifactError, OSError)):
+        # _write_atomic must either detect the escape and raise ArtifactError,
+        # or raise OSError because the temp file's parent (inside_dir) no longer
+        # exists as a real directory after the symlink swap.
+        _write_atomic(
+            None,  # type: ignore[arg-type] — not used for local FS path
+            dest,
+            b"dummy artifact bytes",
+            is_local=True,
+        )
+
+
+def test_assert_output_root_containment_no_op_without_env(tmp_path: Path) -> None:
+    """_assert_output_root_containment is a no-op when RECOTEM_ARTIFACT_ROOT is unset."""
+    from recotem.artifact.io import _assert_output_root_containment
+
+    # Must not raise even for a path that would be outside any root.
+    _assert_output_root_containment(str(tmp_path / "anywhere" / "model.recotem"))
+
+
+def test_assert_output_root_containment_inside_root_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_assert_output_root_containment accepts a dest inside the configured root."""
+    from recotem.artifact.io import _assert_output_root_containment
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "models").mkdir()
+    monkeypatch.setenv("RECOTEM_ARTIFACT_ROOT", str(root))
+
+    # Should not raise
+    _assert_output_root_containment(str(root / "models" / "model.recotem"))
+
+
+def test_assert_output_root_containment_outside_root_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_assert_output_root_containment raises ArtifactError for path outside root."""
+    from recotem.artifact.io import _assert_output_root_containment
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setenv("RECOTEM_ARTIFACT_ROOT", str(root))
+
+    with pytest.raises(ArtifactError, match="outside"):
+        _assert_output_root_containment(str(outside / "model.recotem"))
+
+
+# ---------------------------------------------------------------------------
+# C-2: _write_atomic cleans up .tmp on BaseException (unlink guard)
+# ---------------------------------------------------------------------------
+
+
+def test_atomic_write_unlinks_tmp_on_replace_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When os.replace raises OSError, the .tmp sibling must be removed.
+
+    If _write_atomic leaves the .tmp file behind on failure, a subsequent
+    successful write may pick up stale data if the temp file name collides.
+    The except BaseException: os.unlink(tmp_path) guard must fire even for
+    regular OSError from os.replace.
+    """
+    import os as _os
+
+    from recotem.artifact.io import _write_atomic
+
+    dest = str(tmp_path / "target.recotem")
+    data = b"dummy artifact bytes"
+
+    replace_called = []
+
+    real_replace = _os.replace
+
+    def _failing_replace(src: str, dst: str) -> None:
+        replace_called.append((src, dst))
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(_os, "replace", _failing_replace)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        _write_atomic(None, dest, data, is_local=True)  # type: ignore[arg-type]
+
+    # No .tmp files should remain in tmp_path
+    leftover_tmp = list(tmp_path.glob("*.tmp"))
+    assert leftover_tmp == [], (
+        f"_write_atomic must unlink the .tmp file on OSError from os.replace; "
+        f"leftover: {leftover_tmp}"
+    )
+
+
+def test_atomic_write_unlinks_tmp_on_keyboard_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KeyboardInterrupt during os.replace must still trigger .tmp cleanup.
+
+    The guard uses ``except BaseException`` so signals delivered as
+    KeyboardInterrupt are also caught and the temp file is removed.
+    """
+    import os as _os
+
+    from recotem.artifact.io import _write_atomic
+
+    dest = str(tmp_path / "target_ki.recotem")
+    data = b"some bytes"
+
+    def _ki_replace(src: str, dst: str) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_os, "replace", _ki_replace)
+
+    with pytest.raises(KeyboardInterrupt):
+        _write_atomic(None, dest, data, is_local=True)  # type: ignore[arg-type]
+
+    leftover_tmp = list(tmp_path.glob("*.tmp"))
+    assert leftover_tmp == [], (
+        f"_write_atomic must unlink .tmp on KeyboardInterrupt; leftover: {leftover_tmp}"
+    )
+
+
+def test_atomic_write_unlinks_tmp_on_systemexit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SystemExit must also trigger .tmp cleanup before propagation."""
+    import os as _os
+
+    from recotem.artifact.io import _write_atomic
+
+    dest = str(tmp_path / "target_se.recotem")
+    data = b"some bytes"
+
+    def _se_replace(src: str, dst: str) -> None:
+        raise SystemExit(0)
+
+    monkeypatch.setattr(_os, "replace", _se_replace)
+
+    with pytest.raises(SystemExit):
+        _write_atomic(None, dest, data, is_local=True)  # type: ignore[arg-type]
+
+    leftover_tmp = list(tmp_path.glob("*.tmp"))
+    assert leftover_tmp == [], (
+        f"_write_atomic must unlink .tmp on SystemExit; leftover: {leftover_tmp}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# T-6: append_sha pointer-file write order (sha-suffixed before pointer)
+# ---------------------------------------------------------------------------
+
+
+def test_append_sha_sha_suffixed_written_before_pointer(tmp_path: Path) -> None:
+    """In append_sha mode, the sha-suffixed artifact must be durably written
+    before the pointer file is updated.
+
+    If the write of the sha-suffixed file succeeds but the pointer update
+    fails (simulated by raising on the second _write_atomic call), the
+    pointer file must not have been updated.
+
+    Strategy: patch _write_atomic to record call order and raise on the
+    second call (the pointer write).  Assert that exactly one call was made
+    (the sha-suffixed artifact) and that the pointer file was not modified.
+    """
+    from unittest.mock import patch
+
+    from recotem.artifact.io import write_artifact
+
+    kr = _make_keyring()
+    output_path = str(tmp_path / "model.recotem")
+    pointer_path = tmp_path / "model.recotem"
+
+    call_log: list[str] = []
+    real_write_atomic = __import__(
+        "recotem.artifact.io", fromlist=["_write_atomic"]
+    )._write_atomic
+
+    def _spy_write_atomic(fs, dest, data, is_local):
+        call_log.append(dest)
+        if len(call_log) == 2:
+            # Second call is the pointer update — simulate failure
+            raise OSError("simulated pointer write failure")
+        real_write_atomic(fs, dest, data, is_local)
+
+    with patch("recotem.artifact.io._write_atomic", side_effect=_spy_write_atomic):
+        with pytest.raises(OSError, match="simulated pointer write failure"):
+            write_artifact(
+                payload_obj={"x": 1},
+                header_dict={"recipe_name": "order_test"},
+                key_ring=kr,
+                fs_path=output_path,
+                versioning="append_sha",
+            )
+
+    # First call must be the sha-suffixed artifact, not the pointer
+    assert len(call_log) >= 1
+    first_written = call_log[0]
+    assert first_written != output_path, (
+        "First write must be the sha-suffixed artifact, not the pointer file"
+    )
+    assert ".recotem" in first_written
+    # The pointer file must not have been written (call aborted before second write)
+    assert not pointer_path.exists(), (
+        "Pointer file must not exist when sha-suffixed write succeeded but "
+        "pointer write failed"
+    )

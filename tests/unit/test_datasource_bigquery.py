@@ -368,6 +368,96 @@ def test_query_parameters_bound_via_bigquery_param_placeholders() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# T-4: BigQuery query timeout/job timeout wrapped as DataSourceError
+# ---------------------------------------------------------------------------
+
+
+def test_bigquery_concurrent_futures_timeout_wraps_DataSourceError() -> None:
+    """concurrent.futures.TimeoutError from to_dataframe must be wrapped as DataSourceError.
+
+    This covers the case where the BigQuery job hangs past any client-side
+    deadline and the futures machinery raises TimeoutError.
+    """
+    import concurrent.futures
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    mock_query_job.to_dataframe.side_effect = concurrent.futures.TimeoutError(
+        "query job timed out"
+    )
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError):
+            source.fetch(_ctx())
+
+
+def test_bigquery_deadline_exceeded_wraps_DataSourceError() -> None:
+    """google.api_core.exceptions.DeadlineExceeded from to_dataframe must be
+    wrapped as DataSourceError.
+
+    DeadlineExceeded is a subclass of GoogleAPICallError; the outer
+    except GoogleAPICallError handler in fetch() must catch it.
+    """
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    # Make DeadlineExceeded a subclass of our mock GoogleAPICallError class.
+    deadline_cls = type("DeadlineExceeded", (mock_api_error_cls,), {})
+    mock_query_job.to_dataframe.side_effect = deadline_cls("deadline exceeded")
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError):
+            source.fetch(_ctx())
+
+
 def test_storage_oom_propagates() -> None:
     """A MemoryError from the Storage Read API must propagate, not trigger fallback.
 

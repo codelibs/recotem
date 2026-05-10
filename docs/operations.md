@@ -36,7 +36,7 @@ This multi-kid pattern enables zero-downtime rotation:
 
    Run `recotem train` for each recipe. Each new artifact is signed with `prod-2026-q3` (the first entry). The server hot-swaps each model as the new artifact appears. Old artifacts signed with `prod-2026-q2` continue to serve until each recipe is retrained.
 
-4. **Remove the old kid.**
+4. **Remove the old kid and verify.**
 
    Once all recipes have been retrained and hot-swapped, remove the old entry:
 
@@ -46,7 +46,7 @@ This multi-kid pattern enables zero-downtime rotation:
 
    Restart `recotem serve`. Any artifact still signed with the old kid will fail to load and appear as `loaded: false` in `/health`. Retrain those recipes.
 
-5. **Verify.**
+   Confirm all recipes loaded successfully:
 
    ```bash
    curl http://localhost:8080/health | jq '.recipes | to_entries[] | select(.value.loaded == false)'

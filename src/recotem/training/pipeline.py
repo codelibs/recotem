@@ -580,6 +580,7 @@ def _compute_recipe_hash(recipe: Recipe) -> str:
         recipe.model_dump(mode="json", by_alias=False),
         sort_keys=True,
         separators=(",", ":"),
+        default=str,
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
 

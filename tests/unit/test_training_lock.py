@@ -529,3 +529,67 @@ def test_acquire_propagates_unexpected_oserror(tmp_path: Path, monkeypatch) -> N
     assert exc_info.value.errno == _errno.EIO, (
         f"Expected EIO to propagate, got errno={exc_info.value.errno}"
     )
+
+
+# ---------------------------------------------------------------------------
+# T-5: SystemExit inside recipe_lock releases the flock for the next process
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_system_exit_inside_lock_releases_flock_for_next_process(
+    tmp_path: Path,
+) -> None:
+    """When a process raises SystemExit inside a recipe_lock context, the OS
+    releases the flock when the process exits.  A second process must then be
+    able to acquire the lock promptly.
+
+    Test design (multiprocessing):
+    1. Process A: acquires recipe_lock, signals ready, then raises SystemExit(0).
+    2. Main process: waits for A to finish (join), then verifies process B can
+       acquire the lock.
+    3. Process B: acquires recipe_lock with fail_on_busy=True; should succeed
+       because the OS releases flocks on process exit.
+    """
+    ctx = multiprocessing.get_context("fork")
+    output_path = tmp_path / "sysexit_lock.recotem"
+    lock_path = Path(str(output_path) + ".lock")
+
+    ready = ctx.Event()
+    result_q = ctx.Queue()
+
+    def _process_a(output_path_str: str, ready_event) -> None:
+        """Acquire lock, signal ready, then raise SystemExit."""
+        with recipe_lock(output_path_str) as acquired:
+            assert acquired is True
+            ready_event.set()
+            raise SystemExit(0)
+
+    def _process_b(output_path_str: str, q) -> None:
+        """Try to acquire the lock; put 'acquired' or 'contested'."""
+        try:
+            with recipe_lock(output_path_str, fail_on_busy=True) as acquired:
+                q.put("acquired" if acquired else "not_acquired")
+        except LockContestedError:
+            q.put("contested")
+        except Exception as exc:  # noqa: BLE001
+            q.put(f"error:{exc!r}")
+
+    # Start process A
+    pa = ctx.Process(target=_process_a, args=(str(output_path), ready))
+    pa.start()
+    ready.wait(timeout=5.0)
+    pa.join(timeout=5.0)  # Wait for A to exit (and release the flock)
+
+    assert pa.exitcode == 0, f"Process A must exit cleanly; exitcode={pa.exitcode}"
+
+    # Start process B — flock should now be available
+    pb = ctx.Process(target=_process_b, args=(str(output_path), result_q))
+    pb.start()
+    pb.join(timeout=5.0)
+
+    result = result_q.get(timeout=2.0)
+    assert result == "acquired", (
+        f"Process B must acquire the lock after process A's SystemExit released it; "
+        f"got: {result!r}"
+    )

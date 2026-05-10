@@ -200,7 +200,8 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=serve_config.allowed_origins,
-            allow_methods=["GET", "POST"],
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "OPTIONS"],
             allow_headers=["*"],
         )
 

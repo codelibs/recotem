@@ -148,6 +148,15 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 3
 
+          # preStop sleep lets kube-proxy finish propagating the endpoint
+          # removal before SIGTERM is sent, eliminating 503/RST spikes during
+          # rolling updates.  terminationGracePeriodSeconds must be at least
+          # preStopSleepSeconds + RECOTEM_DRAIN_SECONDS + buffer (5 s).
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep {{ .Values.preStopSleepSeconds | default 5 }}"]
+
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
 

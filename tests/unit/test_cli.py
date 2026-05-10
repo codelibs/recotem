@@ -258,19 +258,24 @@ def test_inspect_exit5_on_unknown_kid(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_inspect_caps_oversized_read(tmp_path: Path, monkeypatch) -> None:
-    """inspect refuses files exceeding the artifact size cap without pulling
-    them fully into memory.
+    """inspect refuses files exceeding the payload cap without pulling them
+    fully into memory.
 
-    The cap is monkeypatched down so the test can use a tiny file rather than
-    allocate gigabytes.  Guards the fix that swapped the CLI's unbounded
-    ``Path.read_bytes()`` for a bounded ``fh.read(max_bytes + 1)``.
+    The cap is driven by RECOTEM_MAX_PAYLOAD_BYTES (read via ServeConfig).
+    ServeConfig clamps the value to [1 MiB, 16 GiB], so we set the env var to
+    the minimum (1 MiB) and write a file larger than 1 MiB so the cap fires.
+    Guards the fix that swapped the CLI's unbounded ``Path.read_bytes()``
+    for a bounded ``fh.read(max_bytes + 1)``.
     """
     artifact_path = tmp_path / "huge.recotem"
-    artifact_path.write_bytes(b"A" * 1024)
+    # Write 1 MiB + 1 byte so the file exceeds the minimum allowed cap (1 MiB).
+    one_mib_plus_one = 1 * 1024 * 1024 + 1
+    artifact_path.write_bytes(b"A" * one_mib_plus_one)
 
-    monkeypatch.setattr(
-        "recotem.artifact.format.DEFAULT_MAX_PAYLOAD_BYTES", 16, raising=True
-    )
+    # Set the env var to the minimum allowed (1 MiB = 1048576).
+    # ServeConfig clamps below-minimum values up to 1 MiB, so this is the
+    # smallest cap we can reliably test.
+    monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", str(1 * 1024 * 1024))
     monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
     result = runner.invoke(app, ["inspect", str(artifact_path)])
     assert result.exit_code == 5
@@ -1380,3 +1385,75 @@ def test_schema_includes_all_registered_source_types() -> None:
             f"Expected source type {expected_type!r} to appear in schema JSON; "
             f"schema excerpt: {schema_str[:500]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# I-E: inspect honors RECOTEM_MAX_PAYLOAD_BYTES
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_honors_recotem_max_payload_bytes(tmp_path: Path, monkeypatch) -> None:
+    """inspect must exit 5 when the artifact exceeds RECOTEM_MAX_PAYLOAD_BYTES.
+
+    Previously, inspect hard-coded DEFAULT_MAX_PAYLOAD_BYTES (2 GiB).  After
+    the I-E fix it reads the cap from ServeConfig.from_env(), so setting
+    RECOTEM_MAX_PAYLOAD_BYTES=1048576 (1 MiB) must cause a 2 MiB artifact to
+    be rejected before any deserialization happens.
+    """
+    from tests.conftest import build_raw_artifact
+
+    # Build a valid artifact with a 2 MiB payload so the total artifact size
+    # exceeds 1 MiB even before the header overhead.
+    two_mib_payload = b"P" * (2 * 1024 * 1024)
+    data = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={"recipe_name": "ie_test", "best_score": 0.5},
+        payload_bytes=two_mib_payload,
+    )
+    artifact_path = tmp_path / "large.recotem"
+    artifact_path.write_bytes(data)
+
+    # Cap at 1 MiB — the 2 MiB artifact must be rejected.
+    monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", str(1 * 1024 * 1024))
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+
+    assert result.exit_code == 5, (
+        f"inspect must exit 5 when artifact exceeds RECOTEM_MAX_PAYLOAD_BYTES; "
+        f"exit_code={result.exit_code}, output={result.stdout}"
+    )
+    combined = result.stdout + (result.stderr or "")
+    assert "exceeds cap" in combined, (
+        f"Expected 'exceeds cap' in output; got: {combined!r}"
+    )
+
+
+def test_inspect_max_payload_bytes_small_artifact_passes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """inspect must succeed when the artifact is within RECOTEM_MAX_PAYLOAD_BYTES.
+
+    Complement to the rejection test: with a 4 MiB cap a minimal artifact
+    (tiny payload) must be accepted and exit 0.
+    """
+    from tests.conftest import build_raw_artifact
+
+    data = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={"recipe_name": "ie_small", "best_score": 0.9},
+    )
+    artifact_path = tmp_path / "small.recotem"
+    artifact_path.write_bytes(data)
+
+    # 4 MiB cap — this tiny artifact must sail through.
+    monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", str(4 * 1024 * 1024))
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+    assert result.exit_code == 0, (
+        f"inspect must succeed for artifact within cap; output={result.stdout}"
+    )
+    assert "HMAC: OK" in result.stdout

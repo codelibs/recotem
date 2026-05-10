@@ -205,9 +205,10 @@ class CSVSource:
         _check_size_cap(cfg.path, safe_path, "CSV")
 
         if cfg.sha256 is not None:
+            cap = _get_max_download_bytes()
             try:
                 with fsspec.open(cfg.path, "rb") as f:
-                    raw_bytes = f.read()
+                    raw_bytes = f.read(cap + 1)
             except FileNotFoundError as exc:
                 raise DataSourceError(f"CSV file not found: {safe_path}") from exc
             except PermissionError as exc:
@@ -218,6 +219,11 @@ class CSVSource:
                 raise DataSourceError(
                     f"Failed to read CSV from '{safe_path}': {exc}"
                 ) from exc
+            if len(raw_bytes) > cap:
+                raise DataSourceError(
+                    f"CSV file '{safe_path}' exceeds RECOTEM_MAX_DOWNLOAD_BYTES ({cap}) — "
+                    "increase the cap or split the file."
+                )
             _verify_sha256(raw_bytes, cfg.sha256)
             sha256_verified = True
             compression = _infer_compression(cfg.path)
@@ -374,9 +380,10 @@ class ParquetSource:
         _check_size_cap(cfg.path, safe_path, "Parquet")
 
         if cfg.sha256 is not None:
+            cap = _get_max_download_bytes()
             try:
                 with fsspec.open(cfg.path, "rb") as f:
-                    raw_bytes = f.read()
+                    raw_bytes = f.read(cap + 1)
             except FileNotFoundError as exc:
                 raise DataSourceError(f"Parquet file not found: {safe_path}") from exc
             except PermissionError as exc:
@@ -387,6 +394,11 @@ class ParquetSource:
                 raise DataSourceError(
                     f"Failed to read Parquet from '{safe_path}': {exc}"
                 ) from exc
+            if len(raw_bytes) > cap:
+                raise DataSourceError(
+                    f"Parquet file '{safe_path}' exceeds RECOTEM_MAX_DOWNLOAD_BYTES ({cap}) — "
+                    "increase the cap or split the file."
+                )
             _verify_sha256(raw_bytes, cfg.sha256)
             sha256_verified = True
             try:

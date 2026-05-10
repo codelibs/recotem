@@ -34,6 +34,10 @@ import os
 import re
 from dataclasses import dataclass, field
 
+import structlog
+
+_logger = structlog.get_logger(__name__)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -76,6 +80,7 @@ def _clamped_int_env(name: str, default: int, lo: int, hi: int) -> int:
     """Return an integer env value clamped to ``[lo, hi]``, falling back to *default*.
 
     On unset / empty / unparseable input, returns *default* unchanged.
+    Emits a structured warning log when the value is clamped.
     """
     raw = os.environ.get(name, "")
     if not raw:
@@ -84,7 +89,17 @@ def _clamped_int_env(name: str, default: int, lo: int, hi: int) -> int:
         value = int(raw)
     except ValueError:
         return default
-    return max(lo, min(hi, value))
+    clamped = max(lo, min(hi, value))
+    if clamped != value:
+        _logger.warning(
+            "env_var_clamped",
+            name=name,
+            requested=value,
+            clamped=clamped,
+            lo=lo,
+            hi=hi,
+        )
+    return clamped
 
 
 # ---------------------------------------------------------------------------
@@ -231,11 +246,16 @@ class ServeConfig:
         port_env = os.environ.get("RECOTEM_PORT", "").strip()
         if port_env:
             try:
-                cfg.port = int(port_env)
+                port_val = int(port_env)
             except ValueError as exc:
                 raise ValueError(
                     f"RECOTEM_PORT must be an integer, got {port_env!r}: {exc}"
                 ) from exc
+            if not (1 <= port_val <= 65535):
+                raise ValueError(
+                    f"RECOTEM_PORT must be in range 1–65535, got {port_val}"
+                )
+            cfg.port = port_val
 
         # RECOTEM_WATCH_INTERVAL (clamp 1–30)
         interval_env = os.environ.get("RECOTEM_WATCH_INTERVAL", "").strip()
@@ -250,8 +270,14 @@ class ServeConfig:
             cfg.watch_interval = max(1.0, min(30.0, raw_interval))
 
         # RECOTEM_LOG_FORMAT
+        _VALID_LOG_FORMATS = frozenset({"auto", "json", "console"})
         fmt_env = os.environ.get("RECOTEM_LOG_FORMAT", "").strip().lower()
-        if fmt_env in ("json", "console", "auto"):
+        if fmt_env:
+            if fmt_env not in _VALID_LOG_FORMATS:
+                raise ValueError(
+                    f"RECOTEM_LOG_FORMAT must be one of {sorted(_VALID_LOG_FORMATS)}, "
+                    f"got {fmt_env!r}"
+                )
             cfg.log_format = fmt_env
 
         # RECOTEM_SIGNING_KEYS (raw; KeyRing instantiation happens elsewhere)
@@ -283,16 +309,10 @@ class ServeConfig:
         # RECOTEM_ENV
         cfg.env = os.environ.get("RECOTEM_ENV", "").strip()
 
-        # RECOTEM_DRAIN_SECONDS
-        drain_env = os.environ.get("RECOTEM_DRAIN_SECONDS", "").strip()
-        if drain_env:
-            try:
-                cfg.drain_seconds = int(drain_env)
-            except ValueError as exc:
-                raise ValueError(
-                    f"RECOTEM_DRAIN_SECONDS must be an integer, "
-                    f"got {drain_env!r}: {exc}"
-                ) from exc
+        # RECOTEM_DRAIN_SECONDS (clamped 1–300; warns if clamped)
+        cfg.drain_seconds = _clamped_int_env(
+            "RECOTEM_DRAIN_SECONDS", _DEFAULT_DRAIN_SECONDS, lo=1, hi=300
+        )
 
         cfg.metadata_field_deny = _split_csv_env("RECOTEM_METADATA_FIELD_DENY", [])
 

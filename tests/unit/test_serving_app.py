@@ -938,6 +938,95 @@ def test_corrupt_header_json_returns_failed_entry_not_crash(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# I-C: CORS — allow_credentials=False, OPTIONS method included, preflight works
+# ---------------------------------------------------------------------------
+
+
+def test_CORS_preflight_returns_success_for_configured_origin(tmp_path: Path) -> None:
+    """An OPTIONS preflight request from a configured origin must receive a
+    2xx response (200 or 204) so browsers proceed with the actual request.
+
+    FastAPI's CORSMiddleware returns 200 for OPTIONS when the origin matches.
+    """
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.allowed_origins = ["https://app.example.com"]
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.options(
+        "/predict/some_model",
+        headers={
+            "origin": "https://app.example.com",
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "x-api-key",
+        },
+    )
+    assert response.status_code in (200, 204), (
+        f"CORS preflight must return 2xx for a configured origin; "
+        f"got {response.status_code}"
+    )
+    assert (
+        response.headers.get("access-control-allow-origin") == "https://app.example.com"
+    )
+
+
+def test_CORS_allow_credentials_header_not_sent_for_configured_origin(
+    tmp_path: Path,
+) -> None:
+    """With ``allow_credentials=False``, the ``Access-Control-Allow-Credentials``
+    header must NOT be present in preflight responses.
+
+    Browsers only send the ``Access-Control-Allow-Credentials: true`` header
+    when ``allow_credentials=True``.  With ``False`` the header is omitted
+    entirely — which is the correct posture for an API key auth scheme
+    (credentials in the ``X-API-Key`` header, not cookies / HTTP auth).
+    """
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.allowed_origins = ["https://app.example.com"]
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.options(
+        "/health",
+        headers={
+            "origin": "https://app.example.com",
+            "access-control-request-method": "GET",
+        },
+    )
+    # access-control-allow-credentials must be absent or set to "false".
+    acao_cred = response.headers.get("access-control-allow-credentials")
+    assert acao_cred is None or acao_cred.lower() == "false", (
+        f"allow_credentials=False must not produce "
+        f"'Access-Control-Allow-Credentials: true'; got {acao_cred!r}"
+    )
+
+
+def test_CORS_allow_methods_includes_options(tmp_path: Path) -> None:
+    """The CORSMiddleware must be configured with OPTIONS in allow_methods
+    so that preflight requests are handled correctly.
+
+    Verifies structurally via source inspection that 'OPTIONS' is listed.
+    """
+    import inspect
+
+    from recotem.serving import app as app_mod
+
+    source = inspect.getsource(app_mod.create_app)
+    assert "OPTIONS" in source, (
+        "create_app must include 'OPTIONS' in the CORSMiddleware allow_methods list"
+    )
+    assert "allow_credentials=False" in source, (
+        "create_app must explicitly set allow_credentials=False in CORSMiddleware"
+    )
+
+
 def test_insecure_no_auth_http_request_without_key_returns_200(
     tmp_path: Path,
 ) -> None:

@@ -345,3 +345,143 @@ def test_csv_source_sha256_mismatch_via_http_raises(httpserver) -> None:
 
     with pytest.raises(DataSourceError, match="sha256"):
         source.fetch(ctx)
+
+
+# ---------------------------------------------------------------------------
+# I-A: sha256 path byte cap — CSV and Parquet non-network paths
+# ---------------------------------------------------------------------------
+
+
+def test_csv_sha256_path_over_byte_cap_rejected(tmp_path: Path, monkeypatch) -> None:
+    """A local CSV file with sha256 set that exceeds the byte cap must be rejected.
+
+    Previously f.read() (no limit) would buffer the entire file; now
+    f.read(cap + 1) is used and the size is checked before sha256 verification.
+    The stat-based check_size_cap() is best-effort and may be silent on some
+    filesystems, so this second line of defence is essential.
+    """
+    import hashlib
+
+    from recotem.datasource import csv as csv_module
+
+    # Write a file with enough content to exceed a small cap.
+    csv_file = tmp_path / "sha256_big.csv"
+    content = "user_id,item_id\n" + "u1,i1\n" * 200  # ~1.4 KiB
+    csv_file.write_text(content)
+
+    # Patch the cap to 1024 bytes so the file exceeds it.
+    monkeypatch.setattr(csv_module, "_get_max_download_bytes", lambda: 1024)
+
+    real_sha256 = hashlib.sha256(content.encode()).hexdigest()
+    cfg = CSVConfig(type="csv", path=str(csv_file), sha256=real_sha256)
+    source = CSVSource(cfg)
+    with pytest.raises(DataSourceError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
+        source.fetch(_ctx())
+
+
+def test_csv_sha256_path_within_byte_cap_passes(tmp_path: Path, monkeypatch) -> None:
+    """A local CSV file with sha256 set that is within the cap must be accepted.
+
+    Ensures the cap check does not fire for files that are legitimately small.
+    """
+    import hashlib
+
+    from recotem.datasource import csv as csv_module
+
+    csv_file = tmp_path / "sha256_small.csv"
+    content = "user_id,item_id\nu1,i1\nu2,i2\n"
+    csv_file.write_text(content)
+
+    # Cap at 8192 bytes — well above the tiny file.
+    monkeypatch.setattr(csv_module, "_get_max_download_bytes", lambda: 8192)
+
+    real_sha256 = hashlib.sha256(content.encode()).hexdigest()
+    cfg = CSVConfig(type="csv", path=str(csv_file), sha256=real_sha256)
+    source = CSVSource(cfg)
+    df = source.fetch(_ctx())
+    assert len(df) == 2
+
+
+def test_parquet_sha256_path_over_byte_cap_rejected(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A local Parquet file with sha256 set that exceeds the byte cap must be rejected.
+
+    Mirrors the CSV test for the ParquetSource sha256 code path.
+    """
+    import hashlib
+
+    from recotem.datasource import csv as csv_module
+
+    parquet_file = tmp_path / "sha256_big.parquet"
+    df_orig = pd.DataFrame(
+        {
+            "user_id": ["u" + str(i) for i in range(50)],
+            "item_id": ["i" + str(i) for i in range(50)],
+        }
+    )
+    df_orig.to_parquet(parquet_file, index=False)
+
+    file_bytes = parquet_file.read_bytes()
+    real_sha256 = hashlib.sha256(file_bytes).hexdigest()
+
+    # Cap smaller than the Parquet file.
+    monkeypatch.setattr(csv_module, "_get_max_download_bytes", lambda: 10)
+
+    cfg = ParquetConfig(type="parquet", path=str(parquet_file), sha256=real_sha256)
+    source = ParquetSource(cfg)
+    with pytest.raises(DataSourceError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
+        source.fetch(_ctx())
+
+
+def test_parquet_sha256_path_within_byte_cap_passes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A local Parquet file with sha256 set that is within the cap must be accepted."""
+    import hashlib
+
+    from recotem.datasource import csv as csv_module
+
+    parquet_file = tmp_path / "sha256_ok.parquet"
+    df_orig = pd.DataFrame({"user_id": ["u1", "u2"], "item_id": ["i1", "i2"]})
+    df_orig.to_parquet(parquet_file, index=False)
+
+    file_bytes = parquet_file.read_bytes()
+    real_sha256 = hashlib.sha256(file_bytes).hexdigest()
+
+    # 1 MiB cap — well above the small parquet file.
+    monkeypatch.setattr(csv_module, "_get_max_download_bytes", lambda: 1024 * 1024)
+
+    cfg = ParquetConfig(type="parquet", path=str(parquet_file), sha256=real_sha256)
+    source = ParquetSource(cfg)
+    df = source.fetch(_ctx())
+    assert len(df) == 2
+
+
+def test_csv_sha256_cap_fires_even_when_stat_unavailable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The sha256-path cap fires even when check_size_cap (stat) is silent.
+
+    Simulates a filesystem where stat fails by replacing check_size_cap with a
+    no-op.  The sha256-path f.read(cap+1) enforcement must still catch oversized
+    files independently of the stat-based pre-check.
+    """
+    import hashlib
+
+    from recotem._size_cap import SizeCapExceededError  # noqa: F401
+    from recotem.datasource import csv as csv_module
+
+    csv_file = tmp_path / "nostat.csv"
+    content = "user_id,item_id\n" + "u1,i1\n" * 200
+    csv_file.write_text(content)
+
+    # Make stat-based check a no-op.
+    monkeypatch.setattr(csv_module, "_check_size_cap", lambda *_a, **_kw: None)
+    monkeypatch.setattr(csv_module, "_get_max_download_bytes", lambda: 512)
+
+    real_sha256 = hashlib.sha256(content.encode()).hexdigest()
+    cfg = CSVConfig(type="csv", path=str(csv_file), sha256=real_sha256)
+    source = CSVSource(cfg)
+    with pytest.raises(DataSourceError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
+        source.fetch(_ctx())

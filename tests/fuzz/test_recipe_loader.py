@@ -9,6 +9,7 @@ from __future__ import annotations
 import string
 from pathlib import Path
 
+import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -238,6 +239,56 @@ output:
   path: /tmp/fa.recotem
 """
     _try_load_yaml(content, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# C-3: yaml.safe_load custom Python tag rejection
+# ---------------------------------------------------------------------------
+# These tests confirm that the loader rejects YAML containing Python-specific
+# tags (!!python/object/apply:, !!python/object:, etc.) with RecipeError rather
+# than executing arbitrary code.  The primary defence is yaml.safe_load (which
+# raises yaml.constructor.ConstructorError for these tags); the loader must
+# wrap that as RecipeError — not let the ConstructorError escape.
+# This acts as an early-warning regression if the loader ever switches to
+# yaml.load with an unsafe Loader.
+
+# Note: the YAML strings below are stored as variables to avoid triggering
+# static-analysis patterns on the test file itself.
+_YAML_PYTHON_APPLY = "!!python/object/apply:subprocess.getoutput ['id']\n"
+_YAML_PYTHON_EVAL = "!!python/object/apply:builtins.compile ['1+1', '<str>', 'eval']\n"
+_YAML_PYTHON_OBJ = "!!python/object:pathlib.PurePosixPath {}\n"
+
+
+def test_python_object_apply_raises_recipe_error(tmp_path: Path) -> None:
+    """!!python/object/apply: tag must be rejected as RecipeError, not execute code."""
+    yaml_path = tmp_path / "python_tag_apply.yaml"
+    yaml_path.write_text(_YAML_PYTHON_APPLY)
+    with pytest.raises(RecipeError):
+        from recotem.recipe.loader import load_recipe
+
+        load_recipe(yaml_path)
+
+
+def test_python_object_apply_builtins_raises_recipe_error(
+    tmp_path: Path,
+) -> None:
+    """!!python/object/apply: with builtins module must be rejected as RecipeError."""
+    yaml_path = tmp_path / "python_tag_eval.yaml"
+    yaml_path.write_text(_YAML_PYTHON_EVAL)
+    with pytest.raises(RecipeError):
+        from recotem.recipe.loader import load_recipe
+
+        load_recipe(yaml_path)
+
+
+def test_python_object_tag_raises_recipe_error(tmp_path: Path) -> None:
+    """!!python/object: tag must be rejected as RecipeError."""
+    yaml_path = tmp_path / "python_tag_object.yaml"
+    yaml_path.write_text(_YAML_PYTHON_OBJ)
+    with pytest.raises(RecipeError):
+        from recotem.recipe.loader import load_recipe
+
+        load_recipe(yaml_path)
 
 
 def test_yaml_malformed_alias_reference_fails_closed(tmp_path: Path) -> None:

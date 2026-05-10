@@ -229,15 +229,21 @@ def _read_file(file_type: str, path: str, *, sha256: str | None = None) -> pd.Da
         raise ValueError(str(exc)) from exc
 
     if sha256 is not None:
+        cap = get_max_download_bytes()
         try:
             import fsspec
 
             with fsspec.open(path, "rb") as fh:
-                data = fh.read()
+                data = fh.read(cap + 1)
         except Exception as exc:
             raise ValueError(
                 f"failed to read metadata file {safe_path!r}: {exc}"
             ) from exc
+        if len(data) > cap:
+            raise ValueError(
+                f"item metadata file '{safe_path}' exceeds RECOTEM_MAX_DOWNLOAD_BYTES "
+                f"({cap}) — increase the cap or split the file."
+            )
         try:
             verify_sha256(data, sha256)
         except HttpFetchError as exc:

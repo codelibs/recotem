@@ -92,9 +92,11 @@ class ModelEntry:
     def models_dict(self) -> dict[str, Any]:
         """Return header metadata suitable for the ``/models`` endpoint.
 
-        Key material is never included.
+        The artifact header JSON never contains ``hmac`` or ``key`` fields —
+        those are stored in separate binary regions of the artifact format
+        (see ``artifact/format.py``).  All header fields are safe to expose.
         """
-        safe = {k: v for k, v in self.header.items() if k not in ("hmac", "key")}
+        safe = dict(self.header)
         safe["kid"] = self.kid
         safe["name"] = self.name
         return safe

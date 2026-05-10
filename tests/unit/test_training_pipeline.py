@@ -1065,3 +1065,77 @@ def test_per_trial_timeout_excludes_killed_trial_from_best(tmp_path: Path) -> No
         "run_search must raise SearchError when only orphaned/running trials exist; "
         "the orphaned trial's score must not appear in best_score."
     )
+
+
+# ---------------------------------------------------------------------------
+# I-B: _compute_recipe_hash handles non-JSON-serializable values (Decimal etc.)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_recipe_hash_with_decimal_query_parameter(tmp_path: Path) -> None:
+    """_compute_recipe_hash must not raise TypeError for Decimal query_parameters.
+
+    BigQuery recipes may carry query_parameters with Decimal values.  pydantic's
+    model_dump(mode='json') does not coerce Decimal, so json.dumps raised
+    TypeError before the I-B fix added default=str.
+    """
+    from decimal import Decimal
+
+    from recotem.datasource.bigquery import BigQueryConfig
+    from recotem.recipe.models import (
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+    from recotem.training.pipeline import _compute_recipe_hash
+
+    recipe = Recipe(
+        name="bq_decimal_test",
+        source=BigQueryConfig(
+            type="bigquery",
+            project="test-project",
+            query="SELECT * FROM `test_dataset.test_table` WHERE score > @threshold",
+            query_parameters={"threshold": Decimal("1.5")},
+        ),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        training=TrainingConfig(
+            algorithms=["TopPop"],
+            n_trials=1,
+            split=SplitConfig(scheme="random", heldout_ratio=0.1, seed=42),
+        ),
+        output=OutputConfig(path=str(tmp_path / "bq_test.recotem")),
+    )
+
+    # Must not raise TypeError
+    digest = _compute_recipe_hash(recipe)
+    assert isinstance(digest, str) and len(digest) == 64, (
+        f"Expected 64-char hex digest, got {digest!r}"
+    )
+
+
+def test_compute_recipe_hash_is_reproducible(tmp_path: Path) -> None:
+    """The same recipe must always produce the same hash (canonical serialization)."""
+    from recotem.training.pipeline import _compute_recipe_hash
+
+    recipe = _make_recipe(tmp_path)
+
+    hash1 = _compute_recipe_hash(recipe)
+    hash2 = _compute_recipe_hash(recipe)
+
+    assert hash1 == hash2, (
+        f"_compute_recipe_hash must be deterministic; got {hash1!r} then {hash2!r}"
+    )
+
+
+def test_compute_recipe_hash_differs_for_different_recipes(tmp_path: Path) -> None:
+    """Different recipes must produce different hashes."""
+    from recotem.training.pipeline import _compute_recipe_hash
+
+    recipe_a = _make_recipe(tmp_path, algorithms=["TopPop"])
+    recipe_b = _make_recipe(tmp_path, algorithms=["TopPop"], n_trials=5)
+
+    assert _compute_recipe_hash(recipe_a) != _compute_recipe_hash(recipe_b), (
+        "Recipes with different n_trials must produce different hashes"
+    )

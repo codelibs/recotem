@@ -440,13 +440,17 @@ def inspect(
     import fsspec
 
     from recotem.artifact.format import (
-        DEFAULT_MAX_PAYLOAD_BYTES,
         ArtifactError,
         parse_header_from_bytes,
     )
     from recotem.artifact.io import resolve_artifact_pointer
+    from recotem.config import ServeConfig
 
-    max_bytes = DEFAULT_MAX_PAYLOAD_BYTES
+    # Honor RECOTEM_MAX_PAYLOAD_BYTES so inspect uses the same payload cap as
+    # the serving layer.  ServeConfig.from_env() reads only env vars — it does
+    # not require signing keys to be present (those are validated later in this
+    # function by the explicit RECOTEM_SIGNING_KEYS check below).
+    max_bytes = ServeConfig.from_env().max_payload_bytes
     try:
         # Bounded read so a 100 GiB file cannot OOM the CLI before the cap
         # check fires; matches the serving-watcher protocol.

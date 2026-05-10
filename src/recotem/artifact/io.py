@@ -50,6 +50,65 @@ from recotem.artifact.signing import KeyRing, compute_hmac, verify_hmac
 
 logger = structlog.get_logger(__name__)
 
+
+def _assert_output_root_containment(dest: str) -> None:
+    """Re-verify that *dest* lies under RECOTEM_ARTIFACT_ROOT at write time.
+
+    This is a defence-in-depth check that re-evaluates the containment
+    constraint immediately before ``os.replace`` so that a symlink introduced
+    *after* recipe load (TOCTOU window) does not allow an attacker to redirect
+    the artifact write to a path outside the artifact root.
+
+    If ``RECOTEM_ARTIFACT_ROOT`` is unset the function is a no-op, preserving
+    existing behaviour for users who do not use path containment.
+
+    Raises
+    ------
+    ArtifactError
+        If the resolved parent of *dest* lies outside the configured root.
+    """
+    artifact_root_env = os.environ.get("RECOTEM_ARTIFACT_ROOT", "")
+    if not artifact_root_env:
+        return
+
+    import pathlib
+
+    artifact_root = pathlib.Path(artifact_root_env).resolve()
+    dest_path = pathlib.Path(dest)
+    parent = dest_path.parent
+
+    try:
+        resolved_parent = parent.resolve(strict=True)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise ArtifactError(
+            f"artifact write target parent '{parent}' does not exist or is not "
+            "a directory at write time."
+        ) from exc
+    except OSError as exc:
+        raise ArtifactError(
+            f"artifact write target parent '{parent}' could not be resolved: {exc}"
+        ) from exc
+
+    try:
+        resolved_parent.relative_to(artifact_root)
+    except ValueError:
+        raise ArtifactError(
+            f"artifact write target '{dest}' resolved parent '{resolved_parent}' "
+            f"is outside RECOTEM_ARTIFACT_ROOT='{artifact_root}'. "
+            "Symlink-escape attempt rejected at write time."
+        ) from None
+
+    resolved_dest = dest_path.resolve()
+    try:
+        resolved_dest.relative_to(artifact_root)
+    except ValueError:
+        raise ArtifactError(
+            f"artifact write target '{dest}' resolves to '{resolved_dest}' "
+            f"which is outside RECOTEM_ARTIFACT_ROOT='{artifact_root}'. "
+            "Path-traversal attempt rejected at write time."
+        ) from None
+
+
 # Matches the pointer file contents written in append_sha mode.
 # A pointer file contains a single line like "news_articles.a1b2c3d4.recotem".
 _POINTER_RE = re.compile(r"^[A-Za-z0-9_.-]+\.recotem\s*$")
@@ -181,6 +240,8 @@ def _write_atomic(
                     os.fsync(fh.fileno())
                 except OSError:
                     pass  # not all FS support fsync; best-effort
+            # Re-check containment immediately before rename to close TOCTOU.
+            _assert_output_root_containment(dest)
             os.replace(tmp_path, dest)
         except BaseException:
             try:

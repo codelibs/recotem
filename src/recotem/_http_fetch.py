@@ -37,6 +37,65 @@ class HttpFetchError(Exception):
     """Raised by HTTP-fetch helpers on any I/O, redirect, sha256, or cap issue."""
 
 
+# ---------------------------------------------------------------------------
+# Bogon / reserved ranges not covered by is_private / is_reserved alone
+# ---------------------------------------------------------------------------
+#
+# Python's ipaddress.is_private, is_reserved, is_loopback etc. cover the core
+# RFC1918 / loopback / link-local / ULA space, but several additional IANA-
+# reserved blocks are NOT classified as private or reserved in all Python
+# versions:
+#
+#   100.64.0.0/10   CGNAT shared address space (RFC6598)
+#   198.18.0.0/15   Benchmark / testing (RFC2544)
+#   192.0.2.0/24    TEST-NET-1 (RFC5737)
+#   198.51.100.0/24 TEST-NET-2 (RFC5737)
+#   203.0.113.0/24  TEST-NET-3 (RFC5737)
+#
+#   64:ff9b::/96    IPv6 NAT64 well-known prefix (RFC6052)
+#   2001:db8::/32   Documentation / example prefix (RFC3849)
+#
+# These ranges are not routable on the public internet and are abused in SSRF
+# payloads (especially CGNAT which some cloud providers route internally).
+# The bogon lists below are OR-combined with the standard property checks in
+# _is_address_internal to close the gap.
+
+_BOGON_V4: tuple[ipaddress.IPv4Network, ...] = tuple(
+    ipaddress.IPv4Network(net)
+    for net in (
+        "100.64.0.0/10",  # CGNAT shared address space (RFC6598)
+        "198.18.0.0/15",  # Benchmark / testing (RFC2544)
+        "192.0.2.0/24",  # TEST-NET-1 (RFC5737)
+        "198.51.100.0/24",  # TEST-NET-2 (RFC5737)
+        "203.0.113.0/24",  # TEST-NET-3 (RFC5737)
+    )
+)
+
+_BOGON_V6: tuple[ipaddress.IPv6Network, ...] = tuple(
+    ipaddress.IPv6Network(net)
+    for net in (
+        "64:ff9b::/96",  # IPv6 NAT64 well-known prefix (RFC6052)
+        "2001:db8::/32",  # Documentation / example prefix (RFC3849)
+    )
+)
+
+
+def _in_bogon(addr: ipaddress._BaseAddress) -> bool:
+    """Return True if *addr* falls within any bogon / IANA-reserved range.
+
+    Handles both plain IPv4/IPv6 addresses and IPv4-mapped IPv6 addresses
+    (``::ffff:a.b.c.d``): for the latter the embedded IPv4 is checked against
+    ``_BOGON_V4`` so that CGNAT addresses presented as IPv4-mapped are caught.
+    """
+    if isinstance(addr, ipaddress.IPv6Address):
+        mapped = addr.ipv4_mapped
+        if mapped is not None:
+            return any(mapped in net for net in _BOGON_V4)
+        return any(addr in net for net in _BOGON_V6)
+    # Plain IPv4
+    return any(addr in net for net in _BOGON_V4)
+
+
 _USER_AGENT = "recotem/2"
 _CHUNK_SIZE = 1 * 1024 * 1024  # 1 MiB
 MAX_REDIRECTS = 5
@@ -78,11 +137,13 @@ def _resolve_host_addresses(host: str) -> list[ipaddress._BaseAddress]:
 
 
 def _is_address_internal(addr: ipaddress._BaseAddress) -> bool:
-    """Return True if *addr* is RFC1918 / loopback / link-local / reserved.
+    """Return True if *addr* is RFC1918 / loopback / link-local / reserved / bogon.
 
     Covers the SSRF risk surface: cloud metadata (169.254.169.254 link-local),
-    internal services (10/8, 172.16/12, 192.168/16, fc00::/7), localhost, and
-    multicast / unspecified ranges.
+    internal services (10/8, 172.16/12, 192.168/16, fc00::/7), localhost,
+    multicast / unspecified ranges, and additional IANA-reserved bogon blocks
+    that some Python versions do not flag via ``is_private`` / ``is_reserved``
+    alone (see ``_BOGON_V4`` / ``_BOGON_V6`` above).
 
     For IPv4-mapped IPv6 addresses (``::ffff:a.b.c.d``), the embedded IPv4
     address is the authoritative source of truth and is checked first.
@@ -91,11 +152,13 @@ def _is_address_internal(addr: ipaddress._BaseAddress) -> bool:
     ``True`` for public IPv4-mapped addresses in some builds), so relying on
     the IPv6-level properties for these addresses would produce false positives.
     Evaluating the unwrapped IPv4 directly avoids the ambiguity entirely.
+    The bogon check also uses the unwrapped IPv4 for mapped addresses.
     See MAJOR-3 in :doc:`/security`.
     """
     # Primary check for IPv4-mapped IPv6 addresses (``::ffff:a.b.c.d``):
     # unwrap to the embedded IPv4 and evaluate properties there, bypassing
     # IPv6-level property inconsistencies for the ``::ffff:0:0/96`` block.
+    # The bogon membership check also targets the unwrapped IPv4.
     mapped = getattr(addr, "ipv4_mapped", None)
     if mapped is not None:
         return bool(
@@ -105,6 +168,7 @@ def _is_address_internal(addr: ipaddress._BaseAddress) -> bool:
             or mapped.is_multicast
             or mapped.is_reserved
             or mapped.is_unspecified
+            or _in_bogon(mapped)
         )
     return bool(
         addr.is_private
@@ -113,6 +177,7 @@ def _is_address_internal(addr: ipaddress._BaseAddress) -> bool:
         or addr.is_multicast
         or addr.is_reserved
         or addr.is_unspecified
+        or _in_bogon(addr)
     )
 
 
@@ -317,8 +382,19 @@ def _build_pinned_opener(pinned_ip: str) -> urllib.request.OpenerDirector:
     (without the redirect-handler override urllib's default redirect chain
     of up to 10 hops would silently be followed *before* our SSRF re-check
     fires on the next hop).
+
+    The SSL context is created once per opener (not per request) and passed
+    explicitly to :class:`_PinnedHTTPSConnection` via the ``_builder``
+    closure.  Passing ``context=`` directly to ``do_open`` does not guarantee
+    that the custom connection class receives it — some Python versions pass
+    it via kwargs that the constructor does not accept.  By including it in
+    the ``_builder`` closure we ensure the same verified context (system
+    default trust store, hostname verification enabled) is always used.
     """
     pinned_ip_str = pinned_ip
+    # Build the SSL context once per opener — creating it on every request is
+    # unnecessary and wastes a CA-bundle parse on each HTTPS fetch.
+    _ssl_ctx = ssl.create_default_context()
 
     class _PinnedHTTPHandler(urllib.request.HTTPHandler):
         def http_open(self, req):  # type: ignore[override]
@@ -330,13 +406,16 @@ def _build_pinned_opener(pinned_ip: str) -> urllib.request.OpenerDirector:
     class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
         def https_open(self, req):  # type: ignore[override]
             def _builder(host: str, *a: object, **kw: object) -> _PinnedHTTPSConnection:
-                # We deliberately ignore any caller-provided SSL context and use the system
-                # default trust store on every call. Custom CAs are not supported via this
-                # handler today; if needed in future, accept context via a constructor arg
-                # rather than the urllib do_open kwarg.
-                return _PinnedHTTPSConnection(host, *a, pinned_ip=pinned_ip_str, **kw)
+                # Pass the SSL context explicitly through the builder so that
+                # _PinnedHTTPSConnection.connect() uses the system-default trust
+                # store with hostname verification enabled.  Relying on the
+                # `context=` kwarg to do_open is fragile — urllib's machinery
+                # may not propagate it to a custom connection class.
+                return _PinnedHTTPSConnection(
+                    host, *a, pinned_ip=pinned_ip_str, context=_ssl_ctx, **kw
+                )
 
-            return self.do_open(_builder, req, context=ssl.create_default_context())
+            return self.do_open(_builder, req)
 
     return urllib.request.build_opener(
         _PinnedHTTPHandler(),

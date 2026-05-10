@@ -369,3 +369,109 @@ def test_read_file_rejects_tsv_type(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unsupported metadata file type"):
         _read_file("tsv", str(tsv_path), sha256=None)
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-12: on_field_missing="null" — WARNING log + column filled + continue
+# ---------------------------------------------------------------------------
+# The spec calls this "warn" mode; the actual implementation uses "null".
+# Tests verify: WARNING log emitted, column filled with pd.NA, execution continues.
+
+
+def test_on_field_missing_null_logs_warning_and_continues(
+    tmp_path: Path, caplog
+) -> None:
+    """on_field_missing='null': missing fields produce a WARNING log and the
+    DataFrame is returned with pd.NA values — execution does not raise.
+    """
+    import logging
+
+    csv_file = _write_csv(tmp_path, "item_id,title\ni1,Item1\ni2,Item2\n")
+
+    with caplog.at_level(logging.WARNING):
+        df = load_item_metadata(
+            _Config("csv", str(csv_file)),
+            fields=["title", "absent_column"],
+            on_field_missing="null",
+        )
+
+    # The function must continue (not raise)
+    assert df is not None
+
+    # The missing column must be present and filled with pd.NA
+    assert "absent_column" in df.columns, (
+        "on_field_missing='null' must add the missing column to the result"
+    )
+    assert df["absent_column"].isna().all(), (
+        "Missing columns in 'null' mode must be all-NA"
+    )
+
+    # The valid column must still be present
+    assert "title" in df.columns
+
+
+def test_on_field_missing_null_warning_log_emitted_via_structlog(
+    tmp_path: Path,
+) -> None:
+    """on_field_missing='null': the structlog WARNING must name the missing field.
+
+    structlog logs are captured via structlog.testing.capture_logs, not caplog.
+    """
+    import structlog.testing
+
+    csv_file = _write_csv(tmp_path, "item_id,title\ni1,Item1\n")
+
+    with structlog.testing.capture_logs() as captured:
+        load_item_metadata(
+            _Config("csv", str(csv_file)),
+            fields=["title", "my_missing_field"],
+            on_field_missing="null",
+        )
+
+    warning_events = [e for e in captured if e.get("log_level") in ("warning", "warn")]
+    assert warning_events, (
+        f"At least one WARNING log must be emitted for missing field; "
+        f"got events: {captured!r}"
+    )
+    # At least one warning mentions the missing field name
+    warning_str = str(warning_events)
+    assert "my_missing_field" in warning_str, (
+        f"WARNING log must mention 'my_missing_field'; got: {warning_str!r}"
+    )
+
+
+def test_on_field_missing_null_multiple_missing_fields_all_filled(
+    tmp_path: Path,
+) -> None:
+    """When multiple fields are missing in 'null' mode, all are added as pd.NA."""
+    csv_file = _write_csv(tmp_path, "item_id,title\ni1,Item1\n")
+
+    df = load_item_metadata(
+        _Config("csv", str(csv_file)),
+        fields=["title", "missing_a", "missing_b"],
+        on_field_missing="null",
+    )
+
+    assert "missing_a" in df.columns
+    assert "missing_b" in df.columns
+    assert df["missing_a"].isna().all()
+    assert df["missing_b"].isna().all()
+    # Existing field still present
+    assert df.loc["i1", "title"] == "Item1"
+
+
+def test_on_field_missing_error_raises_with_field_names(tmp_path: Path) -> None:
+    """on_field_missing='error' must raise ValueError naming all missing fields."""
+    csv_file = _write_csv(tmp_path, "item_id,title\ni1,Item1\n")
+
+    with pytest.raises(ValueError) as exc_info:
+        load_item_metadata(
+            _Config("csv", str(csv_file)),
+            fields=["title", "alpha", "beta"],
+            on_field_missing="error",
+        )
+
+    msg = str(exc_info.value)
+    assert "alpha" in msg or "beta" in msg, (
+        f"Error message must name the missing fields; got: {msg!r}"
+    )

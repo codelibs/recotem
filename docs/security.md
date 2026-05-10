@@ -92,6 +92,29 @@ Specific operator responsibilities:
   `RECOTEM_HTTP_ALLOW_PRIVATE=1`. Production deployments leave it unset
   so a malicious recipe cannot hit cloud-metadata services or sibling
   pods even if the operator forgot to scrub the recipe directory.
+- **DNS rebinding is mitigated by IP pinning.** Without further care,
+  the SSRF guard's `getaddrinfo()` and the `urllib` connect-time
+  `getaddrinfo()` are independent lookups: an attacker who controls the
+  authoritative DNS for a hostname can return a public IP to the first
+  call (passing the SSRF check) and a private IP to the second (the
+  actual TCP connect), bypassing the guard entirely. Recotem closes this
+  window by feeding the IP resolved at SSRF-check time straight into a
+  custom `HTTPConnection` / `HTTPSConnection` whose `connect()` method
+  opens the socket against the pinned IP. The original hostname is
+  preserved for the `Host:` header and (for HTTPS) for SNI plus
+  certificate validation, so legitimate traffic is unaffected. Pinning
+  is per-request and re-applies on every redirect hop. As a backstop in
+  hostile networks, operators should also restrict outbound DNS at the
+  network layer (egress firewall / VPC endpoints) so that even a
+  partially-compromised resolver cannot return an attacker-controlled
+  IP to either lookup.
+- **IPv4-mapped IPv6 inputs are explicitly unwrapped.** Some Python
+  releases classify `::ffff:169.254.169.254` as `is_link_local=False`
+  because they only consult IPv6-layer attributes. The SSRF guard
+  therefore additionally re-evaluates `is_private` / `is_loopback` /
+  `is_link_local` on the embedded IPv4 address (when present), so
+  `::ffff:127.0.0.1`, `::ffff:169.254.169.254` and any `::ffff:rfc1918`
+  literal are refused regardless of stdlib semantics.
 - **Compute and pin sha256 once, then alert on changes.** A mismatch is
   the signal. Don't bypass it by silently regenerating during CI.
 
@@ -132,6 +155,8 @@ numpy.ndarray
 numpy.dtype
 numpy.core.multiarray._reconstruct
 numpy.core.multiarray.scalar
+numpy._core.multiarray._reconstruct
+numpy._core.multiarray.scalar
 scipy.sparse._csr.csr_matrix
 scipy.sparse._csc.csc_matrix
 scipy.sparse._coo.coo_matrix
@@ -151,28 +176,40 @@ collections.OrderedDict
 
 This list is frozen per Recotem release. Changes ship with a CHANGELOG entry.
 
-In addition to the FQCN list, classes from any module under the prefixes
-`numpy.*` and `scipy.sparse.*` are permitted, because numpy and scipy
-reorganise their internal layout between releases (e.g. `numpy.core.*` →
-`numpy._core.*` in numpy 2.x) and reconstruction helpers move between
-submodules. To keep the prefix allow-list tight, the following submodules
-are explicitly **denied** even though they fall under an allowed prefix —
-they expose code-execution gadgets, callable proxies, file-IO
-constructors, test runners, or build helpers:
+In addition to the FQCN list, classes whose defining module sits under
+one of the following narrow prefixes are permitted via the prefix
+allow-list (numpy and scipy reorganise their internal layout between
+releases — reconstruction helpers like `_reconstruct` move between
+submodules):
 
 ```
-numpy.testing[.*]      numpy.distutils[.*]   numpy.f2py[.*]
-numpy.ctypeslib[.*]    numpy.lib[.*]         numpy.compat[.*]
-scipy.sparse.linalg[.*]   scipy.sparse.tests[.*]   scipy.sparse.csgraph[.*]
+numpy._core.       numpy 2.x reconstruction helpers + scalar / dtype machinery
+numpy.core.        numpy 1.x equivalents (forward-compat with pre-2.x artifacts)
+numpy.dtypes.      numpy 2.x parametric dtype classes (Float64DType, BoolDType, …)
+scipy.sparse._csr. CSR matrix reconstructor + helpers
+scipy.sparse._csc. CSC equivalent
+scipy.sparse._coo. COO equivalent
 ```
 
-Deny overrides allow. Note that `numpy._core.*` (numpy 2.x) and `numpy.core.*`
-(numpy 1.x) are **not** on the deny-list, so reconstruction helpers from those
-submodules pass through the prefix allow-list. The hand-enumerated FQCN entries
-for `numpy.core.multiarray._reconstruct` and `numpy.core.multiarray.scalar`
-cover the most common 1.x case explicitly. HMAC verification remains the
-primary defence; the prefix allow-list is the secondary layer scoped to the
-scientific stack only.
+The bare top-level modules (`numpy`, `scipy.sparse`) are intentionally
+**not** on the prefix list. The legitimate top-level FQCNs
+(`numpy.ndarray`, `numpy.dtype`) are pinned by the hand-enumerated list
+instead, so callable / file-IO gadgets such as `numpy.frompyfunc`,
+`numpy.vectorize`, `numpy.piecewise`, and `scipy.sparse.load_npz` are
+blocked even though they live "under" the same package.
+
+Other numpy submodules that previously fell under an allowed prefix and
+were deny-listed are now simply outside the allow-list (they are not
+on the prefix list at all): `numpy.testing`, `numpy.distutils`,
+`numpy.f2py`, `numpy.ctypeslib`, `numpy.lib`, `numpy.compat`,
+`numpy.random`, `numpy.linalg`, `numpy.fft`, `numpy.polynomial`,
+`scipy.sparse.linalg`, `scipy.sparse.tests`, `scipy.sparse.csgraph`,
+`scipy.sparse._compressed`, `scipy.sparse._data_matrix`. The deny-list
+is retained as a defence-in-depth trip-wire in case a future patch
+broadens the prefix allow-list.
+
+HMAC verification remains the primary defence; the prefix allow-list is
+the secondary layer scoped to the scientific stack only.
 
 `recotem inspect <artifact>` runs the full HMAC verify path and prints the header JSON without invoking the deserializer. It is safe to run on untrusted artifacts.
 

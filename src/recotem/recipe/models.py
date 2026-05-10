@@ -44,6 +44,16 @@ class SchemaConfig(BaseModel, extra="forbid"):
     user_column: str
     item_column: str
     time_column: str | None = None
+    time_unit: str | None = Field(
+        default=None,
+        pattern=r"^(s|ms|us|ns)$",
+        description=(
+            "Unit for numeric time_column values. Required when time_column "
+            "contains integers (Unix timestamps). One of 's', 'ms', 'us', 'ns'. "
+            "String and datetime columns are unaffected. "
+            "Omitting this field for a numeric time_column raises a TrainingError."
+        ),
+    )
 
 
 class CleansingConfig(BaseModel, extra="forbid"):
@@ -98,6 +108,56 @@ class TrainingConfig(BaseModel, extra="forbid"):
     parallelism: int = Field(default=1, ge=1)
     storage_path: str = ""
     split: SplitConfig = Field(default_factory=SplitConfig)
+
+    @model_validator(mode="after")
+    def _validate_per_algorithm_trials_keys(self) -> TrainingConfig:
+        """Reject per_algorithm_trials keys that are not in algorithms.
+
+        Each key must be resolvable as an alias for one of the algorithms
+        listed in ``self.algorithms``.  Unknown keys (e.g. typos) are
+        rejected with a ValidationError at recipe-load time.
+        """
+        if not self.per_algorithm_trials:
+            return self
+
+        # Import lazily to avoid a circular dependency at module load.
+        from recotem.training.algorithms import (  # noqa: PLC0415
+            UnknownAlgorithmError,
+            resolve_algorithm_name,
+        )
+
+        # Build the set of resolved canonical class names from algorithms.
+        resolved_algorithms: set[str] = set()
+        for alias in self.algorithms:
+            try:
+                resolved_algorithms.add(resolve_algorithm_name(alias))
+            except UnknownAlgorithmError:
+                # The algorithms list itself may contain unresolvable names;
+                # those are caught elsewhere (at search time).  Don't block
+                # per_algorithm_trials validation on them.
+                pass
+
+        unknown_keys: list[str] = []
+        for key in self.per_algorithm_trials:
+            # Accept keys that are already canonical class names in algorithms.
+            if key in resolved_algorithms:
+                continue
+            # Try resolving the key as an alias.
+            try:
+                canonical = resolve_algorithm_name(key)
+            except UnknownAlgorithmError:
+                unknown_keys.append(key)
+                continue
+            if canonical not in resolved_algorithms:
+                unknown_keys.append(key)
+
+        if unknown_keys:
+            raise ValueError(
+                f"per_algorithm_trials contains keys that are not in algorithms: "
+                f"{unknown_keys!r}.  Keys must match (or be aliases for) entries "
+                f"in training.algorithms."
+            )
+        return self
 
 
 class OutputConfig(BaseModel, extra="forbid"):

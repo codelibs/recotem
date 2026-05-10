@@ -87,6 +87,23 @@ def _map_exception_to_exit(exc: Exception) -> int:
     except ImportError:
         pass
 
+    # --- HTTP fetch errors (checked BEFORE DataSourceError so that a
+    # DataSourceError wrapping an HttpFetchError still maps to exit 7).
+    # CronJob retry semantics distinguish transient HTTP/SSRF failures (7)
+    # from structural data-source failures (3).
+    try:
+        from recotem._http_fetch import HttpFetchError as _HttpFetchError
+
+        # Walk the __cause__ chain — datasource layers wrap HttpFetchError
+        # into DataSourceError via ``raise DataSourceError(...) from exc``.
+        cur: BaseException | None = exc
+        while cur is not None:
+            if isinstance(cur, _HttpFetchError):
+                return _EXIT_HTTP_FETCH
+            cur = cur.__cause__
+    except (ImportError, AttributeError):
+        pass
+
     # --- datasource errors ---
     try:
         from recotem.datasource.base import DataSourceError as _DataSourceError
@@ -94,15 +111,6 @@ def _map_exception_to_exit(exc: Exception) -> int:
         if isinstance(exc, _DataSourceError):
             return _EXIT_DATASOURCE
     except ImportError:
-        pass
-
-    # --- HTTP fetch errors ---
-    try:
-        from recotem._http_fetch import HttpFetchError as _HttpFetchError
-
-        if isinstance(exc, _HttpFetchError):
-            return _EXIT_HTTP_FETCH
-    except (ImportError, AttributeError):
         pass
 
     # --- artifact errors ---
@@ -453,6 +461,13 @@ def inspect(
         hdr = parse_header_from_bytes(data, max_bytes)
     except Exception as exc:
         _exit(_EXIT_ARTIFACT, f"Artifact parse failed: {exc}")
+
+    if dev_allow_unsigned:
+        # Gate dev-only fallback behind RECOTEM_ENV=development, mirroring
+        # train and serve.  Otherwise an operator who runs
+        # ``recotem inspect --dev-allow-unsigned`` against a production
+        # artifact would silently fall back to a deterministic public key.
+        _check_dev_env("--dev-allow-unsigned")
 
     signing_keys_raw = os.environ.get("RECOTEM_SIGNING_KEYS", "").strip()
     if not signing_keys_raw and dev_allow_unsigned:

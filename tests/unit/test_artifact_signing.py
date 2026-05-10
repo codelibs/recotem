@@ -256,22 +256,59 @@ def test_module_matches_helper_without_trailing_dot() -> None:
 @pytest.mark.parametrize(
     "module",
     [
-        "numpy.foo",
+        # numpy._core.* — numpy 2.x reconstruction helpers
         "numpy._core.multiarray",
         "numpy._core.numeric",
-        "numpy.dtypes",
-        "numpy.fft",
-        "numpy.linalg",
-        "numpy.random",
+        "numpy._core.fromnumeric",
+        # numpy.core.* — numpy 1.x reconstruction helpers (forward-compat)
+        "numpy.core.multiarray",
+        "numpy.core.numeric",
+        # numpy.dtypes.* — parametric dtype factories
+        "numpy.dtypes.Float64DType",
+        "numpy.dtypes.BoolDType",
     ],
 )
 def test_module_prefix_allow_numpy_subpaths(module: str) -> None:
-    """numpy sub-modules are allowed unless they fall under a denied prefix."""
+    """numpy reconstruction-helper / dtype submodules are allowed via prefix.
+
+    The prefix list is intentionally narrow: only ``numpy._core.``,
+    ``numpy.core.`` and ``numpy.dtypes.`` are allowed.  Other numpy
+    submodules (``numpy.fft``, ``numpy.linalg``, ``numpy.random``,
+    ``numpy.foo`` …) are NOT permitted via the prefix list — see
+    :func:`test_module_prefix_rejects_other_numpy_submodules`.
+    """
     from recotem.artifact.signing import _is_allowed
 
     # Use an innocuous name that is not in _ALLOWED_CLASSES so we exercise
     # the prefix path only (not the exact-match path).
     assert _is_allowed(module, "_reconstruct") is True
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        # Top-level numpy (bare module) is NOT on the prefix list —
+        # the legitimate top-level FQCNs (numpy.ndarray, numpy.dtype) are
+        # pinned by the hand-enumerated _ALLOWED_CLASSES set instead, so
+        # `numpy.frompyfunc`, `numpy.vectorize`, `numpy.piecewise` and the
+        # like are blocked.
+        "numpy",
+        # Other numpy submodules outside the narrow allow-list.
+        "numpy.foo",
+        "numpy.fft",
+        "numpy.linalg",
+        "numpy.random",
+        "numpy.polynomial",
+    ],
+)
+def test_module_prefix_rejects_other_numpy_submodules(module: str) -> None:
+    """numpy submodules outside numpy._core / numpy.core / numpy.dtypes are
+    not whitelisted via the prefix list — only an exact FQCN match in
+    ``_ALLOWED_CLASSES`` lets a name through.
+    """
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed(module, "_some_helper") is False
 
 
 def test_module_prefix_deny_numpy_lib_overrides_allow() -> None:
@@ -295,16 +332,56 @@ def test_module_prefix_deny_numpy_compat() -> None:
 @pytest.mark.parametrize(
     "module",
     [
-        "scipy.sparse.foo",
-        "scipy.sparse._compressed",
-        "scipy.sparse._data_matrix",
+        # Only scipy.sparse._csr / _csc / _coo and submodules are allowed.
+        "scipy.sparse._csr",
+        "scipy.sparse._csc",
+        "scipy.sparse._coo",
     ],
 )
-def test_module_prefix_allow_scipy_sparse_subpaths(module: str) -> None:
-    """scipy.sparse sub-modules are allowed via the prefix allow-list."""
+def test_module_prefix_rejects_scipy_sparse_bare_submodules(module: str) -> None:
+    """The narrow prefix list permits only ``scipy.sparse._{csr,csc,coo}.``
+    *children*; the modules themselves require an exact FQCN match in
+    ``_ALLOWED_CLASSES``.  ``scipy.sparse`` (bare) and other submodules
+    such as ``_compressed`` / ``_data_matrix`` / ``foo`` are rejected.
+    """
     from recotem.artifact.signing import _is_allowed
 
-    assert _is_allowed(module, "some_internal") is True
+    # Bare modules: rejected (only their FQCN entries pass)
+    assert _is_allowed(module, "_some_helper") is False
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        # children of the narrow allow-prefixes are accepted via prefix
+        "scipy.sparse._csr.foo",
+        "scipy.sparse._csc.bar",
+        "scipy.sparse._coo.baz",
+    ],
+)
+def test_module_prefix_allow_scipy_sparse_csr_csc_coo_children(module: str) -> None:
+    """Children of the narrow scipy.sparse._{csr,csc,coo}. prefixes pass."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed(module, "_internal_helper") is True
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        # scipy.sparse bare module — must NOT be accepted (was accidentally
+        # accepted by the previous broad ``scipy.sparse.*`` prefix).
+        "scipy.sparse",
+        "scipy.sparse._compressed",
+        "scipy.sparse._data_matrix",
+        "scipy.sparse.foo",
+    ],
+)
+def test_module_prefix_rejects_other_scipy_sparse_submodules(module: str) -> None:
+    """Other scipy.sparse submodules not in {_csr, _csc, _coo} are rejected."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed(module, "_some") is False
 
 
 def test_module_prefix_deny_scipy_sparse_linalg() -> None:
@@ -593,3 +670,194 @@ def test_kid_bytes_tampered_rejected() -> None:
             payload,
             hdr.hmac_digest,
         )
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-1: top-level numpy / scipy.sparse gadgets that the OLD broad prefix
+# would have allowed but the NEW narrow prefix rejects.  These are not used by
+# Recotem artifacts but they have callable / file-IO surface area which would
+# otherwise sit inside the secondary defence-in-depth perimeter.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "module,name",
+    [
+        # numpy: callable proxies + ufunc factories.  Not in any release of
+        # numpy ever needed for recotem artifacts.
+        ("numpy", "frompyfunc"),
+        ("numpy", "vectorize"),
+        ("numpy", "piecewise"),
+        # scipy.sparse top-level helpers (file-IO; reads attacker-controlled
+        # bytes from disk through scipy's own loader path).
+        ("scipy.sparse", "load_npz"),
+        ("scipy.sparse", "save_npz"),
+    ],
+)
+def test_safe_unpickler_rejects_topmodule_gadgets(module: str, name: str) -> None:
+    """Top-level numpy / scipy.sparse gadgets that are NOT in the FQCN
+    allow-list must be rejected.  The hand-enumerated FQCN list pins the
+    legitimate top-level entries (numpy.ndarray / numpy.dtype) — anything
+    else lands on the prefix path and is denied because the narrow prefix
+    list only covers submodules such as ``numpy._core.`` / ``numpy.core.`` /
+    ``numpy.dtypes.`` / ``scipy.sparse._{csr,csc,coo}.``
+    """
+    import io
+
+    from recotem.artifact.signing import SafeUnpickler, _is_allowed
+
+    # Exact-prefix path
+    assert _is_allowed(module, name) is False
+
+    # End-to-end via SafeUnpickler.find_class (the GLOBAL hook used by every
+    # REDUCE opcode in the unpickler — confirms the rejection happens at the
+    # actual load-time hook, not just the helper).
+    unpickler = SafeUnpickler(io.BytesIO(b""))
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickler.find_class(module, name)
+
+
+def test_safe_unpickler_rejects_numpy_random() -> None:
+    """numpy.random is no longer accepted via prefix; bit-generators expose
+    a rich state-restoration API that does not need to be unpicklable in
+    Recotem artifacts.
+    """
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("numpy.random", "PCG64") is False
+    assert _is_allowed("numpy.random._pickle", "__bit_generator_ctor") is False
+
+
+def test_module_prefix_allows_numpy_core_reconstruct() -> None:
+    """Both numpy 1.x (``numpy.core.multiarray._reconstruct``) and numpy 2.x
+    (``numpy._core.multiarray._reconstruct``) reconstruction helpers are
+    allowed — they are the entry points every ndarray pickle goes through.
+    """
+    from recotem.artifact.signing import _is_allowed
+
+    # FQCN exact match (also covered by the prefix path)
+    assert _is_allowed("numpy.core.multiarray", "_reconstruct") is True
+    assert _is_allowed("numpy._core.multiarray", "_reconstruct") is True
+    assert _is_allowed("numpy.core.multiarray", "scalar") is True
+    assert _is_allowed("numpy._core.multiarray", "scalar") is True
+
+
+def test_module_prefix_allows_scipy_sparse_reconstructors() -> None:
+    """The CSR / CSC / COO matrix classes load through the FQCN allow-list."""
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed("scipy.sparse._csr", "csr_matrix") is True
+    assert _is_allowed("scipy.sparse._csc", "csc_matrix") is True
+    assert _is_allowed("scipy.sparse._coo", "coo_matrix") is True
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL-5: FQCN allow-list violation via real I/O path
+# ---------------------------------------------------------------------------
+# These tests build a signed artifact whose payload contains a disallowed class
+# and verify that unpickle_payload propagates ArtifactError.
+
+
+def _build_disallowed_artifact(disallowed_module: str, disallowed_name: str) -> bytes:
+    """Build a signed artifact whose payload embeds a reference to a disallowed class.
+
+    The HMAC is computed over valid kid||header||payload bytes so HMAC
+    verification passes.  The disallowed-class guard must fire during
+    unpickle_payload, not during HMAC verification.
+    """
+    import hmac as _hmac
+    import json
+    import struct
+
+    from recotem.artifact.format import FORMAT_VERSION, MAGIC
+
+    # Build a minimal pickle opcode stream that references the disallowed FQCN.
+    # SafeUnpickler.find_class raises ArtifactError before any import/execution.
+    GLOBAL_OPCODE = b"c"
+    STOP_OPCODE = b"."
+    PROTO_OPCODE = b"\x80\x04"
+    FRAME_OPCODE = b"\x95"
+
+    global_body = (
+        GLOBAL_OPCODE
+        + disallowed_module.encode("utf-8")
+        + b"\n"
+        + disallowed_name.encode("utf-8")
+        + b"\n"
+        + STOP_OPCODE
+    )
+    payload_bytes = (
+        PROTO_OPCODE + FRAME_OPCODE + struct.pack("<Q", len(global_body)) + global_body
+    )
+
+    kid = "active"
+    kid_bytes = kid.encode("utf-8")
+    key_bytes = bytes.fromhex(ACTIVE_KEY_HEX)
+    header_dict = {
+        "recipe_name": "disallowed_fqcn_test",
+        "best_class": disallowed_name,
+        "best_score": 0.0,
+        "trained_at": "2026-01-01T00:00:00Z",
+    }
+    header_json = json.dumps(header_dict, separators=(",", ":")).encode("utf-8")
+
+    h = _hmac.new(key_bytes, digestmod="sha256")
+    h.update(kid_bytes)
+    h.update(header_json)
+    h.update(payload_bytes)
+    digest = h.digest()
+
+    kid_len = len(kid_bytes)
+    header_len = len(header_json)
+
+    parts: list[bytes] = [
+        MAGIC,
+        struct.pack("<HH", FORMAT_VERSION, 0),
+        bytes([kid_len]),
+        kid_bytes,
+        digest,
+        struct.pack("<I", header_len),
+        header_json,
+        payload_bytes,
+    ]
+    return b"".join(parts)
+
+
+@pytest.mark.parametrize(
+    "disallowed_module,disallowed_name",
+    [
+        ("os", "system"),
+        ("subprocess", "Popen"),
+        ("builtins", "exec"),
+    ],
+)
+def test_disallowed_fqcn_in_real_artifact_raises_artifact_error_on_unpack(
+    disallowed_module: str,
+    disallowed_name: str,
+    tmp_path,
+) -> None:
+    """A signed artifact containing a disallowed FQCN must raise ArtifactError
+    when unpickle_payload is called after HMAC verification passes.
+
+    Verifies the full I/O path:
+    1. _build_disallowed_artifact -> valid signed bytes with disallowed payload
+    2. read_artifact -> parses header + HMAC-verifies (must PASS)
+    3. unpickle_payload(payload_bytes) -> must raise ArtifactError
+    """
+    from recotem.artifact.format import ArtifactError
+    from recotem.artifact.io import read_artifact
+    from recotem.artifact.signing import KeyRing, unpickle_payload
+
+    artifact_bytes = _build_disallowed_artifact(disallowed_module, disallowed_name)
+    artifact_path = tmp_path / "disallowed.recotem"
+    artifact_path.write_bytes(artifact_bytes)
+
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    # HMAC verification must pass (the artifact is correctly signed)
+    header, payload_bytes = read_artifact(str(artifact_path), kr)
+    assert header.kid == "active"
+
+    # Deserialization must be refused by the allow-list
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickle_payload(payload_bytes)

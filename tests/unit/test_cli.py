@@ -537,3 +537,357 @@ def test_serve_smoke_starts_and_responds_to_health(tmp_path: Path, monkeypatch) 
     client = TestClient(app_instance)
     response = client.get("/health")
     assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-4: recotem inspect --dev-allow-unsigned must be gated by RECOTEM_ENV
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_dev_allow_unsigned_requires_dev_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``recotem inspect --dev-allow-unsigned`` must refuse to run when
+    RECOTEM_ENV is unset (i.e. production).
+
+    Train and serve already gate ``--dev-allow-unsigned`` behind
+    ``_check_dev_env`` (RECOTEM_ENV=development), but inspect previously
+    let the flag through unconditionally.  An operator who passed the
+    flag against a production artifact would silently fall back to a
+    deterministic, public dev key, which would still verify because the
+    dev key is universally known.
+    """
+    from tests.conftest import build_raw_artifact
+
+    artifact_path = tmp_path / "model.recotem"
+    import pickle  # noqa: S403
+
+    payload = pickle.dumps({"x": 1}, protocol=4)  # noqa: S301
+    # Sign the artifact with the well-known dev key so it would normally
+    # verify under --dev-allow-unsigned.
+    dev_key_hex = "0" * 64
+    data = build_raw_artifact(
+        kid="dev",
+        key_hex=dev_key_hex,
+        header_dict={"recipe_name": "cli_test"},
+        payload_bytes=payload,
+    )
+    artifact_path.write_bytes(data)
+
+    monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
+    monkeypatch.delenv("RECOTEM_ENV", raising=False)
+
+    result = runner.invoke(app, ["inspect", str(artifact_path), "--dev-allow-unsigned"])
+    assert result.exit_code == 2, (
+        f"--dev-allow-unsigned must exit with _EXIT_RECIPE (2) when "
+        f"RECOTEM_ENV is unset; got {result.exit_code}.  "
+        f"Output: {result.output!r}"
+    )
+    combined = result.output + (result.stderr if result.stderr else "")
+    assert "RECOTEM_ENV=development" in combined, (
+        f"Error message must mention RECOTEM_ENV requirement.  Got: {combined!r}"
+    )
+
+
+def test_inspect_dev_allow_unsigned_blocked_in_production(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Same as above, but with RECOTEM_ENV explicitly set to 'production'.
+
+    Any value other than 'development' must trigger the gate.
+    """
+    from tests.conftest import build_raw_artifact
+
+    artifact_path = tmp_path / "model.recotem"
+    import pickle  # noqa: S403
+
+    payload = pickle.dumps({"x": 1}, protocol=4)  # noqa: S301
+    data = build_raw_artifact(
+        kid="dev",
+        key_hex="0" * 64,
+        header_dict={"recipe_name": "cli_test"},
+        payload_bytes=payload,
+    )
+    artifact_path.write_bytes(data)
+
+    monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
+    monkeypatch.setenv("RECOTEM_ENV", "production")
+
+    result = runner.invoke(app, ["inspect", str(artifact_path), "--dev-allow-unsigned"])
+    assert result.exit_code == 2
+    combined = result.output + (result.stderr if result.stderr else "")
+    assert "RECOTEM_ENV=development" in combined
+
+
+def test_inspect_dev_allow_unsigned_works_in_development(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When RECOTEM_ENV=development, ``recotem inspect --dev-allow-unsigned``
+    must continue to function: an artifact signed with the dev key verifies
+    successfully and the header JSON is printed.
+    """
+    from tests.conftest import build_raw_artifact
+
+    artifact_path = tmp_path / "model.recotem"
+    import pickle  # noqa: S403
+
+    payload = pickle.dumps({"x": 1}, protocol=4)  # noqa: S301
+    data = build_raw_artifact(
+        kid="dev",
+        key_hex="0" * 64,
+        header_dict={"recipe_name": "cli_test"},
+        payload_bytes=payload,
+    )
+    artifact_path.write_bytes(data)
+
+    monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
+    monkeypatch.setenv("RECOTEM_ENV", "development")
+
+    result = runner.invoke(app, ["inspect", str(artifact_path), "--dev-allow-unsigned"])
+    assert result.exit_code == 0, (
+        f"--dev-allow-unsigned in development must succeed; output: {result.output!r}"
+    )
+    assert "HMAC: OK" in result.output
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-11: SSRF via recotem train full CLI flow — DataSourceError (exit 3)
+# ---------------------------------------------------------------------------
+
+
+def test_train_ssrf_private_ip_source_exits_7(tmp_path: Path, monkeypatch) -> None:
+    """recotem train with an http source pointing to a private IP must exit 7.
+
+    The SSRF guard fires inside the CSV source's fetch.  ``DataSourceError``
+    wraps the underlying ``HttpFetchError`` via ``raise ... from exc``;
+    ``_map_exception_to_exit`` walks ``__cause__`` so the canonical exit
+    code (7) is preserved for CronJob retry semantics.
+    """
+    sha256_placeholder = "0" * 64
+    recipe_content = f"""\
+name: ssrf_test
+source:
+  type: csv
+  path: http://10.0.0.1/data.csv
+  sha256: "{sha256_placeholder}"
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {tmp_path / "out.recotem"}
+  versioning: always_overwrite
+"""
+    yaml_path = tmp_path / "ssrf_recipe.yaml"
+    yaml_path.write_text(recipe_content)
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
+
+    result = runner.invoke(app, ["train", str(yaml_path)])
+    assert result.exit_code == 7, (
+        f"Private IP HTTP source must exit 7 (HttpFetchError, even when "
+        f"wrapped in DataSourceError); got {result.exit_code}. "
+        f"Output: {result.output}"
+    )
+
+
+def test_train_ssrf_loopback_source_exits_7(tmp_path: Path, monkeypatch) -> None:
+    """recotem train with a loopback-IP source also exits 7 via __cause__ walk."""
+    sha256_placeholder = "0" * 64
+    recipe_content = f"""\
+name: ssrf_loopback
+source:
+  type: csv
+  path: http://127.0.0.1:1/data.csv
+  sha256: "{sha256_placeholder}"
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {tmp_path / "out.recotem"}
+  versioning: always_overwrite
+"""
+    yaml_path = tmp_path / "ssrf_loop_recipe.yaml"
+    yaml_path.write_text(recipe_content)
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
+
+    result = runner.invoke(app, ["train", str(yaml_path)])
+    assert result.exit_code == 7, (
+        f"Loopback source must exit 7 (HttpFetchError); got {result.exit_code}"
+    )
+
+
+def test_map_exception_to_exit_walks_cause_chain_for_http_fetch_error() -> None:
+    """A DataSourceError wrapping HttpFetchError must map to exit 7, not 3.
+
+    This pins the contract that ``_map_exception_to_exit`` walks the
+    ``__cause__`` chain so that CronJob ``restartPolicy: OnFailure`` based on
+    exit code (3 = structural data-source failure, 7 = transient network)
+    keeps working when datasource layers wrap network errors.
+    """
+    from recotem._http_fetch import HttpFetchError
+    from recotem.cli import _EXIT_HTTP_FETCH, _map_exception_to_exit
+    from recotem.datasource.base import DataSourceError
+
+    inner = HttpFetchError("private IP refused")
+    try:
+        raise DataSourceError("wrapped fetch failure") from inner
+    except DataSourceError as exc:
+        wrapped = exc
+
+    assert _map_exception_to_exit(wrapped) == _EXIT_HTTP_FETCH
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-6: --dev-allow-unsigned serve - gating in prod env
+# ---------------------------------------------------------------------------
+
+
+def test_serve_dev_allow_unsigned_refused_in_production(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """serve --dev-allow-unsigned must fail when RECOTEM_ENV != 'development'."""
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_ENV", "production")
+
+    result = runner.invoke(
+        app,
+        [
+            "serve",
+            "--recipes",
+            str(recipes_dir),
+            "--dev-allow-unsigned",
+            "--i-understand-this-loads-arbitrary-code",
+            "--insecure-no-auth",
+        ],
+    )
+    assert result.exit_code != 0, (
+        f"--dev-allow-unsigned in production must fail; got {result.exit_code}"
+    )
+
+
+def test_serve_dev_allow_unsigned_allowed_in_development_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """create_app with dev_allow_unsigned=True in development env must not raise."""
+    from fastapi.testclient import TestClient
+
+    from recotem.config import ServeConfig
+    from recotem.serving.app import create_app
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_ENV", "development")
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = f"active:{ACTIVE_KEY_HEX}"
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.dev_allow_unsigned = True
+    cfg.allowed_hosts = ["testserver", "*"]
+
+    app_instance = create_app(cfg)
+    client = TestClient(app_instance)
+    response = client.get("/health")
+    assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-10: JSON log format end-to-end
+# ---------------------------------------------------------------------------
+
+
+def test_train_json_log_format_stderr_is_valid_json(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When RECOTEM_LOG_FORMAT=json, recotem train writes valid JSON lines to stderr.
+
+    Tests via subprocess so we can capture real stderr output (CliRunner
+    captures stdout/stderr together and does not exercise the real log pipeline).
+    We also verify the redaction processor is in effect: the API key value
+    must not appear in any log line.
+    """
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path as _Path
+
+    venv_bin = _Path(sys.executable).parent
+    recotem_bin = str(venv_bin / "recotem")
+
+    # Build a recipe that fails at data loading (CSV not found) so we get at
+    # least one log line from the pipeline before the error exit.
+    missing_csv = tmp_path / "does_not_exist.csv"
+    artifact_path = tmp_path / "json_test.recotem"
+    yaml_path = tmp_path / "json_log_recipe.yaml"
+    yaml_path.write_text(f"""
+name: json_log_test
+source:
+  type: csv
+  path: {missing_csv}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {artifact_path}
+""")
+
+    api_key_entry = f"kid1:sha256:{'0' * 64}"
+
+    import os
+
+    env = {**os.environ}
+    env["RECOTEM_LOG_FORMAT"] = "json"
+    env["RECOTEM_SIGNING_KEYS"] = f"active:{ACTIVE_KEY_HEX}"
+    env["RECOTEM_API_KEYS"] = api_key_entry
+    env.pop("RECOTEM_HTTP_ALLOW_PRIVATE", None)
+
+    result = subprocess.run(
+        [recotem_bin, "train", str(yaml_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    # exit code != 0 expected (bad recipe)
+    assert result.returncode != 0
+
+    # Structlog JSON lines always start with '{' (JSON objects).
+    # Lines that start with other characters are typer.echo() messages (plain text
+    # error summaries written by _exit()), not log records — exclude those.
+    json_lines = [
+        line
+        for line in result.stderr.splitlines()
+        if line.strip() and line.strip().startswith("{")
+    ]
+    assert json_lines, (
+        f"Expected at least one JSON log line on stderr; got: {result.stderr!r}"
+    )
+
+    parse_errors = []
+    for line in json_lines:
+        try:
+            json.loads(line)
+        except json.JSONDecodeError as e:
+            parse_errors.append(f"Line not valid JSON: {line!r}: {e}")
+
+    assert not parse_errors, "\n".join(parse_errors[:5])
+
+    # The API key hash (hex64) must not appear in any log line
+    api_key_hash = "0" * 64  # what we put in RECOTEM_API_KEYS
+    for line in json_lines:
+        assert api_key_hash not in line, f"API key hash found in log line: {line!r}"

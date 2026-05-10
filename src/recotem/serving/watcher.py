@@ -282,6 +282,20 @@ class ArtifactWatcher(threading.Thread):
                 artifact_path = recipe.output.path
                 state = _RecipeWatchState(recipe=recipe, artifact_path=artifact_path)
                 self._states[recipe.name] = state
+                # Insert a stub entry BEFORE attempting the load so that if
+                # the load fails, _record_load_failure → set_load_error finds
+                # a registered entry and the failure is visible in /health.
+                stub = ModelEntry(
+                    name=recipe.name,
+                    recommender=None,
+                    header={},
+                    kid="",
+                    metadata_df=None,
+                    last_load_error=None,
+                    artifact_path=artifact_path,
+                    loaded=False,
+                )
+                self._registry.replace(recipe.name, stub)
                 self._load_recipe(recipe.name, state, force=True)
 
         for gone in current_names - found_names:
@@ -324,9 +338,19 @@ class ArtifactWatcher(threading.Thread):
                     continue
 
                 if marker is None:
+                    # Artifact file is missing or stat failed.  Record the
+                    # failure unconditionally so /health reflects the problem.
+                    # The stale model (if any) stays in memory and keeps serving
+                    # — we do NOT flip loaded=False — so hot-swap resumes when
+                    # the file reappears.  Only emit the log on the first
+                    # transition to avoid log spam on repeated missing polls.
                     entry = self._registry.get(name)
                     if entry is not None and entry.last_load_error is None:
                         logger.warning("artifact_disappeared", name=name)
+                    self._registry.set_load_error(
+                        name, "artifact missing or unreadable"
+                    )
+                    _metrics.inc_artifact_load_failure(name)
                     continue
 
                 if marker == state.last_marker:

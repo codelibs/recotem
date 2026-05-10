@@ -115,6 +115,12 @@ spec:
                 {{- end }}
                 - name: tmp
                   mountPath: /tmp
+                # /workspace is the Dockerfile WORKDIR and the process cwd.
+                # readOnlyRootFilesystem=true forbids writes to the container root
+                # filesystem, so this emptyDir provides a writable cwd for lock
+                # files and any tooling that creates temp files relative to cwd.
+                - name: workspace
+                  mountPath: /workspace
 
           volumes:
             - name: recipes
@@ -136,6 +142,8 @@ spec:
                 claimName: {{ .Values.artifacts.pvc.claimName }}
             {{- end }}
             - name: tmp
+              emptyDir: {}
+            - name: workspace
               emptyDir: {}
 
           {{- with .Values.nodeSelector }}

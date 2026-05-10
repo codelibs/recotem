@@ -201,10 +201,15 @@ serviceAccount:
   annotations: {}
 
 # ── PodDisruptionBudget ───────────────────────────────────────────────────────
+# IMPORTANT: Production deployments with replicaCount > 1 should set
+# pdb.enabled: true to prevent all replicas being evicted simultaneously
+# during node drain or rolling upgrades.  The default is false only for
+# compatibility with single-replica development installs.
 pdb:
   enabled: false
   minAvailable: 1
-  # maxUnavailable: 1  (use either minAvailable or maxUnavailable, not both)
+  # maxUnavailable: 1  (use either minAvailable or maxUnavailable, not both;
+  #                     setting both causes a chart render error)
 
 # ── HorizontalPodAutoscaler ───────────────────────────────────────────────────
 hpa:
@@ -220,3 +225,27 @@ networkPolicy:
   # Labels that identify pods allowed to reach the serve Deployment (e.g. ingress controller).
   ingressFromPodSelector: {}
   #   app.kubernetes.io/name: ingress-nginx
+
+  # allowKubeletProbes: when true (default), an extra ingress rule is added
+  # that opens the probe port (service.targetPort) to any source (from: []).
+  # This is required because kubelet health checks originate from the node
+  # network, not from a pod, so podSelector-based rules cannot match them.
+  # Without this, readiness/liveness probes are silently dropped by the
+  # NetworkPolicy and pods are eventually killed or removed from Endpoints.
+  #
+  # Set to false only if you have a separate NetworkPolicy or admission
+  # mechanism that already allows node-originating probe traffic, or if you
+  # restrict probe origins via kubeletCIDRs below.
+  allowKubeletProbes: true
+
+  # kubeletCIDRs: optional list of node CIDRs from which kubelet probes
+  # originate.  When non-empty and allowKubeletProbes=true, probe ingress is
+  # restricted to these blocks instead of any source (from: []).
+  # Leave empty to allow probes from any source (safe behind a NetworkPolicy
+  # that already limits egress from untrusted pods).
+  # Example:
+  #   kubeletCIDRs:
+  #     - "10.0.0.0/8"
+  #     - "172.16.0.0/12"
+  #     - "192.168.0.0/16"
+  kubeletCIDRs: []

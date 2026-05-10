@@ -133,3 +133,78 @@ def test_get_source_class_unknown_type_raises() -> None:
             registry.get_source_class("does_not_exist_xyz")
     finally:
         registry.get_source_types.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-9: entry_points ep.load() ImportError — graceful vs fatal behaviour
+# ---------------------------------------------------------------------------
+# The implementation raises DataSourceError (fatal) when ep.load() fails.
+# This test pins that behaviour so a regression (silently skipping the broken
+# plugin) is immediately caught.
+
+
+def test_plugin_ep_load_failure_raises_datasource_error() -> None:
+    """When ep.load() raises ImportError, get_source_types must raise DataSourceError.
+
+    The implementation is FATAL on load failure (not graceful/silent-skip):
+    it is better to fail loudly at startup than to silently omit a plugin the
+    operator configured, which would cause mysterious 'unknown type' errors later.
+
+    This test pins that fatal behaviour so a future refactor to 'graceful skip'
+    is an explicit, reviewed decision.
+    """
+    ep = MagicMock()
+    ep.name = "broken_plugin"
+    ep.value = "some.module:BrokenSource"
+    ep.load.side_effect = ImportError("missing dependency: install broken-extras")
+
+    with patch("recotem.datasource.registry.entry_points", return_value=[ep]):
+        from recotem.datasource import registry
+
+        registry.get_source_types.cache_clear()
+        try:
+            with pytest.raises(
+                DataSourceError, match="Failed to load DataSource plugin"
+            ):
+                registry.get_source_types()
+        finally:
+            registry.get_source_types.cache_clear()
+
+
+def test_plugin_ep_load_failure_error_message_includes_plugin_name() -> None:
+    """The DataSourceError message for a failed ep.load() includes the plugin name."""
+    ep = MagicMock()
+    ep.name = "myspecialplugin"
+    ep.value = "my.module:MySource"
+    ep.load.side_effect = ModuleNotFoundError("no module named 'my'")
+
+    with patch("recotem.datasource.registry.entry_points", return_value=[ep]):
+        from recotem.datasource import registry
+
+        registry.get_source_types.cache_clear()
+        try:
+            with pytest.raises(DataSourceError) as exc_info:
+                registry.get_source_types()
+            assert "myspecialplugin" in str(exc_info.value), (
+                f"Error message must name the broken plugin; got: {exc_info.value!r}"
+            )
+        finally:
+            registry.get_source_types.cache_clear()
+
+
+def test_plugin_ep_load_raises_attribute_error_raises_datasource_error() -> None:
+    """An AttributeError from ep.load() (e.g. class not found) is also fatal."""
+    ep = MagicMock()
+    ep.name = "attr_error_plugin"
+    ep.value = "good.module:NonExistentClass"
+    ep.load.side_effect = AttributeError("module has no attribute 'NonExistentClass'")
+
+    with patch("recotem.datasource.registry.entry_points", return_value=[ep]):
+        from recotem.datasource import registry
+
+        registry.get_source_types.cache_clear()
+        try:
+            with pytest.raises(DataSourceError):
+                registry.get_source_types()
+        finally:
+            registry.get_source_types.cache_clear()

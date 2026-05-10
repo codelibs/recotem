@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import socket
+import ssl
 import urllib.error
 import urllib.request
 from urllib.parse import urlparse, urlunparse
@@ -81,19 +83,53 @@ def _is_address_internal(addr: ipaddress._BaseAddress) -> bool:
     Covers the SSRF risk surface: cloud metadata (169.254.169.254 link-local),
     internal services (10/8, 172.16/12, 192.168/16, fc00::/7), localhost, and
     multicast / unspecified ranges.
+
+    Also defends against IPv4-mapped IPv6 addresses (``::ffff:a.b.c.d``):
+    historically Python's ``ipaddress`` module classified these inconsistently
+    (e.g. ``::ffff:169.254.169.254`` returned ``False`` for
+    ``is_link_local``).  Recent Python versions delegate the relevant
+    properties to the mapped IPv4 address, but we re-check the unwrapped
+    IPv4 explicitly so the SSRF guard does not regress if stdlib semantics
+    flip again.  See MAJOR-3 in :doc:`/security`.
     """
-    return bool(
+    if bool(
         addr.is_private
         or addr.is_loopback
         or addr.is_link_local
         or addr.is_multicast
         or addr.is_reserved
         or addr.is_unspecified
-    )
+    ):
+        return True
+    # Defence-in-depth: re-check the unwrapped IPv4 address for
+    # IPv4-mapped IPv6 inputs (``::ffff:a.b.c.d``).
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        return bool(
+            mapped.is_private
+            or mapped.is_loopback
+            or mapped.is_link_local
+            or mapped.is_multicast
+            or mapped.is_reserved
+            or mapped.is_unspecified
+        )
+    return False
 
 
-def assert_host_public(url: str, *, allow_private: bool) -> None:
+def assert_host_public(url: str, *, allow_private: bool) -> str | None:
     """Raise :class:`HttpFetchError` if *url*'s host resolves to a private IP.
+
+    Returns the resolved IP that the connection should be pinned to — a
+    single one of the public IPs the hostname resolved to.  Callers feed
+    this into :func:`_open_with_pinned_ip` so that the actual TCP connect
+    bypasses a second DNS lookup, foreclosing the DNS-rebinding TOCTOU
+    where the first lookup returns a public IP and the second returns a
+    private one (e.g. cloud metadata).
+
+    Returns ``None`` when *allow_private* is True (no SSRF check, and no
+    pinning — the caller defers to the system resolver).  Returns ``None``
+    when *url*'s host is already a numeric IP that the caller can use
+    directly without re-resolving.
 
     No-op when *allow_private* is True — operators of internal-only
     deployments can opt in via ``RECOTEM_HTTP_ALLOW_PRIVATE=1``.
@@ -102,7 +138,7 @@ def assert_host_public(url: str, *, allow_private: bool) -> None:
     refusal over racing against a potentially-poisoned resolver.
     """
     if allow_private:
-        return
+        return None
     parsed = urlparse(url)
     host = parsed.hostname
     safe_url = redact_url_userinfo(url)
@@ -121,6 +157,12 @@ def assert_host_public(url: str, *, allow_private: bool) -> None:
                 f"(resolved to {addr}). Set RECOTEM_HTTP_ALLOW_PRIVATE=1 to "
                 "allow internal HTTP origins."
             )
+    # All resolved addresses are public; pin the first one for the actual
+    # TCP connect so a follow-up DNS lookup cannot rebind the hostname to
+    # a private IP between the SSRF check and the connect (MAJOR-2 / DNS
+    # rebinding TOCTOU).  We deliberately keep this scoped to a single
+    # request — no caching is shared across requests.
+    return str(addrs[0])
 
 
 _COMPRESSION_MAP: dict[str, str] = {
@@ -185,7 +227,120 @@ class _NoFollowRedirectHandler(urllib.request.HTTPRedirectHandler):
     http_error_308 = _passthrough  # type: ignore[assignment]
 
 
+# Default opener used when no IP-pin is in effect (i.e. when
+# RECOTEM_HTTP_ALLOW_PRIVATE=1 disables the SSRF check, or when the URL's
+# host is already a numeric IP literal).
 _NO_REDIRECT_OPENER = urllib.request.build_opener(_NoFollowRedirectHandler())
+
+
+# ---------------------------------------------------------------------------
+# IP-pinned opener (MAJOR-2: DNS rebinding TOCTOU mitigation)
+# ---------------------------------------------------------------------------
+#
+# Without pinning, urllib does its own DNS lookup inside the connect() call,
+# *independently* of our :func:`assert_host_public` check.  An attacker who
+# controls the authoritative DNS for a hostname can return a public IP to
+# the first lookup (passing the SSRF guard) and a private IP to the second
+# (the real connect), bypassing the guard entirely.
+#
+# Mitigation: once :func:`assert_host_public` has resolved the host and
+# confirmed every address is public, we feed the pinned IP into a custom
+# ``HTTPConnection`` / ``HTTPSConnection`` that connects to the pinned IP
+# directly.  The original hostname is preserved for the ``Host:`` header
+# and (for HTTPS) for SNI + TLS certificate validation, so the request is
+# indistinguishable from one that re-resolved correctly.
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection that connects to a pre-resolved IP, not via DNS.
+
+    The ``Host:`` header that urllib synthesises is built from
+    ``self.host``, which we keep set to the original hostname so the
+    upstream server still receives the right virtual-host header.  The
+    actual TCP connect targets the pinned IP.
+    """
+
+    def __init__(
+        self, host: str, *args: object, pinned_ip: str, **kwargs: object
+    ) -> None:
+        super().__init__(host, *args, **kwargs)  # type: ignore[arg-type]
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:  # type: ignore[override]
+        # Bypass the system resolver entirely: open the socket against the
+        # pinned IP rather than a freshly-resolved getaddrinfo result.
+        self.sock = socket.create_connection(
+            (self._pinned_ip, self.port),
+            timeout=self.timeout,
+            source_address=self.source_address,
+        )
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that connects to a pre-resolved IP, not via DNS.
+
+    Pins the TCP target to *pinned_ip* but keeps ``self.host`` equal to
+    the original hostname so SNI and certificate verification still
+    operate on the hostname the recipe author wrote.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        *args: object,
+        pinned_ip: str,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(host, *args, **kwargs)  # type: ignore[arg-type]
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:  # type: ignore[override]
+        # Open the raw TCP socket against the pinned IP.
+        sock = socket.create_connection(
+            (self._pinned_ip, self.port),
+            timeout=self.timeout,
+            source_address=self.source_address,
+        )
+        # Wrap in TLS using the *original* hostname so SNI + cert
+        # validation continue to use the hostname the recipe author
+        # specified (not the pinned IP).
+        ssl_context = self._context
+        self.sock = ssl_context.wrap_socket(sock, server_hostname=self.host)
+
+
+def _build_pinned_opener(pinned_ip: str) -> urllib.request.OpenerDirector:
+    """Return a urllib opener whose HTTP / HTTPS handlers connect to *pinned_ip*.
+
+    Each invocation builds a fresh opener — pin state is not shared across
+    requests.  The opener also installs :class:`_NoFollowRedirectHandler`
+    so :func:`fetch_http_bytes` keeps strict control of the redirect loop
+    (without the redirect-handler override urllib's default redirect chain
+    of up to 10 hops would silently be followed *before* our SSRF re-check
+    fires on the next hop).
+    """
+    pinned_ip_str = pinned_ip
+
+    class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):  # type: ignore[override]
+            def _builder(host: str, *a: object, **kw: object) -> _PinnedHTTPConnection:
+                return _PinnedHTTPConnection(host, *a, pinned_ip=pinned_ip_str, **kw)
+
+            return self.do_open(_builder, req)
+
+    class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req):  # type: ignore[override]
+            def _builder(host: str, *a: object, **kw: object) -> _PinnedHTTPSConnection:
+                # urllib passes a context= kwarg from the parent handler;
+                # forward it transparently.
+                return _PinnedHTTPSConnection(host, *a, pinned_ip=pinned_ip_str, **kw)
+
+            return self.do_open(_builder, req, context=ssl.create_default_context())
+
+    return urllib.request.build_opener(
+        _PinnedHTTPHandler(),
+        _PinnedHTTPSHandler(),
+        _NoFollowRedirectHandler(),
+    )
 
 
 def fetch_http_bytes(
@@ -236,7 +391,17 @@ def fetch_http_bytes(
 
         # SSRF guard: re-resolve and re-check on every hop so that a 302 to a
         # CNAME pointing into RFC1918 is refused, not just the original URL.
-        assert_host_public(current_url, allow_private=allow_private)
+        # The returned IP is pinned into the per-hop opener so urllib's own
+        # connect() does not perform a *second* DNS lookup that an attacker
+        # controlling the authoritative DNS could rebind to a private IP.
+        # See MAJOR-2: DNS rebinding TOCTOU mitigation.
+        pinned_ip = assert_host_public(current_url, allow_private=allow_private)
+
+        opener = (
+            _build_pinned_opener(pinned_ip)
+            if pinned_ip is not None
+            else _NO_REDIRECT_OPENER
+        )
 
         req = urllib.request.Request(
             current_url,
@@ -244,7 +409,7 @@ def fetch_http_bytes(
             method="GET",
         )
         try:
-            with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
+            with opener.open(req, timeout=timeout) as resp:
                 status = getattr(resp, "status", 200)
                 if status in (301, 302, 303, 307, 308):
                     location = resp.headers.get("Location")

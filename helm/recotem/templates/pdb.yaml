@@ -1,4 +1,7 @@
 {{- if .Values.pdb.enabled -}}
+{{- if and .Values.pdb.minAvailable .Values.pdb.maxUnavailable -}}
+{{- fail "pdb.minAvailable and pdb.maxUnavailable are mutually exclusive — set only one (see values.yaml comment)" -}}
+{{- end -}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

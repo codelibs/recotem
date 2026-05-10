@@ -49,6 +49,10 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        # fsGroup ensures mounted PVC files are owned by GID 1000 (appuser),
+        # matching the Dockerfile USER.  Without this, PVC data may be
+        # inaccessible when the volume's on-disk owner differs from runAsUser.
+        fsGroup: 1000
 
       containers:
         - name: serve
@@ -150,6 +154,11 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            # /workspace is the Dockerfile WORKDIR and the process cwd.
+            # readOnlyRootFilesystem=true forbids writes to the container root
+            # filesystem, so this emptyDir provides a writable cwd.
+            - name: workspace
+              mountPath: /workspace
 
       volumes:
         - name: recipes
@@ -159,4 +168,6 @@ spec:
           persistentVolumeClaim:
             claimName: recotem-artifacts
         - name: tmp
+          emptyDir: {}
+        - name: workspace
           emptyDir: {}

@@ -44,6 +44,95 @@ logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Exit-code mapping (mirrors cli._map_exception_to_exit without importing cli)
+# ---------------------------------------------------------------------------
+
+_EXIT_SUCCESS = 0
+_EXIT_UNKNOWN = 1
+_EXIT_RECIPE = 2
+_EXIT_DATASOURCE = 3
+_EXIT_TRAINING = 4
+_EXIT_ARTIFACT = 5
+_EXIT_LOCK_CONTESTED = 6
+_EXIT_HTTP_FETCH = 7
+_EXIT_CONFIG = 8
+
+
+def _map_exception_to_exit(exc: BaseException) -> int:
+    """Map a known exception type to its canonical exit code.
+
+    A training-side copy of the same mapping that lives in cli.py, so that
+    pipeline.py can include ``exit_code`` in ``train_error`` events without
+    importing the CLI module.
+    """
+    if (
+        isinstance(exc, TrainingError)
+        and getattr(exc, "code", "") == "signing_key_missing"
+    ):
+        return _EXIT_CONFIG
+
+    try:
+        from recotem.recipe.errors import RecipeError as _RecipeError  # noqa: PLC0415
+
+        if isinstance(exc, _RecipeError):
+            return _EXIT_RECIPE
+    except ImportError:
+        pass
+
+    # HTTP fetch errors are checked BEFORE DataSourceError so that a
+    # DataSourceError wrapping an HttpFetchError still maps to exit 7.
+    # CronJob retry semantics distinguish transient HTTP/SSRF failures (7)
+    # from structural data-source failures (3).
+    try:
+        from recotem._http_fetch import (
+            HttpFetchError as _HttpFetchError,  # noqa: PLC0415
+        )
+
+        cur: BaseException | None = exc
+        while cur is not None:
+            if isinstance(cur, _HttpFetchError):
+                return _EXIT_HTTP_FETCH
+            cur = cur.__cause__
+    except (ImportError, AttributeError):
+        pass
+
+    try:
+        from recotem.datasource.base import (
+            DataSourceError as _DataSourceError,  # noqa: PLC0415
+        )
+
+        if isinstance(exc, _DataSourceError):
+            return _EXIT_DATASOURCE
+    except ImportError:
+        pass
+
+    try:
+        from recotem.artifact.format import (
+            ArtifactError as _ArtifactError,  # noqa: PLC0415
+        )
+
+        if isinstance(exc, _ArtifactError):
+            return _EXIT_ARTIFACT
+    except ImportError:
+        pass
+
+    try:
+        from recotem.training.lock import (
+            LockContestedError as _LockContestedError,  # noqa: PLC0415
+        )
+
+        if isinstance(exc, _LockContestedError):
+            return _EXIT_LOCK_CONTESTED
+    except (ImportError, AttributeError):
+        pass
+
+    if isinstance(exc, TrainingError):
+        return _EXIT_TRAINING
+
+    return _EXIT_UNKNOWN
+
+
+# ---------------------------------------------------------------------------
 # Public result type
 # ---------------------------------------------------------------------------
 
@@ -222,6 +311,9 @@ def run_training(
         # emit code="internal_error" so operators can distinguish bugs from
         # expected failure modes when alerting on the code field.
         from recotem.training.errors import (
+            MinDataViolation as _MinDataViolation,  # noqa: PLC0415
+        )
+        from recotem.training.errors import (
             TrainingError as _TrainingError,  # noqa: PLC0415
         )
 
@@ -232,13 +324,33 @@ def run_training(
             error_code = "training_error"
         else:
             error_code = "internal_error"
+
+        exit_code = _map_exception_to_exit(exc)
+
+        # Build extra diagnostic fields for specific error types.
+        extra: dict[str, Any] = {}
+        if isinstance(exc, _MinDataViolation):
+            for attr in (
+                "n_rows",
+                "n_users",
+                "n_items",
+                "min_rows",
+                "min_users",
+                "min_items",
+            ):
+                val = getattr(exc, attr, None)
+                if val is not None:
+                    extra[attr] = val
+
         logger.error(
             "train_error",
             recipe=recipe.name,
             run_id=run_id,
             error=str(exc),
             code=error_code,
+            exit_code=exit_code,
             trained_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            **extra,
         )
         raise
 
@@ -359,6 +471,7 @@ def _run_training_locked(
             reporter=reporter,
             recipe_name=recipe.name,
             run_id=run_id,
+            metric=recipe.training.metric,
         )
 
     bound_logger.info(
@@ -540,7 +653,26 @@ def _cleanse(
     # 3. Parse time column if present.
     if time_col is not None and time_col in df.columns:
         try:
-            df[time_col] = pd.to_datetime(df[time_col], utc=True)
+            col_dtype = df[time_col].dtype
+            if pd.api.types.is_numeric_dtype(col_dtype):
+                # Numeric columns require an explicit time_unit to avoid
+                # silent ns-interpretation that maps Unix epoch seconds to
+                # dates near 1970-01-01 00:00:00 rather than their intended
+                # values.  See docs/recipe-reference.md.
+                time_unit = recipe.schema_.time_unit
+                if time_unit is None:
+                    raise TrainingError(
+                        f"time_column {time_col!r} contains numeric values but "
+                        "schema.time_unit is not set.  Specify time_unit ('s', "
+                        "'ms', 'us', or 'ns') to avoid silent nanosecond "
+                        "interpretation of Unix timestamps.",
+                        code="time_unit_required",
+                    )
+                df[time_col] = pd.to_datetime(df[time_col], unit=time_unit, utc=True)
+            else:
+                df[time_col] = pd.to_datetime(df[time_col], utc=True)
+        except TrainingError:
+            raise
         except Exception as exc:
             raise TrainingError(
                 f"Failed to parse time_column {time_col!r}: {exc}",
@@ -578,6 +710,9 @@ def _cleanse(
             n_rows=n_rows,
             n_users=n_users,
             n_items=n_items,
+            min_rows=cfg.min_rows,
+            min_users=cfg.min_users,
+            min_items=cfg.min_items,
         )
 
     return df, drop_count

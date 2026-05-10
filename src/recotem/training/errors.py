@@ -30,7 +30,7 @@ class TrainingError(Exception):
 class MinDataViolation(TrainingError):
     """Raised when the cleansed dataset is below configured minimum thresholds.
 
-    Carries observed counts for diagnostic output.
+    Carries observed counts and configured thresholds for diagnostic output.
     """
 
     code = "min_data_violation"
@@ -42,11 +42,17 @@ class MinDataViolation(TrainingError):
         n_rows: int | None = None,
         n_users: int | None = None,
         n_items: int | None = None,
+        min_rows: int | None = None,
+        min_users: int | None = None,
+        min_items: int | None = None,
     ) -> None:
         super().__init__(message, code="min_data_violation")
         self.n_rows = n_rows
         self.n_users = n_users
         self.n_items = n_items
+        self.min_rows = min_rows
+        self.min_users = min_users
+        self.min_items = min_items
 
 
 class SplitError(TrainingError):

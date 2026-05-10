@@ -168,8 +168,10 @@ def recipe_lock(
 
         yield True
 
-        fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
+        # os.close(fd) releases the flock automatically on POSIX; an explicit
+        # LOCK_UN call before close is redundant and opens an error window if
+        # the fd has already been invalidated.
         os.close(fd)
         with contextlib.suppress(OSError):
             lock_path.unlink(missing_ok=True)

@@ -140,6 +140,7 @@ def run_search(
     reporter: ProgressReporter,
     recipe_name: str,
     run_id: str,
+    metric: str = "ndcg",
 ) -> SearchResult:
     """Run an Optuna hyperparameter search and return the best result.
 
@@ -326,6 +327,20 @@ def run_search(
 
         return -score  # Optuna minimises; negate the metric
 
+    if parallelism > 1 and per_algorithm_trials:
+        logger.warning(
+            "per_algorithm_trials_budget_race",
+            recipe=recipe_name,
+            run_id=run_id,
+            parallelism=parallelism,
+            message=(
+                "per_algorithm_trials budget enforcement is approximate when "
+                "parallelism > 1: each algorithm's actual trial count may exceed "
+                "its configured budget by up to parallelism-1 trials due to "
+                "in-flight concurrent trials checking a shared study counter."
+            ),
+        )
+
     study.optimize(
         objective,
         n_trials=n_trials,
@@ -374,10 +389,25 @@ def run_search(
     best_score = -best_trial.value  # un-negate
 
     if best_score == 0.0:
-        raise ZeroScoreError(
-            f"Best score across {n_completed} completed trials is 0.0. "
-            "This may indicate too short a timeout or too small a validation set."
-        )
+        if metric == "hit":
+            # hit@k is legitimately 0 on small validation sets; warn but continue.
+            logger.warning(
+                "zero_score_hit_metric",
+                recipe=recipe_name,
+                run_id=run_id,
+                metric=metric,
+                n_completed=n_completed,
+                message=(
+                    "Best score is 0.0 for metric='hit'. This may be legitimate "
+                    "on small validation sets. The artifact will still be written. "
+                    "Consider increasing cutoff or validation set size."
+                ),
+            )
+        else:
+            raise ZeroScoreError(
+                f"Best score across {n_completed} completed trials is 0.0. "
+                "This may indicate too short a timeout or too small a validation set."
+            )
 
     return SearchResult(
         best_class_name=best_class_name,

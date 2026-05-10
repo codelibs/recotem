@@ -17,8 +17,9 @@ spec:
   # Note: an ingress rule with `from: []` matches ALL sources (Kubernetes
   # NetworkPolicy spec) — the opposite of deny-all. The canonical deny-all
   # form is `ingress: []` combined with policyTypes including Ingress.
-  {{- if .Values.networkPolicy.ingressFromPodSelector }}
+  {{- if or .Values.networkPolicy.ingressFromPodSelector .Values.networkPolicy.allowKubeletProbes }}
   ingress:
+    {{- if .Values.networkPolicy.ingressFromPodSelector }}
     - from:
         - podSelector:
             matchLabels:
@@ -26,8 +27,29 @@ spec:
       ports:
         - port: {{ .Values.service.targetPort }}
           protocol: TCP
+    {{- end }}
+    {{- if .Values.networkPolicy.allowKubeletProbes }}
+    # Kubelet health probes originate from the node network (not from a pod),
+    # so podSelector cannot match them.  This rule opens the probe port to
+    # the sources identified below so readiness/liveness checks are not
+    # silently dropped by the NetworkPolicy.
+    - {{- if .Values.networkPolicy.kubeletCIDRs }}
+      from:
+        {{- range .Values.networkPolicy.kubeletCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      {{- else }}
+      # No kubeletCIDRs specified — allow probes from any source.
+      # Restrict via networkPolicy.kubeletCIDRs if tighter control is needed.
+      {{- end }}
+      ports:
+        - port: {{ .Values.service.targetPort }}
+          protocol: TCP
+    {{- end }}
   {{- else }}
-  # No ingress pod selector configured — deny all inbound traffic.
+  # No ingress pod selector configured and allowKubeletProbes=false —
+  # deny all inbound traffic including kubelet probes.
   ingress: []
   {{- end }}
 

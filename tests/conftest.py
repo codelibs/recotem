@@ -60,6 +60,57 @@ def _allow_loopback_http_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "1")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_structlog_state(monkeypatch: pytest.MonkeyPatch):
+    """Prevent CLI-invocation tests from polluting structlog global state.
+
+    ``recotem.logging.configure_logging`` calls ``structlog.configure(...)`` with
+    ``cache_logger_on_first_use=True``.  Once invoked (e.g. via a CLI test that
+    runs ``recotem inspect``), every ``structlog.get_logger()`` proxy resolves
+    its underlying logger via the stdlib ``logging`` factory and caches it on
+    the proxy itself.  After this point ``structlog.testing.capture_logs()``
+    cannot intercept those cached loggers, breaking subsequent tests that rely
+    on capture_logs (e.g. ``tests/unit/test_serving_app.py``).
+
+    Two-pronged fix:
+    1. Replace ``configure_logging`` with a version that sets
+       ``cache_logger_on_first_use=False`` so each ``.info()`` re-resolves the
+       logger from the current config.  This still routes through the stdlib
+       LoggerFactory (so ``RECOTEM_LOG_FORMAT=json`` tests that parse stderr
+       lines keep working) but makes the configuration honour subsequent
+       ``capture_logs()`` context managers.
+    2. After each test, ``structlog.reset_defaults()`` and clear any per-proxy
+       ``_logger`` cache that survived from before the patch took effect.
+    """
+    import structlog
+
+    from recotem.logging import configure_logging as _real_configure_logging
+
+    def _no_cache_configure_logging(log_format: str = "auto") -> None:
+        _real_configure_logging(log_format)
+        # Override the module-level config with the same processors but with
+        # caching disabled so capture_logs() can intercept future calls.
+        cfg = structlog.get_config()
+        structlog.configure(
+            processors=cfg["processors"],
+            wrapper_class=cfg["wrapper_class"],
+            context_class=cfg["context_class"],
+            logger_factory=cfg["logger_factory"],
+            cache_logger_on_first_use=False,
+        )
+
+    monkeypatch.setattr(
+        "recotem.logging.configure_logging", _no_cache_configure_logging
+    )
+    monkeypatch.setattr(
+        "recotem.cli.configure_logging", _no_cache_configure_logging, raising=False
+    )
+
+    yield
+
+    structlog.reset_defaults()
+
+
 @pytest.fixture(scope="session")
 def signing_key_bytes() -> bytes:
     """Deterministic 32-byte signing key for 'active' kid."""

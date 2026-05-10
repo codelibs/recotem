@@ -109,7 +109,7 @@ output:
     assert out_path.stat().st_size > 0
 
 
-def test_http_csv_sha256_mismatch_train_exits_3(
+def test_http_csv_sha256_mismatch_train_exits_7(
     httpserver,
     tmp_path: Path,
     signing_env: str,  # noqa: ARG001
@@ -147,7 +147,12 @@ output:
         text=True,
         env=os.environ,
     )
-    assert proc.returncode == 3, (
-        f"expected exit 3 (DataSourceError), got {proc.returncode}:"
-        f"\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
+    # sha256 mismatch on a network-fetched source raises HttpFetchError
+    # (verify_sha256 lives in _http_fetch.py).  Even though the CSV source
+    # wraps it as DataSourceError, _map_exception_to_exit walks the
+    # __cause__ chain so the canonical exit code 7 is preserved for
+    # CronJob retry semantics.  See docs/operations.md exit-code table.
+    assert proc.returncode == 7, (
+        f"expected exit 7 (HttpFetchError, sha256 mismatch on network fetch), "
+        f"got {proc.returncode}:\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
     )

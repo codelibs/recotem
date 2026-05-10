@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 from recotem.artifact.signing import KeyRing
 from recotem.config import ServeConfig
+from recotem.serving import metrics as _metrics
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from recotem.serving.watcher import (
     ArtifactWatcher,
@@ -497,6 +498,162 @@ def test_watcher_picks_up_runtime_added_yaml(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # G2. Watcher marks error via registry.set_load_error on load failure
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-1: Newly-discovered recipe with bad artifact surfaces in /health
+# ---------------------------------------------------------------------------
+
+
+def test_new_recipe_bad_artifact_appears_in_health(tmp_path: Path) -> None:
+    """When the watcher discovers a new recipe whose artifact is invalid,
+    the registry must still contain an entry with loaded=False and a non-None
+    last_load_error so /health can surface the problem.
+
+    Previously _load_recipe would call _record_load_failure → set_load_error,
+    but no entry existed in the registry yet, so set_load_error returned False
+    and the failure was invisible.  The fix inserts a stub entry BEFORE
+    attempting the load.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    # Write an artifact that is intentionally corrupt
+    artifact_path = tmp_path / "bad_model.recotem"
+    artifact_path.write_bytes(b"this is not a valid artifact at all")
+
+    # Write the recipe YAML pointing at the corrupt artifact
+    _write_recipe_yaml(recipes_dir, "bad_new_recipe", artifact_path)
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    # Start watcher with empty initial states — will discover the YAML at runtime
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+    watcher.start()
+
+    # Wait for at least two poll ticks so the discovery and load attempt happen
+    deadline = time.monotonic() + 2.0
+    found_error = False
+    while time.monotonic() < deadline:
+        entry = registry.get("bad_new_recipe")
+        if entry is not None and entry.last_load_error is not None:
+            found_error = True
+            break
+        time.sleep(0.05)
+
+    watcher.stop()
+    watcher.join(timeout=2.0)
+
+    entry = registry.get("bad_new_recipe")
+    assert entry is not None, (
+        "Registry must contain an entry for the discovered recipe even on load failure"
+    )
+    assert not entry.loaded, "Entry must report loaded=False when initial load failed"
+    assert entry.last_load_error is not None, (
+        "last_load_error must be set so /health surfaces the failure"
+    )
+    assert found_error, "last_load_error must be set within 2 s of discovery"
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-2: Artifact disappearance surfaces in /health and increments metric
+# ---------------------------------------------------------------------------
+
+
+def test_artifact_disappearance_sets_last_load_error_and_increments_metric(
+    tmp_path: Path,
+) -> None:
+    """When a known artifact file is deleted, the next watcher poll must
+    call set_load_error so /health shows the problem, AND must increment
+    recotem_artifact_load_failures_total.
+
+    The stale model (loaded=True) must remain in the registry — the watcher
+    must NOT flip loaded=False so existing traffic continues while the file
+    is temporarily missing.
+    """
+    from unittest.mock import patch
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "vanishing.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "vanishing", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+
+    registry = ModelRegistry()
+    good_entry = _make_entry("vanishing")
+    good_entry.artifact_path = str(artifact_path)
+    # Manually clear last_load_error to establish "healthy" baseline
+    good_entry.last_load_error = None
+    registry.replace("vanishing", good_entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    initial_states = build_initial_states([recipe], {"vanishing": good_entry})
+
+    failure_count: list[int] = [0]
+    original_inc = _metrics.inc_artifact_load_failure
+
+    def _counting_inc(name: str) -> None:
+        if name == "vanishing":
+            failure_count[0] += 1
+        original_inc(name)
+
+    with patch.object(_metrics, "inc_artifact_load_failure", side_effect=_counting_inc):
+        watcher = ArtifactWatcher(
+            registry=registry,
+            recipes_dir=recipes_dir,
+            serve_config=cfg,
+            key_ring=kr,
+            initial_states=initial_states,
+        )
+        watcher.start()
+
+        # Give the watcher one tick with the file present so state is stable
+        time.sleep(0.15)
+
+        # Now delete the artifact
+        artifact_path.unlink()
+
+        # Wait for watcher to notice the disappearance
+        deadline = time.monotonic() + 2.0
+        error_set = False
+        while time.monotonic() < deadline:
+            entry = registry.get("vanishing")
+            if entry is not None and entry.last_load_error is not None:
+                error_set = True
+                break
+            time.sleep(0.05)
+
+        watcher.stop()
+        watcher.join(timeout=2.0)
+
+    entry = registry.get("vanishing")
+    assert entry is not None, "Entry must remain in registry after artifact disappears"
+    assert error_set, "last_load_error must be set within 2 s of file deletion"
+    assert entry.last_load_error is not None
+    assert (
+        "missing" in entry.last_load_error or "unreadable" in entry.last_load_error
+    ), (
+        f"last_load_error should mention 'missing' or 'unreadable': {entry.last_load_error!r}"
+    )
+    assert entry.loaded, (
+        "loaded flag must stay True (stale model keeps serving) after artifact disappears"
+    )
+    assert failure_count[0] >= 1, (
+        "inc_artifact_load_failure must be called at least once when artifact disappears"
+    )
 
 
 # ---------------------------------------------------------------------------

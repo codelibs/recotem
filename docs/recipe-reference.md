@@ -86,6 +86,7 @@ schema:
 | `user_column` | string | yes | Column name in the fetched DataFrame. |
 | `item_column` | string | yes | Column name in the fetched DataFrame. |
 | `time_column` | string | conditional | Required for `time_user` and `time_global` split schemes. |
+| `time_unit` | string | conditional | Required when `time_column` contains integer (numeric) values. One of `s`, `ms`, `us`, `ns`. Omitting this field for a numeric time column raises a `TrainingError` (`code: time_unit_required`) to avoid silent nanosecond interpretation of Unix timestamps. String and datetime columns are unaffected by this field. |
 
 ---
 
@@ -174,7 +175,7 @@ training:
 | `metric` | string | `ndcg` | One of `ndcg`, `map`, `recall`, `hit`. |
 | `cutoff` | int | `20` | Recommendation list length for evaluation (must be ≥ 1). |
 | `n_trials` | int | `40` | Total Optuna trial budget (must be ≥ 1). |
-| `per_algorithm_trials` | map | `null` | Per-algorithm trial overrides. **Explicit `0` disables that algorithm** (it is dropped from the search entirely). Algorithms in `algorithms` that are *unspecified* in this map split whatever budget remains after honouring the explicit values. If the explicit values sum to more than `n_trials`, positive values are scaled down proportionally (each remains ≥ 1 *when at least n_trials slots exist*; otherwise the first `n_trials` non-zero classes get one trial each and the remainder are skipped — the total budget never exceeds `n_trials`). Unknown algorithm keys are silently ignored. |
+| `per_algorithm_trials` | map | `null` | Per-algorithm trial overrides. **Explicit `0` disables that algorithm** (it is dropped from the search entirely). Algorithms in `algorithms` that are *unspecified* in this map split whatever budget remains after honouring the explicit values. If the explicit values sum to more than `n_trials`, positive values are scaled down proportionally (each remains ≥ 1 *when at least n_trials slots exist*; otherwise the first `n_trials` non-zero classes get one trial each and the remainder are skipped — the total budget never exceeds `n_trials`). **Unknown algorithm keys are rejected at recipe-load time with a ValidationError** — each key must be a valid alias or class name present in `algorithms`. When `parallelism > 1`, the actual per-algorithm trial count may exceed the configured budget by up to `parallelism - 1` trials due to in-flight concurrent trials; a warning is logged on each run where this condition applies. |
 | `per_trial_timeout_seconds` | int | `null` | Soft per-trial wall-clock cap. Implemented by running the trial in a worker thread; if it overshoots, Optuna prunes the trial but the underlying thread is daemonised and may continue until it finishes naturally (CPU/memory still spent). |
 | `timeout_seconds` | int | `null` | Overall tuning wall-clock cap. |
 | `parallelism` | int | `1` | Optuna `n_jobs` (Python threads, not processes). Algorithms whose hot loop is GIL-bound see little speed-up; native-code learners (IALS, RP3beta) benefit most. |

@@ -181,6 +181,105 @@ output:
 
 
 # ---------------------------------------------------------------------------
+# CRITICAL-2: query_parameters must never receive env expansion
+# ---------------------------------------------------------------------------
+
+
+def test_env_var_expansion_inside_query_parameters_not_expanded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Env expansion must NOT occur inside source.query_parameters values.
+
+    query_parameters carries user-supplied SQL parameters; expanding ${...}
+    there would permit SQL-injection via environment variables.
+    """
+    monkeypatch.setenv("RECOTEM_RECIPE_MYVAL", "injected_value")
+    content = """\
+name: qp_no_expand
+source:
+  type: bigquery
+  query: "SELECT * FROM my_table WHERE col = @param"
+  query_parameters:
+    - name: param
+      parameterType:
+        type: STRING
+      parameterValue:
+        value: "${RECOTEM_RECIPE_MYVAL}"
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: /tmp/qp.recotem
+"""
+    p = _write_recipe(tmp_path, content)
+    try:
+        recipe = load_recipe(p)
+        # If the recipe loaded, the query_parameters must NOT have been expanded:
+        # the literal "${RECOTEM_RECIPE_MYVAL}" must survive intact.
+        qp = recipe.source.query_parameters
+        if qp is not None:
+            import json as _json
+
+            # serialise to string to find the literal reference
+            qp_str = _json.dumps(qp) if not isinstance(qp, str) else qp
+            # The env var VALUE should not be present; the literal ${...} should be.
+            assert "injected_value" not in qp_str, (
+                "query_parameters must not be env-expanded; "
+                f"found injected value in: {qp_str!r}"
+            )
+    except RecipeError:
+        # Acceptable — bigquery may not be available; refusal is also correct.
+        pass
+
+
+def test_env_var_expansion_secret_pattern_in_query_parameters_not_expanded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A secret-pattern variable inside query_parameters must not cause RecipeError
+    (i.e. the blacklist check must NOT fire inside no-expand sections).
+
+    The _NO_EXPAND_KEYS guard must short-circuit expansion entirely —
+    including the blacklist check — so no RecipeError is raised for
+    ${RECOTEM_SIGNING_KEY} appearing inside query_parameters.
+    """
+    monkeypatch.setenv("RECOTEM_SIGNING_KEY", "secret-value")
+    content = """\
+name: qp_secret_key
+source:
+  type: bigquery
+  query: "SELECT 1"
+  query_parameters:
+    - name: k
+      parameterType:
+        type: STRING
+      parameterValue:
+        value: "${RECOTEM_SIGNING_KEY}"
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: /tmp/qp_secret.recotem
+"""
+    p = _write_recipe(tmp_path, content)
+    # Must NOT raise RecipeError with "blacklisted" — no expansion means no check.
+    # If bigquery source type causes failure for another reason, that's fine too.
+    try:
+        load_recipe(p)
+        # If we get here, the literal was preserved (no expansion, no blacklist error)
+    except RecipeError as exc:
+        # Must not be the blacklist error
+        assert "blacklisted" not in str(exc), (
+            f"query_parameters expansion guard must not fire the blacklist; got: {exc}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Path scheme — direction-aware policy
 # ---------------------------------------------------------------------------
 

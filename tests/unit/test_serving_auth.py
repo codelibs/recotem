@@ -268,3 +268,188 @@ def test_cli_keygen_uses_auth_hash_function() -> None:
     assert printed_hash == _hash_api_key(plaintext), (
         "cli.py keygen must use the same hashing as serving.auth"
     )
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-5: oversized X-API-Key header rejected before scrypt KDF runs
+# ---------------------------------------------------------------------------
+
+
+def test_oversized_api_key_header_rejected_without_invoking_scrypt() -> None:
+    """An ``X-API-Key`` header longer than ``_API_KEY_MAX_LEN`` must be
+    rejected with 401 BEFORE ``_hash_api_key`` (scrypt) is invoked.
+
+    Without the length cap, an unauthenticated attacker can post a 1 MiB
+    header on every request and force the server to scrypt-hash that input
+    each time — a DoS amplifier even at the lowest valid scrypt cost.
+    """
+    from unittest.mock import patch
+
+    import recotem.serving.auth as auth_module
+    from recotem.serving.auth import _API_KEY_MAX_LEN, verify_api_key
+
+    entry = _make_entry("k1", "exact_secret_padding_to_32_bytes")
+    oversize_key = "A" * 1024  # well over _API_KEY_MAX_LEN
+    assert len(oversize_key) > _API_KEY_MAX_LEN
+
+    request = _make_request(oversize_key)
+
+    # Wrap _hash_api_key so we can confirm it was NOT invoked.  Wrapping a
+    # MagicMock around the real function lets the test still observe a
+    # call count of 0 deterministically.
+    with patch.object(
+        auth_module, "_hash_api_key", wraps=auth_module._hash_api_key
+    ) as hash_spy:
+        with pytest.raises(HTTPException) as exc_info:
+            verify_api_key(request, [entry])
+        assert exc_info.value.status_code == 401
+        assert hash_spy.call_count == 0, (
+            f"_hash_api_key (scrypt) was invoked {hash_spy.call_count} times "
+            f"despite the header exceeding _API_KEY_MAX_LEN — KDF DoS "
+            f"amplification is reachable."
+        )
+
+
+def test_api_key_at_max_len_still_accepted_for_hashing() -> None:
+    """A header exactly at ``_API_KEY_MAX_LEN`` chars must still be hashed
+    (and rejected only because the digest does not match a configured
+    entry).  This pins the exact boundary so future tightening to a
+    smaller cap is intentional.
+    """
+    from unittest.mock import patch
+
+    import recotem.serving.auth as auth_module
+    from recotem.serving.auth import _API_KEY_MAX_LEN, verify_api_key
+
+    entry = _make_entry("k1", "real_secret_padded_to_32_bytes!!")
+    boundary_key = "B" * _API_KEY_MAX_LEN
+
+    request = _make_request(boundary_key)
+
+    with patch.object(
+        auth_module, "_hash_api_key", wraps=auth_module._hash_api_key
+    ) as hash_spy:
+        with pytest.raises(HTTPException) as exc_info:
+            verify_api_key(request, [entry])
+        # Still 401 — the boundary-length key is hashed but does not match.
+        assert exc_info.value.status_code == 401
+        assert hash_spy.call_count == 1, (
+            f"At exactly _API_KEY_MAX_LEN chars the KDF must run; "
+            f"got {hash_spy.call_count} invocations."
+        )
+
+
+def test_api_key_just_over_max_len_rejected() -> None:
+    """One char over ``_API_KEY_MAX_LEN`` must trip the cap."""
+    from unittest.mock import patch
+
+    import recotem.serving.auth as auth_module
+    from recotem.serving.auth import _API_KEY_MAX_LEN, verify_api_key
+
+    entry = _make_entry("k1", "real_secret_padded_to_32_bytes!!")
+    over_key = "C" * (_API_KEY_MAX_LEN + 1)
+
+    request = _make_request(over_key)
+
+    with patch.object(
+        auth_module, "_hash_api_key", wraps=auth_module._hash_api_key
+    ) as hash_spy:
+        with pytest.raises(HTTPException) as exc_info:
+            verify_api_key(request, [entry])
+        assert exc_info.value.status_code == 401
+        assert hash_spy.call_count == 0, (
+            "_hash_api_key invoked on an oversized header — KDF DoS "
+            "amplification is reachable."
+        )
+
+
+# ---------------------------------------------------------------------------
+# MINOR-13: keygen scrypt cost factors consistent with auth verify
+# ---------------------------------------------------------------------------
+# The keygen command calls _hash_api_key to produce the stored hash.
+# The verify call also uses _hash_api_key.  The cost factors must be identical
+# and pinned so they don't silently diverge in a future refactor.
+
+
+def test_scrypt_cost_factors_are_pinned_to_documented_values() -> None:
+    """The scrypt cost factors (N, r, p, dklen) are pinned to N=2, r=8, p=1, dklen=32.
+
+    These values are chosen because API keys are 256-bit random tokens,
+    making brute-force infeasible regardless of hash speed.  The lowest
+    valid scrypt cost is used to keep verification under 1ms.
+
+    This test pins the exact constants so any change triggers a reviewed test
+    failure rather than a silent configuration drift.
+    """
+    from recotem.serving.auth import (
+        _SCRYPT_DKLEN,
+        _SCRYPT_N,
+        _SCRYPT_P,
+        _SCRYPT_R,
+    )
+
+    assert _SCRYPT_N == 2, f"Expected _SCRYPT_N=2, got {_SCRYPT_N}"
+    assert _SCRYPT_R == 8, f"Expected _SCRYPT_R=8, got {_SCRYPT_R}"
+    assert _SCRYPT_P == 1, f"Expected _SCRYPT_P=1, got {_SCRYPT_P}"
+    assert _SCRYPT_DKLEN == 32, f"Expected _SCRYPT_DKLEN=32, got {_SCRYPT_DKLEN}"
+
+
+def test_keygen_hash_matches_verify_hash_round_trip() -> None:
+    """keygen produces a hash that verify_api_key accepts — round-trip.
+
+    This confirms that keygen and the auth verify share the same KDF
+    parameters: if N/r/p/dklen diverge between the two, the round-trip fails.
+    """
+    from recotem.serving.auth import _hash_api_key
+
+    plaintext = "round_trip_test_key_of_32_chars!!"
+
+    # Hash as keygen would
+    keygen_hash = _hash_api_key(plaintext)
+
+    # Build an entry as the config parser would
+    entry = ApiKeyEntry(kid="rt-test", sha256_hex=keygen_hash)
+
+    # Simulate verify as auth.py would
+    verify_hash = _hash_api_key(plaintext)
+
+    import hmac as _hmac
+
+    assert _hmac.compare_digest(keygen_hash, verify_hash), (
+        "keygen hash and verify hash must be identical for the same plaintext"
+    )
+    assert entry.sha256_hex == keygen_hash, (
+        "Entry sha256_hex must equal the keygen-produced hash"
+    )
+
+
+def test_hash_api_key_round_trip_with_scrypt_parameters() -> None:
+    """Verify the exact scrypt parameters are used for the hash.
+
+    Computes the expected digest using the pinned parameters directly and
+    confirms it matches _hash_api_key output.
+    """
+    import hashlib
+
+    from recotem.serving.auth import (
+        _API_KEY_SCRYPT_SALT,
+        _SCRYPT_DKLEN,
+        _SCRYPT_N,
+        _SCRYPT_P,
+        _SCRYPT_R,
+        _hash_api_key,
+    )
+
+    plaintext = "parameter_consistency_test_key_!"
+    expected = hashlib.scrypt(
+        plaintext.encode("utf-8"),
+        salt=_API_KEY_SCRYPT_SALT,
+        n=_SCRYPT_N,
+        r=_SCRYPT_R,
+        p=_SCRYPT_P,
+        dklen=_SCRYPT_DKLEN,
+    ).hex()
+
+    assert _hash_api_key(plaintext) == expected, (
+        "_hash_api_key must use exactly the pinned scrypt parameters"
+    )

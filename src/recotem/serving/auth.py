@@ -36,6 +36,18 @@ logger = structlog.get_logger(__name__)
 # Header name used by the client (lowercase for case-insensitive lookup).
 _API_KEY_HEADER = "x-api-key"
 
+# Maximum accepted X-API-Key header length (in bytes / chars — the header
+# is ASCII-only so the two are equivalent here).
+#
+# Recotem-issued API keys are 32 bytes random encoded as base64url
+# (43 chars).  256 chars leaves comfortable headroom for any reasonable
+# operator-issued key while bounding the work that an attacker can force
+# the scrypt KDF to perform per request.  Without this cap, a single
+# 1 MiB X-API-Key header would force the server to scrypt-hash a 1 MiB
+# input on every request — even at the lowest valid cost (n=2, r=8, p=1)
+# this is enough memory bandwidth to amplify a denial-of-service.
+_API_KEY_MAX_LEN = 256
+
 # Domain-separation salt for API key hashing via scrypt.  The fixed salt
 # binds the stored digest to this specific use (API key verification) so it
 # cannot be substituted into any other context that hashes the same
@@ -112,6 +124,21 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
         raise HTTPException(
             status_code=401,
             detail={"detail": "X-API-Key header required", "code": "missing_api_key"},
+        )
+
+    # Reject oversized headers BEFORE invoking the scrypt KDF.  An
+    # unbounded header would let an unauthenticated attacker amplify
+    # scrypt work into a denial-of-service.  See ``_API_KEY_MAX_LEN``.
+    if len(raw_header) > _API_KEY_MAX_LEN:
+        logger.warning(
+            "auth_oversized_header",
+            path=request.url.path,
+            length=len(raw_header),
+            cap=_API_KEY_MAX_LEN,
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={"detail": "Invalid API key", "code": "invalid_api_key"},
         )
 
     # No stripping — whitespace is part of the key.

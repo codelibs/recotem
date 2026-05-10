@@ -772,3 +772,81 @@ def test_lifespan_watcher_joined_on_shutdown(tmp_path: Path) -> None:
             pass  # lifespan shutdown runs on __exit__
 
     assert join_calls, "ArtifactWatcher.join() must be called during app shutdown"
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL-3 (lightweight): SIGTERM drain — drain_seconds propagated to uvicorn
+# and watcher join timeout logic
+# ---------------------------------------------------------------------------
+
+
+def test_drain_seconds_used_as_uvicorn_graceful_shutdown_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The drain_seconds from ServeConfig is forwarded to uvicorn as
+    timeout_graceful_shutdown so in-flight requests have time to complete.
+
+    We verify this structurally via the CLI module rather than actually
+    starting uvicorn (which would bind a real port).
+    """
+    import inspect
+
+    from recotem.cli import serve as serve_command
+
+    source = inspect.getsource(serve_command)
+    assert "timeout_graceful_shutdown" in source, (
+        "cli.serve must pass drain_seconds to uvicorn.run "
+        "as timeout_graceful_shutdown so in-flight requests are drained on SIGTERM"
+    )
+    assert "drain_seconds" in source, (
+        "cli.serve must reference cfg.drain_seconds when calling uvicorn.run"
+    )
+
+
+def test_watcher_join_timeout_uses_drain_seconds_clamped(tmp_path: Path) -> None:
+    """The watcher join timeout is clamped to max(1, min(5, drain_seconds)).
+
+    This test verifies that very large drain_seconds values (e.g. 300s) are
+    clamped so the watcher join does not block process exit indefinitely.
+    """
+    # Confirm the formula is applied in app.py source
+    import inspect
+
+    from recotem.serving import app as app_mod
+
+    source = inspect.getsource(app_mod.create_app)
+    # The clamp logic should reference min/max around 5.0 and drain_seconds
+    assert "min(5.0" in source or "min(5," in source, (
+        "Watcher join timeout must be clamped with min(5.0, ...) "
+        "to prevent blocking process exit on large drain_seconds"
+    )
+    assert "drain_seconds" in source, (
+        "Watcher join timeout must reference drain_seconds"
+    )
+
+
+def test_drain_seconds_respected_during_lifespan_shutdown(tmp_path: Path) -> None:
+    """The lifespan must emit 'serve_shutdown' with drain_seconds in the log.
+
+    This verifies the drain_seconds value flows through the shutdown path.
+    """
+    import structlog.testing
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.drain_seconds = 42  # non-default value
+
+    app = create_app(cfg)
+
+    with structlog.testing.capture_logs() as captured:
+        with TestClient(app):
+            pass  # triggers lifespan shutdown
+
+    shutdown_events = [e for e in captured if e.get("event") == "serve_shutdown"]
+    assert shutdown_events, "lifespan shutdown must emit 'serve_shutdown' log event"
+    assert shutdown_events[0].get("drain_seconds") == 42, (
+        f"serve_shutdown log must include drain_seconds=42; got: {shutdown_events[0]!r}"
+    )

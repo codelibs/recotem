@@ -4,22 +4,7 @@
 
 ## Linux cron
 
-Add to `/etc/cron.d/recotem` (or the user crontab via `crontab -e`):
-
-```cron
-# Run at 03:00 UTC daily. Logs to /var/log/recotem/train.log.
-RECOTEM_SIGNING_KEYS=prod-2026-q2:aabbcc...
-0 3 * * * recotem /usr/local/bin/recotem train /etc/recotem/recipes/my_recipe.yaml >> /var/log/recotem/train.log 2>&1
-```
-
-The `RECOTEM_SIGNING_KEYS` line sets an env var for all commands in this crontab file (cron syntax). Do not put secrets in `/etc/cron.d/` with world-readable permissions — restrict the file:
-
-```bash
-chmod 600 /etc/cron.d/recotem
-chown root:root /etc/cron.d/recotem
-```
-
-A cleaner approach is to source a secrets file:
+Add to `/etc/cron.d/recotem` (or the user crontab via `crontab -e`). Source a secrets file so plaintext keys never appear in the crontab itself:
 
 ```cron
 0 3 * * * recotem . /etc/recotem/secrets && /usr/local/bin/recotem train /etc/recotem/recipes/my_recipe.yaml >> /var/log/recotem/train.log 2>&1
@@ -29,6 +14,23 @@ A cleaner approach is to source a secrets file:
 # /etc/recotem/secrets — mode 600, owned by the cron user
 export RECOTEM_SIGNING_KEYS="prod-2026-q2:aabbcc..."
 ```
+
+Secure both the crontab and the secrets file:
+
+```bash
+chmod 600 /etc/cron.d/recotem
+chown root:root /etc/cron.d/recotem
+chmod 600 /etc/recotem/secrets
+chown recotem:recotem /etc/recotem/secrets
+```
+
+> **DO NOT** embed secrets directly in the crontab as inline env var assignments — `/etc/cron.d/` files may be world-readable on some distributions:
+>
+> ```cron
+> # BAD — exposes the key to any local user who can read /etc/cron.d/recotem
+> RECOTEM_SIGNING_KEYS=prod-2026-q2:aabbcc...
+> 0 3 * * * recotem /usr/local/bin/recotem train /etc/recotem/recipes/my_recipe.yaml >> /var/log/recotem/train.log 2>&1
+> ```
 
 ## Wrapper script
 

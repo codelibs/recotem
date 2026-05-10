@@ -192,11 +192,11 @@ logic instead of grepping stderr.
 | 0 | Success | — |
 | 1 | Unknown error | Bug, environment issue, schema generation failure |
 | 2 | RecipeError | YAML syntax, schema violation, invalid `--env-var`, `--dev-allow-unsigned` without companion confirmation flag, `--dev-allow-unsigned` outside `RECOTEM_ENV=development` |
-| 3 | DataSourceError | Source fetch failed, sha256 mismatch, redirect cap, HTTP 4xx/5xx, body cap exceeded |
+| 3 | DataSourceError | Source-layer failure NOT during HTTP fetch — CSV/Parquet format error, required column missing, local-FS path not found, BigQuery schema mismatch |
 | 4 | TrainingError | Includes subcodes `signing_key_missing`, `min_data_violation`, `time_column_parse_error`, `final_training_error`, `no_completed_trials`, `zero_score`, `excessive_per_trial_timeouts` |
 | 5 | ArtifactError | Missing/invalid signing key, magic mismatch, kid unknown, HMAC mismatch, payload over cap, disallowed FQCN, header JSON over cap |
 | 6 | LockContestedError | Recipe lock held by another process when `--fail-on-busy` is set |
-| 7 | HttpFetchError | SSRF guard refused the destination, connect/read timeout, HTTP 4xx/5xx on HTTP/HTTPS source fetch |
+| 7 | HttpFetchError | Any failure during HTTP/HTTPS source fetch — SSRF guard refused the destination, connect/read timeout, HTTP 4xx/5xx, body cap exceeded, redirect cap, scheme-changing redirect, sha256 mismatch on a network-fetched source |
 | 8 | Configuration error | Missing `RECOTEM_SIGNING_KEYS`, bind port already in use, other env-var misconfiguration |
 
 `--fail-on-busy` surfaces as exit 6, not exit 4 — `LockContestedError` is
@@ -227,7 +227,7 @@ as the basis for SLO and alerting rules.
 | `training_final_model` / `final_model_trained` | refit | `recommender` |
 | `artifact_written` | persist | `versioning`, `artifact`, `pointer` (append_sha), `kid` |
 | `train_done` | end | `name`, `run_id`, `exit_code`, `artifact`, `best_class`, `best_score`, `trials`, `n_orphaned`, `trained_at`, `kid` |
-| `train_error` | failure | `error`, `code` (`internal_error` for non-domain exceptions), `recipe`, `run_id`, `exit_code` |
+| `train_error` | failure | `error`, `code` (`internal_error` for non-domain exceptions), `recipe`, `run_id`, `exit_code`; additionally `n_rows`, `n_users`, `n_items`, `min_rows`, `min_users`, `min_items` when `code=min_data_violation` |
 | `recipe_lock_contended_skipping` | start | `recipe`, `run_id` (default `--fail-on-busy=False` exits 0) |
 | `csv_source_redirect`, `csv_source_size_exceeded` | datasource | `path`, `status`, `cap` |
 

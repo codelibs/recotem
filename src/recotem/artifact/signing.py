@@ -69,11 +69,16 @@ _ALLOWED_CLASSES: frozenset[tuple[str, str]] = frozenset(
         ("irspack.recommenders.dense_slim", "DenseSLIMRecommender"),
         ("irspack.recommenders.truncsvd", "TruncatedSVDRecommender"),
         ("irspack.recommenders.bpr", "BPRFMRecommender"),
-        # numpy
+        # numpy.  Both numpy 1.x (numpy.core.*) and numpy 2.x
+        # (numpy._core.*) reconstruction helpers are pinned explicitly
+        # — these are the FQCNs every artifact references via the
+        # _reconstruct / scalar reduce helpers.
         ("numpy", "ndarray"),
         ("numpy", "dtype"),
         ("numpy.core.multiarray", "_reconstruct"),
         ("numpy.core.multiarray", "scalar"),
+        ("numpy._core.multiarray", "_reconstruct"),
+        ("numpy._core.multiarray", "scalar"),
         # scipy sparse
         ("scipy.sparse._csr", "csr_matrix"),
         ("scipy.sparse._csc", "csc_matrix"),
@@ -98,21 +103,40 @@ _ALLOWED_CLASSES: frozenset[tuple[str, str]] = frozenset(
 
 # Module-prefix allow-list for scientific computing libraries.
 #
-# numpy and scipy reorganise their internal layout between releases (e.g.
-# numpy.core.* -> numpy._core.* in 2.x, plus serialisation helpers like
-# numpy._core.numeric._frombuffer and numpy.dtypes.* that vary by release).
-# Hand-enumerating every reconstruction helper would break each time we
-# bump the dep.
+# numpy and scipy reorganise their internal layout between releases — the
+# pickle reconstruction helpers (``_reconstruct``, ``scalar``) and the
+# dtype factories (``numpy.dtypes.Float64DType`` and friends) move between
+# submodules across major versions, so a strict FQCN-only list would break
+# on every dep bump.  We therefore allow a *narrow* set of submodule
+# prefixes that contain only reconstruction / dtype-factory helpers:
 #
-# These libraries do not contain shell-execution gadgets in their public
-# API, so the additional risk over the FQCN list is bounded.  HMAC
-# verification remains the primary defence; this prefix list is the
+#   numpy._core.       numpy 2.x reconstruction helpers + scalar / dtype
+#                      machinery (multiarray._reconstruct, ``numeric``…).
+#   numpy.core.        numpy 1.x equivalents kept for forward compat with
+#                      pre-2.x artifacts.
+#   numpy.dtypes.      numpy 2.x parametric dtype classes
+#                      (Float64DType, BoolDType, …) referenced by ndarray
+#                      reconstruction.
+#   scipy.sparse._csr. CSR matrix reconstructor + helpers.
+#   scipy.sparse._csc. CSC equivalent.
+#   scipy.sparse._coo. COO equivalent.
+#
+# Bare-module entries (``numpy``, ``scipy.sparse``) are intentionally NOT
+# on the prefix list — top-level numpy gadgets such as ``numpy.frompyfunc``,
+# ``numpy.vectorize``, ``numpy.piecewise`` and ``scipy.sparse.load_npz``
+# (file-IO) are not needed for Recotem artifacts and are blocked.  The
+# legitimate top-level FQCNs (``numpy.ndarray``, ``numpy.dtype``) are
+# pinned by the hand-enumerated ``_ALLOWED_CLASSES`` set above.
+#
+# HMAC verification remains the primary defence; this prefix list is the
 # secondary layer scoped to the scientific stack only.
 _ALLOWED_MODULE_PREFIXES: tuple[str, ...] = (
-    "numpy.",
-    "numpy",
-    "scipy.sparse.",
-    "scipy.sparse",
+    "numpy._core.",
+    "numpy.core.",
+    "numpy.dtypes.",
+    "scipy.sparse._csr.",
+    "scipy.sparse._csc.",
+    "scipy.sparse._coo.",
 )
 
 # Denied submodules that fall under an allowed prefix but expose

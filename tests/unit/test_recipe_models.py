@@ -323,3 +323,31 @@ def test_item_metadata_item_id_column_whitespace_only_rejected() -> None:
         ItemMetadataConfig(
             type="csv", path="/tmp/meta.csv", fields=["title"], item_id_column="   "
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix A3 — validate_assignment: re-validation on post-construction assignment
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_name_assignment_revalidates_and_rejects_illegal() -> None:
+    """Post-construction assignment of an invalid name must raise ValidationError.
+
+    validate_assignment=True on the Recipe model_config ensures that
+    `_validate_name` is re-run on every field set, not only at load time.
+    """
+    d = _minimal_recipe_dict(name="valid-name")
+    recipe = Recipe.model_validate(d)
+    original_name = recipe.name
+    with pytest.raises(ValidationError):
+        recipe.name = "../../etc/passwd"
+    # Original name must be unchanged after the failed assignment.
+    assert recipe.name == original_name
+
+
+def test_recipe_name_assignment_accepts_valid_value() -> None:
+    """Post-construction assignment of a valid name must succeed."""
+    d = _minimal_recipe_dict(name="original-name")
+    recipe = Recipe.model_validate(d)
+    recipe.name = "new-valid-name"
+    assert recipe.name == "new-valid-name"

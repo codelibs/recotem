@@ -933,3 +933,135 @@ def test_per_algorithm_zero_budget_enqueues_no_trials() -> None:
         f"TopPop budget=0 must enqueue 0 trials, not {toppop_count}. "
         "max(1, budget) footgun detected. Enqueued: {enqueued}"
     )
+
+
+# ---------------------------------------------------------------------------
+# C4 — timeout_seconds fires before first trial completes -> TrainingError
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_before_first_trial_raises_TrainingError(tmp_path: Path) -> None:
+    """A very short global timeout_seconds must cause run_training to raise TrainingError.
+
+    We mock the recommender's learn_with_optimizer to sleep slightly beyond the
+    timeout, and set timeout_seconds to a very small value (0.05 s).  The Optuna
+    study must stop and raise a SearchError (which is a TrainingError subclass)
+    rather than hanging or returning silently.
+    """
+    import time
+
+    import numpy as np
+    import scipy.sparse as sps
+
+    from recotem.training.errors import SearchError, TrainingError
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    class _SlowRecommender:
+        learnt_config: dict = {}
+
+        def __init__(self, X, **kwargs):
+            self._X = X
+
+        @staticmethod
+        def default_suggest_parameter(trial, space):
+            return {}
+
+        def learn_with_optimizer(self, evaluator, trial):
+            time.sleep(0.3)  # longer than per_trial_timeout below
+
+        def learn(self):
+            return self
+
+    X = sps.csr_matrix(np.ones((5, 3)))
+    evaluator = MagicMock()
+
+    with patch(
+        "recotem.training.search.get_recommender_cls",
+        return_value=_SlowRecommender,
+    ):
+        with ProgressReporter(
+            n_trials=2, recipe_name="timeout_c4", run_id="run-c4"
+        ) as rep:
+            with pytest.raises((SearchError, TrainingError)):
+                run_search(
+                    algorithms=["TopPopRecommender"],
+                    X_tv_train=X,
+                    evaluator=evaluator,
+                    n_trials=2,
+                    per_algorithm_trials=None,
+                    per_trial_timeout_seconds=0.1,  # 100ms per-trial budget
+                    timeout_seconds=0.15,  # 150ms global — exhausted quickly
+                    parallelism=1,
+                    storage_path="",
+                    random_seed=0,
+                    reporter=rep,
+                    recipe_name="timeout_c4",
+                    run_id="run-c4",
+                )
+
+
+# ---------------------------------------------------------------------------
+# C6 — per_trial_timeout_seconds: orphaned trial not in best score
+# ---------------------------------------------------------------------------
+
+
+def test_per_trial_timeout_excludes_killed_trial_from_best(tmp_path: Path) -> None:
+    """When a trial is orphaned by per_trial_timeout, its result must not contribute
+    to the best score.
+
+    We mock the Optuna study so that all trials are marked FAIL/RUNNING (no
+    COMPLETE state), which means run_search must raise SearchError (no_completed_trials)
+    rather than returning a best score from the orphaned trial.
+    """
+    import numpy as np
+    import optuna
+    import scipy.sparse as sps
+
+    from recotem.training.errors import SearchError
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+        mock_study = MagicMock()
+
+        # All trials are in RUNNING state (orphaned/timed-out) — none COMPLETE.
+        orphaned_trial = MagicMock()
+        orphaned_trial.state = optuna.trial.TrialState.RUNNING
+        orphaned_trial.value = None
+        orphaned_trial.number = 0
+        orphaned_trial.params = {"recommender_class_name": "TopPopRecommender"}
+        orphaned_trial.user_attrs = {"recommender_class_name": "TopPopRecommender"}
+
+        mock_study.trials = [orphaned_trial]
+        mock_study.optimize = MagicMock()
+        mock_study_fn.return_value = mock_study
+
+        X = sps.csr_matrix(np.ones((5, 3)))
+        evaluator = MagicMock()
+
+        with ProgressReporter(
+            n_trials=1, recipe_name="orphan_c6", run_id="run-c6"
+        ) as rep:
+            with pytest.raises(SearchError) as exc_info:
+                run_search(
+                    algorithms=["TopPopRecommender"],
+                    X_tv_train=X,
+                    evaluator=evaluator,
+                    n_trials=1,
+                    per_algorithm_trials=None,
+                    per_trial_timeout_seconds=None,
+                    timeout_seconds=None,
+                    parallelism=1,
+                    storage_path="",
+                    random_seed=0,
+                    reporter=rep,
+                    recipe_name="orphan_c6",
+                    run_id="run-c6",
+                )
+
+    # The orphaned (RUNNING) trial must NOT have been promoted to best.
+    assert exc_info.value is not None, (
+        "run_search must raise SearchError when only orphaned/running trials exist; "
+        "the orphaned trial's score must not appear in best_score."
+    )

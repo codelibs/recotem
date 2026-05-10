@@ -1106,6 +1106,65 @@ def test_local_output_path_dotdot_traversal_rejected(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# C10 — recursive env-var expansion does not loop
+# ---------------------------------------------------------------------------
+
+
+def test_env_var_expansion_recursive_does_not_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A self-referencing env var must not cause infinite recursion.
+
+    The expand_env_vars implementation uses re.sub() with a one-pass
+    replacement: it substitutes all ${...} references in the original string
+    once, then returns.  It does NOT re-scan the expanded result.
+
+    Policy confirmed by the code: if RECOTEM_RECIPE_A = '${RECOTEM_RECIPE_A}',
+    the result of expanding ${RECOTEM_RECIPE_A} is the literal string
+    '${RECOTEM_RECIPE_A}' — no infinite recursion, just one pass.
+
+    This test documents that policy.
+    """
+    from recotem.recipe.envvars import expand_env_vars
+
+    # Set the variable to a self-referencing value.
+    monkeypatch.setenv("RECOTEM_RECIPE_A", "${RECOTEM_RECIPE_A}")
+
+    # The expansion must terminate without RecursionError.
+    # The result is the literal value of the env var (the self-reference string).
+    result = expand_env_vars("${RECOTEM_RECIPE_A}")
+
+    # Policy: one-pass expansion — the result is whatever the env var says,
+    # NOT recursively expanded.  No infinite loop.
+    assert result == "${RECOTEM_RECIPE_A}", (
+        f"One-pass expansion of a self-referencing env var must return the "
+        f"literal env var value without recursing; got: {result!r}"
+    )
+
+
+def test_env_var_expansion_mutual_recursion_does_not_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutually-referencing env vars (A → B → A) must not cause infinite recursion.
+
+    A = '${RECOTEM_RECIPE_B}', B = '${RECOTEM_RECIPE_A}'.
+    One-pass expansion of ${RECOTEM_RECIPE_A} returns '${RECOTEM_RECIPE_B}'
+    without re-scanning.
+    """
+    from recotem.recipe.envvars import expand_env_vars
+
+    monkeypatch.setenv("RECOTEM_RECIPE_A", "${RECOTEM_RECIPE_B}")
+    monkeypatch.setenv("RECOTEM_RECIPE_B", "${RECOTEM_RECIPE_A}")
+
+    # Must not recurse — returns the literal value of RECOTEM_RECIPE_A.
+    result = expand_env_vars("${RECOTEM_RECIPE_A}")
+    assert result == "${RECOTEM_RECIPE_B}", (
+        f"One-pass expansion must return the literal value of the env var "
+        f"without recursing into RECOTEM_RECIPE_B; got: {result!r}"
+    )
+
+
 def test_output_path_with_ftp_scheme_rejected(tmp_path: Path) -> None:
     """ftp:// on output.path must be rejected as an unsupported write scheme.
 

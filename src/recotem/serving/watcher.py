@@ -341,12 +341,14 @@ class ArtifactWatcher(threading.Thread):
             try:
                 name, marker = fut.result()
             except Exception as exc:
+                _failed_recipe = futures[fut]
                 logger.warning(
                     "artifact_stat_error",
-                    recipe_name=futures[fut],
+                    recipe_name=_failed_recipe,
                     error=str(exc),
                     exc_type=type(exc).__name__,
                 )
+                _metrics.inc_artifact_stat_failure(_failed_recipe)
                 continue
 
             state = self._states.get(name)
@@ -439,7 +441,11 @@ class ArtifactWatcher(threading.Thread):
             self._record_load_failure(name, str(exc))
             return
 
-        new_marker = marker if marker is not None else _stat_marker(artifact_path)
+        new_marker = (
+            marker
+            if marker is not None
+            else _stat_marker(artifact_path, recipe_name=name)
+        )
         self._registry.replace(name, entry)
         # Update the loaded marker through the registry lock so the mutation
         # is serialised with respect to any concurrent readers.  The entry is

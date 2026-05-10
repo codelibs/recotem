@@ -14,7 +14,7 @@ A recipe is a YAML file that defines what data to fetch, how to train, and where
 | `training` | object | yes | Algorithm and tuning settings. |
 | `output` | object | yes | Artifact path and versioning. |
 
-`name` is validated at YAML load and again immediately before any filesystem or URL use.
+`name` is validated at YAML load via the `^[A-Za-z0-9_-]{1,64}$` regex. The Recipe pydantic model uses `validate_assignment=True`, so any post-construction mutation of `name` re-runs the validator and raises `ValidationError` on illegal values. The helper `recotem.recipe.models.validate_for_filesystem(name)` is exported for callers who construct names programmatically without pydantic.
 
 ---
 
@@ -229,7 +229,7 @@ scheme is accepted. Schemes `http://` and `https://` additionally require an
 
 `output.path` rejects schemes that fsspec does not implement for writes:
 `http://`, `https://`, `ftp://`, `ftps://`, `memory://`. Acceptable output
-schemes: bare local, `file://`, `s3://`, `gs://`, `az://`.
+schemes: bare local, `file://`, `s3://`, `gs://`, `az://`, `abfs://`, `abfss://`.
 
 Embedded credentials (`s3://AKIA...:secret@bucket/`) are rejected at recipe
 load on every path field.

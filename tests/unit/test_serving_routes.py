@@ -745,3 +745,40 @@ def test_load_failure_increments_artifact_load_failures_total(monkeypatch) -> No
     metrics_response = client.get("/metrics")
     assert metrics_response.status_code == 200
     assert "recotem_artifact_load_failures_total" in metrics_response.text
+
+
+# ---------------------------------------------------------------------------
+# C11 — predict returns 503 after recipe removed from registry
+# ---------------------------------------------------------------------------
+
+
+def test_yaml_deleted_then_predict_returns_503() -> None:
+    """After a recipe entry is removed from the registry, POST /predict/<name>
+    must return HTTP 503 with code 'recipe_unavailable'.
+
+    This simulates the watcher removing a recipe when its YAML is deleted.
+    The route checks ``registry.get(name)`` — None means the recipe is gone
+    and the route raises HTTPException(503, code='recipe_unavailable').
+    """
+    registry = _make_registry_with_recipe("will_be_deleted")
+    client, _ = _make_test_client(registry=registry)
+
+    # Confirm the recipe is serving before removal.
+    response_before = client.post("/predict/will_be_deleted", json={"user_id": "user1"})
+    assert response_before.status_code == 200, (
+        f"Predict must succeed before removal; got {response_before.status_code}"
+    )
+
+    # Simulate YAML deletion by removing the entry from the registry.
+    registry.remove("will_be_deleted")
+
+    # After removal, the route must return 503.
+    response_after = client.post("/predict/will_be_deleted", json={"user_id": "user1"})
+    assert response_after.status_code == 503, (
+        f"Predict must return 503 after recipe removed from registry; "
+        f"got {response_after.status_code}"
+    )
+    detail = response_after.json()
+    assert detail.get("detail", {}).get("code") == "recipe_unavailable", (
+        f"503 response must include code='recipe_unavailable'; got: {detail!r}"
+    )

@@ -56,15 +56,40 @@ def test_truncated_before_hmac_rejected() -> None:
         parse_header_from_bytes(truncated, max_payload_bytes=2**31)
 
 
-def test_truncated_mid_payload_parses_ok_or_fails_gracefully() -> None:
-    """Truncated payload does not crash with unhandled exception."""
+def test_truncated_mid_payload_rejected() -> None:
+    """A mid-payload truncation must be rejected at a level that verifies integrity.
+
+    ``parse_header_from_bytes`` intentionally treats trailing bytes as the
+    payload and only caps their size — it does not know the declared payload
+    length because the format stores no such field.  Truncation is therefore
+    detected at the HMAC-verify stage, not the structural-parse stage.
+
+    This test verifies the full chain (parse + verify) rejects a truncated
+    artifact so that callers cannot silently receive a partially-read model.
+    """
+    from recotem.artifact.signing import KeyRing, verify_hmac
+
     data = _valid_artifact()
     truncated = data[:-5]
-    try:
-        hdr = parse_header_from_bytes(truncated, max_payload_bytes=2**31)
-        assert hdr is not None
-    except ArtifactError:
-        pass
+
+    # Structural parse must still succeed (payload is just shorter).
+    hdr = parse_header_from_bytes(truncated, max_payload_bytes=2**31)
+    assert hdr is not None
+
+    # HMAC verification must reject the truncated payload — the truncated
+    # trailing bytes no longer match the digest computed over the full payload.
+    key_ring = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    payload_bytes = truncated[hdr.payload_offset :]
+
+    with pytest.raises(ArtifactError):
+        verify_hmac(
+            key_ring,
+            hdr.kid,
+            hdr.kid.encode("utf-8"),
+            hdr.header_data,
+            payload_bytes,
+            hdr.hmac_digest,
+        )
 
 
 def test_format_version_zero_rejected() -> None:
@@ -86,6 +111,23 @@ def test_reserved_bytes_nonzero_rejected() -> None:
     struct.pack_into("<H", data, 10, 1)
     with pytest.raises(ArtifactError, match="reserved"):
         parse_header_from_bytes(bytes(data), max_payload_bytes=2**31)
+
+
+def test_header_length_exceeding_uint32_rejected_without_allocation() -> None:
+    """An artifact declaring header_len=0xFFFFFFFF is rejected before any allocation.
+
+    The parser checks header_len against MAX_HEADER_LEN (65536) before slicing
+    the data buffer, so a 4 GiB allocation is never attempted.  This test must
+    complete in well under 100 ms — any allocation would make it extremely slow.
+    """
+    data = _valid_artifact()
+    kid_len = data[12]
+    hmac_offset = 13 + kid_len
+    header_len_offset = hmac_offset + 32
+    data_ba = bytearray(data)
+    struct.pack_into("<I", data_ba, header_len_offset, 0xFFFFFFFF)
+    with pytest.raises(ArtifactError, match="header_len"):
+        parse_header_from_bytes(bytes(data_ba), max_payload_bytes=2**31)
 
 
 def test_header_length_exceeding_64KiB_rejected() -> None:

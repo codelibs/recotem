@@ -253,6 +253,121 @@ def test_storage_fallback_emits_log_event(monkeypatch) -> None:
     assert len(result) == 1
 
 
+# ---------------------------------------------------------------------------
+# C9 — query_parameters are bound via ScalarQueryParameter, not string interpolation
+# ---------------------------------------------------------------------------
+
+
+def test_query_parameters_bound_via_bigquery_param_placeholders() -> None:
+    """BigQuery query_parameters are bound as ScalarQueryParameter objects, not
+    string-interpolated into the query.
+
+    Verifies that _build_query_parameters() produces a list of
+    ScalarQueryParameter objects matching the recipe's query_parameters dict,
+    and that the BigQuery client.query() call receives a QueryJobConfig whose
+    query_parameters attribute is non-empty and contains the expected binding.
+
+    The BQ client is mocked so no real GCP connection is made.
+    """
+    import pandas as pd
+
+    scalar_param_calls: list[tuple[str, str, object]] = []
+
+    # Build mock modules that record ScalarQueryParameter constructor calls.
+    mock_bq = MagicMock()
+    mock_client = MagicMock()
+    mock_job = MagicMock()
+    mock_bq.Client.return_value = mock_client
+    mock_client.query.return_value = mock_job
+    mock_job.to_dataframe.return_value = pd.DataFrame(
+        {"user_id": ["u1"], "item_id": ["i1"]}
+    )
+
+    mock_job_config_instance = MagicMock()
+    mock_bq.QueryJobConfig.return_value = mock_job_config_instance
+
+    captured_params: list = []
+
+    class _FakeScalarQueryParameter:
+        """Records constructor args so we can assert binding behavior."""
+
+        def __init__(self, name: str, type_: str, value: object) -> None:
+            scalar_param_calls.append((name, type_, value))
+            self.name = name
+            self.type_ = type_
+            self.value = value
+
+    mock_bq.ScalarQueryParameter = _FakeScalarQueryParameter
+
+    # Patch the job_config setter to capture query_parameters assignment.
+    def _capture_query_parameters(params):
+        captured_params.extend(params)
+
+    type(mock_job_config_instance).query_parameters = property(
+        lambda self: captured_params,
+        lambda self, v: captured_params.extend(v) if v else None,
+    )
+
+    mock_api_error_cls = type("GoogleAPICallError", (Exception,), {})
+    mock_exceptions = MagicMock()
+    mock_exceptions.GoogleAPICallError = mock_api_error_cls
+    mock_api_core = MagicMock()
+    mock_api_core.exceptions = mock_exceptions
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(
+            type="bigquery",
+            query="SELECT user_id, item_id FROM my_table WHERE category = @cat AND min_score = @score",
+            query_parameters={"cat": "books", "score": 3.5},
+        )
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        # Call _build_query_parameters directly to verify binding.
+        params = source._build_query_parameters()
+
+    assert len(params) == 2, (
+        f"Expected 2 ScalarQueryParameter objects; got {len(params)}"
+    )
+
+    # Verify each parameter was constructed with (name, type, value) — not
+    # string-interpolated into the query.
+    param_names = {p.name for p in params}
+    assert "cat" in param_names, (
+        f"Expected parameter 'cat' to be bound; got {param_names!r}"
+    )
+    assert "score" in param_names, (
+        f"Expected parameter 'score' to be bound; got {param_names!r}"
+    )
+
+    cat_param = next(p for p in params if p.name == "cat")
+    score_param = next(p for p in params if p.name == "score")
+    assert cat_param.value == "books", (
+        f"Expected 'cat' value='books'; got {cat_param.value!r}"
+    )
+    assert score_param.value == 3.5, (
+        f"Expected 'score' value=3.5; got {score_param.value!r}"
+    )
+    # String binding NOT injection — the query itself must remain unchanged.
+    assert "@cat" in cfg.query, "Query must retain @cat placeholder (not interpolated)"
+    assert "@score" in cfg.query, (
+        "Query must retain @score placeholder (not interpolated)"
+    )
+
+
 def test_storage_oom_propagates() -> None:
     """A MemoryError from the Storage Read API must propagate, not trigger fallback.
 

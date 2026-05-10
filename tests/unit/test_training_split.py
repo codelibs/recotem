@@ -10,6 +10,7 @@ These tests cover:
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 import recotem.training._compat  # noqa: F401 - install IPython stub
 from recotem.recipe.models import SplitConfig
@@ -148,6 +149,39 @@ def test_time_global_held_out_interactions_are_after_global_cutoff() -> None:
     assert not (held_out_item_names & pre_cutoff_only), (
         "time_global held out items that exist only before the cutoff"
     )
+
+
+# ---------------------------------------------------------------------------
+# C5 — empty test set raises SplitError (TrainingError subclass)
+# ---------------------------------------------------------------------------
+
+
+def test_split_producing_empty_test_set_raises_TrainingError() -> None:
+    """A heldout_ratio so small that the random split assigns all rows to train
+    must raise SplitError, not silently return an empty test matrix.
+
+    SplitError is a TrainingError subclass, so the CLI maps it to exit 4.
+    The code in split.py checks ``X_val_test.nnz == 0`` and raises SplitError.
+
+    We use a tiny 2-row dataset with heldout_ratio=0.001 to make it very
+    likely that no interaction lands in the held-out set.
+    """
+    from recotem.training.errors import SplitError
+
+    df = pd.DataFrame({"user_id": ["u1", "u2"], "item_id": ["i1", "i2"]})
+    df["user_id"] = df["user_id"].astype(object)
+    df["item_id"] = df["item_id"].astype(object)
+
+    config = SplitConfig(scheme="random", heldout_ratio=0.001, seed=42)
+
+    with pytest.raises(SplitError):
+        split_interactions(
+            df,
+            user_column="user_id",
+            item_column="item_id",
+            time_column=None,
+            split_config=config,
+        )
 
 
 def test_time_global_and_time_user_produce_different_splits() -> None:

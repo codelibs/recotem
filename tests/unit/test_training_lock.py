@@ -18,6 +18,16 @@ import pytest
 from recotem.training.lock import LockContestedError, recipe_lock
 
 
+@pytest.fixture(autouse=True)
+def _reset_warned_remote_paths():
+    """Reset the per-process dedup set before each test to prevent cross-test pollution."""
+    import recotem.training.lock as lock_mod
+
+    lock_mod._warned_remote_paths.clear()
+    yield
+    lock_mod._warned_remote_paths.clear()
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
 def test_lock_acquired_yields_true(tmp_path: Path) -> None:
     output_path = tmp_path / "model.recotem"
@@ -404,6 +414,95 @@ def test_lock_file_owner_only_permissions(tmp_path: Path) -> None:
             f"Lock file must be created with mode 0o600 (owner-only); "
             f"got 0o{perm_bits:o} for {lock_path}"
         )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_remote_output_warning_emitted_once_per_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """For the same remote output path, the WARN-level advisory must fire only
+    once per process; subsequent calls must emit at DEBUG or not at all.
+
+    Regression: previously the warning fired on every invocation, producing
+    log noise on hourly CronJobs.
+    """
+    import structlog.testing
+
+    import recotem.training.lock as lock_mod
+
+    # Reset the per-process dedup set so this test is isolated from others.
+    lock_mod._warned_remote_paths.clear()
+
+    monkeypatch.setenv("RECOTEM_LOCK_DIR", str(tmp_path / "locks"))
+    remote = "s3://my-bucket/artifacts/dedup_test.recotem"
+
+    with structlog.testing.capture_logs() as cap1:
+        with recipe_lock(remote) as acquired:
+            assert acquired is True
+
+    with structlog.testing.capture_logs() as cap2:
+        with recipe_lock(remote) as acquired:
+            assert acquired is True
+
+    warn_events_1 = [
+        e
+        for e in cap1
+        if e.get("event") == "recipe_lock_local_only"
+        and e.get("log_level") == "warning"
+    ]
+    warn_events_2 = [
+        e
+        for e in cap2
+        if e.get("event") == "recipe_lock_local_only"
+        and e.get("log_level") == "warning"
+    ]
+
+    assert len(warn_events_1) == 1, (
+        "First call must emit exactly one WARN-level recipe_lock_local_only event"
+    )
+    assert len(warn_events_2) == 0, (
+        "Second call with the same remote path must NOT emit a WARN-level event; "
+        "should emit DEBUG or omit entirely"
+    )
+
+
+@pytest.mark.skipif(
+    not hasattr(__import__("os"), "O_NOFOLLOW"),
+    reason="O_NOFOLLOW not available on this platform",
+)
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_lock_refuses_to_follow_symlink(tmp_path: Path) -> None:
+    """recipe_lock must refuse to open a .lock path that is a symlink.
+
+    O_NOFOLLOW causes os.open to raise OSError(ELOOP) when the final path
+    component is a symlink, preventing a symlink-swap attack where an
+    attacker plants a symlink between invocations.
+    """
+    import errno as _errno
+
+    output_path = tmp_path / "model.recotem"
+    lock_path = Path(str(output_path) + ".lock")
+    # Create a real file to be the symlink target
+    target_file = tmp_path / "attacker_file.txt"
+    target_file.write_text("attacker controlled content")
+    # Plant a symlink at the expected lock path
+    lock_path.symlink_to(target_file)
+
+    with pytest.raises(OSError) as exc_info:
+        with recipe_lock(output_path):
+            pass  # pragma: no cover
+
+    # On macOS and Linux, O_NOFOLLOW raises ELOOP when the final path
+    # component is a symlink.
+    assert exc_info.value.errno == _errno.ELOOP, (
+        f"Expected ELOOP ({_errno.ELOOP}) when opening a symlink with O_NOFOLLOW, "
+        f"got errno={exc_info.value.errno}"
+    )
+
+    # The target file must NOT have been written to.
+    assert target_file.read_text() == "attacker controlled content", (
+        "recipe_lock must not write to the symlink target file"
+    )
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")

@@ -1219,6 +1219,145 @@ def test_configure_logging_from_env_prints_unexpected_error_to_stderr(
     )
 
 
+# ---------------------------------------------------------------------------
+# C3 — train exit code coverage
+# ---------------------------------------------------------------------------
+
+
+def test_train_exit0_on_success(tmp_path: Path, monkeypatch) -> None:
+    """train exits 0 when run_training completes without raising."""
+    from unittest.mock import MagicMock, patch
+
+    from recotem.training.pipeline import TrainResult
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "success_recipe")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    fake_result = MagicMock(spec=TrainResult)
+    fake_result.recipe_name = "success_recipe"
+    fake_result.run_id = "abc123"
+
+    with patch("recotem.training.pipeline.run_training", return_value=fake_result):
+        result = runner.invoke(app, ["train", str(yaml_path)])
+
+    assert result.exit_code == 0, (
+        f"Successful train must exit 0; got {result.exit_code}. Output: {result.stdout}"
+    )
+
+
+def test_train_exit1_on_unexpected_exception(tmp_path: Path, monkeypatch) -> None:
+    """train exits 1 when run_training raises an arbitrary RuntimeError (not a known type)."""
+    from unittest.mock import patch
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "unexpected_error_recipe")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    with patch(
+        "recotem.training.pipeline.run_training",
+        side_effect=RuntimeError("kaboom"),
+    ):
+        result = runner.invoke(app, ["train", str(yaml_path)])
+
+    assert result.exit_code == 1, (
+        f"Unexpected RuntimeError must produce exit 1 (unknown); "
+        f"got {result.exit_code}. Output: {result.stdout}"
+    )
+
+
+def test_train_exit4_on_all_trials_fail(tmp_path: Path, monkeypatch) -> None:
+    """train exits 4 when run_training raises TrainingError."""
+    from unittest.mock import patch
+
+    from recotem.training.errors import TrainingError
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "all_trials_fail_recipe")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    with patch(
+        "recotem.training.pipeline.run_training",
+        side_effect=TrainingError("all trials failed", code="no_completed_trials"),
+    ):
+        result = runner.invoke(app, ["train", str(yaml_path)])
+
+    assert result.exit_code == 4, (
+        f"TrainingError('all trials failed') must produce exit 4; "
+        f"got {result.exit_code}. Output: {result.stdout}"
+    )
+
+
+def test_train_exit4_on_min_data_violation(tmp_path: Path, monkeypatch) -> None:
+    """train exits 4 when run_training raises MinDataViolation (a TrainingError subclass)."""
+    from unittest.mock import patch
+
+    from recotem.training.errors import MinDataViolation
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "min_data_recipe")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    with patch(
+        "recotem.training.pipeline.run_training",
+        side_effect=MinDataViolation(
+            "n_rows=1 < min_rows=100",
+            n_rows=1,
+            n_users=1,
+            n_items=1,
+            min_rows=100,
+        ),
+    ):
+        result = runner.invoke(app, ["train", str(yaml_path)])
+
+    assert result.exit_code == 4, (
+        f"MinDataViolation must produce exit 4; "
+        f"got {result.exit_code}. Output: {result.stdout}"
+    )
+
+
+def test_train_lock_contention_skips_with_exit0_default(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """train exits 0 (skip) when the recipe lock is contested without --fail-on-busy.
+
+    run_training returns None when the lock is held and fail_on_busy=False.
+    The CLI should treat None as a graceful skip and exit 0.
+    """
+    from unittest.mock import patch
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "lock_skip_recipe")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    # run_training returns None when lock is contested and fail_on_busy=False
+    with patch("recotem.training.pipeline.run_training", return_value=None):
+        result = runner.invoke(app, ["train", str(yaml_path)])
+
+    assert result.exit_code == 0, (
+        f"Lock-contended skip (None result) must produce exit 0; "
+        f"got {result.exit_code}. Output: {result.stdout}"
+    )
+
+
+def test_train_fail_on_busy_exits_nonzero_when_locked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """train exits 6 when run_training raises LockContestedError with --fail-on-busy."""
+    from unittest.mock import patch
+
+    from recotem.training.lock import LockContestedError
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "lock_fail_recipe")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    with patch(
+        "recotem.training.pipeline.run_training",
+        side_effect=LockContestedError("recipe.yaml locked by pid 42"),
+    ):
+        result = runner.invoke(app, ["train", str(yaml_path), "--fail-on-busy"])
+
+    assert result.exit_code == 6, (
+        f"LockContestedError with --fail-on-busy must produce exit 6; "
+        f"got {result.exit_code}. Output: {result.stdout}"
+    )
+
+
 def test_schema_includes_all_registered_source_types() -> None:
     """recotem schema output must include csv, parquet, and bigquery.
 

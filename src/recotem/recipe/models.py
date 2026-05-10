@@ -222,7 +222,7 @@ class Recipe(BaseModel, extra="forbid"):
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     output: OutputConfig
 
-    model_config = {"populate_by_name": True}
+    model_config = {"populate_by_name": True, "validate_assignment": True}
 
     @field_validator("name")
     @classmethod

@@ -48,6 +48,11 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# Process-wide set of remote lock paths for which the WARN-level advisory has
+# already been emitted.  Subsequent calls for the same path use DEBUG so
+# repeated CronJob invocations don't spam the log.
+_warned_remote_paths: set[str] = set()
+
 
 class LockContestedError(Exception):
     """Raised when the recipe lock is held by another process and
@@ -121,16 +126,21 @@ def recipe_lock(
         # assume distributed mutual exclusion. See
         # docs/operations.md "Concurrent training" section.
         lock_path = _remote_lock_path(output_str)
-        logger.warning(
-            "recipe_lock_local_only",
-            scheme=scheme,
-            output_path=output_str,
-            lock_path=str(lock_path),
-            advice=(
+        _lock_path_str = str(lock_path)
+        _log_kwargs: dict[str, str] = {
+            "scheme": scheme,
+            "output_path": output_str,
+            "lock_path": _lock_path_str,
+            "advice": (
                 "per-recipe flock is host-local; ensure single-writer via the "
                 "scheduler (CronJob concurrencyPolicy=Forbid, Argo mutex, etc.)"
             ),
-        )
+        }
+        if _lock_path_str not in _warned_remote_paths:
+            _warned_remote_paths.add(_lock_path_str)
+            logger.warning("recipe_lock_local_only", **_log_kwargs)
+        else:
+            logger.debug("recipe_lock_local_only", **_log_kwargs)
     else:
         lock_path = Path(output_str + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,7 +165,8 @@ def recipe_lock(
     if timeout == 0.0:
         lock_op |= fcntl.LOCK_NB  # non-blocking
 
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)  # noqa: S103 – mode is 0o600 (owner-only); CodeQL false positive (py/world-readable-file)
+    _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY | _O_NOFOLLOW, 0o600)  # noqa: S103 – mode is 0o600 (owner-only); CodeQL false positive (py/world-readable-file)
     try:
         try:
             if timeout > 0:

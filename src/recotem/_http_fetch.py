@@ -330,8 +330,10 @@ def _build_pinned_opener(pinned_ip: str) -> urllib.request.OpenerDirector:
     class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
         def https_open(self, req):  # type: ignore[override]
             def _builder(host: str, *a: object, **kw: object) -> _PinnedHTTPSConnection:
-                # urllib passes a context= kwarg from the parent handler;
-                # forward it transparently.
+                # We deliberately ignore any caller-provided SSL context and use the system
+                # default trust store on every call. Custom CAs are not supported via this
+                # handler today; if needed in future, accept context via a constructor arg
+                # rather than the urllib do_open kwarg.
                 return _PinnedHTTPSConnection(host, *a, pinned_ip=pinned_ip_str, **kw)
 
             return self.do_open(_builder, req, context=ssl.create_default_context())

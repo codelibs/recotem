@@ -56,7 +56,7 @@ The internet-facing boundary is `recotem serve`. `recotem train` has no inbound 
 `recotem train` fetches `http://` and `https://` source paths via stdlib
 `urllib`. The fetch path enforces:
 
-- **Redirect cap**: at most 5 redirects (urllib's default 30 is overridden);
+- **Redirect cap**: at most 5 redirects (urllib's default 10 is overridden);
   visited-URL set detects redirect loops; redirects to non-`http`/`https`
   schemes are refused (e.g. `file://`, `gopher://`).
 - **Cert validation**: stdlib `urllib` default — system trust store, no opt-out.
@@ -400,7 +400,7 @@ on success.
 
 `POST /predict/{name}` returns:
 
-- 503 (`recipe_unavailable` / `recipe_unhealthy`) — recipe stub or stale entry; visible without auth context only at `/health`.
+- 503 (`recipe_unavailable`) — recipe stub or stale entry; visible without auth context only at `/health`.
 - 404 (`user_not_found`) — `user_id` was not in training data. This response distinguishes "known user, no recommendations" from "unknown user". If user-existence is sensitive in your application, mask 404 responses at your reverse proxy and return a generic empty-recommendation body.
 - 200 — recommendations, optionally joined with item metadata. Field stripping is configured via `RECOTEM_METADATA_FIELD_DENY` (case-**insensitive** column names — `"Internal_ID"` in metadata is stripped if `"internal_id"` is in the deny list). Use this to keep PII columns out of API responses even when they are present in the metadata file.
 

@@ -726,6 +726,61 @@ def test_content_length_over_cap_rejected_without_reading(httpserver) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_https_to_file_redirect_rejected() -> None:
+    """A 302 redirect from https:// to file:// must be refused.
+
+    The redirect-scheme check in fetch_http_bytes rejects any redirect to a
+    scheme not in NETWORK_SCHEMES ('http', 'https').  'file://' is not a
+    network scheme, so this must raise HttpFetchError with a message mentioning
+    the scheme change before any file access occurs.
+    """
+    import recotem._http_fetch as _mod
+    from recotem._http_fetch import HttpFetchError
+
+    file_redirect_url = "file:///etc/passwd"
+
+    class _FakeResponse:
+        status = 302
+
+        class headers:
+            @staticmethod
+            def get(key):
+                if key == "Location":
+                    return file_redirect_url
+                return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, n):
+            return b""
+
+    call_count = [0]
+
+    def _fake_open(req, timeout=None):
+        call_count[0] += 1
+        return _FakeResponse()
+
+    with patch.object(_mod._NO_REDIRECT_OPENER, "open", side_effect=_fake_open):
+        with patch.object(_mod, "assert_host_public", return_value=None):
+            with pytest.raises(HttpFetchError) as exc_info:
+                fetch_http_bytes(
+                    "https://example.com/start",
+                    timeout=5,
+                    max_bytes=65536,
+                    allow_private=True,
+                )
+
+    err = str(exc_info.value).lower()
+    assert any(kw in err for kw in ("scheme", "redirect", "file", "disallowed")), (
+        f"HttpFetchError must mention scheme change or disallowed redirect; "
+        f"got: {exc_info.value!r}"
+    )
+
+
 def test_fetch_http_bytes_rejects_embedded_credentials_in_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

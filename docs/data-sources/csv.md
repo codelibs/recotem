@@ -181,6 +181,8 @@ This ensures consistent string-coercion between training and serving. Recotem st
 
 ## Errors and exit codes
 
+CSV-parse failures, missing files, and missing columns map to exit 3 (`DataSourceError`) or exit 2 (`RecipeError`). HTTP/HTTPS-fetch failures — including redirect violations, sha256 mismatches, and byte-cap exceeded — map to exit 7 (`HttpFetchError`), which takes precedence over `DataSourceError` in the exit-code chain.
+
 | Error | Exit | Message pattern |
 |-------|------|----------------|
 | File not found | 3 | `DataSourceError: No such file or path: ./data/interactions.csv` |
@@ -190,10 +192,10 @@ This ensures consistent string-coercion between training and serving. Recotem st
 | Corrupt Parquet | 3 | `DataSourceError: ArrowInvalid: ...` |
 | Rejected scheme | 2 | `RecipeError: path scheme 'http' is not allowed` |
 | Embedded credentials | 2 | `RecipeError: 'source.path' contains embedded credentials in the URI. Use environment-based authentication instead.` |
-| sha256 mismatch | 3 | `DataSourceError: sha256 mismatch: got <8 hex>…, expected <8 hex>…` |
-| Download cap exceeded | 3 | `DataSourceError: Download size cap exceeded fetching <url>: > <bytes> bytes (RECOTEM_MAX_DOWNLOAD_BYTES).` |
-| HTTP redirect to disallowed scheme | 3 | `DataSourceError: Refusing redirect from <url> to disallowed scheme '<scheme>://'` |
-| HTTP redirect loop / over cap | 3 | `DataSourceError: Redirect loop detected …` / `Too many redirects (>5) …` |
+| sha256 mismatch | 7 | `HttpFetchError: sha256 mismatch: got <8 hex>…, expected <8 hex>…` |
+| Download cap exceeded | 7 | `HttpFetchError: Download size cap exceeded fetching <url>: > <bytes> bytes (RECOTEM_MAX_DOWNLOAD_BYTES).` |
+| HTTP redirect to disallowed scheme | 7 | `HttpFetchError: Refusing redirect from <url> to disallowed scheme '<scheme>://'` |
+| HTTP redirect loop / over cap | 7 | `HttpFetchError: Redirect loop detected …` / `Too many redirects (>5) …` |
 
 ## Encoding tips
 

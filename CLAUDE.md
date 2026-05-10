@@ -154,6 +154,20 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
   `recotem.training._compat` (for training-package callers) and
   `recotem._idmap` (for direct importers, e.g. serving).
 
+## CLI exit codes
+
+| Code | Constant | Meaning |
+|------|----------|---------|
+| 0 | `_EXIT_SUCCESS` | success |
+| 1 | `_EXIT_UNKNOWN` | unhandled / unmapped exception |
+| 2 | `_EXIT_RECIPE` | `RecipeError` (schema, env, path scheme) |
+| 3 | `_EXIT_DATASOURCE` | `DataSourceError` (CSV parse, missing column, BQ access) |
+| 4 | `_EXIT_TRAINING` | `TrainingError` (all trials failed, min-data violation) |
+| 5 | `_EXIT_ARTIFACT` | `ArtifactError` (magic / version / HMAC verify) |
+| 6 | `_EXIT_LOCK_CONTESTED` | per-recipe training lock held by another process |
+| 7 | `_EXIT_HTTP_FETCH` | `HttpFetchError` (SSRF guard / sha256 mismatch / scheme-changing redirect / byte cap) |
+| 8 | `_EXIT_CONFIG` | configuration error (e.g. signing keys missing without `--dev-allow-unsigned`) |
+
 ## Test commands
 
 ```bash

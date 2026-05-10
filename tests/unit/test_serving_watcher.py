@@ -1098,3 +1098,122 @@ def test_watcher_uses_registry_setter_for_loaded_marker(tmp_path: Path) -> None:
     # sha256 part must be a non-empty hex string
     sha256_val = loaded_marker[1]
     assert sha256_val, "sha256 part of _loaded_marker must be non-empty after load"
+
+
+# ---------------------------------------------------------------------------
+# Fix D1: future raise in _poll_artifacts increments stat failure metric
+# ---------------------------------------------------------------------------
+
+
+def test_artifact_stat_future_raise_increments_failure_metric(
+    tmp_path: Path,
+) -> None:
+    """When the executor future raises (e.g. BrokenThreadPool), the except
+    branch in _poll_artifacts must call inc_artifact_stat_failure with the
+    recipe name — not just log the error.
+    """
+    from concurrent.futures import Future
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "stat_fail_recipe", artifact_path)
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    state = _RecipeWatchState(recipe=recipe, artifact_path=str(artifact_path))
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states={"stat_fail_recipe": state},
+    )
+
+    # Build a future that raises RuntimeError when .result() is called.
+    failing_future: Future = Future()
+    failing_future.set_exception(RuntimeError("simulated executor failure"))
+
+    failure_calls: list[str] = []
+    original_inc = _metrics.inc_artifact_stat_failure
+
+    def _counting_inc(name: str) -> None:
+        failure_calls.append(name)
+        original_inc(name)
+
+    with patch.object(_metrics, "inc_artifact_stat_failure", side_effect=_counting_inc):
+        # Patch executor.submit to return the pre-built failing future.
+        with patch.object(watcher._executor, "submit", return_value=failing_future):
+            watcher._poll_artifacts()
+
+    assert "stat_fail_recipe" in failure_calls, (
+        "inc_artifact_stat_failure must be called with the recipe name when "
+        "the executor future raises an exception"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix D5: startup stat failure logs real recipe name
+# ---------------------------------------------------------------------------
+
+
+def test_startup_stat_failure_logs_real_recipe_name(
+    tmp_path: Path,
+) -> None:
+    """When _stat_marker is called during startup (force=True, marker=None)
+    and the stat fails, the logged recipe name must be the real recipe name,
+    not the default '<unknown>'.
+
+    We verify by calling _stat_marker directly with a recipe_name kwarg and
+    confirming the log event captures it correctly.
+    """
+    import structlog.testing
+
+    from recotem.serving.watcher import _stat_marker
+
+    # Point at a path that doesn't trigger FileNotFoundError but causes
+    # a generic error by patching fsspec.
+    nonexistent_path = str(tmp_path / "ghost.recotem")
+
+    import fsspec
+
+    original_url_to_fs = fsspec.core.url_to_fs
+
+    def _raising_url_to_fs(path, **kwargs):
+        fs_mock = MagicMock()
+        fs_mock.info.side_effect = OSError("simulated stat error")
+        return fs_mock, path
+
+    with structlog.testing.capture_logs() as cap:
+        from unittest.mock import patch
+
+        with patch(
+            "recotem.serving.watcher.fsspec.core.url_to_fs",
+            side_effect=_raising_url_to_fs,
+        ):
+            result = _stat_marker(nonexistent_path, recipe_name="startup_recipe")
+
+    assert result is None, "_stat_marker must return None on error"
+
+    stat_failed_events = [e for e in cap if e.get("event") == "artifact_stat_failed"]
+    assert stat_failed_events, (
+        "artifact_stat_failed must be logged on non-FileNotFoundError"
+    )
+    evt = stat_failed_events[0]
+    assert evt.get("recipe") == "startup_recipe", (
+        f"artifact_stat_failed must log real recipe name 'startup_recipe', "
+        f"not '<unknown>'; got {evt!r}"
+    )
+    assert evt.get("recipe") != "<unknown>", (
+        "artifact_stat_failed must NOT log '<unknown>' when recipe_name is provided"
+    )

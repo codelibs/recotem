@@ -154,7 +154,7 @@ def write_artifact(
 
 def _is_local_fs(fs: fsspec.AbstractFileSystem) -> bool:
     """Return True when *fs* is a local filesystem."""
-    return type(fs).__name__ in {"LocalFileSystem", "AbstractBufferedFile"}
+    return type(fs).__name__ == "LocalFileSystem"
 
 
 def _write_atomic(

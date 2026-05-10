@@ -7,7 +7,7 @@
 # ── image ─────────────────────────────────────────────────────────────────────
 image:
   repository: ghcr.io/codelibs/recotem
-  tag: "2.0.0"
+  tag: "2.0.0a0"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -95,6 +95,20 @@ env:
   # an Ingress in front it must be widened.
   RECOTEM_ALLOWED_HOSTS: ""
   RECOTEM_DRAIN_SECONDS: "30"
+  # RECOTEM_MAX_DOWNLOAD_BYTES: ""       # default 268435456 (256 MiB); cap on source-path
+  #                                      # body for HTTP/HTTPS, local, and object-store reads
+  #                                      # (clamped 1 MiB–16 GiB).  Uncomment to override.
+  # RECOTEM_HTTP_TIMEOUT_SECONDS: ""     # default 30; connect/read timeout (seconds) for
+  #                                      # HTTP/HTTPS source fetch (clamped 1–600).
+  #                                      # Uncomment and raise for slow remote data sources.
+  # RECOTEM_HTTP_ALLOW_PRIVATE: ""       # default unset (private/loopback destinations
+  #                                      # blocked to prevent SSRF against cloud-metadata
+  #                                      # services).  Set to "1" only in isolated dev
+  #                                      # environments — never in production.
+  # RECOTEM_METRICS_ENABLED: ""          # default unset (Prometheus /metrics disabled).
+  #                                      # Set to "1" to enable.  Requires the recotem[metrics]
+  #                                      # extra (prometheus-client) to be installed in the
+  #                                      # image; see Dockerfile build args or custom image.
 
 # ── secrets ───────────────────────────────────────────────────────────────────
 # Names of Kubernetes Secrets containing sensitive env vars.

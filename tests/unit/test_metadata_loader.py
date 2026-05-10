@@ -475,3 +475,93 @@ def test_on_field_missing_error_raises_with_field_names(tmp_path: Path) -> None:
     assert "alpha" in msg or "beta" in msg, (
         f"Error message must name the missing fields; got: {msg!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: local file size cap via RECOTEM_MAX_DOWNLOAD_BYTES
+# ---------------------------------------------------------------------------
+
+
+def test_local_metadata_size_cap_exceeded_raises(tmp_path: Path, monkeypatch) -> None:
+    """A local metadata CSV larger than the cap must raise ValueError.
+
+    The RECOTEM_MAX_DOWNLOAD_BYTES cap documented in CLAUDE.md applies to all
+    read paths (local + object-store), not only HTTP downloads.
+    """
+    from recotem import _size_cap
+    from recotem.metadata import loader as metadata_loader
+
+    csv_file = _write_csv(tmp_path, "item_id,title\n" + "i1,Item1\n" * 20)
+
+    # The metadata loader imported `check_size_cap` by name, so binding lives in
+    # its own module namespace.  Patch *that* reference (not the source module)
+    # so the loader sees the tiny-cap version on its next call.
+    original = _size_cap.check_size_cap
+
+    def _tiny_cap(path: str, cap: int, *, label: str = "file") -> None:
+        return original(path, 10, label=label)  # 10-byte cap
+
+    monkeypatch.setattr(metadata_loader, "check_size_cap", _tiny_cap)
+
+    with pytest.raises(ValueError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
+        load_item_metadata(_Config("csv", str(csv_file)), fields=["title"])
+
+
+def test_object_store_uncappable_returns_silently(monkeypatch) -> None:
+    """When fsspec stat fails for an object-store path, check_size_cap is silent.
+
+    The real read will surface the error; the cap check must not raise on
+    stat failure.
+    """
+    from recotem._size_cap import check_size_cap
+
+    # s3:// path — fsspec will fail (not installed / no credentials), so the
+    # cap check must return without raising SizeCapExceededError.
+    try:
+        check_size_cap("s3://some-bucket/some/file.csv", cap=1, label="CSV")
+    except Exception as exc:
+        # Only SizeCapExceededError is a failure here; other exceptions from
+        # missing fsspec/credentials are acceptable but should not occur
+        # (the helper swallows them).
+        from recotem._size_cap import SizeCapExceededError
+
+        if isinstance(exc, SizeCapExceededError):
+            raise AssertionError(
+                "check_size_cap must not raise SizeCapExceededError "
+                "when fsspec stat fails"
+            ) from exc
+        # Any other exception means fsspec itself raised — that means the
+        # helper did NOT swallow the error correctly.
+        raise AssertionError(
+            f"check_size_cap must swallow fsspec errors silently, got: {exc}"
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: literal "nan" item id preserved
+# ---------------------------------------------------------------------------
+
+
+def test_literal_nan_item_id_preserved(tmp_path: Path) -> None:
+    """An item whose id is literally the string 'nan' must not be dropped.
+
+    Previously, after astype(str), genuine NaN and the literal string "nan"
+    were both dropped.  The fix detects nulls before str-coercion so that
+    items whose id field contains the text "nan" are retained.
+    """
+    csv_file = _write_csv(
+        tmp_path,
+        # Row 1: literal "nan" id — must be preserved
+        # Row 2: real null id (empty cell) — must be dropped
+        # Row 3: normal id — must be preserved
+        "item_id,title\nnan,NaN Product\n,No Title\ni1,Item One\n",
+    )
+    df = load_item_metadata(_Config("csv", str(csv_file)), fields=["title"])
+
+    assert "nan" in df.index, (
+        "Literal 'nan' item id must be preserved (it is a valid string id)"
+    )
+    assert "i1" in df.index
+    # The null row (empty cell) must be dropped
+    assert len(df) == 2, f"Expected 2 rows (nan + i1), got {len(df)}: {list(df.index)}"
+    assert df.loc["nan", "title"] == "NaN Product"

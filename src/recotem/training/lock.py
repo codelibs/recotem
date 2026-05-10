@@ -12,11 +12,31 @@ Implements the spec's lock semantics (Section 6 step 2):
 
 Uses ``fcntl.flock`` on POSIX and falls back to a best-effort open-based
 lock on Windows.  The spec targets Linux/macOS (Docker), so POSIX is primary.
+
+Lock-file sentinel pattern
+--------------------------
+The ``.lock`` file is intentionally **never deleted**.  Deleting it while a
+holder still has the fd open creates a classic inode-rotation race:
+
+1. Holder opens inode A, acquires flock.
+2. Contender opens inode A, tries flock → blocked / EWOULDBLOCK.
+3. Holder closes fd → flock released.  Contender is about to call flock …
+4. A third process deletes inode A and creates inode B at the same path.
+5. Contender calls flock on the *old* inode A (already unlinked).
+6. Third process opens inode B and acquires flock on it.
+
+Both the contender (inode A) and the third process (inode B) now each believe
+they hold "the recipe lock" — two writers in the critical section.
+
+Keeping the sentinel file alive means every opener always opens the **same**
+inode.  The file is cheap (0 bytes of content) and creates itself on first
+use, so there is no operational penalty to leaving it in place.
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import os
 import sys
@@ -124,11 +144,8 @@ def recipe_lock(
                 )
             yield False
             return
-        try:
-            yield True
-        finally:
-            with contextlib.suppress(OSError):
-                lock_path.unlink(missing_ok=True)
+        # The sentinel file is left on disk intentionally — see module docstring.
+        yield True
         return
 
     # POSIX path via fcntl.flock
@@ -150,14 +167,27 @@ def recipe_lock(
                     try:
                         fcntl.flock(fd, lock_op | fcntl.LOCK_NB)
                         break
-                    except OSError:
+                    except OSError as _poll_exc:
+                        # Only retry on genuine lock-contention errno values.
+                        # EBADF, ENOLCK, EIO, etc. indicate a real error and
+                        # must not be silently swallowed as "try again later".
+                        if _poll_exc.errno not in (
+                            errno.EWOULDBLOCK,
+                            errno.EACCES,
+                            errno.EAGAIN,
+                        ):
+                            raise
                         if time.monotonic() >= deadline:
                             raise
                         time.sleep(0.05)
             else:
                 fcntl.flock(fd, lock_op)
         except OSError as exc:
-            # Lock contended (LOCK_NB + EWOULDBLOCK / EACCES).
+            # Only treat genuine lock-contention errno values as "busy".
+            # EBADF, ENOLCK, EIO, etc. indicate a real system problem and
+            # must not be silently converted to "lock contested".
+            if exc.errno not in (errno.EWOULDBLOCK, errno.EACCES, errno.EAGAIN):
+                raise
             if fail_on_busy:
                 raise LockContestedError(
                     f"Recipe lock at {lock_path} is held by another process. "
@@ -166,6 +196,7 @@ def recipe_lock(
             yield False
             return
 
+        # The sentinel file is left on disk intentionally — see module docstring.
         yield True
 
     finally:
@@ -173,8 +204,6 @@ def recipe_lock(
         # LOCK_UN call before close is redundant and opens an error window if
         # the fd has already been invalidated.
         os.close(fd)
-        with contextlib.suppress(OSError):
-            lock_path.unlink(missing_ok=True)
 
 
 def _try_acquire_windows(lock_path: Path) -> bool:

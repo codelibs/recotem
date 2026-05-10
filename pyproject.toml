@@ -68,6 +68,10 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Slow tests are excluded by default to keep local and CI runs fast.
+# Override with: uv run pytest -m slow --override-ini='addopts='
+# or:            uv run pytest --override-ini='addopts=' (runs everything)
+addopts = ["-m", "not slow"]
 markers = [
     "slow: marks tests as slow (deselect with -m \"not slow\")",
 ]

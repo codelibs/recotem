@@ -89,14 +89,22 @@ def test_lock_fail_on_busy_raises_lock_contested_error(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
 def test_lock_released_after_context(tmp_path: Path) -> None:
-    """The lock file is cleaned up after the context manager exits."""
+    """The flock is released after the context manager exits.
+
+    The sentinel file intentionally persists on disk (inode-rotation safety —
+    see lock.py module docstring).  A second acquire after the first context
+    exits must succeed, proving the flock itself was released.
+    """
     output_path = tmp_path / "released.recotem"
     lock_path = Path(str(output_path) + ".lock")
     with recipe_lock(output_path) as acquired:
         assert acquired is True
         assert lock_path.exists()
-    # After context exit, the lock file should be removed
-    assert not lock_path.exists()
+    # Sentinel file must remain on disk (never deleted).
+    assert lock_path.exists()
+    # The flock must have been released — a subsequent acquire must succeed.
+    with recipe_lock(output_path) as acquired2:
+        assert acquired2 is True
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
@@ -242,4 +250,158 @@ def test_remote_lock_path_uses_full_sha256_digest(tmp_path: Path, monkeypatch) -
     )
     assert stem == expected_digest, (
         f"Lock file stem {stem!r} does not match full digest {expected_digest!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sentinel-pattern / inode-safety tests (concurrency bug fix)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_lock_file_persists_after_release(tmp_path: Path) -> None:
+    """The sentinel ``.lock`` file must remain on disk after the holder exits.
+
+    Deleting the file on release opens the inode-rotation race described in
+    the lock.py module docstring.  The file is cheap and intentionally left.
+    """
+    output_path = tmp_path / "model.recotem"
+    lock_path = Path(str(output_path) + ".lock")
+
+    with recipe_lock(output_path) as acquired:
+        assert acquired is True
+
+    assert lock_path.exists(), (
+        "Sentinel lock file must persist after release (inode-rotation safety)"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_contender_does_not_delete_lock_file(tmp_path: Path) -> None:
+    """A contender that exits without acquiring must not delete the lock file.
+
+    Scenario: process A holds the lock; process B contends with
+    fail_on_busy=False (yields False, returns immediately).  After both
+    finish, the sentinel must still exist so future acquirers open the same
+    inode.
+    """
+    import fcntl
+    import os
+
+    output_path = tmp_path / "model.recotem"
+    lock_path = Path(str(output_path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Process A: hold the lock via a raw fd from a different open-file-description
+    # so that the same-process flock re-entrancy of Linux does not mask the test.
+    ctx = multiprocessing.get_context("fork")
+
+    def _holder(lock_path_str: str, ready_event, release_event) -> None:
+        fd = os.open(lock_path_str, os.O_CREAT | os.O_WRONLY, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ready_event.set()
+        release_event.wait(timeout=5.0)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    ready = ctx.Event()
+    release = ctx.Event()
+    p = ctx.Process(target=_holder, args=(str(lock_path), ready, release))
+    p.start()
+    ready.wait(timeout=3.0)
+
+    try:
+        # Process B: contend with fail_on_busy=False — must yield False.
+        with recipe_lock(output_path, timeout=0.0, fail_on_busy=False) as result:
+            # On Linux flock is per-open-file-description; same-process may
+            # re-acquire.  Regardless of True/False, the sentinel must survive.
+            _ = result
+    finally:
+        release.set()
+        p.join(timeout=3.0)
+
+    assert lock_path.exists(), (
+        "Contender must not delete the sentinel lock file (inode-rotation safety)"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_concurrent_holders_serialized_through_persistent_lock_file(
+    tmp_path: Path,
+) -> None:
+    """Two processes competing for the same lock must not overlap in the
+    critical section.
+
+    Uses a shared multiprocessing.Value as a counter that is incremented
+    inside the lock.  If mutual exclusion holds, the counter always reaches
+    exactly N (one increment per process, never lost due to concurrent write).
+    Also verifies the sentinel file still exists after all processes finish.
+    """
+    import time
+
+    output_path = tmp_path / "shared.recotem"
+    lock_path = Path(str(output_path) + ".lock")
+
+    N = 4
+    ctx = multiprocessing.get_context("fork")
+    counter = ctx.Value("i", 0)
+    violation = ctx.Value("i", 0)  # 1 if two processes overlapped
+
+    def _worker(output_path_str: str, counter, violation) -> None:
+        from recotem.training.lock import recipe_lock as rl
+
+        with rl(output_path_str, timeout=-1) as acquired:
+            assert acquired is True
+            # Read, sleep briefly (yields CPU so other process can attempt),
+            # then write back.  A non-serialized second writer would observe
+            # stale value and produce a final sum < N.
+            val = counter.value
+            time.sleep(0.02)
+            # If another process is also inside the critical section, it will
+            # have incremented the counter during our sleep.
+            if counter.value != val:
+                violation.value = 1
+            counter.value = val + 1
+
+    procs = [
+        ctx.Process(target=_worker, args=(str(output_path), counter, violation))
+        for _ in range(N)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=10.0)
+
+    assert violation.value == 0, "Two processes overlapped inside the critical section"
+    assert counter.value == N, (
+        f"Expected counter={N} after {N} serialized increments, got {counter.value}"
+    )
+    assert lock_path.exists(), (
+        "Sentinel lock file must persist after all processes finish"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_acquire_propagates_unexpected_oserror(tmp_path: Path, monkeypatch) -> None:
+    """An OSError with errno=EIO from fcntl.flock must propagate unmodified.
+
+    Only EWOULDBLOCK / EACCES / EAGAIN are lock-contention signals.  Real I/O
+    errors (EIO, ENOLCK, EBADF, …) must not be silently converted to
+    "lock contested" or cause the call to yield False.
+    """
+    import errno as _errno
+    import fcntl
+
+    output_path = tmp_path / "eio.recotem"
+
+    eio = OSError(_errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(fcntl, "flock", lambda fd, op: (_ for _ in ()).throw(eio))
+
+    with pytest.raises(OSError) as exc_info:
+        with recipe_lock(output_path, timeout=0.0):
+            pass  # pragma: no cover
+
+    assert exc_info.value.errno == _errno.EIO, (
+        f"Expected EIO to propagate, got errno={exc_info.value.errno}"
     )

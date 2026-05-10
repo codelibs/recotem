@@ -651,3 +651,71 @@ def test_is_address_internal_unwraps_ipv4_mapped() -> None:
     assert _is_address_internal(ipaddress.ip_address("::ffff:10.0.0.1")) is True
     # A public IPv4-mapped should pass.
     assert _is_address_internal(ipaddress.ip_address("::ffff:8.8.8.8")) is False
+
+
+# ---------------------------------------------------------------------------
+# New: Content-Length pre-check vs streaming cap behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_content_length_over_cap_rejected_without_reading(httpserver) -> None:
+    """Server responds with Content-Length larger than max_bytes cap.
+
+    Current behaviour: fetch_http_bytes does NOT inspect Content-Length
+    headers before streaming; the cap fires during the streaming read
+    when accumulated bytes exceed max_bytes.
+
+    This test documents that behaviour.  When the actual body is small
+    (< max_bytes) but Content-Length claims it is huge, the streaming cap
+    does NOT fire and the fetch succeeds — because only actual bytes read
+    are counted.
+
+    The xfail marker below documents the desired future behaviour
+    (pre-stream Content-Length check) that is NOT yet implemented.
+    """
+    import pytest
+
+    # Serve a small 50-byte body but advertise a very large Content-Length.
+    small_body = b"user_id,item_id\nu1,i1\n"  # 22 bytes
+    huge_content_length = 10 * 1024 * 1024  # 10 MiB — far above cap
+
+    httpserver.expect_request("/data.csv").respond_with_data(
+        small_body,
+        status=200,
+        headers={"Content-Length": str(huge_content_length)},
+    )
+
+    cap = 100  # 100 bytes — small_body (22 bytes) fits; huge_cl does not
+
+    # With current implementation: streaming cap fires only on actual bytes.
+    # The body is 22 bytes < cap (100), so fetch succeeds despite lying CL.
+    result = fetch_http_bytes(
+        httpserver.url_for("/data.csv"),
+        timeout=5,
+        max_bytes=cap,
+        allow_private=True,
+    )
+    assert result == small_body, (
+        "Streaming cap should allow a small actual body even if "
+        "Content-Length advertises a larger size"
+    )
+
+    # xfail: a pre-Content-Length check is NOT currently implemented.
+    # If this is ever added, the fetch should raise HttpFetchError before
+    # reading any body bytes when Content-Length > max_bytes.
+    # This assertion documents the gap.
+    @pytest.mark.xfail(
+        reason=(
+            "Pre-stream Content-Length check not implemented: "
+            "cap fires during streaming, not on header inspection"
+        ),
+        strict=True,
+    )
+    def _assert_pre_check_future_behaviour() -> None:
+        with pytest.raises(HttpFetchError, match="cap|Content-Length"):
+            fetch_http_bytes(
+                httpserver.url_for("/data.csv"),
+                timeout=5,
+                max_bytes=cap,
+                allow_private=True,
+            )

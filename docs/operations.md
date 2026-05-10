@@ -13,12 +13,12 @@ This multi-kid pattern enables zero-downtime rotation:
    ```bash
    recotem keygen --type signing --kid prod-2026-q3
    # kid=prod-2026-q3
-   # plaintext=<64 hex chars>     <-- 32 raw bytes; this IS the signing key
-   # hash=sha256:<64 hex chars>   <-- informational only (sha256 of plaintext)
+   # plaintext=<64 hex chars>       <-- 32 raw bytes; this IS the signing key
+   # fingerprint=ddeeff00           <-- sha256(key_bytes)[:8]; matches /security.posture log
    # env_entry=RECOTEM_SIGNING_KEYS=prod-2026-q3:<64 hex chars>
    ```
 
-   For signing keys, the **`plaintext`** line is the actual key — copy it (or the ready-made `env_entry=` line) into `RECOTEM_SIGNING_KEYS`. The `hash=sha256:<hex>` line is shown for reference only and must not be used in `RECOTEM_SIGNING_KEYS`. (The `sha256:` wire prefix is reserved for `RECOTEM_API_KEYS` entries — see "API key rotation" below.)
+   For signing keys, the **`plaintext`** line is the actual key — copy it (or the ready-made `env_entry=` line) into `RECOTEM_SIGNING_KEYS`. The `fingerprint=` line is `sha256(key_bytes)[:8]` and matches the `fingerprint` field in the `security.posture` log line; it is informational only and must not be used in `RECOTEM_SIGNING_KEYS`. (The `sha256:` wire prefix is reserved for `RECOTEM_API_KEYS` entries — see "API key rotation" below.)
 
 2. **Add the new kid as the first entry, keeping the old one.**
 
@@ -337,7 +337,7 @@ Enable Prometheus metrics:
 pip install "recotem[metrics]"
 ```
 
-The `/metrics` endpoint is opt-in and off by default. Set `RECOTEM_METRICS_ENABLED=true` to activate.
+The `/metrics` endpoint is opt-in and off by default. Set `RECOTEM_METRICS_ENABLED` to a truthy value (`1`, `true`, `yes`, `on`) to activate.
 
 > **Network exposure.** Both `/metrics` and `/health` are unauthenticated by
 > design — the same posture Prometheus and Kubernetes liveness/readiness

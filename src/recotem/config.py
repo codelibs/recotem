@@ -38,6 +38,8 @@ _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8080
 _DEFAULT_WATCH_INTERVAL = 5
 _DEFAULT_MAX_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
+_MIN_ARTIFACT_BYTES = 1 * 1024 * 1024  # 1 MiB
+_MAX_ARTIFACT_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
 _DEFAULT_DRAIN_SECONDS = 30
 _DEFAULT_ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
 
@@ -245,16 +247,13 @@ class ServeConfig:
         # RECOTEM_SIGNING_KEYS (raw; KeyRing instantiation happens elsewhere)
         cfg.signing_keys_raw = os.environ.get("RECOTEM_SIGNING_KEYS", "").strip()
 
-        # RECOTEM_MAX_ARTIFACT_BYTES
-        max_bytes_env = os.environ.get("RECOTEM_MAX_ARTIFACT_BYTES", "").strip()
-        if max_bytes_env:
-            try:
-                cfg.max_artifact_bytes = int(max_bytes_env)
-            except ValueError as exc:
-                raise ValueError(
-                    f"RECOTEM_MAX_ARTIFACT_BYTES must be an integer, "
-                    f"got {max_bytes_env!r}: {exc}"
-                ) from exc
+        # RECOTEM_MAX_ARTIFACT_BYTES (clamped to [1 MiB, 16 GiB])
+        cfg.max_artifact_bytes = _clamped_int_env(
+            "RECOTEM_MAX_ARTIFACT_BYTES",
+            _DEFAULT_MAX_ARTIFACT_BYTES,
+            _MIN_ARTIFACT_BYTES,
+            _MAX_ARTIFACT_BYTES,
+        )
 
         cfg.allowed_origins = _split_csv_env("RECOTEM_ALLOWED_ORIGINS", [])
         cfg.allowed_hosts = _split_csv_env(

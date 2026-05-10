@@ -3,11 +3,12 @@
 This processor MUST be placed first in the structlog processor chain so that
 redaction runs before any other processor can serialize the event.
 
-Redacted key patterns (case-insensitive):
+Redacted key patterns (case-insensitive, matched against the **key name**
+not the value):
   - x-api-key, authorization, cookie
   - recotem_signing_key, recotem_signing_keys, recotem_api_keys
-  - *_secret*, *_password*
-  - aws_*, gcp_*, google_*
+  - *_secret*, *_password*, *_token*, *_key*
+  - aws_*, gcp_*, google_*, azure_*
 """
 
 from __future__ import annotations
@@ -35,12 +36,16 @@ _EXACT_KEYS: frozenset[str] = frozenset(
 )
 
 # Glob-style patterns matched against the lowercased key.
+# Aligned with src/recotem/recipe/envvars.py blacklist (case-folded to lower).
 _GLOB_PATTERNS: tuple[str, ...] = (
     "*_secret*",
     "*_password*",
+    "*_token*",
+    "*_key*",
     "aws_*",
     "gcp_*",
     "google_*",
+    "azure_*",
 )
 
 _COMPILED_GLOBS: tuple[re.Pattern[str], ...] = tuple(

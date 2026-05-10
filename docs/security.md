@@ -40,7 +40,7 @@ The internet-facing boundary is `recotem serve`. `recotem train` has no inbound 
 | Stat-then-read TOCTOU on artifact | Read-once protocol: bytes read into memory once, sha256 computed, then HMAC-verified from the same buffer |
 | Key material in logs | structlog redaction processor runs first in chain; unit test asserts no key material at any log level |
 | API key brute-force / timing attack | `hmac.compare_digest` constant-time compare; no logging of plaintext or hash |
-| Credential injection via recipe env expansion | `RECOTEM_SIGNING_KEY*`, `RECOTEM_API_KEYS`, `*_SECRET*`, `*_PASSWORD*`, `AWS_*`, `GOOGLE_*`, `GCP_*` are blacklisted from `${...}` expansion |
+| Credential injection via recipe env expansion | `RECOTEM_SIGNING_KEY*`, `RECOTEM_API_KEYS`, `*_SECRET*`, `*_PASSWORD*`, `*_TOKEN*`, `*_KEY*`, `AWS_*`, `GOOGLE_*`, `GCP_*` are blacklisted from `${...}` expansion |
 | SQL injection via recipe | Env expansion never performed inside `source.query`; dynamic values must use `@param` BigQuery placeholders |
 | Path traversal via recipe | `name` validated with `^[A-Za-z0-9_-]{1,64}$` at load and before every filesystem use; artifact root confinement via `RECOTEM_ARTIFACT_ROOT` |
 | Tampered or rotated network-fetched data | `sha256` integrity pin is **mandatory** on `source.path` / `item_metadata.path` when the scheme is `http://` or `https://`; mismatch raises `DataSourceError` (exit 3) before the bytes reach the parser |
@@ -244,6 +244,24 @@ For S3:
 
 Grant `s3:PutObject` only to the train role, not the serve role.
 
+## Recipe env-var expansion blacklist
+
+Only variables matching `RECOTEM_RECIPE_*` are candidates for `${...}` expansion. A secondary blacklist blocks sensitive names even if they satisfy the prefix. Blacklisted patterns (case-insensitive):
+
+```
+RECOTEM_SIGNING_KEY
+RECOTEM_API_KEYS
+*_SECRET*
+*_PASSWORD*
+*_TOKEN*
+*_KEY*
+AWS_*
+GOOGLE_*
+GCP_*
+```
+
+The `*_KEY*` pattern is intentionally broad. Any `RECOTEM_RECIPE_*` variable whose name contains `_KEY` — such as `RECOTEM_RECIPE_PARTITION_KEY` — is rejected. Use a name that avoids `_KEY*` (e.g. `RECOTEM_RECIPE_PARTITION_COLUMN`). A blacklisted reference raises `RecipeError` (exit 2) and the error message names the variable but never includes its value.
+
 ## Secrets handling
 
 **What must be kept secret:**
@@ -264,6 +282,44 @@ Grant `s3:PutObject` only to the train role, not the serve role.
 
 Never commit signing keys, API key hashes, or API key plaintexts to version control.
 
+## API key minimum length
+
+Recotem enforces a 32-character minimum on the `X-API-Key` header value. Plaintext keys shorter than 32 chars are rejected with a 401 (`invalid_api_key`) before any digest comparison is attempted. The error message does not reveal the minimum threshold to the caller.
+
+The recommended workflow is `recotem keygen --type api`, which generates a 43-char base64url plaintext (32 raw bytes of `os.urandom`). Operator-chosen passphrases or passwords must be at least 32 chars; shorter values will silently fail authentication at runtime with no configuration error at startup.
+
+## `recotem keygen` output format
+
+The two key types produce different output and must not be confused:
+
+**Signing key** (`--type signing`):
+
+```
+kid=prod-2026-q3
+plaintext=<64 hex chars>        # 32 raw bytes; THIS is the signing key
+fingerprint=ddeeff00            # sha256(key_bytes)[:8]; matches /security.posture log
+env_entry=RECOTEM_SIGNING_KEYS=prod-2026-q3:<64 hex chars>
+```
+
+- Copy the `env_entry=` value into `RECOTEM_SIGNING_KEYS`.
+- The `fingerprint=` value is `sha256(key_bytes)[:8]`. It matches the `fingerprint` field in the `security.posture` log line emitted at startup. Use it to confirm the correct key is loaded — it does not expose the key material.
+- The `fingerprint=` line is informational only and must **not** be used in `RECOTEM_SIGNING_KEYS` or any config value.
+
+**API key** (`--type api`):
+
+```
+kid=client-a
+plaintext=<43-char base64url>   # share with the API client (shown once)
+hash=sha256:<64 hex chars>      # put this in RECOTEM_API_KEYS
+env_entry=RECOTEM_API_KEYS=client-a:sha256:<64 hex chars>
+```
+
+- Copy the `env_entry=` value into `RECOTEM_API_KEYS`.
+- The `hash=sha256:<hex>` line is the scrypt digest that goes into `RECOTEM_API_KEYS`. The `sha256:` prefix is a digest-family label, not the algorithm name — the actual digest uses `hashlib.scrypt`.
+- The `plaintext` is shown once at generation time. Store it in a password manager; there is no recovery path.
+
+The two key types use incompatible formats. Putting an API key hash into `RECOTEM_SIGNING_KEYS` (or vice versa) will fail at startup with a configuration error.
+
 ## Log redaction
 
 A structlog processor strips the following keys (case-insensitive) from every log event before output:
@@ -277,14 +333,19 @@ recotem_signing_keys
 recotem_api_keys
 *_secret*
 *_password*
+*_token*
+*_key*
 aws_*
 gcp_*
 google_*
+azure_*
 ```
 
 The redaction processor is the first in the chain and runs at every log level including trace. A CI check asserts that none of these patterns appear in captured log output across a full training and serving lifecycle.
 
 If a value is replaced with `[REDACTED]` in a log line you are debugging, the field name matched one of the patterns above. This is intentional.
+
+**URL userinfo redaction.** Any URL containing embedded credentials (e.g. `https://user:pass@host/path`) is logged as `https://[REDACTED]@host/path` at the HTTP-fetcher boundary via `redact_url_userinfo`. The recipe loader rejects userinfo-bearing URLs at parse time, so this redaction applies only to internally-constructed URLs and redirect targets. Do not log raw URLs with userinfo in your own application code — strip credentials before logging.
 
 ## Artifact security posture flags
 
@@ -339,7 +400,7 @@ on success.
 
 - 503 (`recipe_unavailable` / `recipe_unhealthy`) — recipe stub or stale entry; visible without auth context only at `/health`.
 - 404 (`user_not_found`) — `user_id` was not in training data. This response distinguishes "known user, no recommendations" from "unknown user". If user-existence is sensitive in your application, mask 404 responses at your reverse proxy and return a generic empty-recommendation body.
-- 200 — recommendations, optionally joined with item metadata. Field stripping is configured via `RECOTEM_METADATA_FIELD_DENY` (case-sensitive column names). Use this to keep PII columns out of API responses even when they are present in the metadata file.
+- 200 — recommendations, optionally joined with item metadata. Field stripping is configured via `RECOTEM_METADATA_FIELD_DENY` (case-**insensitive** column names — `"Internal_ID"` in metadata is stripped if `"internal_id"` is in the deny list). Use this to keep PII columns out of API responses even when they are present in the metadata file.
 
 `cutoff` is bounded at `[1, 1000]` by the request schema; oversized requests
 receive a 422 from FastAPI before reaching the recommender.

@@ -104,15 +104,18 @@ class IDMappedRecommender:
         ------
         KeyError
             If *user_id* was not in the training set.
+        RuntimeError
+            If the underlying recommender raises an internal error (propagated
+            so it surfaces as a 500 rather than being masked as a 404).
         """
-        try:
-            return self._mapper.recommend_for_known_user_id(
-                self.recommender,
-                str(user_id),
-                cutoff=cutoff,
-            )
-        except RuntimeError as exc:
-            raise KeyError(str(user_id)) from exc
+        uid = str(user_id)
+        if uid not in self._mapper.user_id_to_index:
+            raise KeyError(uid)
+        return self._mapper.recommend_for_known_user_id(
+            self.recommender,
+            uid,
+            cutoff=cutoff,
+        )
 
     def get_recommendation_for_new_user(
         self,

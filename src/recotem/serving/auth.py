@@ -69,6 +69,14 @@ _SCRYPT_R = 8
 _SCRYPT_P = 1
 _SCRYPT_DKLEN = 32
 
+# Minimum accepted X-API-Key plaintext length (in chars).  Keys shorter than
+# this carry less entropy and could be brute-forced offline if the stored
+# digest were ever leaked.  Recotem-issued keys (``recotem keygen --type api``)
+# produce 43-char base64url output, well above this floor.  Rejection is
+# indistinguishable from an invalid-key response to avoid leaking information
+# about which keys are configured.
+_API_KEY_MIN_LEN = 32
+
 
 def _hash_api_key(value: str) -> str:
     """Return the hex-encoded scrypt digest of *value*.
@@ -111,7 +119,12 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
     Raises
     ------
     fastapi.HTTPException
-        401 if the header is missing or no entry matches.
+        401 if the header is missing, shorter than ``_API_KEY_MIN_LEN``
+        (32 chars), exceeds ``_API_KEY_MAX_LEN`` (256 chars), or no entry
+        matches.  Short-key rejections are indistinguishable from
+        invalid-key rejections so the caller cannot determine which guard
+        fired.  ``recotem keygen --type api`` produces 43-char keys, safely
+        above the 32-char floor.
     """
     # No keys configured → no auth enforcement.
     if not api_keys:
@@ -135,6 +148,26 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
             path=request.url.path,
             length=len(raw_header),
             cap=_API_KEY_MAX_LEN,
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={"detail": "Invalid API key", "code": "invalid_api_key"},
+        )
+
+    # Reject plaintexts shorter than _API_KEY_MIN_LEN before running scrypt.
+    # A key shorter than 32 chars carries less than 256 bits of entropy even
+    # when generated randomly; if the digest were ever leaked, the reduced
+    # search space makes offline brute-force tractable.  Recotem-issued keys
+    # (``recotem keygen --type api``) produce 43-char base64url output (32
+    # random bytes), well above this floor.  The rejection response is
+    # identical to an invalid-key response so the caller cannot determine
+    # whether the key was too short or simply unrecognised.
+    if len(raw_header) < _API_KEY_MIN_LEN:
+        logger.warning(
+            "auth_short_key_rejected",
+            path=request.url.path,
+            length=len(raw_header),
+            min_len=_API_KEY_MIN_LEN,
         )
         raise HTTPException(
             status_code=401,

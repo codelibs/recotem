@@ -117,9 +117,12 @@ When `source.path` (or `item_metadata.path`) uses `http://` or `https://`:
   Production clusters leave it unset — the SSRF guard blocks a malicious
   recipe from reaching cloud-metadata services even when the operator
   has not curated the recipe directory.
-- `recotem validate` issues a HEAD-like check (`fs.exists()` for non-network
-  schemes; for HTTP(S) the URL is accepted at recipe-load only — no probe
-  fetch is issued). The integrity check happens at fetch time, not validate.
+- `recotem validate` issues a connectivity check for non-network schemes
+  (`fs.exists()` via fsspec). For HTTP(S) sources the check performs DNS
+  resolution and runs the SSRF guard (`assert_host_public`) — so a validate
+  against an unreachable or private hostname fails at DNS, not at HTTP.
+  No actual HTTP request is issued during validate; the sha256 integrity
+  check happens at fetch time, not validate time.
 - On sha256 mismatch the error message shows only the first 8 hex characters
   of each digest (`got 1a2b3c4d…, expected 5e6f7a8b…`) to avoid leaking the
   expected ground truth into shared logs.

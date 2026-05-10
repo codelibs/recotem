@@ -79,6 +79,12 @@ spec:
             {{- range .Values.ingress.hosts }}
             {{- if .host }}{{ $hosts = append $hosts .host }}{{ end }}
             {{- end }}
+            {{- /* localhost is always prepended so that kubelet probe requests
+                   (which hard-code "Host: localhost") are accepted by
+                   TrustedHostMiddleware even when ingress hostnames are set.
+                   Without it every readiness/liveness probe returns 400 and
+                   pods cycle unready indefinitely. */}}
+            {{- $hosts = prepend $hosts "localhost" }}
             {{- $allowed = join "," $hosts }}
             {{- end }}
             {{- end }}

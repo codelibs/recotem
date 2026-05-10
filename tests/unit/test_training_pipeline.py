@@ -851,3 +851,85 @@ def test_per_trial_timeout_orphans_thread_warns(tmp_path: Path) -> None:
         "Expected at least one per_trial_timeout_thread_orphaned log event; "
         f"captured events: {[e.get('event') for e in cap]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: per_algorithm_trials zero budget enqueues no trials (not max(1, 0)=1)
+# ---------------------------------------------------------------------------
+
+
+def test_per_algorithm_zero_budget_enqueues_no_trials() -> None:
+    """Explicit 0 budget for an algorithm must result in exactly 0 in the plan.
+
+    Regression guard against ``max(1, budget)`` footgun: if someone adds that
+    guard, TopPop would silently get 1 trial even when budget=0.
+
+    Uses _compute_budgets (pure function) to verify budget allocation, and
+    also verifies that run_search does NOT enqueue any TopPop trials when its
+    budget is 0 (only IALS trials are enqueued).
+    """
+    from recotem.training.search import _compute_budgets
+
+    # Canonical aliases: "IALS" and "TopPop" are the supported short names.
+    budgets = _compute_budgets(
+        class_names=["IALSRecommender", "TopPopRecommender"],
+        n_trials=5,
+        per_algorithm_trials={"IALS": 5, "TopPop": 0},
+    )
+
+    assert budgets.get("IALSRecommender", -1) == 5, (
+        f"IALS should have 5 trials, got {budgets.get('IALSRecommender')}"
+    )
+    assert budgets.get("TopPopRecommender", -1) == 0, (
+        f"TopPop budget=0 must NOT be promoted to 1 (max(1,0) footgun); "
+        f"got {budgets.get('TopPopRecommender')}"
+    )
+    assert sum(budgets.values()) == 5
+
+    # Verify via run_search's enqueue calls: TopPop must never be enqueued.
+    import numpy as np
+    import scipy.sparse as sps
+
+    from recotem.training.errors import SearchError
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+        mock_study = MagicMock()
+        mock_study.trials = []
+        mock_study.optimize = MagicMock()
+        mock_study_fn.return_value = mock_study
+
+        X = sps.csr_matrix(np.ones((10, 5)))
+        evaluator = MagicMock()
+
+        with ProgressReporter(
+            n_trials=5, recipe_name="zero_budget", run_id="run-zero"
+        ) as rep:
+            with pytest.raises(SearchError):
+                run_search(
+                    algorithms=["IALS", "TopPop"],
+                    X_tv_train=X,
+                    evaluator=evaluator,
+                    n_trials=5,
+                    per_algorithm_trials={"IALS": 5, "TopPop": 0},
+                    per_trial_timeout_seconds=None,
+                    timeout_seconds=None,
+                    parallelism=1,
+                    storage_path="",
+                    random_seed=42,
+                    reporter=rep,
+                    recipe_name="zero_budget",
+                    run_id="run-zero",
+                )
+
+    enqueued = [
+        call.args[0]["recommender_class_name"]
+        for call in mock_study.enqueue_trial.call_args_list
+    ]
+    toppop_count = enqueued.count("TopPopRecommender")
+
+    assert toppop_count == 0, (
+        f"TopPop budget=0 must enqueue 0 trials, not {toppop_count}. "
+        "max(1, budget) footgun detected. Enqueued: {enqueued}"
+    )

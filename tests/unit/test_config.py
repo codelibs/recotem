@@ -161,3 +161,55 @@ def test_get_max_download_bytes_clamps_small_values(
         f"RECOTEM_MAX_DOWNLOAD_BYTES={raw_value!r}: expected >= {expected_min}, got {result}"
     )
     assert result <= expected_max
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: RECOTEM_MAX_ARTIFACT_BYTES clamped to [1 MiB, 16 GiB]
+# ---------------------------------------------------------------------------
+
+_1_MIB = 1 * 1024 * 1024
+_16_GIB = 16 * 1024 * 1024 * 1024
+_2_GIB = 2 * 1024 * 1024 * 1024  # default
+
+
+@pytest.mark.parametrize(
+    "raw_value,expected",
+    [
+        ("0", _1_MIB),  # 0 -> clamped to 1 MiB
+        ("-1", _1_MIB),  # negative -> clamped to 1 MiB
+        ("999999999999999", _16_GIB),  # absurdly large -> clamped to 16 GiB
+        (str(_1_MIB), _1_MIB),  # exact lower bound -> unchanged
+        (str(_16_GIB), _16_GIB),  # exact upper bound -> unchanged
+        (str(_2_GIB), _2_GIB),  # default value -> unchanged
+    ],
+)
+def test_max_artifact_bytes_clamped(
+    raw_value: str,
+    expected: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_MAX_ARTIFACT_BYTES values outside [1 MiB, 16 GiB] are clamped."""
+    monkeypatch.setenv("RECOTEM_MAX_ARTIFACT_BYTES", raw_value)
+    cfg = ServeConfig.from_env()
+    assert cfg.max_artifact_bytes == expected, (
+        f"RECOTEM_MAX_ARTIFACT_BYTES={raw_value!r}: expected {expected}, "
+        f"got {cfg.max_artifact_bytes}"
+    )
+
+
+def test_max_artifact_bytes_unset_uses_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When RECOTEM_MAX_ARTIFACT_BYTES is unset, the 2 GiB default is used."""
+    monkeypatch.delenv("RECOTEM_MAX_ARTIFACT_BYTES", raising=False)
+    cfg = ServeConfig.from_env()
+    assert cfg.max_artifact_bytes == _2_GIB
+
+
+def test_max_artifact_bytes_non_integer_uses_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-integer RECOTEM_MAX_ARTIFACT_BYTES falls back to the 2 GiB default."""
+    monkeypatch.setenv("RECOTEM_MAX_ARTIFACT_BYTES", "not_a_number")
+    cfg = ServeConfig.from_env()
+    assert cfg.max_artifact_bytes == _2_GIB

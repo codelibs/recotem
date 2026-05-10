@@ -226,3 +226,82 @@ def test_local_parquet_over_byte_cap_rejected(tmp_path: Path, monkeypatch) -> No
     source = ParquetSource(cfg)
     with pytest.raises(DataSourceError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
         source.fetch(_ctx())
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: file://localhost path parsing
+# ---------------------------------------------------------------------------
+
+
+def test_file_localhost_uri_resolves_correctly(tmp_path: Path, monkeypatch) -> None:
+    """file://localhost/abs/path must resolve to /abs/path, not localhost/abs/path.
+
+    The old ``Path(path.removeprefix("file://"))`` left ``localhost`` as a
+    path component, turning the absolute path into a relative one and silently
+    skipping the size cap check.  The fix uses urllib.request.url2pathname on
+    the parsed path component.
+    """
+    from recotem import _size_cap
+
+    csv_file = tmp_path / "data.csv"
+    csv_file.write_text("user_id,item_id\nu1,i1\nu2,i2\n")
+
+    file_localhost_uri = f"file://localhost{csv_file}"
+
+    # Confirm that _file_uri_to_local_path resolves to the real absolute path.
+    result = _size_cap._file_uri_to_local_path(file_localhost_uri)
+    assert result == csv_file, (
+        f"file://localhost URI must resolve to {csv_file}, got {result}"
+    )
+
+
+def test_file_localhost_size_cap_fires(tmp_path: Path, monkeypatch) -> None:
+    """Size cap must fire for a file://localhost URI that points to an oversized file."""
+    from recotem import _size_cap
+
+    csv_file = tmp_path / "data.csv"
+    csv_file.write_text("user_id,item_id\n" + "u1,i1\n" * 20)
+
+    file_localhost_uri = f"file://localhost{csv_file}"
+
+    with pytest.raises(
+        _size_cap.SizeCapExceededError, match="RECOTEM_MAX_DOWNLOAD_BYTES"
+    ):
+        _size_cap.check_size_cap(file_localhost_uri, cap=10, label="CSV")
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: sha256 mismatch on HTTP path raises DataSourceError
+# ---------------------------------------------------------------------------
+
+
+def test_csv_source_sha256_mismatch_via_http_raises(httpserver) -> None:
+    """Serve a small CSV via pytest-httpserver and request with wrong sha256.
+
+    CSVSource.fetch() must raise DataSourceError whose message contains
+    "sha256" when the downloaded content does not match the declared digest.
+    This is distinct from metadata sha256 tests — it exercises the data-
+    source HTTP path.
+    """
+    from recotem.datasource.base import DataSourceError, FetchContext
+    from recotem.datasource.csv import CSVConfig, CSVSource
+
+    body = b"user_id,item_id\nu1,i1\nu2,i2\n"
+    httpserver.expect_request("/data.csv").respond_with_data(
+        body,
+        status=200,
+        content_type="text/csv",
+    )
+
+    wrong_sha256 = "0" * 64  # definitely wrong
+
+    cfg = CSVConfig(
+        type="csv",
+        path=httpserver.url_for("/data.csv"),
+        sha256=wrong_sha256,
+    )
+    source = CSVSource(cfg)
+    ctx = FetchContext(recipe_name="sha256_test", run_id="run-sha-test")
+
+    with pytest.raises(DataSourceError, match="sha256"):
+        source.fetch(ctx)

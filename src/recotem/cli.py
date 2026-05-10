@@ -416,7 +416,8 @@ def inspect(
             "--dev-allow-unsigned",
             help=(
                 "Verify against the deterministic in-memory dev signing key "
-                "when RECOTEM_SIGNING_KEYS is unset.  Useful for inspecting "
+                "when RECOTEM_SIGNING_KEYS is unset.  Requires "
+                "RECOTEM_ENV=development.  Useful for inspecting "
                 "artifacts produced by `recotem train --dev-allow-unsigned`."
             ),
         ),
@@ -425,7 +426,14 @@ def inspect(
     """Read and verify an artifact header without deserializing the payload.
 
     Reads the structural fields and HMAC, verifies against RECOTEM_SIGNING_KEYS,
-    and prints the header JSON.  Never invokes the unpickler.
+    and prints the header JSON.  Does not invoke the deserializer — no
+    ``--i-understand-this-loads-arbitrary-code`` flag is needed because
+    inspect only reads the signed header, never the serialized payload.
+
+    Requires RECOTEM_SIGNING_KEYS to be set (or --dev-allow-unsigned with
+    RECOTEM_ENV=development) so that a scripted pipeline can distinguish
+    verified output from unverified output.  Exits non-zero (exit 5) when
+    signing keys are absent and --dev-allow-unsigned is not passed.
     """
     _configure_logging_from_env()
 
@@ -491,9 +499,13 @@ def inspect(
         except Exception as exc:
             _exit(_EXIT_ARTIFACT, f"HMAC verification failed: {exc}")
     else:
-        typer.echo(
-            f"HMAC: SKIPPED (RECOTEM_SIGNING_KEYS not set)  kid={hdr.kid!r}",
-            err=True,
+        _exit(
+            _EXIT_ARTIFACT,
+            f"Cannot verify artifact (kid={hdr.kid!r}): RECOTEM_SIGNING_KEYS is "
+            "not set and --dev-allow-unsigned was not passed.\n"
+            "  - Set RECOTEM_SIGNING_KEYS=<kid>:<hex64> to verify the HMAC, or\n"
+            "  - Pass --dev-allow-unsigned with RECOTEM_ENV=development to skip "
+            "verification in a development environment.",
         )
 
     try:
@@ -644,10 +656,15 @@ def keygen(
 
     if key_type == "signing":
         plaintext = raw_bytes.hex()
-        hex_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+        # Fingerprint matches KeyRing.fingerprint semantics: sha256(key_bytes)[:8].
+        # Use this value to correlate with the /security.posture log line — it is
+        # NOT the value that goes into RECOTEM_SIGNING_KEYS (the raw hex is).
+        fingerprint = hashlib.sha256(raw_bytes).hexdigest()[:8]
         typer.echo(f"kid={kid}")
         typer.echo(f"plaintext={plaintext}")
-        typer.echo(f"hash=sha256:{hex_hash}")
+        typer.echo(
+            f"fingerprint={fingerprint}  # matches /security.posture log; NOT for config"
+        )
         typer.echo(f"env_entry=RECOTEM_SIGNING_KEYS={kid}:{plaintext}")
     else:
         from recotem.serving.auth import _hash_api_key  # noqa: PLC0415

@@ -14,7 +14,7 @@ Pushed by `.github/workflows/docker.yml` to `ghcr.io/codelibs/recotem`:
 | `main` (branch ref) | mutable, head of `main` | smoke-tests only |
 | `sha-<short>` | immutable | reproducing a specific commit |
 
-`:latest` is updated on every push to `main`. The tutorial `compose.yaml` references `:latest`; in production always pin to a semver tag (e.g. `2.0.0`). The Helm chart and `examples/k8s/` already pin `2.0.0`.
+`:latest` is updated on every push to `main`. The tutorial `compose.yaml` references `:latest`; in production always pin to a semver tag (e.g. `2.0.0a0`). The Helm chart and `examples/k8s/` already pin `2.0.0a0`.
 
 The image is multi-arch (`linux/amd64`, `linux/arm64`). SBOM and SLSA
 provenance attestations are attached at push time (`provenance: mode=max`,

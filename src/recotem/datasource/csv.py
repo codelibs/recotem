@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from io import BytesIO
-from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal
 from urllib.parse import urlparse
 
@@ -21,6 +20,7 @@ from recotem._http_fetch import (
     redact_url_userinfo,
     verify_sha256,
 )
+from recotem._size_cap import SizeCapExceededError, check_size_cap
 from recotem.config import (
     get_http_allow_private,
     get_http_timeout_seconds,
@@ -53,15 +53,8 @@ def _get_max_download_bytes() -> int:
 def _check_size_cap(path: str, safe_path: str, kind: str) -> None:
     """Enforce RECOTEM_MAX_DOWNLOAD_BYTES on local and object-store paths.
 
-    The cap (``RECOTEM_MAX_DOWNLOAD_BYTES``, default 256 MiB) is conceptually
-    a *max source body* limit — it applies to all read paths, not just HTTP
-    downloads — to prevent OOM from accidentally huge local or object-store
-    inputs.
-
-    For local paths ``Path.stat().st_size`` is used (cheap, no I/O).
-    For object-store paths (``s3://``, ``gs://``, ``az://``, etc.) the size
-    is queried via ``fsspec.AbstractFileSystem.info(path)["size"]``.
-    HTTP/HTTPS paths are already capped during streaming and are skipped here.
+    Delegates to :func:`recotem._size_cap.check_size_cap` which handles all
+    path schemes including ``file://localhost/…`` URIs correctly.
 
     Raises
     ------
@@ -70,42 +63,10 @@ def _check_size_cap(path: str, safe_path: str, kind: str) -> None:
         ``RECOTEM_MAX_DOWNLOAD_BYTES`` so operators know which env var to
         raise if they legitimately need larger inputs.
     """
-    cap = _get_max_download_bytes()
-    scheme = urlparse(path).scheme.lower()
-
-    # HTTP/HTTPS paths are handled by the streaming fetch; skip here.
-    if scheme in _NETWORK_SCHEMES:
-        return
-
-    size: int | None = None
-
-    if scheme in ("", "file"):
-        # Local path — fast stat, no I/O.
-        local = Path(path) if scheme == "" else Path(path.removeprefix("file://"))
-        try:
-            size = local.stat().st_size
-        except OSError:
-            # File may not exist yet (will be caught later by the actual read).
-            return
-    else:
-        # Object-store path (s3://, gs://, az://, …) — ask fsspec.
-        try:
-            import fsspec
-
-            fs, fspath = fsspec.core.url_to_fs(path)
-            info = fs.info(fspath)
-            size = info.get("size")
-        except Exception:
-            # If the size query fails (permissions, connectivity), skip the
-            # cap check here — the real read will surface the error.
-            return
-
-    if size is not None and size > cap:
-        raise DataSourceError(
-            f"{kind} file '{safe_path}' is {size:,} bytes which exceeds the "
-            f"{cap:,}-byte cap set by RECOTEM_MAX_DOWNLOAD_BYTES. "
-            "Raise the limit or downsample the source data."
-        )
+    try:
+        check_size_cap(path, cap=_get_max_download_bytes(), label=kind)
+    except SizeCapExceededError as exc:
+        raise DataSourceError(str(exc)) from exc
 
 
 def _fetch_http_bytes(

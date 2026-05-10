@@ -191,9 +191,19 @@ class ArtifactWatcher(threading.Thread):
         self._states: dict[str, _RecipeWatchState] = dict(initial_states or {})
         self._consecutive_errors: int = 0
         self._unhealthy_threshold: int = unhealthy_threshold
+        self._executor: ThreadPoolExecutor = ThreadPoolExecutor(
+            max_workers=_MAX_CONCURRENT_STATS,
+            thread_name_prefix="artifact-stat",
+        )
 
     def stop(self) -> None:
-        """Request the watcher thread to exit on its next poll tick."""
+        """Signal the watcher thread to exit on its next poll tick.
+
+        The executor is intentionally NOT shut down here: an in-flight poll
+        may still be submitting work.  The run() loop owns the executor and
+        shuts it down in its finally block once the loop exits.  Callers
+        should follow up with ``join(timeout=...)`` to wait for clean exit.
+        """
         self._stop_event.set()
 
     # ------------------------------------------------------------------
@@ -202,29 +212,31 @@ class ArtifactWatcher(threading.Thread):
 
     def run(self) -> None:
         logger.info("artifact_watcher_started", interval=self._config.watch_interval)
-        while not self._stop_event.is_set():
-            jitter = self._config.watch_interval * 0.1 * (random.random() * 2 - 1)
-            sleep_secs = max(0.1, self._config.watch_interval + jitter)
-            if self._stop_event.wait(sleep_secs):
-                break
+        try:
+            while not self._stop_event.is_set():
+                jitter = self._config.watch_interval * 0.1 * (random.random() * 2 - 1)
+                sleep_secs = max(0.1, self._config.watch_interval + jitter)
+                if self._stop_event.wait(sleep_secs):
+                    break
 
-            try:
-                self._scan_recipes_dir()
-                self._poll_artifacts()
-                # Successful poll — reset consecutive-error counter.
-                self._consecutive_errors = 0
-            except Exception:
-                self._consecutive_errors += 1
-                _metrics.inc_watcher_unhandled_error()
-                logger.exception(
-                    "artifact_watcher_unhandled_error",
-                    consecutive_errors=self._consecutive_errors,
-                    threshold=self._unhealthy_threshold,
-                )
-                if self._consecutive_errors >= self._unhealthy_threshold:
-                    self._mark_all_unhealthy()
-
-        logger.info("artifact_watcher_stopped")
+                try:
+                    self._scan_recipes_dir()
+                    self._poll_artifacts()
+                    # Successful poll — reset consecutive-error counter.
+                    self._consecutive_errors = 0
+                except Exception:
+                    self._consecutive_errors += 1
+                    _metrics.inc_watcher_unhandled_error()
+                    logger.exception(
+                        "artifact_watcher_unhandled_error",
+                        consecutive_errors=self._consecutive_errors,
+                        threshold=self._unhealthy_threshold,
+                    )
+                    if self._consecutive_errors >= self._unhealthy_threshold:
+                        self._mark_all_unhealthy()
+        finally:
+            self._executor.shutdown(wait=True)
+            logger.info("artifact_watcher_stopped")
 
     def _mark_all_unhealthy(self) -> None:
         """Mark every known recipe as unhealthy after repeated poll failures.
@@ -324,39 +336,41 @@ class ArtifactWatcher(threading.Thread):
             marker = _stat_marker(state.artifact_path, recipe_name=name)
             return name, marker
 
-        with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_STATS) as pool:
-            futures = {pool.submit(_check, n): n for n in names}
-            for fut in as_completed(futures):
-                try:
-                    name, marker = fut.result()
-                except Exception as exc:
-                    logger.warning("artifact_stat_error", error=str(exc))
-                    continue
+        futures = {self._executor.submit(_check, n): n for n in names}
+        for fut in as_completed(futures):
+            try:
+                name, marker = fut.result()
+            except Exception as exc:
+                logger.warning(
+                    "artifact_stat_error",
+                    recipe_name=futures[fut],
+                    error=str(exc),
+                    exc_type=type(exc).__name__,
+                )
+                continue
 
-                state = self._states.get(name)
-                if state is None:
-                    continue
+            state = self._states.get(name)
+            if state is None:
+                continue
 
-                if marker is None:
-                    # Artifact file is missing or stat failed.  Record the
-                    # failure unconditionally so /health reflects the problem.
-                    # The stale model (if any) stays in memory and keeps serving
-                    # — we do NOT flip loaded=False — so hot-swap resumes when
-                    # the file reappears.  Only emit the log on the first
-                    # transition to avoid log spam on repeated missing polls.
-                    entry = self._registry.get(name)
-                    if entry is not None and entry.last_load_error is None:
-                        logger.warning("artifact_disappeared", name=name)
-                    self._registry.set_load_error(
-                        name, "artifact missing or unreadable"
-                    )
-                    _metrics.inc_artifact_load_failure(name)
-                    continue
+            if marker is None:
+                # Artifact file is missing or stat failed.  Record the
+                # failure unconditionally so /health reflects the problem.
+                # The stale model (if any) stays in memory and keeps serving
+                # — we do NOT flip loaded=False — so hot-swap resumes when
+                # the file reappears.  Only emit the log on the first
+                # transition to avoid log spam on repeated missing polls.
+                entry = self._registry.get(name)
+                if entry is not None and entry.last_load_error is None:
+                    logger.warning("artifact_disappeared", name=name)
+                self._registry.set_load_error(name, "artifact missing or unreadable")
+                _metrics.inc_artifact_load_failure(name)
+                continue
 
-                if marker == state.last_marker:
-                    continue
+            if marker == state.last_marker:
+                continue
 
-                self._load_recipe(name, state, force=False, marker=marker)
+            self._load_recipe(name, state, force=False, marker=marker)
 
     # ------------------------------------------------------------------
     # Load / verify / replace
@@ -382,9 +396,23 @@ class ArtifactWatcher(threading.Thread):
         try:
             data = _read_artifact_bytes(artifact_path, max_bytes)
         except ArtifactError as exc:
+            logger.error(
+                "artifact_read_failed",
+                name=name,
+                path=str(artifact_path),
+                error=str(exc),
+                exc_type=type(exc).__name__,
+            )
             self._record_load_failure(name, f"read failed: {exc}")
             return
         except Exception as exc:
+            logger.error(
+                "artifact_read_failed",
+                name=name,
+                path=str(artifact_path),
+                error=str(exc),
+                exc_type=type(exc).__name__,
+            )
             self._record_load_failure(name, f"unexpected read error: {exc}")
             return
 
@@ -456,7 +484,14 @@ class ArtifactWatcher(threading.Thread):
                 kid=hdr.kid,
             )
 
-        header_dict: dict[str, Any] = json.loads(hdr.header_data.decode("utf-8"))
+        # Decode header JSON BEFORE deserializing the payload so a corrupt
+        # header surfaces as a clear header-decode error rather than as a
+        # downstream "ran out of input" on an empty/truncated payload.
+        try:
+            header_dict: dict[str, Any] = json.loads(hdr.header_data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ArtifactError(f"header JSON decode failed: {exc}") from exc
+
         recommender = unpickle_payload(payload_bytes)
 
         metadata_df = None

@@ -1061,3 +1061,61 @@ output:
     p = _write_recipe(tmp_path, content)
     with pytest.raises(RecipeError):
         load_recipe(p)
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: dot-dot traversal in output.path rejected under ARTIFACT_ROOT
+# ---------------------------------------------------------------------------
+
+
+def test_local_output_path_dotdot_traversal_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dot-dot path that escapes RECOTEM_ARTIFACT_ROOT must be rejected.
+
+    output.path: <root>/allowed/sub/../../escape/foo.recotem resolves to
+    <root>/escape/foo.recotem which lies outside the artifact root.
+
+    Both parent directories (sub/ and escape/) are created so the parent-
+    directory existence check does not fire first — the containment check
+    is what must catch the traversal.
+    """
+    artifact_root = tmp_path / "allowed"
+    artifact_root.mkdir()
+    monkeypatch.setenv("RECOTEM_ARTIFACT_ROOT", str(artifact_root))
+
+    # Create the intermediate dirs so only the containment check fires.
+    (artifact_root / "sub").mkdir()
+    escape_dir = tmp_path / "escape"
+    escape_dir.mkdir()
+
+    # /allowed/sub/../../escape/foo.recotem resolves to /escape/foo.recotem.
+    dotdot_path = str(artifact_root / "sub" / ".." / ".." / "escape" / "foo.recotem")
+
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="dotdot_escape",
+        output_path=dotdot_path,
+    )
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="outside"):
+        load_recipe(p)
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: ftp:// scheme on output.path rejected
+# ---------------------------------------------------------------------------
+
+
+def test_output_path_with_ftp_scheme_rejected(tmp_path: Path) -> None:
+    """ftp:// on output.path must be rejected as an unsupported write scheme.
+
+    Matches the http/https/memory rejection behaviour documented in
+    test_output_path_with_http_scheme_rejected.
+    """
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="ftp_output",
+        output_path="ftp://example.com/foo.recotem",
+    )
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="does not support|ftp"):
+        load_recipe(p)

@@ -171,13 +171,22 @@ jobs:
             FAIL=1
           fi
 
-          # Pattern 5: bare signing-key entry (kid:<hex64>) leaked outside
-          # an env-var assignment. Signing keys use the format
-          # ``<kid>:<hex64>``; without this pattern, a leaked value with
-          # no surrounding variable name slips past patterns 1 and 3.
-          if grep -rEqi '\b[A-Za-z0-9_.-]+:[0-9a-f]{64}\b' "$LOG_DIR"; then
-            echo "FAIL: Found bare <kid>:<hex64> entry in log output."
-            grep -rEni '\b[A-Za-z0-9_.-]+:[0-9a-f]{64}\b' "$LOG_DIR" | head -5
+          # Pattern 5: signing/API key leaked as a JSON value under a known
+          # sensitive key name.  Matches the formats the app logs when the
+          # redaction processor fails:
+          #   "recotem_signing_keys" : "kid:<hex64>"
+          #   "recotem_api_keys"     : "kid:sha256:<hex64>"
+          # A broader kid:<hex64> pattern would false-positive on benign
+          # fields such as "recipe_hash", "artifact", and fsspec paths that
+          # contain 64-character hex strings (e.g. sha256 digests in paths).
+          if grep -rEqi '"recotem_signing_keys"\s*:\s*"[A-Za-z0-9_.-]+:[0-9a-f]{64}"' "$LOG_DIR"; then
+            echo "FAIL: Found RECOTEM_SIGNING_KEYS value in JSON log output."
+            grep -rEni '"recotem_signing_keys"\s*:\s*"[A-Za-z0-9_.-]+:[0-9a-f]{64}"' "$LOG_DIR" | head -5
+            FAIL=1
+          fi
+          if grep -rEqi '"recotem_api_keys"\s*:\s*"[A-Za-z0-9_.-]+:sha256:[0-9a-f]{64}"' "$LOG_DIR"; then
+            echo "FAIL: Found RECOTEM_API_KEYS value in JSON log output."
+            grep -rEni '"recotem_api_keys"\s*:\s*"[A-Za-z0-9_.-]+:sha256:[0-9a-f]{64}"' "$LOG_DIR" | head -5
             FAIL=1
           fi
 

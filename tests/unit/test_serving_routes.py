@@ -446,3 +446,119 @@ def test_metrics_endpoint_exposes_documented_metrics(monkeypatch) -> None:
     assert 'recotem_predict_total{recipe="test_recipe"' in body
     assert 'recotem_model_loaded{recipe="test_recipe"' in body
     assert 'recotem_swap_total{recipe="test_recipe"' in body
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: predict increments recotem_predict_total counter
+# ---------------------------------------------------------------------------
+
+
+def test_predict_increments_predict_total_metric(monkeypatch) -> None:
+    """After a POST /predict, recotem_predict_total must increment for the recipe.
+
+    Uses a dedicated recipe name that is unique to this test to avoid
+    interference with the global Prometheus registry from other test runs.
+    Captures the counter value before and after the predict call.
+    """
+    import pytest
+
+    pytest.importorskip("prometheus_client")
+    monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "true")
+
+    from recotem.serving import metrics
+
+    recipe_name = "counter_increment_recipe"
+    registry = _make_registry_with_recipe(recipe_name)
+    client, _ = _make_test_client(registry=registry)
+
+    # Ensure metrics are initialized (idempotent).
+    metrics._ensure_initialized()
+
+    # Read the current counter value before the predict call.
+    before = 0.0
+    if metrics._PREDICT_TOTAL is not None:
+        try:
+            before = metrics._PREDICT_TOTAL.labels(
+                recipe=recipe_name, status="ok"
+            )._value.get()
+        except Exception:
+            before = 0.0
+
+    response = client.post(
+        f"/predict/{recipe_name}",
+        json={"user_id": "user1", "cutoff": 5},
+    )
+    assert response.status_code == 200
+
+    # The counter must have incremented.
+    after = 0.0
+    if metrics._PREDICT_TOTAL is not None:
+        try:
+            after = metrics._PREDICT_TOTAL.labels(
+                recipe=recipe_name, status="ok"
+            )._value.get()
+        except Exception:
+            after = 0.0
+
+    assert after > before, (
+        f"recotem_predict_total must increment after /predict; "
+        f"before={before}, after={after}"
+    )
+
+    # Also confirm /metrics output contains the counter.
+    metrics_response = client.get("/metrics")
+    assert metrics_response.status_code == 200
+    assert "recotem_predict_total" in metrics_response.text
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: load failure increments recotem_artifact_load_failures_total
+# ---------------------------------------------------------------------------
+
+
+def test_load_failure_increments_artifact_load_failures_total(monkeypatch) -> None:
+    """inc_artifact_load_failure must be visible in /metrics output.
+
+    Calls the metric recorder directly (simulating the watcher's failure
+    path) and confirms the counter appears in the Prometheus exposition.
+    """
+    import pytest
+
+    pytest.importorskip("prometheus_client")
+    monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "true")
+
+    from recotem.serving import metrics
+
+    recipe_name = "fail_load_recipe_unique"
+    metrics._ensure_initialized()
+
+    before = 0.0
+    if metrics._ARTIFACT_LOAD_FAILURES is not None:
+        try:
+            before = metrics._ARTIFACT_LOAD_FAILURES.labels(
+                recipe=recipe_name
+            )._value.get()
+        except Exception:
+            before = 0.0
+
+    metrics.inc_artifact_load_failure(recipe_name)
+
+    after = 0.0
+    if metrics._ARTIFACT_LOAD_FAILURES is not None:
+        try:
+            after = metrics._ARTIFACT_LOAD_FAILURES.labels(
+                recipe=recipe_name
+            )._value.get()
+        except Exception:
+            after = 0.0
+
+    assert after == before + 1, (
+        f"recotem_artifact_load_failures_total must increment by 1; "
+        f"before={before}, after={after}"
+    )
+
+    # Also confirm /metrics exposition includes the counter.
+    client, _ = _make_test_client()
+    metrics_response = client.get("/metrics")
+    assert metrics_response.status_code == 200
+    assert "recotem_artifact_load_failures_total" in metrics_response.text

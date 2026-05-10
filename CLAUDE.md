@@ -43,6 +43,7 @@ src/recotem/
 ├── serving/            FastAPI app, ModelRegistry, ArtifactWatcher
 ├── _idmap.py           Neutral home for IDMappedRecommender (canonical FQCN)
 ├── _http_fetch.py      SSRF-guarded HTTP/HTTPS fetcher with sha256 verify
+├── _size_cap.py        Shared download-size cap helper (used by csv source + metadata loader)
 ├── log_redaction.py    structlog processor stripping API/signing keys + creds
 ├── config.py           ServeConfig / TrainConfig from env vars
 └── logging.py          structlog setup with redaction processor first
@@ -63,7 +64,7 @@ docs/
 └── plugin-authoring.md DataSource plugin contract walkthrough
 
 helm/recotem/           serve-only chart with optional CronJob train
-examples/               tutorial-purchase-log, csv-local, ga4-bigquery, k8s/, plugins/echo-source/
+examples/               quickstart/, csv-local/, ga4-bigquery/, k8s/, plugins/echo-source/, tutorial-purchase-log/
 Dockerfile              multi-stage python:3.12-slim, appuser:1000
 compose.yaml            train one-shot + serve long-running (tutorial)
 ```

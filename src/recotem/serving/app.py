@@ -408,6 +408,21 @@ def _try_load_artifact(
             kid=hdr.kid,
         )
 
+    # Decode header JSON FIRST — failing here with a corrupt header should not
+    # require a working payload (unpickle on an empty payload would fail with
+    # an unrelated "ran out of input" error and mask the actual problem).
+    try:
+        header_bytes = hdr.header_data
+        header_dict: dict[str, Any] = json.loads(header_bytes.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "initial_artifact_header_json_failed",
+            name=recipe.name,
+            kid=hdr.kid,
+            error=str(exc),
+        )
+        return _failed_entry(recipe, f"header JSON decode failed: {exc}")
+
     try:
         recommender = unpickle_payload(payload_bytes)
     except ArtifactError as exc:
@@ -418,8 +433,6 @@ def _try_load_artifact(
             error=str(exc),
         )
         return _failed_entry(recipe, f"deserialize failed: {exc}")
-
-    header_dict: dict[str, Any] = json.loads(hdr.header_data.decode("utf-8"))
 
     metadata_df = None
     if recipe.item_metadata is not None:

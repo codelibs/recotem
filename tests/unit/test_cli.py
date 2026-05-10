@@ -129,14 +129,41 @@ def test_schema_command_emits_valid_jsonschema() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_keygen_emits_kid_plaintext_hash_triple() -> None:
-    """keygen outputs kid, plaintext, hash, and env_entry lines."""
+def test_keygen_emits_kid_plaintext_fingerprint_triple() -> None:
+    """keygen --type signing outputs kid, plaintext, fingerprint, and env_entry lines."""
     result = runner.invoke(app, ["keygen", "--kid", "test-kid", "--type", "signing"])
     assert result.exit_code == 0
     assert "kid=test-kid" in result.stdout
     assert "plaintext=" in result.stdout
-    assert "hash=sha256:" in result.stdout
+    assert "fingerprint=" in result.stdout
     assert "RECOTEM_SIGNING_KEYS=" in result.stdout
+    # Must NOT emit the old misleading "hash=sha256:" line for signing keys
+    assert "hash=sha256:" not in result.stdout
+
+
+def test_keygen_signing_fingerprint_matches_keyring_semantics() -> None:
+    """keygen --type signing fingerprint is sha256(key_bytes)[:8] hex."""
+    import hashlib
+
+    result = runner.invoke(app, ["keygen", "--kid", "fp-test", "--type", "signing"])
+    assert result.exit_code == 0
+
+    plaintext: str | None = None
+    fingerprint: str | None = None
+    for line in result.stdout.splitlines():
+        if line.startswith("plaintext="):
+            plaintext = line.split("=", 1)[1].strip()
+        elif line.startswith("fingerprint="):
+            # Strip trailing comment after optional whitespace
+            fingerprint = line.split("=", 1)[1].strip().split()[0]
+
+    assert plaintext is not None and fingerprint is not None, result.stdout
+    key_bytes = bytes.fromhex(plaintext)
+    expected = hashlib.sha256(key_bytes).hexdigest()[:8]
+    assert fingerprint == expected, (
+        f"fingerprint {fingerprint!r} does not match KeyRing.fingerprint "
+        f"semantics sha256(key_bytes)[:8]={expected!r}"
+    )
 
 
 def test_keygen_api_key_outputs_recotem_api_keys_format() -> None:
@@ -248,6 +275,64 @@ def test_inspect_caps_oversized_read(tmp_path: Path, monkeypatch) -> None:
     result = runner.invoke(app, ["inspect", str(artifact_path)])
     assert result.exit_code == 5
     assert "exceeds cap" in (result.stdout + (result.stderr or ""))
+
+
+def test_inspect_exit5_without_signing_keys(tmp_path: Path, monkeypatch) -> None:
+    """inspect exits 5 (non-zero) when RECOTEM_SIGNING_KEYS is unset.
+
+    A scripted pipeline must not receive header output from an unverified
+    artifact.  The old 'HMAC: SKIPPED / exit 0' behavior is now an error.
+    """
+    from tests.conftest import build_raw_artifact
+
+    artifact_path = tmp_path / "model.recotem"
+    data = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={"recipe_name": "no_key_test", "best_score": 0.9},
+        payload_bytes=b"dummy",
+    )
+    artifact_path.write_bytes(data)
+    monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
+    monkeypatch.delenv("RECOTEM_ENV", raising=False)
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+    assert result.exit_code != 0, (
+        "inspect must exit non-zero when RECOTEM_SIGNING_KEYS is unset"
+    )
+    combined = result.stdout + (result.stderr or "")
+    assert "RECOTEM_SIGNING_KEYS" in combined
+
+
+def test_inspect_exit0_dev_allow_unsigned_with_dev_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """inspect exits 0 and prints header with --dev-allow-unsigned + RECOTEM_ENV=development."""
+    from tests.conftest import build_raw_artifact
+
+    dev_key_hex = "0" * 64  # matches the hardcoded dev key in cli.py
+    artifact_path = tmp_path / "model.recotem"
+    data = build_raw_artifact(
+        kid="dev",
+        key_hex=dev_key_hex,
+        header_dict={"recipe_name": "dev_test", "best_score": 0.5},
+        payload_bytes=b"dummy",
+    )
+    artifact_path.write_bytes(data)
+    monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
+    monkeypatch.setenv("RECOTEM_ENV", "development")
+    result = runner.invoke(app, ["inspect", "--dev-allow-unsigned", str(artifact_path)])
+    assert result.exit_code == 0, result.stdout + (result.stderr or "")
+    assert "recipe_name" in result.stdout
+
+
+def test_keygen_api_key_still_prints_hash_sha256() -> None:
+    """Regression guard: keygen --type api must still print 'hash=sha256:<hex64>'."""
+    result = runner.invoke(app, ["keygen", "--kid", "regression", "--type", "api"])
+    assert result.exit_code == 0
+    assert "hash=sha256:" in result.stdout
+    assert "RECOTEM_API_KEYS=" in result.stdout
+    # The fingerprint= line is only for signing keys, not api keys
+    assert "fingerprint=" not in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -891,3 +976,202 @@ output:
     api_key_hash = "0" * 64  # what we put in RECOTEM_API_KEYS
     for line in json_lines:
         assert api_key_hash not in line, f"API key hash found in log line: {line!r}"
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: validate probes BigQuery source and surfaces connectivity errors
+# ---------------------------------------------------------------------------
+
+
+def test_validate_probes_bigquery_source_and_surfaces_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """recotem validate exits non-zero when BigQuery connectivity fails.
+
+    Recipe with source.type=bigquery and an unreachable project.  The
+    datasource registry's get_source_class is mocked to return a stub that
+    raises DataSourceError from probe(), simulating an unreachable BigQuery.
+
+    Patching at the datasource-registry level avoids importing
+    google.cloud.bigquery for real, which would pollute google.api_core
+    module state and break subsequent tests that patch sys.modules.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from recotem.datasource.base import DataSourceError
+
+    artifact_path = tmp_path / "bq_test.recotem"
+    yaml_path = tmp_path / "bq_recipe.yaml"
+    yaml_path.write_text(
+        f"""\
+name: bq_validate_test
+source:
+  type: bigquery
+  query: "SELECT user_id, item_id FROM `my_project.dataset.events` LIMIT 100"
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {artifact_path}
+"""
+    )
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    # Build a stub source class whose probe() raises DataSourceError (simulating
+    # connectivity failure) and whose __init__ accepts any config without
+    # importing google-cloud-bigquery.  This avoids polluting the real
+    # google.api_core module state.
+    class _StubBQSource:
+        extras_required: list = []
+
+        def __init__(self, config) -> None:
+            pass
+
+        def probe(self) -> None:
+            raise DataSourceError(
+                "BigQuery connectivity check failed: project not found in GCP"
+            )
+
+    # Return the stub class from get_source_class so the CLI never touches real BQ.
+    mock_get_source_class = MagicMock(return_value=_StubBQSource)
+
+    with patch(
+        "recotem.datasource.registry.get_source_class",
+        mock_get_source_class,
+    ):
+        result = runner.invoke(app, ["validate", str(yaml_path)])
+
+    assert result.exit_code != 0, (
+        f"validate must exit non-zero for unreachable BigQuery source; "
+        f"got {result.exit_code}. Output: {result.stdout}"
+    )
+    combined = result.stdout + (result.stderr or "")
+    assert any(
+        kw in combined.lower()
+        for kw in ("bigquery", "connectivity", "error", "probe", "bq", "failed")
+    ), f"Output must mention BigQuery or connectivity error; got: {combined!r}"
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: inspect exits non-zero on tampered HMAC (payload flip)
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_exit_nonzero_on_tampered_hmac(tmp_path: Path, monkeypatch) -> None:
+    """recotem inspect must exit with the artifact error code (5) on HMAC failure.
+
+    A valid artifact is written, then one payload byte is flipped so the
+    stored HMAC no longer matches.  inspect must detect the mismatch and
+    exit with code 5.
+    """
+    import pickle  # noqa: S403
+
+    from tests.conftest import build_raw_artifact
+
+    # Build a valid artifact.
+    payload = pickle.dumps({"x": 1}, protocol=4)  # noqa: S301
+    raw = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={"recipe_name": "inspect_tamper", "best_score": 0.7},
+        payload_bytes=payload,
+    )
+    # Flip the last byte of the payload to break HMAC.
+    tampered = bytearray(raw)
+    tampered[-1] ^= 0xFF
+    artifact_path = tmp_path / "tampered.recotem"
+    artifact_path.write_bytes(bytes(tampered))
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+
+    assert result.exit_code == 5, (
+        f"inspect on a tampered HMAC artifact must exit 5 (ArtifactError); "
+        f"got {result.exit_code}. Output: {result.stdout}"
+    )
+    combined = result.stdout + (result.stderr or "")
+    assert any(
+        kw in combined.lower() for kw in ("hmac", "signature", "integrity", "tamper")
+    ), f"Error output must mention HMAC or signature; got: {combined!r}"
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: train --run-id propagates to train_done log event
+# ---------------------------------------------------------------------------
+
+
+def test_train_run_id_propagates_to_train_done_log(tmp_path: Path, monkeypatch) -> None:
+    """train --run-id <id> must pass the custom id to run_training.
+
+    Mocks run_training to verify the run_id argument equals the value
+    passed on the CLI, rather than a freshly-generated UUID.  This
+    verifies the CLI→pipeline hand-off without requiring real training data.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from recotem.training.pipeline import TrainResult
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "run_id_log_test")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    custom_run_id = "custom-abc-123"
+
+    captured_run_ids: list[str] = []
+
+    fake_result = MagicMock(spec=TrainResult)
+    fake_result.recipe_name = "run_id_log_test"
+    fake_result.run_id = custom_run_id
+
+    def _mock_run_training(recipe, *, run_id=None, **kwargs):
+        captured_run_ids.append(run_id or "")
+        return fake_result
+
+    with patch(
+        "recotem.training.pipeline.run_training", side_effect=_mock_run_training
+    ):
+        result = runner.invoke(
+            app, ["train", str(yaml_path), "--run-id", custom_run_id]
+        )
+
+    assert result.exit_code == 0, (
+        f"train with mocked run_training must exit 0; got {result.exit_code}. "
+        f"Output: {result.stdout}"
+    )
+    assert captured_run_ids, "run_training must have been called"
+    assert captured_run_ids[0] == custom_run_id, (
+        f"run_id passed to run_training must be {custom_run_id!r}; "
+        f"got {captured_run_ids[0]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: schema output includes all registered source types
+# ---------------------------------------------------------------------------
+
+
+def test_schema_includes_all_registered_source_types() -> None:
+    """recotem schema output must include csv, parquet, and bigquery.
+
+    Parses the JSON schema emitted by the schema command and checks the
+    discriminator mapping or the source union definition for the three
+    built-in source types.
+    """
+    result = runner.invoke(app, ["schema"])
+    assert result.exit_code == 0, f"schema must succeed; got: {result.stdout}"
+
+    schema_dict = json.loads(result.stdout)
+
+    # Walk the schema to find all literal 'type' enum values in source
+    # definitions.  The exact structure depends on pydantic v2's JSON Schema
+    # emission (discriminated union with oneOf / anyOf entries).
+    schema_str = json.dumps(schema_dict)
+
+    for expected_type in ("csv", "parquet", "bigquery"):
+        assert f'"{expected_type}"' in schema_str, (
+            f"Expected source type {expected_type!r} to appear in schema JSON; "
+            f"schema excerpt: {schema_str[:500]}"
+        )

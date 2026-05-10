@@ -200,3 +200,47 @@ def test_read_artifact_not_found_raises(tmp_path: Path) -> None:
     kr = _make_keyring()
     with pytest.raises(ArtifactError, match="not found"):
         read_artifact(str(tmp_path / "no_such.recotem"), kr)
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: header_json byte tamper rejected end-to-end
+# ---------------------------------------------------------------------------
+
+
+def test_header_json_byte_tamper_rejected_end_to_end(tmp_path: Path) -> None:
+    """Flipping ONE byte inside header_json portion fails HMAC verify.
+
+    This is distinct from existing payload/kid tamper tests.  The HMAC
+    scope covers kid_bytes || header_json || payload, so any tamper to
+    header_json must surface as an HMAC failure before JSON/pickle parsing.
+    """
+    from tests.conftest import build_raw_artifact
+
+    kr = _make_keyring()
+
+    raw = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={
+            "recipe_name": "tamper_header_test",
+            "trained_at": "2026-01-01T00:00:00Z",
+            "best_class": "TopPopRecommender",
+            "best_score": 0.42,
+        },
+    )
+
+    from recotem.artifact.format import parse_header_from_bytes
+
+    hdr = parse_header_from_bytes(raw, max_payload_bytes=10 * 1024 * 1024)
+    # header_json starts just before the payload offset.
+    header_json_start = hdr.payload_offset - len(hdr.header_data)
+    header_json_mid = header_json_start + len(hdr.header_data) // 2
+
+    tampered = bytearray(raw)
+    tampered[header_json_mid] ^= 0x01  # flip one bit inside header_json
+    tampered_path = tmp_path / "header_tampered.recotem"
+    tampered_path.write_bytes(bytes(tampered))
+
+    # Must raise ArtifactError for HMAC, not for JSON or pickle.
+    with pytest.raises(ArtifactError, match="HMAC"):
+        read_artifact(str(tampered_path), kr)

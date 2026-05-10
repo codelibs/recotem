@@ -13,6 +13,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
+
 from recotem.artifact.signing import KeyRing
 from recotem.config import ServeConfig
 from recotem.serving.registry import ModelRegistry
@@ -226,3 +228,97 @@ def test_real_watcher_hot_swap_concurrent_reads_safe(tmp_path: Path) -> None:
 
     assert not errors, f"Concurrent read errors during hot-swap: {errors}"
     assert reads_ok[0] > 0, "Readers must have successfully accessed registry entries"
+
+
+def test_watcher_does_not_reload_when_sha256_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Watcher skips _build_entry when file content (sha256) is unchanged.
+
+    Sequence:
+    1. Write an artifact and start the watcher.
+    2. Wait for initial load.
+    3. Touch the file's mtime WITHOUT changing bytes.
+    4. Wait one poll cycle.
+    5. Assert unpickle_payload is NOT called a second time
+       (the sha256 short-circuit skips build_entry).
+    """
+    import time
+
+    import pytest
+
+    import recotem.artifact.signing as signing_module
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "no_reload.recotem"
+
+    _write_artifact(artifact_path, "stable_version")
+    yaml_path = _write_recipe_yaml(recipes_dir, "no_reload_recipe", artifact_path)
+
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+
+    initial_states = {
+        "no_reload_recipe": _RecipeWatchState(
+            recipe=recipe,
+            artifact_path=str(artifact_path),
+            last_sha256="",
+            last_marker=None,
+        ),
+    }
+
+    unpickle_call_count: list[int] = [0]
+    original_unpickle = signing_module.unpickle_payload
+
+    def _counting_unpickle(payload_bytes: bytes):
+        unpickle_call_count[0] += 1
+        return original_unpickle(payload_bytes)
+
+    monkeypatch.setattr(signing_module, "unpickle_payload", _counting_unpickle)
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+    watcher.start()
+
+    # Wait for initial load (unpickle_call_count must reach at least 1).
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        entry = registry.get("no_reload_recipe")
+        if entry is not None and entry.loaded:
+            break
+        time.sleep(0.05)
+    else:
+        watcher.stop()
+        watcher.join(timeout=3.0)
+        pytest.fail("Watcher did not load initial artifact within 3s")
+
+    count_after_initial_load = unpickle_call_count[0]
+    assert count_after_initial_load >= 1, "Must have unpickled at least once"
+
+    # Touch the mtime without changing bytes.
+    current_bytes = artifact_path.read_bytes()
+    artifact_path.write_bytes(current_bytes)
+
+    # Wait two full poll cycles for the watcher to process the mtime change.
+    time.sleep(WATCH_INTERVAL * 4)
+
+    watcher.stop()
+    watcher.join(timeout=3.0)
+
+    count_after_touch = unpickle_call_count[0]
+    assert count_after_touch == count_after_initial_load, (
+        f"Watcher must NOT reload when sha256 is unchanged (touch only). "
+        f"unpickle_payload called {count_after_touch - count_after_initial_load} "
+        f"extra times after mtime touch."
+    )

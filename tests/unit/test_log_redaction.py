@@ -162,3 +162,38 @@ def test_processor_is_callable_with_standard_signature() -> None:
     sig = inspect.signature(redact_sensitive_keys)
     params = list(sig.parameters.keys())
     assert len(params) == 3
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: redact processor is first in structlog processor chain
+# ---------------------------------------------------------------------------
+
+
+def test_redact_processor_is_first_in_chain() -> None:
+    """configure_logging must place _redact_sensitive_keys first in the chain.
+
+    The security contract: no sensitive value reaches any renderer because
+    the redaction processor runs BEFORE all other processors.  If it is
+    placed second (or later), a renderer that fires first could log raw keys.
+
+    This test calls configure_logging("json") then reads the processor list
+    to confirm position [0] is the redaction function.  The previous
+    structlog config is restored via structlog.reset_defaults() in the
+    autouse conftest fixture.
+    """
+    import structlog
+
+    from recotem.log_redaction import redact_sensitive_keys
+    from recotem.logging import configure_logging
+
+    configure_logging("json")
+    cfg = structlog.get_config()
+    processors = cfg["processors"]
+
+    assert len(processors) > 0, "processor list must not be empty"
+    first = processors[0]
+    assert first is redact_sensitive_keys, (
+        f"Expected processors[0] to be redact_sensitive_keys, "
+        f"got {first!r}.  Redaction MUST be first so no sensitive "
+        "value can reach a renderer before being stripped."
+    )

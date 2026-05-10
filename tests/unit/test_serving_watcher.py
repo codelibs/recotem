@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from recotem.artifact.signing import KeyRing
 from recotem.config import ServeConfig
 from recotem.serving import metrics as _metrics
@@ -813,3 +815,207 @@ def test_watcher_marks_error_via_registry_set_load_error(tmp_path: Path) -> None
     assert entry.last_load_error is not None, (
         "Watcher must set last_load_error via registry.set_load_error on failed load"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: ThreadPoolExecutor reuse
+# ---------------------------------------------------------------------------
+
+
+def test_executor_exists_after_init() -> None:
+    """ArtifactWatcher._executor must be a ThreadPoolExecutor after __init__."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from recotem.serving.watcher import ArtifactWatcher
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=Path("/tmp"),
+        serve_config=cfg,
+        key_ring=kr,
+    )
+    assert hasattr(watcher, "_executor"), (
+        "ArtifactWatcher must have _executor attribute"
+    )
+    assert isinstance(watcher._executor, ThreadPoolExecutor)
+    # Clean up without starting the thread
+    watcher._executor.shutdown(wait=False)
+
+
+def test_executor_reused_across_poll_cycles(tmp_path: Path) -> None:
+    """The same executor instance must be reused across multiple _poll_artifacts calls."""
+    from recotem.serving.watcher import ArtifactWatcher
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+
+    executor_id_before = id(watcher._executor)
+    # Call _poll_artifacts directly twice — no states so it returns immediately
+    watcher._poll_artifacts()
+    watcher._poll_artifacts()
+    executor_id_after = id(watcher._executor)
+
+    assert executor_id_before == executor_id_after, (
+        "_poll_artifacts must not replace the executor; same instance required"
+    )
+    watcher._executor.shutdown(wait=False)
+
+
+def test_executor_shutdown_on_stop(tmp_path: Path) -> None:
+    """stop() must shut down the executor gracefully.
+
+    After stop() the executor's internal _shutdown flag must be True,
+    meaning it will no longer accept new work.
+    """
+
+    from recotem.serving.watcher import ArtifactWatcher
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+    watcher.start()
+    watcher.stop()
+    watcher.join(timeout=2.0)
+
+    # After shutdown, submitting new work must raise RuntimeError
+    with pytest.raises(RuntimeError):
+        watcher._executor.submit(lambda: None)
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: artifact_read_failed log event on read failure
+# ---------------------------------------------------------------------------
+
+
+def test_artifact_read_failed_log_emitted_on_read_error(tmp_path: Path) -> None:
+    """When _read_artifact_bytes raises, _load_recipe must emit an
+    'artifact_read_failed' structlog event with name, path, and error keys."""
+    from unittest.mock import patch
+
+    import structlog.testing
+
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+
+    from recotem.artifact.format import ArtifactError
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "fail_recipe", artifact_path)
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    state = _RecipeWatchState(recipe=recipe, artifact_path=str(artifact_path))
+    initial_states = {"fail_recipe": state}
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+
+    stub_entry = MagicMock()
+    stub_entry.last_load_error = None
+    stub_entry.loaded = False
+    registry.replace("fail_recipe", stub_entry)
+
+    with structlog.testing.capture_logs() as cap:
+        with patch(
+            "recotem.serving.watcher._read_artifact_bytes",
+            side_effect=ArtifactError("disk read error"),
+        ):
+            watcher._load_recipe("fail_recipe", state, force=True)
+
+    read_failed_events = [e for e in cap if e.get("event") == "artifact_read_failed"]
+    assert read_failed_events, (
+        "artifact_read_failed log event must be emitted when _read_artifact_bytes raises"
+    )
+    evt = read_failed_events[0]
+    assert evt.get("name") == "fail_recipe", f"event must include name; got {evt!r}"
+    assert "error" in evt, f"event must include error; got {evt!r}"
+    assert "disk read error" in evt["error"]
+
+
+def test_artifact_read_failed_log_emitted_on_unexpected_exception(
+    tmp_path: Path,
+) -> None:
+    """artifact_read_failed must also fire for non-ArtifactError exceptions."""
+    from unittest.mock import patch
+
+    import structlog.testing
+
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "unexpected_recipe", artifact_path)
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    state = _RecipeWatchState(recipe=recipe, artifact_path=str(artifact_path))
+    initial_states = {"unexpected_recipe": state}
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+
+    stub_entry = MagicMock()
+    stub_entry.last_load_error = None
+    stub_entry.loaded = False
+    registry.replace("unexpected_recipe", stub_entry)
+
+    with structlog.testing.capture_logs() as cap:
+        with patch(
+            "recotem.serving.watcher._read_artifact_bytes",
+            side_effect=OSError("network timeout"),
+        ):
+            watcher._load_recipe("unexpected_recipe", state, force=True)
+
+    read_failed_events = [e for e in cap if e.get("event") == "artifact_read_failed"]
+    assert read_failed_events, (
+        "artifact_read_failed must fire for any exception from _read_artifact_bytes"
+    )
+    evt = read_failed_events[0]
+    assert "network timeout" in evt.get("error", "")

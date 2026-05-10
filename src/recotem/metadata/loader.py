@@ -33,6 +33,7 @@ from recotem._http_fetch import (
     redact_url_userinfo,
     verify_sha256,
 )
+from recotem._size_cap import SizeCapExceededError, check_size_cap
 from recotem.config import get_http_timeout_seconds, get_max_download_bytes
 
 logger = structlog.get_logger(__name__)
@@ -108,33 +109,27 @@ def load_item_metadata(
         )
 
     # -----------------------------------------------------------------------
-    # Coerce item-id to str
+    # Drop rows with null/empty item-id — detect BEFORE str coercion so that
+    # items literally named the string "nan" are preserved as real ids.
+    #
+    # CSV reads use keep_default_na=False so empty cells arrive as empty
+    # strings (not NaN).  Parquet / HTTP reads may still produce genuine NaN.
+    # We treat both as "no item id".
     # -----------------------------------------------------------------------
-    df[item_id_col] = df[item_id_col].astype(str)
-
-    # -----------------------------------------------------------------------
-    # Drop rows with null item-id (NaN coerces to "nan" — detect post-coerce)
-    # -----------------------------------------------------------------------
-    # After str-coercion, genuine NaN becomes the string "nan" which is
-    # indistinguishable from an item legitimately named "nan".  We therefore
-    # detect nulls *before* string coercion using the original column.
-    null_mask = df[item_id_col].isna()
-    # Re-read original to check nulls (already overwritten above, so use the
-    # fact that "nan" == str(float("nan"))).  The safest approach: check the
-    # raw column before coercion.  Re-read from the source is expensive; instead
-    # we accept that "nan"-named items will be treated as valid.  Users must
-    # clean their data upstream.  We do flag nulls that survived str-coercion
-    # as "nan" == str(float("nan")).
-    nan_str = str(float("nan"))  # "nan"
-    post_nan_mask = df[item_id_col] == nan_str
-    null_count = int(post_nan_mask.sum()) + int(null_mask.sum())
+    null_mask = df[item_id_col].isna() | (df[item_id_col].astype(str).str.strip() == "")
+    null_count = int(null_mask.sum())
     if null_count > 0:
         logger.warning(
             "metadata_null_item_ids_dropped",
             path=path,
             drop_count=null_count,
         )
-        df = df[~null_mask & ~post_nan_mask]
+        df = df[~null_mask]
+
+    # -----------------------------------------------------------------------
+    # Coerce item-id to str (after null removal — preserves literal "nan")
+    # -----------------------------------------------------------------------
+    df[item_id_col] = df[item_id_col].astype(str)
 
     # -----------------------------------------------------------------------
     # Validate / fill requested fields
@@ -225,6 +220,14 @@ def _read_file(file_type: str, path: str, *, sha256: str | None = None) -> pd.Da
                 ) from exc
         return _parse_bytes(file_type, data, safe_path)
 
+    # Enforce RECOTEM_MAX_DOWNLOAD_BYTES on local and object-store paths before
+    # reading any bytes.  HTTP/HTTPS paths are already capped during streaming
+    # fetch above; check_size_cap skips them automatically.
+    try:
+        check_size_cap(path, cap=get_max_download_bytes(), label=file_type.upper())
+    except SizeCapExceededError as exc:
+        raise ValueError(str(exc)) from exc
+
     if sha256 is not None:
         try:
             import fsspec
@@ -251,7 +254,10 @@ def _read_file(file_type: str, path: str, *, sha256: str | None = None) -> pd.Da
                 f"failed to read parquet file {safe_path!r}: {exc}"
             ) from exc
     try:
-        return pd.read_csv(path, dtype=str)
+        # keep_default_na=False preserves literal "nan" strings as item ids
+        # instead of silently converting them to NaN.  Genuine nulls (empty
+        # cells) are detected via the empty-string check in load_item_metadata.
+        return pd.read_csv(path, dtype=str, keep_default_na=False)
     except Exception as exc:
         raise ValueError(f"failed to read csv file {safe_path!r}: {exc}") from exc
 
@@ -266,6 +272,7 @@ def _parse_bytes(file_type: str, data: bytes, safe_path: str) -> pd.DataFrame:
                 f"failed to parse parquet file {safe_path!r}: {exc}"
             ) from exc
     try:
-        return pd.read_csv(BytesIO(data), dtype=str)
+        # keep_default_na=False: see comment in _read_file above.
+        return pd.read_csv(BytesIO(data), dtype=str, keep_default_na=False)
     except Exception as exc:
         raise ValueError(f"failed to parse csv file {safe_path!r}: {exc}") from exc

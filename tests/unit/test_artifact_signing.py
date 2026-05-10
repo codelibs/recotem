@@ -861,3 +861,57 @@ def test_disallowed_fqcn_in_real_artifact_raises_artifact_error_on_unpack(
     # Deserialization must be refused by the allow-list
     with pytest.raises(ArtifactError, match="not allowed"):
         unpickle_payload(payload_bytes)
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL: KeyRing forward rotation — new key signs, old key only verifies old
+# ---------------------------------------------------------------------------
+
+
+def test_keyring_forward_rotation_new_key_signs_verifies() -> None:
+    """After rotation, new key signs; old-only ring rejects new artifacts.
+
+    Scenario:
+    1. Build a ring with active=NEW_KEY, old=OLD_KEY.
+    2. Sign with compute_hmac using the new (active) key.
+    3. Confirm the stored kid is 'active' (the new key's kid).
+    4. Confirm verify_hmac succeeds with the two-key ring.
+    5. Confirm a ring with ONLY the old key REJECTS the new artifact.
+
+    This complements test_old_key_verifies_with_two_key_ring (backward test).
+    """
+    # Use fresh keys distinct from conftest fixtures to avoid cross-test state.
+    new_key_hex = "cc" * 32  # 64 hex chars = 32 bytes
+    old_key_hex = OLD_KEY_HEX  # reuse bb*32 from conftest
+
+    kr_both = KeyRing(f"active:{new_key_hex}", f"old:{old_key_hex}")
+    assert kr_both.active_kid == "active"
+
+    kid = kr_both.active_kid  # "active"
+    kid_bytes = kid.encode("utf-8")
+    header_json = b'{"recipe_name":"rotation_test"}'
+    payload = b"forward_rotation_payload"
+
+    # 1. Sign with the active (new) key.
+    new_key_bytes = kr_both.get(kid)
+    assert new_key_bytes is not None
+    digest = compute_hmac(new_key_bytes, kid_bytes, header_json, payload)
+
+    # 2. The kid stored is "active".
+    assert kid == "active", f"active kid must be 'active', got {kid!r}"
+
+    # 3. Verify with the two-key ring succeeds.
+    verify_hmac(kr_both, kid, kid_bytes, header_json, payload, digest)
+
+    # 4. Removing old key still permits forward verify (kid='active' uses new key).
+    kr_new_only = KeyRing(f"active:{new_key_hex}")
+    verify_hmac(kr_new_only, kid, kid_bytes, header_json, payload, digest)
+
+    # 5. A ring with ONLY the old key REJECTS the artifact signed by the new key.
+    #    Both share kid="active", but the old-only ring maps it to old_key_hex.
+    #    verify_hmac must raise because the digest was computed over new_key_hex.
+    kr_old_only = KeyRing(f"active:{old_key_hex}")
+    from recotem.artifact.format import ArtifactError
+
+    with pytest.raises(ArtifactError, match="HMAC"):
+        verify_hmac(kr_old_only, kid, kid_bytes, header_json, payload, digest)

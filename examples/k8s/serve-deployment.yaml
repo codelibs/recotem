@@ -16,7 +16,7 @@ metadata:
   labels:
     app.kubernetes.io/name: recotem
     app.kubernetes.io/component: serve
-    app.kubernetes.io/version: "2.0.0"
+    app.kubernetes.io/version: "2.0.0a0"
 spec:
   replicas: 2
   selector:
@@ -56,7 +56,7 @@ spec:
 
       containers:
         - name: serve
-          image: ghcr.io/codelibs/recotem:2.0.0
+          image: ghcr.io/codelibs/recotem:2.0.0a0
           imagePullPolicy: IfNotPresent
           command: ["recotem", "serve", "--recipes", "/recipes"]
 

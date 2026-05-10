@@ -850,3 +850,84 @@ def test_drain_seconds_respected_during_lifespan_shutdown(tmp_path: Path) -> Non
     assert shutdown_events[0].get("drain_seconds") == 42, (
         f"serve_shutdown log must include drain_seconds=42; got: {shutdown_events[0]!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: corrupt header JSON returns _failed_entry instead of crashing server
+# ---------------------------------------------------------------------------
+
+
+def _build_artifact_with_corrupt_header_json(key_hex: str) -> bytes:
+    """Build a .recotem artifact whose header JSON bytes are valid UTF-8 but
+    not valid JSON.  HMAC is computed over the tampered content so the
+    signature check passes; only json.loads should fail.
+    """
+    import hmac as _hmac
+    import struct
+
+    from recotem.artifact.format import FORMAT_VERSION, MAGIC
+
+    bad_json: bytes = b"{ this is not valid json !!!"
+    payload_bytes: bytes = b""  # empty payload — json.loads fires before unpickle
+
+    kid = "active"
+    kid_bytes = kid.encode("utf-8")
+    key_bytes = bytes.fromhex(key_hex)
+
+    h = _hmac.new(key_bytes, digestmod="sha256")
+    h.update(kid_bytes)
+    h.update(bad_json)
+    h.update(payload_bytes)
+    digest = h.digest()
+
+    parts: list[bytes] = [
+        MAGIC,
+        struct.pack("<HH", FORMAT_VERSION, 0),
+        bytes([len(kid_bytes)]),
+        kid_bytes,
+        digest,
+        struct.pack("<I", len(bad_json)),
+        bad_json,
+        payload_bytes,
+    ]
+    return b"".join(parts)
+
+
+def test_corrupt_header_json_returns_failed_entry_not_crash(tmp_path: Path) -> None:
+    """A valid artifact whose header JSON is syntactically invalid must produce
+    a stub registry entry (loaded=False, last_load_error containing
+    'header JSON decode failed') instead of crashing the server.
+
+    Regression for app.py — previously json.loads(hdr.header_data.decode())
+    was unwrapped; a corrupt header would propagate as an unhandled ValueError.
+    """
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+    from tests.conftest import ACTIVE_KEY_HEX
+
+    cfg = _minimal_config(tmp_path)
+    cfg.signing_keys_raw = f"active:{ACTIVE_KEY_HEX}"
+    recipes_dir = Path(cfg.recipes_dir)  # type: ignore[arg-type]
+
+    artifact_path = tmp_path / "bad_header.recotem"
+    artifact_path.write_bytes(_build_artifact_with_corrupt_header_json(ACTIVE_KEY_HEX))
+    _write_recipe_yaml(recipes_dir, "corrupt_header", artifact_path)
+
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+
+    assert "corrupt_header" in body["recipes"], (
+        "Recipe with corrupt header JSON must appear in /health"
+    )
+    entry = body["recipes"]["corrupt_header"]
+    assert entry["loaded"] is False, (
+        f"corrupt header JSON must cause loaded=False; got {entry!r}"
+    )
+    error_str = entry.get("error") or ""
+    assert "header JSON decode failed" in error_str, (
+        f"last_load_error must contain 'header JSON decode failed'; got {error_str!r}"
+    )

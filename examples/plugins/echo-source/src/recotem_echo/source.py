@@ -61,6 +61,9 @@ class EchoSource:
     extras_required: ClassVar[list[str]] = []
     """No optional extras required — pandas is a core recotem dependency."""
 
+    no_expand_fields: ClassVar[frozenset[str]] = frozenset()
+    """No fields carry raw SQL or other content that must avoid env-var expansion."""
+
     # ── pydantic config schema ────────────────────────────────────────────────
 
     class Config(BaseModel):

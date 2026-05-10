@@ -1126,3 +1126,79 @@ def test_fetch_http_bytes_rejects_embedded_credentials_in_url(
             f"{type(exc).__name__}: {exc}. "
             "Only HttpFetchError is expected here."
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Regression: numeric IP host behaviour in assert_host_public (docstring fix)
+# ---------------------------------------------------------------------------
+
+
+def test_assert_host_public_numeric_public_ip_returns_ip_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """assert_host_public must return the IP string (NOT None) for a public numeric IP.
+
+    The docstring previously claimed it returned None for numeric-IP hosts; the
+    actual code validates the address and returns str(addrs[0]) on the public-IP
+    fast path.  This test pins that behaviour so any regression (e.g. an
+    erroneous early-return of None) is caught immediately.
+    """
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
+    result = assert_host_public("http://8.8.8.8/data.csv", allow_private=False)
+    assert result is not None, (
+        "assert_host_public must return the IP string for a public numeric IP, "
+        "not None. Returning None would skip IP-pinning and weaken the SSRF guard."
+    )
+    assert result == "8.8.8.8", (
+        f"assert_host_public must return '8.8.8.8' for http://8.8.8.8/data.csv; "
+        f"got {result!r}"
+    )
+
+
+def test_assert_host_public_numeric_private_ip_still_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """assert_host_public must reject a private numeric IP in URL form.
+
+    Even when the host is already a numeric IP (no DNS lookup needed), the
+    SSRF guard must still validate it against the internal-address check.
+    Returning None for numeric IPs would silently skip this validation.
+    """
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
+    with pytest.raises(HttpFetchError, match="private/internal address"):
+        assert_host_public("http://127.0.0.1/x", allow_private=False)
+
+
+def test_assert_host_public_returns_none_only_for_allow_private(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """None is returned by assert_host_public ONLY when allow_private=True.
+
+    This test exhausts the None-return paths: with allow_private=True the
+    function short-circuits immediately and returns None regardless of the host.
+    All other code paths (public hostname, public numeric IP) return an IP
+    string, never None.
+    """
+    monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
+
+    # allow_private=True → always None (SSRF check bypassed).
+    result_private = assert_host_public("http://127.0.0.1/x", allow_private=True)
+    assert result_private is None, (
+        "assert_host_public must return None when allow_private=True"
+    )
+
+    # allow_private=True even for a public IP → still None.
+    result_public_private = assert_host_public(
+        "http://8.8.8.8/data.csv", allow_private=True
+    )
+    assert result_public_private is None, (
+        "assert_host_public must return None when allow_private=True, "
+        "regardless of the target IP"
+    )
+
+    # allow_private=False with a public numeric IP → returns the IP string, not None.
+    result_public = assert_host_public("http://8.8.8.8/data.csv", allow_private=False)
+    assert result_public is not None, (
+        "assert_host_public must NOT return None for a public IP when "
+        "allow_private=False. Only allow_private=True triggers None."
+    )

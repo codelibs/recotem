@@ -118,6 +118,7 @@ class CSVSource:
     type_name: ClassVar[str] = "csv"
     Config: ClassVar[type[BaseModel]] = CSVConfig
     extras_required: ClassVar[list[str]] = []
+    no_expand_fields: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(self, config: CSVConfig) -> None:
         try:
@@ -301,6 +302,7 @@ class ParquetSource:
     type_name: ClassVar[str] = "parquet"
     Config: ClassVar[type[BaseModel]] = ParquetConfig
     extras_required: ClassVar[list[str]] = []
+    no_expand_fields: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(self, config: ParquetConfig) -> None:
         try:

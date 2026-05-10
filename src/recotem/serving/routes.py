@@ -8,23 +8,19 @@ Routes:
                            is importable)
 """
 
-from __future__ import annotations
-
 import math
 import time
 import uuid
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from recotem.config import ApiKeyEntry
 from recotem.serving import metrics as _metrics
 from recotem.serving.auth import verify_api_key
 from recotem.serving.registry import ModelRegistry
-
-if TYPE_CHECKING:
-    from recotem.config import ApiKeyEntry
 
 logger = structlog.get_logger(__name__)
 

@@ -32,6 +32,7 @@ def test_two_plugins_register_same_name_rejected_at_discovery() -> None:
         type_name = "csv"
         Config = DupeConfig
         extras_required = []
+        no_expand_fields = frozenset()
 
         def fetch(self, ctx): ...
 
@@ -39,6 +40,7 @@ def test_two_plugins_register_same_name_rejected_at_discovery() -> None:
         type_name = "csv"  # same name
         Config = DupeConfig
         extras_required = []
+        no_expand_fields = frozenset()
 
         def fetch(self, ctx): ...
 
@@ -102,6 +104,7 @@ def test_dynamic_discriminated_union_includes_third_party_type() -> None:
         type_name = "echo"
         Config = ThirdPartyConfig
         extras_required = []
+        no_expand_fields = frozenset()
 
         def fetch(self, ctx): ...
 

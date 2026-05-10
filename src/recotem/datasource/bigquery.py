@@ -58,6 +58,9 @@ class BigQuerySource:
     type_name: ClassVar[str] = "bigquery"
     Config: ClassVar[type[BaseModel]] = BigQueryConfig
     extras_required: ClassVar[list[str]] = ["bigquery"]
+    no_expand_fields: ClassVar[frozenset[str]] = frozenset(
+        {"query", "query_parameters"}
+    )
 
     def __init__(self, config: BigQueryConfig) -> None:
         try:

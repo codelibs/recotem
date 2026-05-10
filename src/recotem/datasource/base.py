@@ -130,6 +130,23 @@ def validate_plugin_contract(cls: type) -> None:
             "'extras_required': must be a list of strings."
         )
 
+    if not hasattr(cls, "no_expand_fields"):
+        raise DataSourceError(
+            f"DataSource plugin '{cls.__qualname__}' is missing required "
+            "class attribute 'no_expand_fields'. "
+            "Declare 'no_expand_fields: ClassVar[frozenset[str]] = frozenset()' "
+            "(or list field names whose values must not receive env-var expansion). "
+            "See docs/plugin-authoring.md for the plugin contract."
+        )
+
+    if not isinstance(cls.no_expand_fields, frozenset):  # type: ignore[union-attr]
+        raise DataSourceError(
+            f"DataSource plugin '{cls.__qualname__}' has an invalid "
+            f"'no_expand_fields': must be a frozenset[str], "
+            f"got {type(cls.no_expand_fields).__name__!r}. "  # type: ignore[union-attr]
+            "See docs/plugin-authoring.md for the plugin contract."
+        )
+
     if not hasattr(cls, "fetch") or not callable(getattr(cls, "fetch", None)):
         raise DataSourceError(
             f"DataSource plugin '{cls.__qualname__}' must define a 'fetch' method."

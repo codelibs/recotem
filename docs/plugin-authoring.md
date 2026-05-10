@@ -47,6 +47,17 @@ class EchoSource:
     #    are missing.  Leave empty if the plugin has no optional deps.
     extras_required: ClassVar[list[str]] = []
 
+    # 4. no_expand_fields: frozenset of field names inside the source config
+    #    whose string values must NEVER receive ${RECOTEM_RECIPE_*} env-var
+    #    expansion.  List any fields that carry raw SQL, query parameters, or
+    #    other content where ${} should be treated as literals.
+    #    Use frozenset() (empty) when no fields need protection beyond the
+    #    global baseline (query, query_parameters) that is always guarded.
+    #    This attribute is REQUIRED — validate_plugin_contract enforces its
+    #    presence and its type (frozenset).  A missing or wrong-type attribute
+    #    raises DataSourceError at plugin discovery with a pointer to this doc.
+    no_expand_fields: ClassVar[frozenset[str]] = frozenset()
+
     def __init__(self, config: "EchoSource.Config") -> None:
         self._config = config
 
@@ -103,9 +114,14 @@ class EchoSource:
 
 3. **`extras_required`** is **purely documentation**. The registry only validates that it is a `list[str]`; recotem never auto-installs or auto-checks these extras. Surface a helpful message yourself in `__init__` (see [Deferred imports](#deferred-imports)) — the value of the attribute is what you cite there.
 
-4. **`fetch(ctx)`** must return a `pandas.DataFrame`. The DataFrame must contain at least the columns referenced in `recipe.schema` (`user_column`, `item_column`, and optionally `time_column`). The training pipeline accesses those columns by name immediately after fetch — a missing column surfaces as a `KeyError` and exits the train run.
+4. **`no_expand_fields`** is **required** and must be a `frozenset[str]`. It names every field in the source `Config` whose string values must **never** receive `${RECOTEM_RECIPE_*}` environment-variable expansion. `validate_plugin_contract` checks that this attribute is present and is a `frozenset`; a missing or wrong-type declaration raises `DataSourceError` at plugin-discovery time with a pointer to this doc.
 
-5. **`fetch()` must raise `DataSourceError`** for any external or transient failure (auth errors, network errors, query errors, empty results). `DataSourceError` is mapped to exit code 3. Any other exception surfaces as exit code 1. Wrap third-party exceptions explicitly:
+   - For most plugins, declare `no_expand_fields: ClassVar[frozenset[str]] = frozenset()` — the global baseline (`query`, `query_parameters`) is already guarded unconditionally by the recipe loader.
+   - For plugins with SQL or parameterised-query fields, list them explicitly: `no_expand_fields: ClassVar[frozenset[str]] = frozenset({"sql", "bind_params"})`. This provides defence-in-depth and documents the security intent for future maintainers.
+
+5. **`fetch(ctx)`** must return a `pandas.DataFrame`. The DataFrame must contain at least the columns referenced in `recipe.schema` (`user_column`, `item_column`, and optionally `time_column`). The training pipeline accesses those columns by name immediately after fetch — a missing column surfaces as a `KeyError` and exits the train run.
+
+6. **`fetch()` must raise `DataSourceError`** for any external or transient failure (auth errors, network errors, query errors, empty results). `DataSourceError` is mapped to exit code 3. Any other exception surfaces as exit code 1. Wrap third-party exceptions explicitly:
 
    ```python
    def fetch(self, ctx: FetchContext) -> pd.DataFrame:
@@ -115,7 +131,7 @@ class EchoSource:
            raise DataSourceError(str(exc)) from exc
    ```
 
-6. **Deferred imports.** Do not import optional dependencies at module top-level. Defer to `__init__` or `fetch()`:
+7. **Deferred imports.** Do not import optional dependencies at module top-level. Defer to `__init__` or `fetch()`:
 
    ```python
    def __init__(self, config: "MySource.Config") -> None:

@@ -191,10 +191,14 @@ def assert_host_public(url: str, *, allow_private: bool) -> str | None:
     where the first lookup returns a public IP and the second returns a
     private one (e.g. cloud metadata).
 
-    Returns ``None`` when *allow_private* is True (no SSRF check, and no
-    pinning — the caller defers to the system resolver).  Returns ``None``
-    when *url*'s host is already a numeric IP that the caller can use
-    directly without re-resolving.
+    Returns ``None`` **only** when *allow_private* is True (no SSRF check,
+    and no pinning — the caller defers to the system resolver).
+
+    When *url*'s host is already a numeric IP literal, the address is
+    validated against the internal-address check exactly like a
+    DNS-resolved hostname.  If it passes, the IP string is returned as the
+    pinned-IP for the actual TCP connect — the same path as any hostname.
+    There is no fast-return-``None`` shortcut for numeric-IP hosts.
 
     No-op when *allow_private* is True — operators of internal-only
     deployments can opt in via ``RECOTEM_HTTP_ALLOW_PRIVATE=1``.
@@ -292,9 +296,12 @@ class _NoFollowRedirectHandler(urllib.request.HTTPRedirectHandler):
     http_error_308 = _passthrough  # type: ignore[assignment]
 
 
-# Default opener used when no IP-pin is in effect (i.e. when
-# RECOTEM_HTTP_ALLOW_PRIVATE=1 disables the SSRF check, or when the URL's
-# host is already a numeric IP literal).
+# Default opener used when no IP-pin is in effect — specifically when
+# RECOTEM_HTTP_ALLOW_PRIVATE=1 disables the SSRF check and
+# assert_host_public returns None.  For all other fetches (including URLs
+# whose host is already a numeric IP literal) assert_host_public validates
+# the address and returns the IP string, so the IP-pinned opener is used
+# instead.
 _NO_REDIRECT_OPENER = urllib.request.build_opener(_NoFollowRedirectHandler())
 
 

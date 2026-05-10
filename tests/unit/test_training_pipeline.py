@@ -524,6 +524,71 @@ def test_one_structured_log_per_trial(caplog) -> None:
 
 
 # ---------------------------------------------------------------------------
+# M-9 regression: callback default_class is configurable, not "unknown"
+# ---------------------------------------------------------------------------
+
+
+def test_make_trial_callback_uses_configured_default_class() -> None:
+    """``make_trial_callback`` must forward ``default_class`` so early trials
+    surface a real candidate name to the SIEM rather than ``"unknown"``.
+
+    Pre-fix, the callback hard-coded ``default_class="unknown"``.  When a
+    trial completed before its ``recommender_class_name`` made it into
+    ``trial.user_attrs`` / ``trial.params`` (early-trial race), the
+    structured ``trial_done`` event surfaced ``algorithm="unknown"`` and
+    polluted SIEM aggregations on the algorithm dimension.
+    """
+    from unittest.mock import MagicMock
+
+    from recotem.training.progress import make_trial_callback
+
+    seen_algorithms: list[str] = []
+
+    class _RecordingReporter:
+        def on_trial_done(self, *, trial_number, algorithm, score, params) -> None:
+            seen_algorithms.append(algorithm)
+
+    cb = make_trial_callback(_RecordingReporter(), default_class="IALSRecommender")
+
+    trial = MagicMock()
+    trial.number = 0
+    trial.value = -0.5
+    trial.params = {}  # no recommender_class_name yet
+    trial.user_attrs = {}  # not set yet either
+
+    cb(MagicMock(), trial)
+
+    assert seen_algorithms == ["IALSRecommender"], (
+        "Early-trial callback must use the configured default_class "
+        f"(IALSRecommender); got {seen_algorithms!r}"
+    )
+
+
+def test_make_trial_callback_default_class_back_compat_is_unknown() -> None:
+    """Omitting ``default_class`` must keep the legacy ``"unknown"`` behaviour
+    for back-compat with any external callers of ``make_trial_callback``.
+    """
+    from unittest.mock import MagicMock
+
+    from recotem.training.progress import make_trial_callback
+
+    seen: list[str] = []
+
+    class _RecordingReporter:
+        def on_trial_done(self, *, trial_number, algorithm, score, params) -> None:
+            seen.append(algorithm)
+
+    cb = make_trial_callback(_RecordingReporter())  # no default_class
+    trial = MagicMock()
+    trial.number = 0
+    trial.value = -0.5
+    trial.params = {}
+    trial.user_attrs = {}
+    cb(MagicMock(), trial)
+    assert seen == ["unknown"]
+
+
+# ---------------------------------------------------------------------------
 # no_lock / lock semantics
 # ---------------------------------------------------------------------------
 
@@ -1139,3 +1204,165 @@ def test_compute_recipe_hash_differs_for_different_recipes(tmp_path: Path) -> No
     assert _compute_recipe_hash(recipe_a) != _compute_recipe_hash(recipe_b), (
         "Recipes with different n_trials must produce different hashes"
     )
+
+
+# ---------------------------------------------------------------------------
+# B-1 regression: _train_final filters best_params to __init__-accepted keys
+# ---------------------------------------------------------------------------
+
+
+def test_train_final_filters_best_params_to_init_signature() -> None:
+    """``_train_final`` must drop best_params keys not in ``rec_cls.__init__``
+    and emit a ``final_training_dropped_params`` WARN log.
+
+    Pre-fix, a stray TPE-injected key (e.g. an Optuna ``user_attrs`` overlay
+    from ``learnt_config``) caused ``rec_cls(X_full, **best_params)`` to
+    raise ``TypeError`` after a successful 100% search — the artifact never
+    got written and the operator saw exit 4 with no actionable message.
+    """
+    from unittest.mock import patch
+
+    import pandas as pd
+    import structlog
+    import structlog.testing
+
+    from recotem.training.pipeline import _train_final
+
+    df = pd.DataFrame(
+        {
+            "user_id": ["u1", "u2", "u1", "u3"],
+            "item_id": ["i1", "i1", "i2", "i2"],
+        }
+    )
+
+    class FakeRec:
+        """Recommender with a strict ``__init__`` that does not accept extras.
+
+        Mirrors the irspack failure mode where recommender constructors
+        reject unknown keyword arguments.
+        """
+
+        def __init__(self, X, n_components: int = 8) -> None:
+            self.X = X
+            self.n_components = n_components
+
+        def learn(self):
+            return self
+
+    # The pipeline emits via structlog directly (not stdlib logging), so
+    # caplog cannot see the line.  capture_logs() temporarily replaces the
+    # processor chain with one that buffers events into a list.
+    with (
+        patch(
+            "recotem.training.pipeline.get_recommender_cls",
+            return_value=FakeRec,
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
+        result = _train_final(
+            df,
+            user_column="user_id",
+            item_column="item_id",
+            class_name="FakeRec",
+            best_params={
+                "n_components": 16,
+                "stray_key_from_user_attrs": "ignored",
+                "another_unknown": 42,
+            },
+        )
+
+    # Construction must succeed (no TypeError leaks past the filter).
+    assert result.recommender.n_components == 16
+
+    # Both unknown keys must be reported in the dropped log line so an
+    # operator can investigate plugin/version drift instead of staring at a
+    # silent exit 4.
+    dropped_events = [
+        e for e in captured if e.get("event") == "final_training_dropped_params"
+    ]
+    assert dropped_events, (
+        f"Expected a final_training_dropped_params WARN line; got {captured!r}"
+    )
+    dropped_keys = dropped_events[0]["dropped"]
+    assert "another_unknown" in dropped_keys
+    assert "stray_key_from_user_attrs" in dropped_keys
+    assert dropped_events[0]["class_name"] == "FakeRec"
+
+
+def test_train_final_passes_through_when_constructor_accepts_kwargs() -> None:
+    """If ``__init__`` has ``**kwargs``, all params flow through unchanged.
+
+    Recommenders that intentionally accept extras (e.g. transparently
+    forwarding to a base class) must not be denied params just because
+    we cannot enumerate them via ``inspect.signature``.
+    """
+    from unittest.mock import patch
+
+    import pandas as pd
+
+    from recotem.training.pipeline import _train_final
+
+    df = pd.DataFrame(
+        {"user_id": ["u1", "u2"], "item_id": ["i1", "i2"]},
+    )
+
+    captured: dict = {}
+
+    class OpenRec:
+        def __init__(self, X, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def learn(self):
+            return self
+
+    with patch(
+        "recotem.training.pipeline.get_recommender_cls",
+        return_value=OpenRec,
+    ):
+        _train_final(
+            df,
+            user_column="user_id",
+            item_column="item_id",
+            class_name="OpenRec",
+            best_params={"alpha": 0.1, "beta": 0.2, "gamma": 3},
+        )
+
+    assert captured == {"alpha": 0.1, "beta": 0.2, "gamma": 3}
+
+
+def test_train_final_maps_value_error_to_training_error() -> None:
+    """irspack ``ValueError`` (e.g. invalid hyperparam combo) must surface as
+    ``TrainingError`` so the operator-visible exit code is 4 (training),
+    not 1 (unknown).
+    """
+    from unittest.mock import patch
+
+    import pandas as pd
+    import pytest
+
+    from recotem.training.errors import TrainingError
+    from recotem.training.pipeline import _train_final
+
+    df = pd.DataFrame(
+        {"user_id": ["u1", "u2"], "item_id": ["i1", "i2"]},
+    )
+
+    class RejectingRec:
+        def __init__(self, X, n_components: int = 8) -> None:
+            raise ValueError("n_components must be < min(n_users, n_items)")
+
+        def learn(self):
+            return self  # pragma: no cover
+
+    with patch(
+        "recotem.training.pipeline.get_recommender_cls",
+        return_value=RejectingRec,
+    ):
+        with pytest.raises(TrainingError, match="rejected params"):
+            _train_final(
+                df,
+                user_column="user_id",
+                item_column="item_id",
+                class_name="RejectingRec",
+                best_params={"n_components": 64},
+            )

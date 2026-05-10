@@ -193,18 +193,27 @@ def _rich_available() -> bool:
 
 def make_trial_callback(
     reporter: ProgressReporter,
+    default_class: str = "unknown",
 ) -> Callable:
     """Return an Optuna study callback that feeds *reporter*.
 
     Compatible with ``optuna.study.Study.optimize(callbacks=[...])``.
     The callback is called with ``(study, trial)`` after each trial.
+
+    ``default_class`` is forwarded to
+    :func:`~recotem.training.search.extract_class_and_clean_params` for
+    early trials whose ``recommender_class_name`` has not yet been written
+    to ``trial.user_attrs`` / ``trial.params``.  Pass ``algorithms[0]`` so
+    the structured ``trial_done`` events surface a real candidate name to
+    the SIEM rather than a ``"unknown"`` literal that pollutes class-name
+    aggregations.
     """
 
     from recotem.training.search import extract_class_and_clean_params  # noqa: PLC0415
 
     def _callback(study, trial) -> None:  # type: ignore[no-untyped-def]
         algorithm, params = extract_class_and_clean_params(
-            trial, default_class="unknown"
+            trial, default_class=default_class
         )
 
         score: float | None = None

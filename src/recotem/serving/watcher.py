@@ -492,9 +492,20 @@ class ArtifactWatcher(threading.Thread):
             )
             self._record_load_failure(name, str(exc))
             return
+        except (MemoryError, RecursionError):
+            # Never swallow OOM / stack-exhaustion in a long-running thread:
+            # silently retrying every poll cycle drives the process to the
+            # OOM killer with no observable symptom.  Re-raise so the
+            # outer poll loop's exception handler logs and counts it.
+            raise
         except Exception as exc:
-            logger.error("artifact_load_unexpected_error", name=name, error=str(exc))
-            self._record_load_failure(name, str(exc))
+            logger.exception(
+                "artifact_load_unexpected_error",
+                name=name,
+                exc_type=type(exc).__name__,
+                error=str(exc),
+            )
+            self._record_load_failure(name, f"{type(exc).__name__}: {exc}")
             return
 
         new_marker = (
@@ -647,6 +658,33 @@ def _load_metadata(recipe: Any, recipe_name: str) -> Any:
 # ---------------------------------------------------------------------------
 # Factory helper used by app.py
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Public re-exports
+# ---------------------------------------------------------------------------
+#
+# The functions below are intentionally referenced by ``serving/app.py`` for
+# the startup load path.  Expose them under public names so the module
+# boundary is no longer a leading-underscore handshake — leaving them
+# private was a soft contract that broke quietly when the watcher internals
+# moved during refactors.  The original ``_``-prefixed names remain for
+# legacy callers (existing unit tests bind to them directly).
+
+read_artifact_bytes = _read_artifact_bytes
+stat_marker = _stat_marker
+sha256_bytes = _sha256_bytes
+load_metadata = _load_metadata
+
+
+__all__ = [
+    "ArtifactWatcher",
+    "build_initial_states",
+    "read_artifact_bytes",
+    "stat_marker",
+    "sha256_bytes",
+    "load_metadata",
+]
 
 
 def build_initial_states(

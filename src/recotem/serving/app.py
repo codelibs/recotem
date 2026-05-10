@@ -39,11 +39,11 @@ from recotem.serving.registry import ModelEntry, ModelRegistry
 from recotem.serving.routes import make_router
 from recotem.serving.watcher import (
     ArtifactWatcher,
-    _load_metadata,
-    _read_artifact_bytes,
-    _sha256_bytes,
-    _stat_marker,
     build_initial_states,
+    load_metadata,
+    read_artifact_bytes,
+    sha256_bytes,
+    stat_marker,
 )
 from recotem.version import __version__
 
@@ -366,7 +366,7 @@ def _try_load_artifact(
     max_payload_bytes = serve_config.max_payload_bytes
 
     try:
-        data = _read_artifact_bytes(artifact_path, max_artifact_bytes)
+        data = read_artifact_bytes(artifact_path, max_artifact_bytes)
     except ArtifactError as exc:
         logger.warning("initial_artifact_read_failed", name=recipe.name, error=str(exc))
         return _failed_entry(recipe, f"read failed: {exc}")
@@ -374,7 +374,7 @@ def _try_load_artifact(
         logger.warning("initial_artifact_read_error", name=recipe.name, error=str(exc))
         return _failed_entry(recipe, f"read error: {exc}")
 
-    sha256 = _sha256_bytes(data)
+    sha256 = sha256_bytes(data)
 
     try:
         # Use max_payload_bytes (not max_artifact_bytes) as the payload cap so
@@ -443,7 +443,7 @@ def _try_load_artifact(
     metadata_df = None
     if recipe.item_metadata is not None:
         try:
-            metadata_df = _load_metadata(recipe, recipe.name)
+            metadata_df = load_metadata(recipe, recipe.name)
         except Exception as exc:
             logger.warning(
                 "initial_artifact_metadata_failed",
@@ -452,7 +452,7 @@ def _try_load_artifact(
             )
             return _failed_entry(recipe, f"metadata load failed: {exc}")
 
-    marker = _stat_marker(artifact_path)
+    marker = stat_marker(artifact_path)
     entry = ModelEntry(
         name=recipe.name,
         recommender=recommender,

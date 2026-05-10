@@ -198,13 +198,22 @@ def make_router(
     # ------------------------------------------------------------------
 
     @router.get("/health", summary="Per-recipe health status")
-    def health() -> dict[str, Any]:
+    def health(response: Response) -> dict[str, Any]:
         """Return per-recipe health.  Overall status is ``degraded`` if any
         recipe is unloaded or carries a load error.
 
         Every recipe found in the recipes directory at startup appears here,
         regardless of whether its artifact loaded — startup-failed recipes
         are inserted as stubs with ``loaded=false`` and an ``error`` string.
+
+        HTTP status mirrors ``status``:
+
+        - ``200 OK``         when every recipe is loaded and free of errors.
+        - ``503 Service Unavailable`` when any recipe is unloaded or carries
+          a ``last_load_error``.  Kubernetes readiness/liveness probes only
+          consider the status code, so returning 200 for a degraded process
+          would let Pods be marked ``Ready`` while every prediction returns
+          503 — defeating the rolling-upgrade safety net.
         """
         snapshot = registry.health_snapshot()
         overall = "ok"
@@ -212,6 +221,8 @@ def make_router(
             if not entry_health.get("loaded", True) or entry_health.get("error"):
                 overall = "degraded"
                 break
+        if overall == "degraded":
+            response.status_code = 503
         return {"status": overall, "recipes": snapshot}
 
     # ------------------------------------------------------------------

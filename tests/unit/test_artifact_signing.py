@@ -121,6 +121,49 @@ def test_one_byte_tamper_rejected() -> None:
         verify_hmac(kr, kid, kid_bytes, header_json, bytes(payload), digest)
 
 
+def test_header_json_tamper_rejected() -> None:
+    """Modifying header_json must fail verify (HMAC scope = kid+header+payload).
+
+    The payload-byte tamper test above covers one third of the HMAC scope;
+    the kid-tamper test covers another.  This test pins the remaining third
+    so a future refactor that drops ``header_json`` from the scope would
+    fail CI rather than silently widen the spoofing surface (an attacker
+    could otherwise rewrite ``recipe_name`` / ``best_class`` / metadata
+    without invalidating the signature).
+    """
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    kid = "active"
+    kid_bytes = kid.encode("utf-8")
+    original_header = b'{"recipe_name":"original","best_score":0.9}'
+    tampered_header = b'{"recipe_name":"injected","best_score":0.9}'
+    payload = b"payload"
+    key = kr.get(kid)
+    assert key is not None
+    digest = compute_hmac(key, kid_bytes, original_header, payload)
+    with pytest.raises(ArtifactError, match="HMAC"):
+        verify_hmac(kr, kid, kid_bytes, tampered_header, payload, digest)
+
+
+def test_header_json_extension_rejected() -> None:
+    """Appending bytes to header_json (without re-signing) must fail verify.
+
+    Defensive against a hypothetical bug where a parser ignored trailing
+    whitespace in header_json — re-using the original digest with extended
+    JSON would still be rejected because the HMAC covers the exact bytes.
+    """
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    kid = "active"
+    kid_bytes = kid.encode("utf-8")
+    original_header = b'{"x":1}'
+    extended_header = b'{"x":1}   '  # trailing whitespace
+    payload = b"data"
+    key = kr.get(kid)
+    assert key is not None
+    digest = compute_hmac(key, kid_bytes, original_header, payload)
+    with pytest.raises(ArtifactError, match="HMAC"):
+        verify_hmac(kr, kid, kid_bytes, extended_header, payload, digest)
+
+
 def test_hmac_valid_over_wrong_key_rejected() -> None:
     """Digest computed with a different key fails verify."""
     kr_correct = KeyRing(f"active:{ACTIVE_KEY_HEX}")

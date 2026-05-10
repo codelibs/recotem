@@ -475,7 +475,9 @@ def test_failed_initial_load_inserts_stub_with_loaded_false(tmp_path: Path) -> N
     app = create_app(cfg)
     client = TestClient(app)
     response = client.get("/health")
-    assert response.status_code == 200
+    # /health now returns 503 when degraded so K8s readiness probes mark
+    # the Pod NotReady — see routes.health() and B-2 fix.
+    assert response.status_code == 503
     body = response.json()
 
     assert body["status"] == "degraded", (
@@ -568,7 +570,9 @@ output:
     app = create_app(cfg)
     client = TestClient(app)
     response = client.get("/health")
-    assert response.status_code == 200
+    # Same B-2 contract: a stub recipe (loaded=False) makes the overall
+    # status degraded, which now surfaces as HTTP 503.
+    assert response.status_code == 503
     body = response.json()
 
     assert "with_bad_metadata" in body["recipes"]
@@ -917,7 +921,10 @@ def test_corrupt_header_json_returns_failed_entry_not_crash(tmp_path: Path) -> N
     app = create_app(cfg)
     client = TestClient(app)
     response = client.get("/health")
-    assert response.status_code == 200
+    # Same B-2 contract: a stub recipe (loaded=False) makes overall
+    # status degraded → HTTP 503.  The recipe must still appear in the
+    # body so operators can see the failure reason.
+    assert response.status_code == 503
     body = response.json()
 
     assert "corrupt_header" in body["recipes"], (

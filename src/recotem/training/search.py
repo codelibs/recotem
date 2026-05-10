@@ -263,7 +263,10 @@ def run_search(
     _orphaned_live: list[int] = [0]
     _orphaned_total: list[int] = [0]
 
-    trial_progress_cb = make_trial_callback(reporter)
+    # Pass class_names[0] as the default so early-trial structured logs surface
+    # a real candidate name rather than the literal "unknown" sentinel that
+    # would otherwise pollute SIEM aggregations of ``trial_done.algorithm``.
+    trial_progress_cb = make_trial_callback(reporter, default_class=class_names[0])
 
     def objective(trial: optuna.Trial) -> float:
         if len(class_names) == 1:
@@ -301,6 +304,12 @@ def run_search(
                         rec = rec_cls(X_tv_train, **params)
                         rec.learn_with_optimizer(evaluator, trial)
                         result_holder.append(rec)
+                    except (MemoryError, RecursionError):
+                        # Re-raise without capture so the worker thread dies
+                        # loudly and the parent process can surface OOM via
+                        # exit code instead of bookkeeping it as a trial
+                        # failure that hints at per-trial timeout.
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         exc_holder.append(exc)
                 finally:

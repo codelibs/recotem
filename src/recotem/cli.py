@@ -225,8 +225,11 @@ def train(
     _configure_logging_from_env()
 
     if dev_allow_unsigned and not i_understand_this_loads_arbitrary_code:
+        # Flag-pair misuse is a configuration error (CLI invocation), not a
+        # recipe error — map to EXIT_CONFIG so operators can distinguish it
+        # from a malformed recipe via the documented exit-code table.
         _exit(
-            _EXIT_RECIPE,
+            _EXIT_CONFIG,
             "--dev-allow-unsigned requires "
             "--i-understand-this-loads-arbitrary-code to also be passed.",
         )
@@ -346,8 +349,9 @@ def serve(
     _configure_logging_from_env()
 
     if dev_allow_unsigned and not i_understand_this_loads_arbitrary_code:
+        # Flag-pair misuse: configuration error per the exit-code table.
         _exit(
-            _EXIT_RECIPE,
+            _EXIT_CONFIG,
             "--dev-allow-unsigned requires "
             "--i-understand-this-loads-arbitrary-code to also be passed.",
         )
@@ -468,6 +472,19 @@ def inspect(
             data = fh.read(max_bytes + 1)
     except OSError as exc:
         _exit(_EXIT_ARTIFACT, f"Cannot read artifact '{artifact}': {exc}")
+    except MemoryError:
+        # Never collapse OOM into a "read failed" message — the operator
+        # needs to see the real cause to size the host correctly.
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # fsspec backends raise SDK-specific exceptions that do not derive
+        # from OSError (botocore.NoCredentialsError, gcsfs.HttpError, etc.).
+        # Without this branch they would bubble up to typer's default handler
+        # and surface as exit 1, breaking the documented exit-code contract.
+        _exit(
+            _EXIT_ARTIFACT,
+            f"Cannot open artifact '{artifact}' ({type(exc).__name__}): {exc}",
+        )
 
     try:
         # Resolve pointer files written by the default ``append_sha`` versioning
@@ -724,11 +741,17 @@ def _configure_logging_from_env() -> None:
 
 
 def _check_dev_env(flag: str) -> None:
-    """Exit with code 2 if RECOTEM_ENV is not 'development'."""
+    """Exit with EXIT_CONFIG (8) if RECOTEM_ENV is not 'development'.
+
+    Per the documented exit-code table, environment-gated flag misuse is a
+    configuration error (8), not a recipe error (2).  Sibling guards in the
+    code-base for "signing keys missing without --dev-allow-unsigned" exit
+    with the same code, so CronJob retry logic can branch on a single value.
+    """
     env = os.environ.get("RECOTEM_ENV", "").strip().lower()
     if env != "development":
         _exit(
-            _EXIT_RECIPE,
+            _EXIT_CONFIG,
             f"{flag} requires RECOTEM_ENV=development. "
             f"Current RECOTEM_ENV={os.environ.get('RECOTEM_ENV', '')!r}.",
         )

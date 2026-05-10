@@ -669,8 +669,12 @@ def test_inspect_dev_allow_unsigned_requires_dev_env(
     monkeypatch.delenv("RECOTEM_ENV", raising=False)
 
     result = runner.invoke(app, ["inspect", str(artifact_path), "--dev-allow-unsigned"])
-    assert result.exit_code == 2, (
-        f"--dev-allow-unsigned must exit with _EXIT_RECIPE (2) when "
+    # _check_dev_env now exits with _EXIT_CONFIG (8) per the documented
+    # exit-code table — environment-gated flag misuse is a configuration
+    # error, not a recipe error.  Sibling guards ("signing keys missing")
+    # already exit with 8 so operators can branch on a single value.
+    assert result.exit_code == 8, (
+        f"--dev-allow-unsigned must exit with _EXIT_CONFIG (8) when "
         f"RECOTEM_ENV is unset; got {result.exit_code}.  "
         f"Output: {result.output!r}"
     )
@@ -705,7 +709,8 @@ def test_inspect_dev_allow_unsigned_blocked_in_production(
     monkeypatch.setenv("RECOTEM_ENV", "production")
 
     result = runner.invoke(app, ["inspect", str(artifact_path), "--dev-allow-unsigned"])
-    assert result.exit_code == 2
+    # See test_inspect_dev_allow_unsigned_requires_dev_env — exit 8.
+    assert result.exit_code == 8
     combined = result.output + (result.stderr if result.stderr else "")
     assert "RECOTEM_ENV=development" in combined
 
@@ -1712,4 +1717,89 @@ def test_schema_includes_echo_plugin_source_type() -> None:
     assert '"echo"' in schema_str, (
         f"'echo' source type must appear in schema JSON when plugin is registered; "
         f"schema excerpt: {schema_str[:500]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# B-4 regression: flag-pair misuse maps to EXIT_CONFIG (8)
+# ---------------------------------------------------------------------------
+
+
+def test_train_dev_allow_unsigned_without_companion_exits_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``--dev-allow-unsigned`` without ``--i-understand...`` must exit 8.
+
+    Per the documented exit-code table, flag-pair misuse is a configuration
+    error (``_EXIT_CONFIG = 8``), not a recipe error.  Operators rely on the
+    table to drive CronJob retry logic — collapsing 8 onto 2 (recipe) would
+    cause a config-only failure to be retried as if the recipe could be
+    fixed.
+    """
+    yaml_path = _minimal_recipe_yaml(tmp_path, "config_exit_train")
+    monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
+    monkeypatch.setenv("RECOTEM_ENV", "development")
+    result = runner.invoke(app, ["train", str(yaml_path), "--dev-allow-unsigned"])
+    assert result.exit_code == 8, (
+        f"flag-pair misuse must exit 8, got {result.exit_code}; "
+        f"output: {result.output!r}"
+    )
+
+
+def test_serve_dev_allow_unsigned_without_companion_exits_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Same as above for the ``serve`` subcommand."""
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_ENV", "development")
+    result = runner.invoke(
+        app,
+        [
+            "serve",
+            "--recipes",
+            str(recipes_dir),
+            "--dev-allow-unsigned",
+        ],
+    )
+    assert result.exit_code == 8
+
+
+# ---------------------------------------------------------------------------
+# B-5 regression: inspect maps fsspec backend exceptions to EXIT_ARTIFACT (5)
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_maps_fsspec_backend_exception_to_exit5(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A non-OSError exception from the fsspec read path must exit 5.
+
+    Real-world triggers: ``botocore.exceptions.NoCredentialsError``,
+    ``gcsfs.retry.HttpError`` and similar do not subclass ``OSError``.  The
+    pre-fix code let them bubble past the ``except OSError`` and surface as
+    typer's default exit 1, breaking the documented exit-code contract.
+    """
+    artifact_path = tmp_path / "artifact.recotem"
+    artifact_path.write_bytes(b"unused: replaced via patch")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    class _FakeBackendError(Exception):
+        """Stand-in for botocore.exceptions.NoCredentialsError (no OSError)."""
+
+    import fsspec.core as _core
+
+    def _boom(*args, **kwargs):
+        raise _FakeBackendError("Unable to locate credentials")
+
+    monkeypatch.setattr(_core, "url_to_fs", _boom)
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+    assert result.exit_code == 5, (
+        f"fsspec backend exception must map to exit 5, got {result.exit_code}; "
+        f"output: {result.output!r}"
+    )
+    combined = result.output + (result.stderr if result.stderr else "")
+    assert "_FakeBackendError" in combined or "Cannot open" in combined, (
+        f"Error must surface the underlying exception class; got {combined!r}"
     )

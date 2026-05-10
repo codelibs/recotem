@@ -265,8 +265,44 @@ def test_health_overall_degraded_when_any_recipe_unloaded() -> None:
     registry.replace("broken", broken_entry)
     client, _ = _make_test_client(registry=registry)
     response = client.get("/health")
+    # Degraded must surface as HTTP 503 so K8s readiness probes mark the Pod
+    # NotReady — returning 200 would let rolling upgrades silently swap in a
+    # Pod whose every /predict returns 503.  See routes.health() docstring.
+    assert response.status_code == 503
     data = response.json()
     assert data["status"] == "degraded"
+
+
+def test_health_returns_200_when_all_recipes_loaded() -> None:
+    """Counterpart to the degraded-503 test: healthy state stays 200."""
+    client, _ = _make_test_client()
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_health_503_when_recipe_loaded_false_even_without_error() -> None:
+    """A stub entry with loaded=False (startup load failure) → 503.
+
+    Covers the recipe_not_loaded_at_startup branch where the watcher inserts
+    a ``ModelEntry(loaded=False, last_load_error=...)`` placeholder.  Both
+    flags should drive overall degraded; this test pins the ``loaded=False``
+    half so a future refactor cannot regress to "degraded only when error".
+    """
+    registry = _make_registry_with_recipe("loaded")
+    stub_entry = ModelEntry(
+        name="never_loaded",
+        recommender=None,
+        header={},
+        kid="",
+        last_load_error="HMAC verify failed",
+        loaded=False,
+    )
+    registry.replace("never_loaded", stub_entry)
+    client, _ = _make_test_client(registry=registry)
+    response = client.get("/health")
+    assert response.status_code == 503
+    assert response.json()["status"] == "degraded"
 
 
 def test_health_per_recipe_status() -> None:

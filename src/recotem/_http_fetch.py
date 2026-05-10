@@ -574,6 +574,12 @@ def fetch_http_bytes(
             raise
         except TimeoutError as exc:
             raise HttpFetchError(f"Timeout ({timeout}s) fetching {safe_url}") from exc
+        except (MemoryError, RecursionError):
+            # OOM / stack-exhaustion must not be disguised as an HTTP error:
+            # operators would retry the fetch indefinitely while the real
+            # cause (host RAM sizing) remains hidden.  Let it propagate so
+            # the process exit code reflects the underlying failure.
+            raise
         except Exception as exc:  # pragma: no cover - defensive
             raise HttpFetchError(
                 f"Unexpected {type(exc).__name__} fetching {safe_url}: {exc}"

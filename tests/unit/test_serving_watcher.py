@@ -1691,3 +1691,116 @@ def test_hot_swap_triggered_by_etag_change_on_object_store(
         "record_swap(ok=True) must be called when ETag changes from 'v1' to 'v2'; "
         f"got swap_ok_calls={swap_ok_calls!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# M-1 regression: public re-exports for symbols used outside the watcher
+# ---------------------------------------------------------------------------
+
+
+def test_public_reexports_are_bound_and_callable() -> None:
+    """``serving.app`` reaches into watcher for these helpers; expose them as
+    public names so the cross-module contract is no longer a leading-
+    underscore handshake.  The aliases must point at the same callables to
+    keep behaviour identical and so existing private-name unit tests keep
+    binding to the canonical implementation.
+    """
+    import recotem.serving.watcher as watcher_module
+
+    assert watcher_module.read_artifact_bytes is watcher_module._read_artifact_bytes
+    assert watcher_module.stat_marker is watcher_module._stat_marker
+    assert watcher_module.sha256_bytes is watcher_module._sha256_bytes
+    assert watcher_module.load_metadata is watcher_module._load_metadata
+
+
+def test_public_reexports_in_module_all() -> None:
+    """``__all__`` must list the public surface so ``from watcher import *``
+    in downstream code does not pull private helpers."""
+    import recotem.serving.watcher as watcher_module
+
+    expected = {
+        "ArtifactWatcher",
+        "build_initial_states",
+        "read_artifact_bytes",
+        "stat_marker",
+        "sha256_bytes",
+        "load_metadata",
+    }
+    assert set(watcher_module.__all__) == expected, (
+        f"watcher.__all__ drift: got {sorted(watcher_module.__all__)!r}, "
+        f"expected {sorted(expected)!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M-5 regression: MemoryError from _build_entry must propagate, not be
+# swallowed by the broad except → "next poll" loop
+# ---------------------------------------------------------------------------
+
+
+def test_build_entry_memory_error_propagates_through_load_recipe(
+    tmp_path: Path,
+) -> None:
+    """A long-running watcher must never silently retry through OOM.
+
+    Pre-fix, ``except Exception`` in ``_load_recipe`` caught ``MemoryError``
+    too — so the next poll cycle re-attempted the load, repeating the OOM
+    path indefinitely until the kernel killed the process with no
+    actionable log line.  The fix re-raises ``MemoryError`` /
+    ``RecursionError`` before the broad handler runs.
+
+    The test mocks ``_read_artifact_bytes`` to return synthetic bytes so the
+    load reaches ``_build_entry`` (where the simulated MemoryError fires).
+    """
+    from unittest.mock import patch
+
+    from recotem.recipe.models import OutputConfig
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(b"placeholder")
+
+    cfg = _make_serve_config()
+    key_ring = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    fake_recipe = MagicMock()
+    fake_recipe.name = "oom_recipe"
+    fake_recipe.output = OutputConfig(path=str(artifact_path))
+    initial_states = {
+        "oom_recipe": _RecipeWatchState(
+            recipe=fake_recipe, artifact_path=str(artifact_path)
+        ),
+    }
+    registry = ModelRegistry()
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=tmp_path,
+        serve_config=cfg,
+        key_ring=key_ring,
+        initial_states=initial_states,
+    )
+
+    state = initial_states["oom_recipe"]
+    # Force the sha-comparison branch to "different" so _build_entry runs.
+    state.last_sha256 = "0" * 64
+    state.last_marker = ("v0", None)
+
+    fresh_data = b"\x00" * 128
+
+    with (
+        patch(
+            "recotem.serving.watcher._read_artifact_bytes",
+            return_value=fresh_data,
+        ),
+        patch.object(
+            watcher,
+            "_build_entry",
+            side_effect=MemoryError("simulated OOM"),
+        ),
+        pytest.raises(MemoryError, match="simulated OOM"),
+    ):
+        watcher._load_recipe(
+            "oom_recipe",
+            state,
+            force=True,
+            marker=("v1", None),
+        )

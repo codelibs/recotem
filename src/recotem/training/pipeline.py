@@ -726,24 +726,70 @@ def _train_final(
     class_name: str,
     best_params: dict[str, Any],
 ) -> IDMappedRecommender:
-    """Train the final model on the full dataset using best hyperparameters."""
+    """Train the final model on the full dataset using best hyperparameters.
+
+    ``best_params`` may carry keys outside the recommender's ``__init__``
+    signature (TPESampler-injected names, ``user_attrs.learnt_config``
+    overlays, etc.).  Forwarding those to ``rec_cls(X_full, **best_params)``
+    raises ``TypeError`` after a successful 100% search — the artifact never
+    gets written.  Filter to ``__init__``-accepted keys before constructing,
+    and log any dropped names so operators can investigate plugin/version
+    drift.
+    """
+    import inspect as _inspect
+
     X_full, uids, iids = df_to_sparse(df, user_column, item_column)
     uids_str = [str(u) for u in uids]
     iids_str = [str(i) for i in iids]
 
     rec_cls = get_recommender_cls(class_name)
 
-    # Only pass params that the recommender's __init__ accepts.
-    # best_params may contain user_attrs not in __init__; filter via
-    # default_suggest_parameter signature is not straightforward, so we pass
-    # them all and let irspack handle unknowns (it typically ignores extras).
     try:
-        recommender = rec_cls(X_full, **best_params).learn()
+        sig = _inspect.signature(rec_cls.__init__)
+        accepted = {
+            name
+            for name, p in sig.parameters.items()
+            if p.kind
+            in (
+                _inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                _inspect.Parameter.KEYWORD_ONLY,
+            )
+        }
+        # Any **kwargs sink means the constructor accepts everything.
+        accepts_var_kw = any(
+            p.kind is _inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        )
+    except (TypeError, ValueError):
+        # ``inspect.signature`` can fail on C-extension classes; fall back to
+        # forwarding every key and let the construction surface the error.
+        accepted = set(best_params)
+        accepts_var_kw = True
+
+    if accepts_var_kw:
+        filtered = best_params
+    else:
+        dropped = sorted(k for k in best_params if k not in accepted)
+        filtered = {k: v for k, v in best_params.items() if k in accepted}
+        if dropped:
+            logger.warning(
+                "final_training_dropped_params",
+                class_name=class_name,
+                dropped=dropped,
+            )
+
+    try:
+        recommender = rec_cls(X_full, **filtered).learn()
     except TypeError as exc:
-        # Some params from search are not valid for final __init__; retry with
-        # only the params the class declares via its own parameter space.
         raise TrainingError(
-            f"Final training of {class_name} failed with params {best_params}: {exc}",
+            f"Final training of {class_name} failed with params {filtered}: {exc}",
+            code="final_training_error",
+        ) from exc
+    except ValueError as exc:
+        # Invalid hyperparameter combinations (e.g. n_components > n_users)
+        # surface as ValueError from irspack — also map to TrainingError so
+        # the operator-visible exit code is 4 (training) rather than 1.
+        raise TrainingError(
+            f"Final training of {class_name} rejected params {filtered}: {exc}",
             code="final_training_error",
         ) from exc
 

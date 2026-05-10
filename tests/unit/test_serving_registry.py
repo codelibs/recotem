@@ -245,3 +245,66 @@ def test_registry_update_loaded_marker_writes_under_lock() -> None:
         t.join(timeout=5.0)
 
     assert errors == [], f"Concurrent marker access errors: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-11: update_loaded_marker lock contract
+# ---------------------------------------------------------------------------
+
+
+def test_update_loaded_marker_takes_lock() -> None:
+    """update_loaded_marker must execute inside the registry lock.
+
+    We verify this by replacing the registry lock with a tracked proxy that
+    records acquire/release calls, then confirm that acquire was called at
+    least once during update_loaded_marker execution.
+    """
+
+    reg = ModelRegistry()
+    entry = _make_entry("lock_test")
+    reg.replace("lock_test", entry)
+
+    acquire_count = [0]
+    original_lock = reg._lock
+
+    class _TrackedRLock:
+        """Proxy that counts acquire calls on the underlying RLock."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def acquire(self, *a, **kw):
+            acquire_count[0] += 1
+            return self._inner.acquire(*a, **kw)
+
+        def release(self):
+            self._inner.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    tracked = _TrackedRLock(original_lock)
+    reg._lock = tracked  # type: ignore[assignment]
+
+    new_marker = ("new_mtime", "abc123" * 10)
+    count_before = acquire_count[0]
+    result = reg.update_loaded_marker("lock_test", new_marker)
+
+    assert result is True
+    assert reg.get("lock_test")._loaded_marker == new_marker
+    # The lock must have been acquired at least once during update_loaded_marker
+    assert acquire_count[0] > count_before, (
+        "update_loaded_marker must acquire the registry lock; "
+        f"acquire count did not change (before={count_before}, after={acquire_count[0]})"
+    )
+
+
+def test_update_loaded_marker_returns_false_for_missing() -> None:
+    """update_loaded_marker returns False for a name not in the registry."""
+    reg = ModelRegistry()
+    result = reg.update_loaded_marker("does_not_exist", ("mtime", "sha256"))
+    assert result is False

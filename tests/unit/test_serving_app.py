@@ -931,3 +931,32 @@ def test_corrupt_header_json_returns_failed_entry_not_crash(tmp_path: Path) -> N
     assert "header JSON decode failed" in error_str, (
         f"last_load_error must contain 'header JSON decode failed'; got {error_str!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# insecure-no-auth HTTP request without key returns 200
+# ---------------------------------------------------------------------------
+
+
+def test_insecure_no_auth_http_request_without_key_returns_200(
+    tmp_path: Path,
+) -> None:
+    """With insecure_no_auth=True and RECOTEM_ENV=dev, /health is accessible
+    without an X-API-Key header and returns HTTP 200."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.env = "dev"
+    cfg.insecure_no_auth = True
+    cfg.api_keys = []  # no keys configured
+
+    app = create_app(cfg)
+    client = TestClient(app)
+    # No X-API-Key header — must still pass with insecure_no_auth=True
+    response = client.get("/health")
+    assert response.status_code == 200, (
+        f"insecure_no_auth=True must allow unauthenticated requests; "
+        f"got {response.status_code}"
+    )

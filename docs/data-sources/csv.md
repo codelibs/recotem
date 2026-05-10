@@ -8,7 +8,11 @@ The builtin `csv` and `parquet` sources read tabular interaction data via pandas
 |--------|---------|
 | `s3://` | `pip install "recotem[s3]"` |
 | `gs://` | `pip install "recotem[gcs]"` |
-| `az://` | `pip install "recotem[azure]"` |
+| `az://` / `abfs(s)://` | `pip install "recotem[azure]"` |
+
+> **Azure extra and the official Docker image.** The official Docker image does not include the Azure extra. If you need `az://` or `abfs(s)://` support, build a derived image that installs `recotem[azure]` (e.g. `FROM ghcr.io/codelibs/recotem:latest` + `RUN pip install "recotem[azure]"`).
+
+`http://` and `https://` URIs are accepted without any extra install. A `sha256` integrity pin is **mandatory** for network-scheme paths, and the body is capped at `RECOTEM_MAX_DOWNLOAD_BYTES` (default 256 MiB). See [Network-scheme integrity](#network-scheme-integrity-http--https) below. `file://` is treated as a bare local path and requires no extra install.
 
 ## CSV source
 
@@ -26,7 +30,7 @@ source:
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `path` | string | required | Local path, `s3://`, `gs://`, or `az://`. |
+| `path` | string | required | Accepts a local path, `file://`, `s3://`, `gs://`, `az://`, `abfs(s)://`, `http://`, or `https://` URI. HTTP/HTTPS requires a `sha256` integrity pin and applies a body size cap; see [Path schemes](#path-schemes) below. |
 | `delimiter` | string | `","` | Passed straight to pandas `sep=`. Multi-character values switch pandas to its slower Python parser. |
 | `encoding` | string | `"utf-8"` | Any encoding accepted by pandas. |
 | `header` | int | `0` | Row number containing column names. |

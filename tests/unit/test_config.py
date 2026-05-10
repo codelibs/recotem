@@ -213,3 +213,103 @@ def test_max_artifact_bytes_non_integer_uses_default(
     monkeypatch.setenv("RECOTEM_MAX_ARTIFACT_BYTES", "not_a_number")
     cfg = ServeConfig.from_env()
     assert cfg.max_artifact_bytes == _2_GIB
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-3: RECOTEM_MAX_PAYLOAD_BYTES
+# ---------------------------------------------------------------------------
+
+_512_MIB = 512 * 1024 * 1024  # default
+
+
+def test_max_payload_bytes_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When RECOTEM_MAX_PAYLOAD_BYTES is unset, the 512 MiB default is used."""
+    monkeypatch.delenv("RECOTEM_MAX_PAYLOAD_BYTES", raising=False)
+    cfg = ServeConfig.from_env()
+    assert cfg.max_payload_bytes == _512_MIB
+
+
+def test_max_payload_bytes_clamp_low(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Values below 1 MiB are clamped to 1 MiB."""
+    monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", "0")
+    cfg = ServeConfig.from_env()
+    assert cfg.max_payload_bytes == _1_MIB
+
+
+def test_max_payload_bytes_clamp_high(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Values above 16 GiB are clamped to 16 GiB."""
+    monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", str(_16_GIB + 1))
+    cfg = ServeConfig.from_env()
+    assert cfg.max_payload_bytes == _16_GIB
+
+
+def test_max_payload_bytes_separate_from_artifact_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """max_payload_bytes and max_artifact_bytes are independently parsed."""
+    monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", str(_1_MIB))
+    monkeypatch.setenv("RECOTEM_MAX_ARTIFACT_BYTES", str(_16_GIB))
+    cfg = ServeConfig.from_env()
+    assert cfg.max_payload_bytes == _1_MIB
+    assert cfg.max_artifact_bytes == _16_GIB
+
+
+# ---------------------------------------------------------------------------
+# validate_insecure_flags — env variant coverage
+# ---------------------------------------------------------------------------
+
+
+def test_dev_allow_unsigned_refused_when_recotem_env_empty() -> None:
+    """dev_allow_unsigned=True with env='' raises ValueError."""
+    cfg = ServeConfig()
+    cfg.env = ""
+    cfg.dev_allow_unsigned = True
+    with pytest.raises(ValueError, match="development"):
+        cfg.validate_insecure_flags()
+
+
+def test_dev_allow_unsigned_refused_when_recotem_env_test() -> None:
+    """dev_allow_unsigned=True with env='test' raises ValueError (development only)."""
+    cfg = ServeConfig()
+    cfg.env = "test"
+    cfg.dev_allow_unsigned = True
+    with pytest.raises(ValueError, match="development"):
+        cfg.validate_insecure_flags()
+
+
+@pytest.mark.parametrize("env_value", ["dev", "DEV", "Development", "test"])
+def test_insecure_no_auth_recotem_env_variants(env_value: str) -> None:
+    """insecure_no_auth=True is accepted for dev/DEV/Development/test (case-insensitive)."""
+    cfg = ServeConfig()
+    cfg.env = env_value
+    cfg.insecure_no_auth = True
+    cfg.validate_insecure_flags()  # must not raise
+
+
+@pytest.mark.parametrize("env_value", ["prod", ""])
+def test_insecure_no_auth_recotem_env_variants_rejected(env_value: str) -> None:
+    """insecure_no_auth=True is rejected for 'prod' and '' (empty)."""
+    cfg = ServeConfig()
+    cfg.env = env_value
+    cfg.insecure_no_auth = True
+    with pytest.raises(ValueError, match="RECOTEM_ENV"):
+        cfg.validate_insecure_flags()
+
+
+@pytest.mark.parametrize("env_value", ["development", "Development"])
+def test_dev_allow_unsigned_recotem_env_variants_accepted(env_value: str) -> None:
+    """dev_allow_unsigned=True is accepted for 'development' and 'Development'."""
+    cfg = ServeConfig()
+    cfg.env = env_value
+    cfg.dev_allow_unsigned = True
+    cfg.validate_insecure_flags()  # must not raise
+
+
+@pytest.mark.parametrize("env_value", ["dev", "test", ""])
+def test_dev_allow_unsigned_recotem_env_variants_rejected(env_value: str) -> None:
+    """dev_allow_unsigned=True is rejected for 'dev', 'test', and '' (empty)."""
+    cfg = ServeConfig()
+    cfg.env = env_value
+    cfg.dev_allow_unsigned = True
+    with pytest.raises(ValueError, match="development"):
+        cfg.validate_insecure_flags()

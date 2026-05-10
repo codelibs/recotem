@@ -360,10 +360,11 @@ def _try_load_artifact(
     the caller registers the entry so ``/health`` reports the recipe.
     """
     artifact_path = recipe.output.path
-    max_bytes = serve_config.max_artifact_bytes
+    max_artifact_bytes = serve_config.max_artifact_bytes
+    max_payload_bytes = serve_config.max_payload_bytes
 
     try:
-        data = _read_artifact_bytes(artifact_path, max_bytes)
+        data = _read_artifact_bytes(artifact_path, max_artifact_bytes)
     except ArtifactError as exc:
         logger.warning("initial_artifact_read_failed", name=recipe.name, error=str(exc))
         return _failed_entry(recipe, f"read failed: {exc}")
@@ -374,7 +375,10 @@ def _try_load_artifact(
     sha256 = _sha256_bytes(data)
 
     try:
-        hdr = parse_header_from_bytes(data, max_bytes)
+        # Use max_payload_bytes (not max_artifact_bytes) as the payload cap so
+        # serve-side deserialization memory is bounded independently of the outer
+        # container size.
+        hdr = parse_header_from_bytes(data, max_payload_bytes)
     except ArtifactError as exc:
         logger.warning(
             "initial_artifact_parse_failed", name=recipe.name, error=str(exc)

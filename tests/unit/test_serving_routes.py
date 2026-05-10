@@ -400,6 +400,189 @@ def test_metadata_field_deny_blocks_lower_when_deny_entry_is_upper() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# C-1: X-Request-ID response header
+# ---------------------------------------------------------------------------
+
+
+def test_predict_response_includes_x_request_id_header() -> None:
+    """On a 200 success, response header X-Request-ID must match body request_id."""
+    client, _ = _make_test_client()
+    response = client.post("/predict/test_recipe", json={"user_id": "user1"})
+    assert response.status_code == 200
+    data = response.json()
+    assert "X-Request-ID" in response.headers, (
+        "X-Request-ID header must be present in the response"
+    )
+    assert response.headers["X-Request-ID"] == data["request_id"], (
+        "X-Request-ID header must match the request_id in the response body"
+    )
+
+
+def test_predict_echoes_x_request_id_from_request() -> None:
+    """When the client sends X-Request-ID, the same value is echoed back."""
+    client, _ = _make_test_client()
+    custom_id = "my-trace-id-12345"
+    response = client.post(
+        "/predict/test_recipe",
+        json={"user_id": "user1"},
+        headers={"X-Request-ID": custom_id},
+    )
+    assert response.status_code == 200
+    assert response.headers.get("X-Request-ID") == custom_id, (
+        "X-Request-ID sent by client must be echoed back unchanged"
+    )
+    assert response.json()["request_id"] == custom_id
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-10: predict status label separation
+# ---------------------------------------------------------------------------
+
+
+def test_predict_status_label_ok(monkeypatch) -> None:
+    """Successful prediction records status='ok'."""
+    import pytest
+
+    pytest.importorskip("prometheus_client")
+    monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "true")
+
+    from unittest.mock import patch
+
+    from recotem.serving import metrics
+
+    recipe_name = "status_ok_recipe"
+    registry = _make_registry_with_recipe(recipe_name)
+    client, _ = _make_test_client(registry=registry)
+    metrics._ensure_initialized()
+
+    recorded: list[str] = []
+    real_record = metrics.record_predict
+
+    def _capture(r, s, latency):
+        recorded.append(s)
+        real_record(r, s, latency)
+
+    with patch.object(metrics, "record_predict", side_effect=_capture):
+        response = client.post(
+            f"/predict/{recipe_name}", json={"user_id": "user1", "cutoff": 5}
+        )
+
+    assert response.status_code == 200
+    assert recorded == ["ok"], f"Expected status=['ok'], got {recorded!r}"
+
+
+def test_predict_status_label_user_not_found(monkeypatch) -> None:
+    """User not found (404) records status='user_not_found'."""
+    from unittest.mock import patch
+
+    import pytest
+
+    pytest.importorskip("prometheus_client")
+    monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "true")
+
+    from recotem.serving import metrics
+
+    recipe_name = "status_404_recipe"
+    registry = _make_registry_with_recipe(recipe_name)
+    client, _ = _make_test_client(registry=registry)
+
+    recorded: list[str] = []
+    real_record = metrics.record_predict
+
+    def _capture(r, s, latency):
+        recorded.append(s)
+        real_record(r, s, latency)
+
+    with patch.object(metrics, "record_predict", side_effect=_capture):
+        response = client.post(
+            f"/predict/{recipe_name}",
+            json={"user_id": "totally_unknown_user", "cutoff": 5},
+        )
+
+    assert response.status_code == 404
+    assert recorded == ["user_not_found"], (
+        f"Expected status=['user_not_found'], got {recorded!r}"
+    )
+
+
+def test_predict_status_label_unavailable(monkeypatch) -> None:
+    """Recipe not loaded (503) records status='unavailable'."""
+    from unittest.mock import patch
+
+    import pytest
+
+    pytest.importorskip("prometheus_client")
+    monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "true")
+
+    from recotem.serving import metrics
+
+    registry = ModelRegistry()  # empty — no recipe registered
+    client, _ = _make_test_client(registry=registry)
+
+    recorded: list[str] = []
+    real_record = metrics.record_predict
+
+    def _capture(r, s, latency):
+        recorded.append(s)
+        real_record(r, s, latency)
+
+    with patch.object(metrics, "record_predict", side_effect=_capture):
+        response = client.post(
+            "/predict/nonexistent_recipe", json={"user_id": "user1", "cutoff": 5}
+        )
+
+    assert response.status_code == 503
+    assert recorded == ["unavailable"], (
+        f"Expected status=['unavailable'], got {recorded!r}"
+    )
+
+
+def test_predict_status_label_error(monkeypatch) -> None:
+    """Unexpected exception records status='error'."""
+    from unittest.mock import patch
+
+    import pytest
+
+    pytest.importorskip("prometheus_client")
+    monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "true")
+
+    from recotem.serving import metrics
+
+    recipe_name = "status_error_recipe"
+    registry = _make_registry_with_recipe(recipe_name)
+
+    # Build the client without raise_server_exceptions so the 500 response is
+    # returned rather than the RuntimeError propagating to the test.
+    router = make_router(registry=registry, api_keys=[])
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    recorded: list[str] = []
+    real_record = metrics.record_predict
+
+    def _capture(r, s, latency):
+        recorded.append(s)
+        real_record(r, s, latency)
+
+    # Make the recommender raise a non-KeyError to exercise the generic error path
+    entry = registry.get(recipe_name)
+    assert entry is not None
+    entry.recommender.get_recommendation_for_known_user_id.side_effect = RuntimeError(
+        "unexpected internal failure"
+    )
+
+    with patch.object(metrics, "record_predict", side_effect=_capture):
+        client.post(
+            f"/predict/{recipe_name}",
+            json={"user_id": "user1", "cutoff": 5},
+        )
+
+    # status label must be "error"; the HTTP response is 500
+    assert recorded == ["error"], f"Expected status=['error'], got {recorded!r}"
+
+
 def test_metrics_endpoint_exposes_documented_metrics(monkeypatch) -> None:
     """RECOTEM_METRICS_ENABLED=true exposes /metrics with all six recotem_* metrics."""
     import pytest

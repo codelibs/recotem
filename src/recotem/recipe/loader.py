@@ -23,10 +23,21 @@ logger = structlog.get_logger(__name__)
 # Path-scheme policy
 # ---------------------------------------------------------------------------
 
-# Schemes for which `output.path` is rejected because writing is not
-# supported by fsspec / urllib. (See spec §5.3.)
-_OUTPUT_REJECTED_SCHEMES: frozenset[str] = frozenset(
-    {"http", "https", "ftp", "ftps", "memory"}
+# Allow-list of write-supported schemes for output.path (see docs/recipe-reference.md).
+# Using an allow-list instead of a deny-list means unknown and novel schemes
+# (e.g. data:, javascript:, vendor-specific) are rejected by default rather
+# than admitted by oversight.
+#
+# Entries:
+#   ""       — bare local path (no scheme prefix), e.g. /tmp/out.recotem
+#   "file"   — file:// URI pointing at a local absolute path
+#   "s3"     — Amazon S3 (fsspec s3fs)
+#   "gs"     — Google Cloud Storage (fsspec gcsfs)
+#   "az"     — Azure Blob Storage (fsspec adlfs)
+#   "abfs"   — Azure Data Lake Storage Gen2 (fsspec adlfs)
+#   "abfss"  — Azure Data Lake Storage Gen2 over TLS (fsspec adlfs)
+_OUTPUT_ALLOWED_SCHEMES: frozenset[str] = frozenset(
+    {"", "file", "s3", "gs", "az", "abfs", "abfss"}
 )
 
 # Schemes that involve an unauthenticated network fetch. Used by the
@@ -54,14 +65,22 @@ def _validate_input_path(path: str, field_name: str) -> None:
 
 
 def _validate_output_path(path: str, field_name: str) -> None:
-    """Validate an output-side path (output.path)."""
+    """Validate an output-side path (output.path).
+
+    Uses an allow-list of write-supported schemes so that novel or unknown
+    schemes (e.g. ``data:``, ``javascript:``, vendor-specific) are rejected
+    by default rather than admitted by oversight of a deny-list.
+    """
     _check_userinfo(path, field_name)
     parsed = urlparse(path)
     scheme = (parsed.scheme or "").lower()
-    if scheme in _OUTPUT_REJECTED_SCHEMES:
+    if scheme not in _OUTPUT_ALLOWED_SCHEMES:
+        allowed_display = ", ".join(
+            sorted(f"{s}://" if s else "(bare path)" for s in _OUTPUT_ALLOWED_SCHEMES)
+        )
         raise RecipeError(
-            f"'{field_name}' uses scheme '{scheme}://' which does not support "
-            "writes. Use a bare local path, file://, s3://, gs://, or az://."
+            f"'{field_name}' uses scheme '{scheme}://' which is not supported. "
+            f"Allowed: {allowed_display}"
         )
     if scheme == "file" and parsed.netloc not in ("", "localhost"):
         raise RecipeError(

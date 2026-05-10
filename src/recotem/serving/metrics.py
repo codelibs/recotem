@@ -117,7 +117,25 @@ def _ensure_initialized() -> None:
 
 
 def record_predict(recipe: str, status: str, latency_seconds: float) -> None:
-    """Record a /predict call (status=``ok`` | ``error``)."""
+    """Record a /predict call.
+
+    Parameters
+    ----------
+    recipe:
+        Recipe name (the ``{name}`` path parameter from ``/predict/{name}``).
+    status:
+        One of the following documented status labels:
+
+        - ``"ok"``            — recommendation returned successfully
+        - ``"user_not_found"`` — user was not seen during training (HTTP 404)
+        - ``"unavailable"``   — recipe not loaded or unhealthy (HTTP 503)
+        - ``"error"``         — any other unexpected exception
+
+        Using finer-grained labels avoids alert storms from routine 404s
+        (cold-start users) being conflated with genuine 503s or internal errors.
+    latency_seconds:
+        End-to-end wall-clock time for the request in seconds.
+    """
     _ensure_initialized()
     if _PREDICT_TOTAL is None:
         return

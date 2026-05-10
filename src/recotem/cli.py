@@ -202,7 +202,7 @@ def train(
             help=(
                 "Stable run identifier. Reuse the same value across "
                 "invocations to resume a persistent Optuna study "
-                "(requires `tuning.storage_path` set in the recipe). "
+                "(requires `training.storage_path` set in the recipe). "
                 "Defaults to a fresh random id."
             ),
         ),
@@ -683,14 +683,33 @@ def keygen(
 
 
 def _configure_logging_from_env() -> None:
-    """Configure structlog from RECOTEM_LOG_FORMAT (best-effort)."""
-    try:
-        from recotem.logging import configure_logging
+    """Configure structlog from RECOTEM_LOG_FORMAT (best-effort).
 
-        fmt = os.environ.get("RECOTEM_LOG_FORMAT", "auto").strip().lower()
-        configure_logging(fmt)
-    except Exception:
-        pass
+    Failures are silenced so that a misconfigured logging backend never
+    prevents the CLI from running.  ImportError / OSError (e.g. a missing
+    optional structlog renderer dependency, or a read-only log file) are
+    swallowed quietly.  Any other unexpected exception is printed to stderr
+    as a one-liner so operators can diagnose it without a traceback wall.
+    """
+    import sys  # noqa: PLC0415
+
+    try:
+        try:
+            from recotem.logging import configure_logging  # noqa: PLC0415
+
+            fmt = os.environ.get("RECOTEM_LOG_FORMAT", "auto").strip().lower()
+            configure_logging(fmt)
+        except (ImportError, OSError):
+            # Missing optional dependency or unreadable log sink — safe to ignore.
+            pass
+    except Exception as exc:  # noqa: BLE001
+        # Unexpected failure: surface as a single stderr line so operators can
+        # diagnose it, but do not abort the CLI invocation.
+        print(
+            f"[recotem] log config failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _check_dev_env(flag: str) -> None:

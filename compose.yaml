@@ -82,7 +82,9 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      # Initial model load can take longer than the regular interval; bump
+      # this if your artifacts are large or stored on a slow object store.
+      start_period: 60s
 
 # ── volumes ────────────────────────────────────────────────────────────────────
 # Shared between train (writes) and serve (reads). The recipe writes to

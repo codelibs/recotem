@@ -30,6 +30,8 @@
 
 The internet-facing boundary is `recotem serve`. `recotem train` has no inbound network surface.
 
+> **fsspec input schemes inherit cloud credentials.** When `source.path` uses `s3://`, `gs://`, `az://`, or `abfs(s)://`, the Pod's ambient IAM or service-account credentials are used directly by fsspec — there is no additional credential gate inside Recotem. The SSRF guard applies only to HTTP/HTTPS fetches. In environments where recipe authors are not fully trusted, scope the IAM role or service account to read-only access on the specific bucket(s) and prefix(es) used by your recipes.
+
 ## Threat model summary
 
 | Threat | Mitigation |

@@ -54,7 +54,7 @@ Expected last log line (JSON):
 
 ```json
 {"event":"train_done","name":"purchase_log","exit_code":0,
- "artifact":"./artifacts/purchase_log-...recotem","best_class":"IALSRecommender",...}
+ "artifact":"./artifacts/purchase_log....recotem","best_class":"IALSRecommender",...}
 ```
 
 ### 3. Serve

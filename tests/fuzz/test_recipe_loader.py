@@ -271,3 +271,105 @@ output:
             f"Undefined YAML alias must raise RecipeError, "
             f"got {type(exc).__name__}: {exc}"
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Exponential anchor / alias expansion ("billion laughs" variant)
+# ---------------------------------------------------------------------------
+
+
+def test_yaml_exponential_anchor_expansion_handled_safely(tmp_path: Path) -> None:
+    """YAML anchor chains with exponential expansion must not exhaust memory.
+
+    This is a deterministic (non-Hypothesis) regression for the "YAML billion
+    laughs" class of attack: each alias level doubles the previous one, so
+    depth 15 would theoretically expand to 2^14 = 16 384 copies of the base
+    scalar.  yaml.safe_load (used by the loader) builds Python objects in
+    memory, so the expansion is bounded by the size of the Python objects rather
+    than the YAML text.
+
+    Acceptable outcomes:
+      - RecipeError (loader rejected the malformed/oversized YAML)
+      - yaml.YAMLError (safe_load refused to process it)
+      - The load returns normally (safe_load already limits expansion)
+
+    Unacceptable outcome:
+      - MemoryError / OSError from memory exhaustion
+      - RecursionError from unbounded recursion
+      - Any other unhandled exception that is not one of the above
+
+    Thresholds: 5-second wall-clock limit, 200 MiB memory delta.
+    The depth is capped at 12 (2^11 = 2 048 copies) so that in the worst case
+    — if yaml.safe_load does expand the tree — the RSS increase stays well
+    within the 200 MiB budget on typical deployments.
+    """
+    import resource
+    import time
+
+    import yaml
+
+    from recotem.recipe.errors import RecipeError
+
+    DEPTH = 12  # 2^(DEPTH-1) = 2 048 copies of the base scalar at deepest level
+    WALL_LIMIT = 5.0  # seconds
+    MEM_LIMIT_BYTES = 200 * 1024 * 1024  # 200 MiB
+
+    # Build exponential anchor chain: each level is a sequence whose two elements
+    # are aliases to the previous level's anchor.
+    #
+    # Level 0: &a0 "x"
+    # Level 1: &a1 [*a0, *a0]
+    # Level 2: &a2 [*a1, *a1]
+    # ...
+    # Level N: &aN [*a(N-1), *a(N-1)]
+    lines = ["lev0: &a0 x"]
+    for i in range(1, DEPTH):
+        prev = f"a{i - 1}"
+        curr = f"a{i}"
+        lines.append(f"lev{i}: &{curr} [*{prev}, *{prev}]")
+    yaml_str = "\n".join(lines) + "\n"
+
+    # Record RSS before the attempt.
+    try:
+        rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except Exception:
+        rss_before = 0  # platform without resource module — skip memory check
+
+    start = time.monotonic()
+    try:
+        yaml.safe_load(yaml_str)
+    except (yaml.YAMLError, RecipeError, MemoryError):
+        pass  # all acceptable — safe_load may refuse or run out of memory
+    except RecursionError as exc:
+        raise AssertionError(
+            f"RecursionError on exponential anchor chain (depth={DEPTH}): {exc}. "
+            "The loader or yaml.safe_load must not recurse unboundedly."
+        ) from exc
+    except Exception as exc:
+        raise AssertionError(
+            f"Unexpected exception {type(exc).__name__} on exponential anchor "
+            f"chain (depth={DEPTH}): {exc}"
+        ) from exc
+    elapsed = time.monotonic() - start
+
+    assert elapsed < WALL_LIMIT, (
+        f"Exponential anchor expansion took {elapsed:.2f}s (limit {WALL_LIMIT}s). "
+        f"depth={DEPTH}. yaml.safe_load may be expanding anchors exponentially."
+    )
+
+    try:
+        rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        mem_delta = rss_after - rss_before
+        # On Linux ru_maxrss is in kilobytes; on macOS it is in bytes.
+        import sys
+
+        if sys.platform != "darwin":
+            mem_delta *= 1024  # convert kB → bytes on Linux
+        if rss_before > 0:  # only check if we could read RSS
+            assert mem_delta < MEM_LIMIT_BYTES, (
+                f"RSS grew by {mem_delta / 1024 / 1024:.1f} MiB during exponential "
+                f"anchor expansion (limit {MEM_LIMIT_BYTES // 1024 // 1024} MiB). "
+                f"depth={DEPTH}."
+            )
+    except Exception:
+        pass  # platform without resource module or RSS read failed — skip

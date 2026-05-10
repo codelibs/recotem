@@ -382,6 +382,31 @@ def test_concurrent_holders_serialized_through_persistent_lock_file(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_lock_file_owner_only_permissions(tmp_path: Path) -> None:
+    """The sentinel lock file must be created with mode 0o600 (owner read/write only).
+
+    Regression test: previously some code paths used 0o644 (world-readable),
+    which could allow unprivileged readers to observe lock state.  This test
+    asserts that all recipe_lock() creation paths use 0o600.
+    """
+    import stat
+
+    output_path = tmp_path / "model_perms.recotem"
+    lock_path = tmp_path / "model_perms.recotem.lock"
+
+    with recipe_lock(output_path) as acquired:
+        assert acquired is True
+        assert lock_path.exists()
+        mode = lock_path.stat().st_mode
+        # Only owner read + write bits should be set; no group or other bits.
+        perm_bits = stat.S_IMODE(mode)
+        assert perm_bits == 0o600, (
+            f"Lock file must be created with mode 0o600 (owner-only); "
+            f"got 0o{perm_bits:o} for {lock_path}"
+        )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
 def test_acquire_propagates_unexpected_oserror(tmp_path: Path, monkeypatch) -> None:
     """An OSError with errno=EIO from fcntl.flock must propagate unmodified.
 

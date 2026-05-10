@@ -275,13 +275,15 @@ def test_cli_keygen_uses_auth_hash_function() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_oversized_api_key_header_rejected_without_invoking_scrypt() -> None:
+def test_oversized_api_key_header_rejected_with_constant_time_equalisation() -> None:
     """An ``X-API-Key`` header longer than ``_API_KEY_MAX_LEN`` must be
-    rejected with 401 BEFORE ``_hash_api_key`` (scrypt) is invoked.
+    rejected with 401, and ``_hash_api_key`` (scrypt) must be invoked exactly
+    once on a fixed-length dummy value to equalise response time.
 
-    Without the length cap, an unauthenticated attacker can post a 1 MiB
-    header on every request and force the server to scrypt-hash that input
-    each time — a DoS amplifier even at the lowest valid scrypt cost.
+    Rationale: without the constant-time scrypt call on the oversized path,
+    an attacker can distinguish the oversized branch (~0 ms, no KDF) from
+    the normal branch (~0.5 ms, KDF runs) via response latency — a
+    length-based timing oracle that leaks the accepted key-length range.
     """
     from unittest.mock import patch
 
@@ -294,19 +296,16 @@ def test_oversized_api_key_header_rejected_without_invoking_scrypt() -> None:
 
     request = _make_request(oversize_key)
 
-    # Wrap _hash_api_key so we can confirm it was NOT invoked.  Wrapping a
-    # MagicMock around the real function lets the test still observe a
-    # call count of 0 deterministically.
     with patch.object(
         auth_module, "_hash_api_key", wraps=auth_module._hash_api_key
     ) as hash_spy:
         with pytest.raises(HTTPException) as exc_info:
             verify_api_key(request, [entry])
         assert exc_info.value.status_code == 401
-        assert hash_spy.call_count == 0, (
-            f"_hash_api_key (scrypt) was invoked {hash_spy.call_count} times "
-            f"despite the header exceeding _API_KEY_MAX_LEN — KDF DoS "
-            f"amplification is reachable."
+        assert hash_spy.call_count == 1, (
+            f"_hash_api_key (scrypt) must be invoked exactly once on the "
+            f"oversized path for constant-time equalisation, "
+            f"got {hash_spy.call_count} calls."
         )
 
 
@@ -340,7 +339,12 @@ def test_api_key_at_max_len_still_accepted_for_hashing() -> None:
 
 
 def test_api_key_just_over_max_len_rejected() -> None:
-    """One char over ``_API_KEY_MAX_LEN`` must trip the cap."""
+    """One char over ``_API_KEY_MAX_LEN`` must trip the cap.
+
+    The constant-time equalisation means _hash_api_key is still called once
+    (on a fixed dummy), ensuring the oversized path takes the same wall time
+    as the normal (hashing) path.
+    """
     from unittest.mock import patch
 
     import recotem.serving.auth as auth_module
@@ -357,9 +361,10 @@ def test_api_key_just_over_max_len_rejected() -> None:
         with pytest.raises(HTTPException) as exc_info:
             verify_api_key(request, [entry])
         assert exc_info.value.status_code == 401
-        assert hash_spy.call_count == 0, (
-            "_hash_api_key invoked on an oversized header — KDF DoS "
-            "amplification is reachable."
+        # Exactly 1 call (constant-time equalisation dummy), not 0.
+        assert hash_spy.call_count == 1, (
+            f"Expected exactly 1 _hash_api_key call for constant-time "
+            f"equalisation on an oversized header, got {hash_spy.call_count}."
         )
 
 
@@ -452,4 +457,109 @@ def test_hash_api_key_round_trip_with_scrypt_parameters() -> None:
 
     assert _hash_api_key(plaintext) == expected, (
         "_hash_api_key must use exactly the pinned scrypt parameters"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-1: constant-time timing-oracle tests (new, post-equalisation)
+# ---------------------------------------------------------------------------
+
+
+def test_short_key_invokes_scrypt_for_constant_time() -> None:
+    """A key shorter than ``_API_KEY_MIN_LEN`` must still invoke ``_hash_api_key``
+    exactly once (on a fixed dummy) so that response latency is indistinguishable
+    from the normal hashing path.
+
+    Without this dummy call, an attacker can measure latency differences of a
+    few milliseconds to determine whether the key was too short — leaking the
+    accepted key-length range.
+    """
+    from unittest.mock import patch
+
+    import recotem.serving.auth as auth_module
+    from recotem.serving.auth import _API_KEY_MIN_LEN, verify_api_key
+
+    entry = _make_entry("k1", "full_length_key_32_bytes_exactly!")
+    short_key = "x" * (_API_KEY_MIN_LEN - 1)  # one char under the floor
+    assert len(short_key) < _API_KEY_MIN_LEN
+
+    request = _make_request(short_key)
+
+    with patch.object(
+        auth_module, "_hash_api_key", wraps=auth_module._hash_api_key
+    ) as hash_spy:
+        with pytest.raises(HTTPException) as exc_info:
+            verify_api_key(request, [entry])
+
+    assert exc_info.value.status_code == 401
+    assert hash_spy.call_count == 1, (
+        f"Expected exactly 1 _hash_api_key call (constant-time equalisation) "
+        f"on the short-key path, got {hash_spy.call_count}."
+    )
+
+
+def test_oversized_header_invokes_scrypt_for_constant_time() -> None:
+    """A header longer than ``_API_KEY_MAX_LEN`` must invoke ``_hash_api_key``
+    exactly once (on a fixed dummy) so that response latency is indistinguishable
+    from the normal hashing path.
+
+    This is the symmetric counterpart to test_short_key_invokes_scrypt_for_constant_time
+    and guards against a latency oracle at the upper key-length boundary.
+    """
+    from unittest.mock import patch
+
+    import recotem.serving.auth as auth_module
+    from recotem.serving.auth import _API_KEY_MAX_LEN, verify_api_key
+
+    entry = _make_entry("k1", "full_length_key_32_bytes_exactly!")
+    big_key = "Y" * (_API_KEY_MAX_LEN + 10)  # clearly over the cap
+    assert len(big_key) > _API_KEY_MAX_LEN
+
+    request = _make_request(big_key)
+
+    with patch.object(
+        auth_module, "_hash_api_key", wraps=auth_module._hash_api_key
+    ) as hash_spy:
+        with pytest.raises(HTTPException) as exc_info:
+            verify_api_key(request, [entry])
+
+    assert exc_info.value.status_code == 401
+    assert hash_spy.call_count == 1, (
+        f"Expected exactly 1 _hash_api_key call (constant-time equalisation) "
+        f"on the oversized-header path, got {hash_spy.call_count}."
+    )
+
+
+def test_verify_api_key_uses_compare_digest_at_runtime() -> None:
+    """``hmac.compare_digest`` must be invoked during a normal verify call.
+
+    This test patches ``hmac.compare_digest`` with a sentinel that records
+    calls, then runs a successful verification and confirms the sentinel was
+    reached.  This is complementary to the source-inspection test and verifies
+    the code path at runtime, not just at parse time.
+    """
+    import hmac as _hmac
+    from unittest.mock import patch
+
+    from recotem.serving.auth import verify_api_key
+
+    plaintext = "runtime_compare_digest_test_key!"
+    entry = _make_entry("k1", plaintext)
+    request = _make_request(plaintext)
+
+    # Capture the real function *before* patching so the sentinel can call
+    # the original without recursing into the mock.
+    _real_compare_digest = _hmac.compare_digest
+    compare_digest_calls: list[tuple[str, str]] = []
+
+    def _sentinel_compare_digest(a: str, b: str) -> bool:
+        compare_digest_calls.append((a, b))
+        return _real_compare_digest(a, b)
+
+    with patch.object(_hmac, "compare_digest", side_effect=_sentinel_compare_digest):
+        kid = verify_api_key(request, [entry])
+
+    assert kid == "k1"
+    assert len(compare_digest_calls) >= 1, (
+        "hmac.compare_digest must be called at least once during verify_api_key"
     )

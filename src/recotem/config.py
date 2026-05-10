@@ -12,6 +12,10 @@ Environment variables:
   RECOTEM_SIGNING_KEYS      CSV of "<kid>:<hex64>" entries for artifact signing
                               (64 hex chars = 32 raw bytes)
   RECOTEM_MAX_ARTIFACT_BYTES Max artifact size in bytes (default 2 GiB)
+  RECOTEM_MAX_PAYLOAD_BYTES  Per-payload cap (post-HMAC-verify) for serve-side
+                              deserialization. Smaller than max_artifact_bytes
+                              to bound deserialization memory expansion.
+                              (default 512 MiB; clamped 1 MiB–16 GiB)
   RECOTEM_ALLOWED_ORIGINS   CSV of allowed CORS origins (default empty = deny)
   RECOTEM_ALLOWED_HOSTS     CSV of allowed Host header values (default
                               "127.0.0.1,localhost")
@@ -40,6 +44,9 @@ _DEFAULT_WATCH_INTERVAL = 5
 _DEFAULT_MAX_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 _MIN_ARTIFACT_BYTES = 1 * 1024 * 1024  # 1 MiB
 _MAX_ARTIFACT_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
+_DEFAULT_MAX_PAYLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB
+_MIN_PAYLOAD_BYTES = 1 * 1024 * 1024  # 1 MiB
+_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
 _DEFAULT_DRAIN_SECONDS = 30
 _DEFAULT_ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
 
@@ -163,6 +170,9 @@ class ServeConfig:
 
     # Artifact caps
     max_artifact_bytes: int = _DEFAULT_MAX_ARTIFACT_BYTES
+    # Per-payload cap (post-HMAC-verify) for serve-side deserialization.
+    # Smaller than max_artifact_bytes to bound deserialization memory expansion.
+    max_payload_bytes: int = _DEFAULT_MAX_PAYLOAD_BYTES
 
     # CORS / TrustedHost
     allowed_origins: list[str] = field(default_factory=list)
@@ -253,6 +263,16 @@ class ServeConfig:
             _DEFAULT_MAX_ARTIFACT_BYTES,
             _MIN_ARTIFACT_BYTES,
             _MAX_ARTIFACT_BYTES,
+        )
+
+        # RECOTEM_MAX_PAYLOAD_BYTES (clamped to [1 MiB, 16 GiB])
+        # Per-payload cap (post-HMAC-verify) for serve-side deserialization.
+        # Smaller than max_artifact_bytes to bound deserialization memory expansion.
+        cfg.max_payload_bytes = _clamped_int_env(
+            "RECOTEM_MAX_PAYLOAD_BYTES",
+            _DEFAULT_MAX_PAYLOAD_BYTES,
+            _MIN_PAYLOAD_BYTES,
+            _MAX_PAYLOAD_BYTES,
         )
 
         cfg.allowed_origins = _split_csv_env("RECOTEM_ALLOWED_ORIGINS", [])

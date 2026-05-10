@@ -15,5 +15,5 @@ mkdir -p artifacts
 uv run recotem train examples/tutorial-purchase-log/recipe.yaml
 ```
 
-The artifact is written to `./artifacts/purchase_log-<sha>.recotem` (the
-`-<sha>` suffix is added by `versioning: append_sha`).
+The artifact is written to `./artifacts/purchase_log.<sha>.recotem` (the
+`.<sha>` suffix is added by `versioning: append_sha`).

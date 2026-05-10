@@ -440,8 +440,13 @@ class ArtifactWatcher(threading.Thread):
             return
 
         new_marker = marker if marker is not None else _stat_marker(artifact_path)
-        entry._loaded_marker = (new_marker, sha256)
         self._registry.replace(name, entry)
+        # Update the loaded marker through the registry lock so the mutation
+        # is serialised with respect to any concurrent readers.  The entry is
+        # registered first (replace) so update_loaded_marker will always find
+        # it; readers that already have a reference to entry see a consistent
+        # (loaded, error) pair regardless of whether the marker is yet set.
+        self._registry.update_loaded_marker(name, (new_marker, sha256))
         state.last_sha256 = sha256
         state.last_marker = new_marker
         _metrics.set_model_loaded(name, True)
@@ -461,8 +466,12 @@ class ArtifactWatcher(threading.Thread):
         from recotem.artifact.format import parse_header_from_bytes
         from recotem.artifact.signing import unpickle_payload, verify_hmac
 
-        max_bytes = self._config.max_artifact_bytes
-        hdr = parse_header_from_bytes(data, max_bytes)
+        # Use the payload-specific cap for parse_header_from_bytes so
+        # serve-side deserialization is bounded by max_payload_bytes (not
+        # max_artifact_bytes). This separates the outer container size cap from
+        # the deserialization cap.
+        max_payload_bytes = self._config.max_payload_bytes
+        hdr = parse_header_from_bytes(data, max_payload_bytes)
 
         payload_bytes = data[hdr.payload_offset :]
 

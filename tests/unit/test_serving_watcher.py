@@ -1019,3 +1019,82 @@ def test_artifact_read_failed_log_emitted_on_unexpected_exception(
     )
     evt = read_failed_events[0]
     assert "network timeout" in evt.get("error", "")
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-11: watcher uses registry setter for loaded marker
+# ---------------------------------------------------------------------------
+
+
+def test_watcher_uses_registry_setter_for_loaded_marker(tmp_path: Path) -> None:
+    """After _load_recipe succeeds, the entry's _loaded_marker is set via
+    update_loaded_marker (not a direct attribute write), so the mutation goes
+    through the registry lock.
+    """
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "marker_recipe", artifact_path)
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    state = _RecipeWatchState(recipe=recipe, artifact_path=str(artifact_path))
+    initial_states = {"marker_recipe": state}
+
+    registry = ModelRegistry()
+    # Insert a stub entry so the registry knows about the recipe before we call
+    # _load_recipe directly.
+    from recotem.serving.registry import ModelEntry
+
+    stub = ModelEntry(
+        name="marker_recipe",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+    )
+    registry.replace("marker_recipe", stub)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+
+    update_calls: list[tuple] = []
+    real_update = registry.update_loaded_marker
+
+    def _spy(name, marker):
+        update_calls.append((name, marker))
+        return real_update(name, marker)
+
+    with patch.object(registry, "update_loaded_marker", side_effect=_spy):
+        watcher._load_recipe("marker_recipe", state, force=True)
+
+    # update_loaded_marker must have been called at least once for the recipe
+    matching = [c for c in update_calls if c[0] == "marker_recipe"]
+    assert matching, (
+        "watcher._load_recipe must call registry.update_loaded_marker after a "
+        "successful load; direct entry._loaded_marker assignment bypasses the lock"
+    )
+    # Confirm the entry in the registry has the marker set
+    entry = registry.get("marker_recipe")
+    assert entry is not None
+    loaded_marker = entry._loaded_marker
+    assert isinstance(loaded_marker, tuple) and len(loaded_marker) == 2, (
+        f"_loaded_marker must be a 2-tuple; got {loaded_marker!r}"
+    )
+    # sha256 part must be a non-empty hex string
+    sha256_val = loaded_marker[1]
+    assert sha256_val, "sha256 part of _loaded_marker must be non-empty after load"

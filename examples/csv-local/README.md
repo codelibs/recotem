@@ -18,8 +18,8 @@ mkdir -p artifacts
 uv run recotem train examples/csv-local/recipe.yaml
 ```
 
-The artifact is written to `./artifacts/csv_local_example-<sha>.recotem`
-(the `-<sha>` suffix comes from `versioning: append_sha`).
+The artifact is written to `./artifacts/csv_local_example.<sha>.recotem`
+(the `.<sha>` suffix comes from `versioning: append_sha`).
 
 ## What it demonstrates
 

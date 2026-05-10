@@ -244,3 +244,98 @@ def test_header_json_byte_tamper_rejected_end_to_end(tmp_path: Path) -> None:
     # Must raise ArtifactError for HMAC, not for JSON or pickle.
     with pytest.raises(ArtifactError, match="HMAC"):
         read_artifact(str(tampered_path), kr)
+
+
+# ---------------------------------------------------------------------------
+# HMAC failure prevents payload deserialization
+# ---------------------------------------------------------------------------
+
+
+def test_hmac_failure_prevents_payload_deserialization(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When HMAC verification fails, unpickle_payload must NOT be called.
+
+    We monkeypatch unpickle_payload to count calls; any call with a tampered
+    artifact must not proceed to deserialization.
+    """
+    from unittest.mock import patch
+
+    from tests.conftest import build_raw_artifact
+
+    kr = _make_keyring()
+    raw = build_raw_artifact(kid="active", key_hex=ACTIVE_KEY_HEX)
+
+    # Tamper the HMAC digest (bytes 13+kid_len .. +32) — offset depends on
+    # kid "active" (6 bytes): fixed prefix 13 + kid 6 = 19, then 32 HMAC bytes.
+    tampered = bytearray(raw)
+    tampered[19] ^= 0xFF  # flip a byte inside the HMAC field
+    tampered_path = tmp_path / "hmac_fail.recotem"
+    tampered_path.write_bytes(bytes(tampered))
+
+    call_count = [0]
+
+    import recotem.artifact.signing as signing_mod
+
+    real_unpickle = signing_mod.unpickle_payload
+
+    def _counting_unpickle(payload_bytes):
+        call_count[0] += 1
+        return real_unpickle(payload_bytes)
+
+    with patch.object(signing_mod, "unpickle_payload", side_effect=_counting_unpickle):
+        with pytest.raises(ArtifactError):
+            read_artifact(str(tampered_path), kr)
+
+    assert call_count[0] == 0, (
+        "unpickle_payload must not be called when HMAC verification fails; "
+        f"call_count={call_count[0]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Corrupt pointer file raises ArtifactError
+# ---------------------------------------------------------------------------
+
+
+def test_read_artifact_corrupt_pointer_file_raises_artifact_error(
+    tmp_path: Path,
+) -> None:
+    """A file whose content looks like a pointer but with an invalid target name
+    (fails _POINTER_RE match) is treated as a real artifact and will fail with
+    ArtifactError (not a pointer regex match, so will try to parse as artifact).
+    """
+    kr = _make_keyring()
+
+    # Write bytes that look like a small ASCII string but do not match _POINTER_RE
+    # (contains spaces and lacks a .recotem suffix).
+    corrupt_path = tmp_path / "bad_pointer.recotem"
+    corrupt_path.write_bytes(b"not-valid-artifact-bytes")
+
+    # Should raise ArtifactError (magic mismatch or similar structural error)
+    with pytest.raises(ArtifactError):
+        read_artifact(str(corrupt_path), kr)
+
+
+# ---------------------------------------------------------------------------
+# Payload exceeds max_payload_bytes rejected by parse_header_from_bytes
+# ---------------------------------------------------------------------------
+
+
+def test_payload_exceeds_max_payload_bytes_rejected(tmp_path: Path) -> None:
+    """parse_header_from_bytes raises ArtifactError when payload exceeds cap.
+
+    We build a valid artifact and then parse it with a tiny max_payload_bytes
+    so the payload size check fires before any deserialization.
+    """
+    from recotem.artifact.format import parse_header_from_bytes
+    from tests.conftest import build_raw_artifact
+
+    raw = build_raw_artifact(kid="active", key_hex=ACTIVE_KEY_HEX)
+
+    # Use an absurdly small cap -- must be smaller than the actual payload size.
+    # A pickled dict has some bytes; cap at 1 byte.
+    tiny_cap = 1
+
+    with pytest.raises(ArtifactError, match="payload size"):
+        parse_header_from_bytes(raw, max_payload_bytes=tiny_cap)

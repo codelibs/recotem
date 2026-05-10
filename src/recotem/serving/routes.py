@@ -16,7 +16,7 @@ import uuid
 from typing import TYPE_CHECKING, Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from recotem.serving import metrics as _metrics
@@ -108,10 +108,24 @@ def make_router(
         name: str,
         body: PredictRequest,
         request: Request,
+        response: Response,
         kid: str = Depends(_require_auth),
     ) -> Any:
-        """Return top-K recommendations for *user_id* using model *name*."""
-        request_id = str(uuid.uuid4())
+        """Return top-K recommendations for *user_id* using model *name*.
+
+        The ``X-Request-ID`` response header is set to the request ID used
+        internally (echoed from the incoming ``X-Request-ID`` header when
+        present, otherwise a freshly generated UUID4).
+
+        Status labels recorded via :func:`~recotem.serving.metrics.record_predict`:
+
+        - ``ok``            — successful recommendation
+        - ``user_not_found`` — user was not in training data (HTTP 404)
+        - ``unavailable``   — recipe not loaded or unhealthy (HTTP 503)
+        - ``error``         — any other unexpected exception
+        """
+        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        response.headers["X-Request-ID"] = request_id
         start = time.monotonic()
         status = "error"
 
@@ -124,6 +138,7 @@ def make_router(
             # — "stale-but-loaded keeps serving").  Surfacing that as 503 here
             # would defeat the hot-swap availability contract.
             if entry is None or not entry.loaded or entry.recommender is None:
+                status = "unavailable"
                 raise HTTPException(
                     status_code=503,
                     detail={
@@ -142,6 +157,7 @@ def make_router(
                     )
                 )
             except KeyError:
+                status = "user_not_found"
                 raise HTTPException(
                     status_code=404,
                     detail={
@@ -165,7 +181,7 @@ def make_router(
                     item.update(row)
                 items.append(item)
 
-            response = PredictResponse(
+            predict_response = PredictResponse(
                 items=[RecommendationItem(**it) for it in items],
                 model=ModelInfo(
                     recipe=name,
@@ -177,7 +193,7 @@ def make_router(
             )
 
             status = "ok"
-            return response
+            return predict_response
         finally:
             _metrics.record_predict(name, status, time.monotonic() - start)
 

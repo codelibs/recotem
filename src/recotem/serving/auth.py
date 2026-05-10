@@ -87,7 +87,15 @@ def _hash_api_key(value: str) -> str:
     NOT a password-hashing call site — Recotem API keys are 256-bit random
     tokens.  See `_SCRYPT_N`/`_SCRYPT_R`/`_SCRYPT_P` constants above for
     the rationale behind the (low) cost parameters.
+
+    scrypt is intentionally low-cost (N=2, r=8, p=1) because the input is
+    already a 256-bit random token, making brute-force infeasible regardless
+    of hash speed.  Raising the cost parameters would amplify DoS on the
+    unauthenticated endpoint without improving security, since an attacker
+    who somehow obtained the stored digest would still face 2^256 exhaustion.
     """
+    # codeql[py/weak-sensitive-data-hashing] scrypt KDF intentionally at
+    # minimum cost — see docstring and module-level comment above.
     return hashlib.scrypt(
         value.encode("utf-8"),
         salt=_API_KEY_SCRYPT_SALT,
@@ -139,9 +147,17 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
             detail={"detail": "X-API-Key header required", "code": "missing_api_key"},
         )
 
-    # Reject oversized headers BEFORE invoking the scrypt KDF.  An
-    # unbounded header would let an unauthenticated attacker amplify
-    # scrypt work into a denial-of-service.  See ``_API_KEY_MAX_LEN``.
+    # Reject oversized headers BEFORE invoking the scrypt KDF on the real
+    # payload.  An unbounded header would let an unauthenticated attacker
+    # amplify scrypt work into a denial-of-service.  See ``_API_KEY_MAX_LEN``.
+    #
+    # Constant-time equalisation: we still run _hash_api_key on a fixed-
+    # length dummy value so that the response time is indistinguishable from
+    # the short-key branch and from a legitimate key whose digest simply does
+    # not match.  This prevents a length-based timing oracle — without it, an
+    # attacker could distinguish the oversized branch (~0 ms) from the hashing
+    # branch (~0.5 ms) and infer the key-length range from response latency.
+    # The result is discarded; the side effect is the scrypt wall time alone.
     if len(raw_header) > _API_KEY_MAX_LEN:
         logger.warning(
             "auth_oversized_header",
@@ -149,12 +165,13 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
             length=len(raw_header),
             cap=_API_KEY_MAX_LEN,
         )
+        _hash_api_key("\x00" * _API_KEY_MIN_LEN)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
             detail={"detail": "Invalid API key", "code": "invalid_api_key"},
         )
 
-    # Reject plaintexts shorter than _API_KEY_MIN_LEN before running scrypt.
+    # Reject plaintexts shorter than _API_KEY_MIN_LEN.
     # A key shorter than 32 chars carries less than 256 bits of entropy even
     # when generated randomly; if the digest were ever leaked, the reduced
     # search space makes offline brute-force tractable.  Recotem-issued keys
@@ -162,6 +179,11 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
     # random bytes), well above this floor.  The rejection response is
     # identical to an invalid-key response so the caller cannot determine
     # whether the key was too short or simply unrecognised.
+    #
+    # Constant-time equalisation: same rationale as the oversized branch above.
+    # Without this, timing on the short-key path (~0 ms) vs the normal path
+    # (~0.5 ms) would allow an attacker to determine from latency alone
+    # whether their probe key was too short or too long.
     if len(raw_header) < _API_KEY_MIN_LEN:
         logger.warning(
             "auth_short_key_rejected",
@@ -169,6 +191,7 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
             length=len(raw_header),
             min_len=_API_KEY_MIN_LEN,
         )
+        _hash_api_key("\x00" * _API_KEY_MIN_LEN)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
             detail={"detail": "Invalid API key", "code": "invalid_api_key"},

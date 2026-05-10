@@ -155,7 +155,7 @@ def recipe_lock(
     if timeout == 0.0:
         lock_op |= fcntl.LOCK_NB  # non-blocking
 
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)  # noqa: S103 – mode is 0o600 (owner-only); CodeQL false positive (py/world-readable-file)
     try:
         try:
             if timeout > 0:
@@ -212,7 +212,7 @@ def _try_acquire_windows(lock_path: Path) -> bool:
         fd = os.open(
             str(lock_path),
             os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            0o600,
+            0o600,  # noqa: S103 – mode is 0o600 (owner-only); CodeQL false positive (py/world-readable-file)
         )
         os.close(fd)
         return True

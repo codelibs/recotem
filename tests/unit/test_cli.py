@@ -1153,6 +1153,72 @@ def test_train_run_id_propagates_to_train_done_log(tmp_path: Path, monkeypatch) 
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# MAJOR-6: --run-id help must reference training.storage_path not tuning.storage_path
+# ---------------------------------------------------------------------------
+
+
+def test_run_id_help_uses_training_storage_path() -> None:
+    """train --help must reference 'training.storage_path', not 'tuning.storage_path'."""
+    result = runner.invoke(app, ["train", "--help"])
+    assert result.exit_code == 0
+    assert "training.storage_path" in result.output, (
+        f"Expected 'training.storage_path' in help output; got:\n{result.output}"
+    )
+    assert "tuning.storage_path" not in result.output, (
+        f"Found stale 'tuning.storage_path' in help output; got:\n{result.output}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MINOR: _configure_logging_from_env error handling
+# ---------------------------------------------------------------------------
+
+
+def test_configure_logging_from_env_handles_oserror_silently(monkeypatch) -> None:
+    """An OSError raised by configure_logging must be swallowed silently.
+
+    _configure_logging_from_env is called directly so we don't depend on
+    whether --help or schema happen to invoke it (they may not).
+    """
+    from unittest.mock import patch
+
+    from recotem.cli import _configure_logging_from_env
+
+    # Simulate configure_logging raising OSError (e.g. log file permission denied).
+    with patch("recotem.logging.configure_logging", side_effect=OSError("perm denied")):
+        # Must not raise — OSError is caught silently by the inner guard.
+        _configure_logging_from_env()
+
+
+def test_configure_logging_from_env_prints_unexpected_error_to_stderr(
+    monkeypatch,
+    capsys,
+) -> None:
+    """An unexpected exception (not ImportError/OSError) must print a '[recotem]'
+    prefixed line to stderr without re-raising.
+
+    _configure_logging_from_env is called directly to bypass the --help
+    short-circuit path that never reaches the command body.
+    """
+    from unittest.mock import patch
+
+    from recotem.cli import _configure_logging_from_env
+
+    # Simulate a broad unexpected failure (e.g. configure_logging raises RuntimeError).
+    with patch(
+        "recotem.logging.configure_logging",
+        side_effect=RuntimeError("unexpected broad failure"),
+    ):
+        # Must not raise — the outer broad except catches it and prints to stderr.
+        _configure_logging_from_env()
+
+    captured = capsys.readouterr()
+    assert "[recotem]" in captured.err, (
+        f"Expected '[recotem]' prefix in stderr; got: {captured.err!r}"
+    )
+
+
 def test_schema_includes_all_registered_source_types() -> None:
     """recotem schema output must include csv, parquet, and bigquery.
 

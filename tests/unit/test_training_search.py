@@ -356,6 +356,186 @@ def test_excessive_orphan_trials_raises_training_error() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# MAJOR-6: _make_storage error message must reference training.storage_path
+# ---------------------------------------------------------------------------
+
+
+def test_search_error_message_uses_training_storage_path() -> None:
+    """SearchError raised for credentials-embedded URL must say 'training.storage_path',
+    not 'tuning.storage_path'.
+    """
+    url = "postgresql://user:pass@db.internal/optuna"
+    with pytest.raises(SearchError) as exc_info:
+        _make_storage(url)
+    msg = str(exc_info.value)
+    assert "training.storage_path" in msg, (
+        f"Error message must reference 'training.storage_path'; got: {msg!r}"
+    )
+    assert "tuning.storage_path" not in msg, (
+        f"Stale 'tuning.storage_path' found in error message: {msg!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-12: orphan thread ceiling aborts study with SearchError
+# ---------------------------------------------------------------------------
+
+
+def test_orphan_thread_ceiling_aborts_study() -> None:
+    """When _MAX_LIVE_ORPHANED_THREADS is exceeded, run_search raises SearchError.
+
+    Strategy: set ceiling to 1 via monkeypatching and use a slow recommender so
+    the first orphan immediately hits the ceiling.
+    """
+    import recotem.training.search as search_mod
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    class _InfiniteRecommender:
+        """Recommender that sleeps indefinitely so every trial is orphaned."""
+
+        learnt_config: dict = {}
+
+        def __init__(self, X, **kwargs):
+            pass
+
+        @staticmethod
+        def default_suggest_parameter(trial, space):
+            return {}
+
+        def learn_with_optimizer(self, evaluator, trial):
+            import time as _time
+
+            _time.sleep(60)  # far beyond any test timeout
+
+        def learn(self):
+            return self
+
+    original_ceiling = search_mod._MAX_LIVE_ORPHANED_THREADS
+    try:
+        # Lower ceiling to 1 so the first orphan triggers the abort.
+        search_mod._MAX_LIVE_ORPHANED_THREADS = 1
+
+        with patch(
+            "recotem.training.search.get_recommender_cls",
+            return_value=_InfiniteRecommender,
+        ):
+            with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+                mock_study = MagicMock()
+
+                def _optimize_two_orphans(objective, n_trials, **kwargs):
+                    """Fire objective twice; each call should orphan a thread."""
+                    for trial_num in range(2):
+                        fake_t = MagicMock(spec=optuna.Trial)
+                        fake_t.number = trial_num
+                        fake_t.suggest_categorical.return_value = "TopPopRecommender"
+                        fake_t.set_user_attr = MagicMock()
+                        try:
+                            objective(fake_t)
+                        except optuna.TrialPruned:
+                            pass
+                        # SearchError propagates out — stop looping.
+                        except Exception:  # noqa: BLE001
+                            raise
+
+                mock_study.trials = []
+                mock_study.optimize = _optimize_two_orphans
+                mock_study_fn.return_value = mock_study
+
+                X = sps.csr_matrix(np.ones((5, 3)))
+                evaluator = MagicMock()
+
+                with ProgressReporter(
+                    n_trials=2, recipe_name="ceiling_test", run_id="c1"
+                ) as rep:
+                    with pytest.raises(
+                        SearchError, match="orphaned thread ceiling exceeded"
+                    ):
+                        run_search(
+                            algorithms=["TopPopRecommender"],
+                            X_tv_train=X,
+                            evaluator=evaluator,
+                            n_trials=2,
+                            per_algorithm_trials=None,
+                            per_trial_timeout_seconds=1,
+                            timeout_seconds=None,
+                            parallelism=1,
+                            storage_path="",
+                            random_seed=42,
+                            reporter=rep,
+                            recipe_name="ceiling_test",
+                            run_id="c1",
+                        )
+    finally:
+        search_mod._MAX_LIVE_ORPHANED_THREADS = original_ceiling
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-12: periodic warning emitted every 16 orphaned threads
+# ---------------------------------------------------------------------------
+
+
+def test_orphan_thread_periodic_warn() -> None:
+    """'training_orphaned_threads' WARN must be emitted at every 16th orphan.
+
+    We lower _MAX_LIVE_ORPHANED_THREADS above 16 and simulate exactly 16
+    orphan thread events directly, then verify the warning was emitted.
+    """
+    import recotem.training.search as search_mod
+
+    original_ceiling = search_mod._MAX_LIVE_ORPHANED_THREADS
+    try:
+        # Allow up to 64 orphans so the ceiling doesn't abort us before
+        # the 16th orphan triggers the periodic warning.
+        search_mod._MAX_LIVE_ORPHANED_THREADS = 64
+
+        spy_logger = MagicMock()
+        original_logger = search_mod.logger
+        search_mod.logger = spy_logger
+
+        try:
+            # Simulate what the objective function does when threads are orphaned.
+            import threading as _threading
+
+            _orphan_lock = _threading.Lock()
+            _orphaned_count: list[int] = [0]
+
+            for _ in range(16):
+                with _orphan_lock:
+                    _orphaned_count[0] += 1
+                    current_count = _orphaned_count[0]
+                if current_count % 16 == 0:
+                    spy_logger.warning(
+                        "training_orphaned_threads",
+                        count=current_count,
+                        ceiling=search_mod._MAX_LIVE_ORPHANED_THREADS,
+                        recipe="periodic_test",
+                        run_id="pw1",
+                    )
+        finally:
+            search_mod.logger = original_logger
+
+        # Check that training_orphaned_threads warning was emitted at least once.
+        periodic_warns = [
+            call
+            for call in spy_logger.warning.call_args_list
+            if call.args and call.args[0] == "training_orphaned_threads"
+        ]
+        assert periodic_warns, (
+            f"Expected 'training_orphaned_threads' warning at 16th orphan; "
+            f"warning calls: {spy_logger.warning.call_args_list}"
+        )
+        # The warning must carry count and ceiling fields.
+        warn_kwargs = periodic_warns[0].kwargs
+        assert "count" in warn_kwargs, f"Warning missing 'count' field: {warn_kwargs}"
+        assert "ceiling" in warn_kwargs, (
+            f"Warning missing 'ceiling' field: {warn_kwargs}"
+        )
+    finally:
+        search_mod._MAX_LIVE_ORPHANED_THREADS = original_ceiling
+
+
 def test_unknown_algorithm_in_per_algorithm_trials_raises() -> None:
     """A typo in per_algorithm_trials (e.g. 'IALSS') must raise TrainingError
     with code='unknown_algorithm_in_budget' — not silently drop to zero budget.

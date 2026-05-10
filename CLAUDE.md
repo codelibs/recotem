@@ -180,7 +180,8 @@ uv run ruff format --check src tests
 | `RECOTEM_ALLOWED_ORIGINS` | (empty) | CORS allow-list. Empty = deny. |
 | `RECOTEM_ENV` | (empty) | Gates `--insecure-no-auth` and `--dev-allow-unsigned`. |
 | `RECOTEM_DRAIN_SECONDS` | 30 | SIGTERM grace window. |
-| `RECOTEM_LOG_FORMAT` | auto | `json` | `console`. |
+| `RECOTEM_LOG_FORMAT` | auto | `auto` / `json` / `console`. |
+| `RECOTEM_MAX_PAYLOAD_BYTES` | 512 MiB | Per-payload cap (post-HMAC-verify) for serve-side deserialization. Clamped [1 MiB, 16 GiB]. Smaller than `RECOTEM_MAX_ARTIFACT_BYTES` to bound deserialization memory expansion. |
 | `RECOTEM_ARTIFACT_ROOT` | (empty) | If set, local `output.path` must lie under it. |
 | `RECOTEM_RECIPE_*` | — | Allow-listed for `${...}` recipe expansion. |
 | `RECOTEM_METADATA_FIELD_DENY` | (empty) | Comma-separated columns stripped from `/predict` responses. |

@@ -36,7 +36,7 @@ source:
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `path` | string | required | Local path, `s3://`, `gs://`, or `az://`. See [Path rules](#path-rules). |
+| `path` | string | required | Local path, `file://`, `s3://`, `gs://`, `az://`, `abfs(s)://`, `http://`, or `https://` URI. HTTP/HTTPS requires a `sha256` integrity pin; see [Path rules](#path-rules) and [data-sources/csv.md](data-sources/csv.md#path-schemes). |
 | `delimiter` | string | `","` | Passed straight to pandas `sep=`. Multi-character separators trigger pandas' Python parser (slower); a single character uses the C parser. CSV only. |
 | `encoding` | string | `"utf-8"` | Any encoding accepted by pandas. |
 | `header` | int | `0` | Row number of the header. |

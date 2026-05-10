@@ -34,6 +34,14 @@ logger = structlog.get_logger(__name__)
 # Suppress Optuna's noisy logging (we emit our own structured events).
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+# Maximum number of simultaneously-live orphaned threads before we abort the
+# study entirely.  Each orphaned thread consumes a C-extension worker that
+# cannot be killed; accumulating too many stalls the process and eventually
+# causes OOM.  32 is a conservative ceiling — operators whose dataset+algorithm
+# combination genuinely needs longer training should raise
+# per_trial_timeout_seconds rather than bumping this constant.
+_MAX_LIVE_ORPHANED_THREADS: int = 32
+
 
 # ---------------------------------------------------------------------------
 # Result dataclass
@@ -108,7 +116,7 @@ def _make_storage(storage_path: str) -> optuna.storages.BaseStorage | None:
         parsed = urlparse(path)
         if parsed.username or parsed.password:
             raise SearchError(
-                "tuning.storage_path must not embed credentials "
+                "training.storage_path must not embed credentials "
                 "(user:pass@host).  Use a credential file or env-driven "
                 "auth (PGPASSFILE, ~/.pgpass, sqlalchemy.url env) instead."
             )
@@ -300,6 +308,7 @@ def run_search(
                 # is too aggressive for this dataset+algorithm combination.
                 with _orphan_lock:
                     _orphaned_count[0] += 1
+                    current_orphan_count = _orphaned_count[0]
                 logger.warning(
                     "per_trial_timeout_thread_orphaned",
                     recipe=recipe_name,
@@ -308,6 +317,28 @@ def run_search(
                     class_name=class_name,
                     timeout_seconds=per_trial_timeout_seconds,
                 )
+                # Emit a periodic aggregate warning every 16 orphaned threads
+                # so operators can detect systematic timeout misconfiguration
+                # without being spammed every trial.
+                if current_orphan_count % 16 == 0:
+                    logger.warning(
+                        "training_orphaned_threads",
+                        count=current_orphan_count,
+                        ceiling=_MAX_LIVE_ORPHANED_THREADS,
+                        recipe=recipe_name,
+                        run_id=run_id,
+                    )
+                # Runtime ceiling: abort the study if the number of live orphaned
+                # threads reaches the configured maximum.  Beyond this point the
+                # process is at risk of OOM and the search is not making useful
+                # progress — raising SearchError here propagates out of
+                # study.optimize and surfaces as a fatal training failure.
+                if current_orphan_count >= _MAX_LIVE_ORPHANED_THREADS:
+                    raise SearchError(
+                        f"orphaned thread ceiling exceeded ({current_orphan_count} >= "
+                        f"{_MAX_LIVE_ORPHANED_THREADS}); "
+                        "check per_trial_timeout vs algorithm runtime"
+                    )
                 raise optuna.TrialPruned(
                     f"Trial {trial.number} exceeded per_trial_timeout_seconds "
                     f"({per_trial_timeout_seconds}s)."

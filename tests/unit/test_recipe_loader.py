@@ -338,7 +338,7 @@ def test_output_path_with_http_scheme_rejected(tmp_path: Path) -> None:
         output_path="http://example.com/out.recotem",
     )
     p = _write_recipe(tmp_path, content)
-    with pytest.raises(RecipeError, match="does not support"):
+    with pytest.raises(RecipeError, match="not supported"):
         load_recipe(p)
 
 
@@ -348,7 +348,7 @@ def test_output_path_with_https_scheme_rejected(tmp_path: Path) -> None:
         output_path="https://example.com/out.recotem",
     )
     p = _write_recipe(tmp_path, content)
-    with pytest.raises(RecipeError, match="does not support"):
+    with pytest.raises(RecipeError, match="not supported"):
         load_recipe(p)
 
 
@@ -358,7 +358,7 @@ def test_output_path_with_memory_scheme_rejected(tmp_path: Path) -> None:
         output_path="memory://out.recotem",
     )
     p = _write_recipe(tmp_path, content)
-    with pytest.raises(RecipeError, match="does not support"):
+    with pytest.raises(RecipeError, match="not supported"):
         load_recipe(p)
 
 
@@ -1117,5 +1117,126 @@ def test_output_path_with_ftp_scheme_rejected(tmp_path: Path) -> None:
         output_path="ftp://example.com/foo.recotem",
     )
     p = _write_recipe(tmp_path, content)
-    with pytest.raises(RecipeError, match="does not support|ftp"):
+    with pytest.raises(RecipeError, match="not supported|ftp"):
         load_recipe(p)
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-4: allow-list output scheme enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_output_path_data_scheme_rejected(tmp_path: Path) -> None:
+    """data: URI must be rejected by the allow-list output-scheme check.
+
+    Previously only a deny-list was used; ``data:`` was not in that list and
+    would silently pass through.  The allow-list ensures novel/unknown schemes
+    are refused by default.
+    """
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="data_scheme_output",
+        output_path="data:text/plain,hello",
+    )
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError):
+        load_recipe(p)
+
+
+def test_output_path_javascript_scheme_rejected(tmp_path: Path) -> None:
+    """javascript: URI must be rejected by the allow-list output-scheme check."""
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="js_scheme_output",
+        output_path="javascript:alert(1)",
+    )
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError):
+        load_recipe(p)
+
+
+def test_output_path_unknown_scheme_rejected(tmp_path: Path) -> None:
+    """An unrecognised scheme must be rejected with an 'Allowed' hint in the message."""
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="weird_scheme_output",
+        output_path="weirdscheme://some/path/out.recotem",
+    )
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="Allowed"):
+        load_recipe(p)
+
+
+def test_output_path_file_scheme_accepted_localhost(tmp_path: Path) -> None:
+    """file:/// and file://localhost/ output paths must still be accepted.
+
+    Regression: the allow-list must keep the file:// scheme valid, and the
+    existing netloc check (only '' and 'localhost' are accepted) must also
+    remain in force.
+    """
+    out1 = tmp_path / "local1.recotem"
+    content1 = MINIMAL_RECIPE_TEMPLATE.format(
+        name="file_local_ok1",
+        output_path=f"file://{out1}",
+    )
+    p1 = _write_recipe(tmp_path, content1, filename="recipe1.yaml")
+    recipe1 = load_recipe(p1)
+    assert recipe1.output.path == f"file://{out1}"
+
+    out2 = tmp_path / "local2.recotem"
+    content2 = MINIMAL_RECIPE_TEMPLATE.format(
+        name="file_local_ok2",
+        output_path=f"file://localhost{out2}",
+    )
+    p2 = _write_recipe(tmp_path, content2, filename="recipe2.yaml")
+    recipe2 = load_recipe(p2)
+    assert recipe2.output.path == f"file://localhost{out2}"
+
+
+def test_output_path_object_store_schemes_accepted(tmp_path: Path) -> None:
+    """s3://, gs://, az://, abfs://, and abfss:// output paths must be accepted.
+
+    Note: abfs/abfss URLs that use the ``container@account`` addressing form
+    are rejected by ``_check_userinfo`` because urlparse treats the ``@`` as a
+    userinfo separator (extracting ``container`` as the username).  Use the
+    plain-host form without ``@`` for the scheme-acceptance test; the
+    credential check is independent of the allow-list test.
+    """
+    schemes_and_paths = [
+        ("s3_out", "s3://my-bucket/key.recotem"),
+        ("gs_out", "gs://my-bucket/key.recotem"),
+        ("az_out", "az://my-container/blob.recotem"),
+        # abfs/abfss without the @-form host (plain host, no userinfo):
+        ("abfs_out", "abfs://account.dfs.core.windows.net/container/out.recotem"),
+        ("abfss_out", "abfss://account.dfs.core.windows.net/container/out.recotem"),
+    ]
+    for name, output_path in schemes_and_paths:
+        content = MINIMAL_RECIPE_TEMPLATE.format(
+            name=name,
+            output_path=output_path,
+        )
+        p = _write_recipe(tmp_path, content, filename=f"{name}.yaml")
+        recipe = load_recipe(p)
+        assert recipe.output.path == output_path, (
+            f"Expected {output_path!r} to be accepted, got {recipe.output.path!r}"
+        )
+
+
+def test_output_path_http_https_ftp_memory_still_rejected(tmp_path: Path) -> None:
+    """Regression: schemes previously on the deny-list must still be rejected.
+
+    Ensures the allow-list migration did not accidentally permit http, https,
+    ftp, ftps, or memory output paths.
+    """
+    rejected_paths = [
+        ("http_regr", "http://example.com/out.recotem"),
+        ("https_regr", "https://example.com/out.recotem"),
+        ("ftp_regr", "ftp://example.com/out.recotem"),
+        ("ftps_regr", "ftps://example.com/out.recotem"),
+        ("memory_regr", "memory://out.recotem"),
+    ]
+    for name, output_path in rejected_paths:
+        content = MINIMAL_RECIPE_TEMPLATE.format(
+            name=name,
+            output_path=output_path,
+        )
+        p = _write_recipe(tmp_path, content, filename=f"{name}.yaml")
+        with pytest.raises(RecipeError, match="not supported"):
+            load_recipe(p)

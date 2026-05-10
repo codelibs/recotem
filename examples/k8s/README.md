@@ -23,8 +23,26 @@ process hot-swaps when it detects new files.
   the train and serve pods. With `ReadWriteMany` access mode if they will
   run on different nodes; otherwise `ReadWriteOnce` works as long as both
   schedule on the same node.
-- A `ConfigMap` (or another mechanism) supplying recipe YAML files at
-  `/recipes/`.
+- A `ConfigMap` named `recotem-recipes` supplying recipe YAML files at
+  `/recipes/`. Both `serve-deployment.yaml` and `cronjob.yaml` mount this
+  ConfigMap, so it must exist before applying the manifests. Create it with:
+
+  ```bash
+  # Single recipe
+  kubectl -n recotem create configmap recotem-recipes \
+    --from-file=recipe.yaml=path/to/recipe.yaml
+
+  # Multiple recipes (repeat --from-file for each)
+  kubectl -n recotem create configmap recotem-recipes \
+    --from-file=news_articles.yaml=path/to/news_articles.yaml \
+    --from-file=purchase_log.yaml=path/to/purchase_log.yaml
+  ```
+
+  To update the ConfigMap after adding or changing a recipe, delete and
+  recreate it (or use `kubectl create configmap ... --dry-run=client -o yaml | kubectl apply -f -`).
+  The running serve pod will pick up new artifacts written by the next train
+  CronJob run, but recipe YAML changes require a pod restart (or a rolling
+  update).
 - A `Secret` containing `RECOTEM_SIGNING_KEYS` and `RECOTEM_API_KEYS`,
   mounted as env vars on both pods.
 

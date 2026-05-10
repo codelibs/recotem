@@ -84,25 +84,18 @@ def _is_address_internal(addr: ipaddress._BaseAddress) -> bool:
     internal services (10/8, 172.16/12, 192.168/16, fc00::/7), localhost, and
     multicast / unspecified ranges.
 
-    Also defends against IPv4-mapped IPv6 addresses (``::ffff:a.b.c.d``):
-    historically Python's ``ipaddress`` module classified these inconsistently
-    (e.g. ``::ffff:169.254.169.254`` returned ``False`` for
-    ``is_link_local``).  Recent Python versions delegate the relevant
-    properties to the mapped IPv4 address, but we re-check the unwrapped
-    IPv4 explicitly so the SSRF guard does not regress if stdlib semantics
-    flip again.  See MAJOR-3 in :doc:`/security`.
+    For IPv4-mapped IPv6 addresses (``::ffff:a.b.c.d``), the embedded IPv4
+    address is the authoritative source of truth and is checked first.
+    Python's ``IPv6Address`` properties for the ``::ffff:0:0/96`` block have
+    been inconsistent across patch releases (e.g. ``is_reserved`` returned
+    ``True`` for public IPv4-mapped addresses in some builds), so relying on
+    the IPv6-level properties for these addresses would produce false positives.
+    Evaluating the unwrapped IPv4 directly avoids the ambiguity entirely.
+    See MAJOR-3 in :doc:`/security`.
     """
-    if bool(
-        addr.is_private
-        or addr.is_loopback
-        or addr.is_link_local
-        or addr.is_multicast
-        or addr.is_reserved
-        or addr.is_unspecified
-    ):
-        return True
-    # Defence-in-depth: re-check the unwrapped IPv4 address for
-    # IPv4-mapped IPv6 inputs (``::ffff:a.b.c.d``).
+    # Primary check for IPv4-mapped IPv6 addresses (``::ffff:a.b.c.d``):
+    # unwrap to the embedded IPv4 and evaluate properties there, bypassing
+    # IPv6-level property inconsistencies for the ``::ffff:0:0/96`` block.
     mapped = getattr(addr, "ipv4_mapped", None)
     if mapped is not None:
         return bool(
@@ -113,7 +106,14 @@ def _is_address_internal(addr: ipaddress._BaseAddress) -> bool:
             or mapped.is_reserved
             or mapped.is_unspecified
         )
-    return False
+    return bool(
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+    )
 
 
 def assert_host_public(url: str, *, allow_private: bool) -> str | None:

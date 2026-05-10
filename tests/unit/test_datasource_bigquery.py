@@ -576,6 +576,122 @@ def test_bq_require_storage_api_disables_fallback(monkeypatch) -> None:
             source.fetch(_ctx())
 
 
+# ---------------------------------------------------------------------------
+# MAJOR-2: recotem_bigquery_storage_fallback_total counter incremented
+# ---------------------------------------------------------------------------
+
+
+def test_bigquery_storage_fallback_increments_counter_on_api_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the Storage Read API raises GoogleAPICallError and the fallback is
+    NOT disabled, ``inc_bigquery_storage_fallback("api_error")`` must be called.
+
+    We patch the name bound inside the ``bigquery`` module's own namespace
+    (imported from ``_metrics_bigquery`` at load time) to intercept the call.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import pandas as pd
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    def _to_dataframe_side_effect(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise mock_api_error_cls("PERMISSION_DENIED")
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_side_effect
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    inc_spy = MagicMock()
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        # Import the module so the name is bound, then patch it in-place.
+        import recotem.datasource.bigquery as bq_module
+
+        with patch.object(bq_module, "inc_bigquery_storage_fallback", inc_spy):
+            cfg = bq_module.BigQueryConfig(type="bigquery", query="SELECT 1")
+            source = bq_module.BigQuerySource.__new__(bq_module.BigQuerySource)
+            source._config = cfg
+            source.fetch(_ctx())
+
+    inc_spy.assert_called_once_with("api_error")
+
+
+def test_bigquery_storage_fallback_increments_counter_on_missing_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the Storage Read API raises ImportError (missing extra),
+    ``inc_bigquery_storage_fallback("missing_extra")`` must be called.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import pandas as pd
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        _,
+    ) = _make_mock_bq_modules()
+
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    def _to_dataframe_side_effect(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise ImportError("No module named 'google.cloud.bigquery_storage'")
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_side_effect
+
+    inc_spy = MagicMock()
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        import recotem.datasource.bigquery as bq_module
+
+        with patch.object(bq_module, "inc_bigquery_storage_fallback", inc_spy):
+            cfg = bq_module.BigQueryConfig(type="bigquery", query="SELECT 1")
+            source = bq_module.BigQuerySource.__new__(bq_module.BigQuerySource)
+            source._config = cfg
+            source.fetch(_ctx())
+
+    inc_spy.assert_called_once_with("missing_extra")
+
+
 def test_storage_oom_propagates() -> None:
     """A MemoryError from the Storage Read API must propagate, not trigger fallback.
 

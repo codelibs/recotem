@@ -44,6 +44,8 @@ src/recotem/
 ├── _idmap.py           Neutral home for IDMappedRecommender (canonical FQCN)
 ├── _http_fetch.py      SSRF-guarded HTTP/HTTPS fetcher with sha256 verify
 ├── _size_cap.py        Shared download-size cap helper (used by csv source + metadata loader)
+├── _metrics_bigquery.py  Neutral Prometheus counter for BQ Storage API fallbacks (no serving dep)
+├── _metrics_watcher.py   Neutral Prometheus counter for recipes-dir scan failures (no serving dep)
 ├── log_redaction.py    structlog processor stripping API/signing keys + creds
 ├── config.py           ServeConfig / TrainConfig from env vars
 └── logging.py          structlog setup with redaction processor first
@@ -187,7 +189,7 @@ uv run ruff format --check src tests
 | `RECOTEM_HOST` / `RECOTEM_PORT` | 127.0.0.1 / 8080 | uvicorn bind. Must be `0.0.0.0` inside Docker; overridden to 127.0.0.1 when no API keys are set. |
 | `RECOTEM_WATCH_INTERVAL` | 5 | Watcher poll seconds (clamped 1–30). |
 | `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. |
-| `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Cap on source-path body for HTTP/HTTPS, local, and object-store reads. Clamped [1 MiB, 16 GiB]. |
+| `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Raw I/O bytes cap on source-path reads (HTTP/HTTPS, local, and object-store). Clamped [1 MiB, 16 GiB]. Does NOT cap the decompressed DataFrame size — see `docs/security.md#decompressed-size-cap-not-enforced-medium-5`. |
 | `RECOTEM_HTTP_TIMEOUT_SECONDS` | 30 | Connect/read timeout for HTTP/HTTPS source fetch. Clamped [1, 600]. |
 | `RECOTEM_HTTP_ALLOW_PRIVATE` | (empty) | Truthy (`1`/`true`/`yes`/`on`) opts the HTTP fetcher into accepting private/loopback/link-local destinations. Default refuses RFC1918 / `127.0.0.0/8` / `169.254.0.0/16` to block SSRF on cloud-metadata services. |
 | `RECOTEM_ALLOWED_HOSTS` | 127.0.0.1,localhost | TrustedHostMiddleware list. Whitespace-only comma input falls back to default. |
@@ -202,6 +204,7 @@ uv run ruff format --check src tests
 | `RECOTEM_METRICS_ENABLED` | (empty) | Opt-in Prometheus `/metrics` endpoint. Truthy values: `1`, `true`, `yes`, `on`. Requires `recotem[metrics]` extra. |
 | `RECOTEM_LOCK_DIR` | (empty) | Override directory for per-recipe training lock files. Local outputs always lock at `<output_path>.lock`; remote outputs (`s3://`, `gs://`, ...) need a host-local path and fall back to `<tempdir>/recotem-locks/`. `flock` is host-local — across hosts use scheduler-level mutex (`concurrencyPolicy: Forbid`). |
 | `RECOTEM_BQ_REQUIRE_STORAGE_API` | (empty) | When truthy (`1`/`true`/`yes`/`on`), the BigQuery source raises `DataSourceError` instead of falling back to the REST path when the Storage Read API fails. Requires the service account to hold `bigquery.readSessions.create`. |
+| `RECOTEM_STARTUP_PARALLELISM` | (empty = auto) | Number of parallel threads used to load artifacts at `recotem serve` startup. Default is `min(len(recipes), 8)`. Clamped [1, 32]. Set to `1` to force sequential loading for debugging. |
 
 ## CI
 

@@ -568,19 +568,62 @@ def _run_training_locked(
 # ---------------------------------------------------------------------------
 
 
+def _normalize_paths_for_hash(obj: Any) -> Any:
+    """Recursively convert Path-like objects to POSIX strings for stable hashing.
+
+    ``pathlib.Path`` (and its subclasses such as ``PurePosixPath`` and
+    ``PureWindowsPath``) serialise via ``str()`` to an OS-dependent
+    representation: POSIX gives ``/data/foo`` while Windows gives
+    ``\\data\\foo``.  Using ``Path.as_posix()`` normalises to the forward-
+    slash form on every platform so the same recipe always produces the same
+    hash regardless of where ``_compute_recipe_hash`` is called.
+    """
+    import pathlib  # noqa: PLC0415
+
+    if isinstance(obj, pathlib.PurePath):
+        return obj.as_posix()
+    if isinstance(obj, dict):
+        return {k: _normalize_paths_for_hash(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_normalize_paths_for_hash(v) for v in obj]
+    return obj
+
+
+def _json_default_for_hash(obj: Any) -> Any:
+    """Custom JSON default serialiser for ``_compute_recipe_hash``.
+
+    Converts ``pathlib.PurePath`` to a POSIX string before falling back to
+    ``str()`` for any other non-serialisable type.  This keeps the same
+    safety net as the previous ``default=str`` while guaranteeing that Paths
+    are never serialised with a OS-dependent separator.
+    """
+    import pathlib  # noqa: PLC0415
+
+    if isinstance(obj, pathlib.PurePath):
+        return obj.as_posix()
+    return str(obj)
+
+
 def _compute_recipe_hash(recipe: Recipe) -> str:
     """Return a SHA-256 hex digest of the recipe's canonical YAML serialization.
 
     Uses pydantic's ``model_dump`` -> sorted JSON to get a stable canonical
     form.  No secrets are included (recipe YAML should never contain secrets).
+
+    Path normalisation: any ``pathlib.PurePath`` (including ``PureWindowsPath``)
+    found in the dump is converted to a POSIX forward-slash string via
+    ``as_posix()`` so the hash is identical on POSIX and Windows hosts given
+    the same recipe content.
     """
     import json  # noqa: PLC0415
 
+    raw = recipe.model_dump(mode="json", by_alias=False)
+    normalised = _normalize_paths_for_hash(raw)
     canonical = json.dumps(
-        recipe.model_dump(mode="json", by_alias=False),
+        normalised,
         sort_keys=True,
         separators=(",", ":"),
-        default=str,
+        default=_json_default_for_hash,
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
 

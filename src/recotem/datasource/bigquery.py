@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 import structlog
 from pydantic import BaseModel
 
+from recotem._metrics_bigquery import inc_bigquery_storage_fallback
 from recotem.datasource.base import DataSourceError, FetchContext
 
 # ---------------------------------------------------------------------------
@@ -226,6 +227,7 @@ class BigQuerySource:
                     exc_type=type(storage_exc).__name__,
                     exc=str(storage_exc),
                 )
+                inc_bigquery_storage_fallback("missing_extra")
                 df = query_job.to_dataframe()
             except GoogleAPICallError as storage_exc:
                 # Storage-specific API failure (commonly PermissionDenied when
@@ -236,9 +238,6 @@ class BigQuerySource:
                 #
                 # Set RECOTEM_BQ_REQUIRE_STORAGE_API=1 to disable the fallback
                 # and surface this as a hard DataSourceError instead.
-                #
-                # TODO(post-PR-85): emit recotem_bigquery_storage_fallback_total
-                # counter once metrics.py is merged.
                 if _truthy_env("RECOTEM_BQ_REQUIRE_STORAGE_API"):
                     raise DataSourceError(
                         f"BigQuery Storage Read API failed and "
@@ -255,6 +254,7 @@ class BigQuerySource:
                     exc_type=type(storage_exc).__name__,
                     exc=str(storage_exc),
                 )
+                inc_bigquery_storage_fallback("api_error")
                 df = query_job.to_dataframe()
             # Any other exception (MemoryError, RuntimeError, etc.) propagates
             # out of the inner try and is caught by the outer handler below.

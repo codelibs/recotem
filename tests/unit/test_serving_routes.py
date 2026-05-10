@@ -959,3 +959,248 @@ def test_predict_with_invalid_name_returns_422_not_503() -> None:
         assert response.status_code == 422, (
             f"Expected 422 for name={bad_name!r}, got {response.status_code}"
         )
+
+
+# ---------------------------------------------------------------------------
+# P-2: model_construct hot-path optimization
+# ---------------------------------------------------------------------------
+
+
+def test_predict_response_constructs_via_model_construct_skips_validation() -> None:
+    """The /predict handler must use model_construct (not __init__) for response models.
+
+    Patches model_construct on PredictResponse, ModelInfo, and RecommendationItem
+    to spy on whether the optimized no-validation path is used.  Asserts that
+    model_construct is called at least once for each response model class on a
+    successful predict call.
+    """
+    from unittest.mock import call, patch
+
+    from recotem.serving import routes as _routes
+
+    registry = _make_registry_with_recipe()
+    client, _ = _make_test_client(registry=registry)
+
+    predict_response_calls: list[call] = []
+    model_info_calls: list[call] = []
+    rec_item_calls: list[call] = []
+
+    original_pr = _routes.PredictResponse.model_construct
+    original_mi = _routes.ModelInfo.model_construct
+    original_ri = _routes.RecommendationItem.model_construct
+
+    def _spy_pr(*args, **kwargs):
+        predict_response_calls.append(call(*args, **kwargs))
+        return original_pr(*args, **kwargs)
+
+    def _spy_mi(*args, **kwargs):
+        model_info_calls.append(call(*args, **kwargs))
+        return original_mi(*args, **kwargs)
+
+    def _spy_ri(*args, **kwargs):
+        rec_item_calls.append(call(*args, **kwargs))
+        return original_ri(*args, **kwargs)
+
+    with (
+        patch.object(_routes.PredictResponse, "model_construct", side_effect=_spy_pr),
+        patch.object(_routes.ModelInfo, "model_construct", side_effect=_spy_mi),
+        patch.object(
+            _routes.RecommendationItem, "model_construct", side_effect=_spy_ri
+        ),
+    ):
+        response = client.post(
+            "/predict/test_recipe", json={"user_id": "user1", "cutoff": 5}
+        )
+
+    assert response.status_code == 200, (
+        f"Predict must succeed; got {response.status_code}"
+    )
+    assert len(predict_response_calls) == 1, (
+        "PredictResponse.model_construct must be called exactly once per request"
+    )
+    assert len(model_info_calls) == 1, (
+        "ModelInfo.model_construct must be called exactly once per request"
+    )
+    assert len(rec_item_calls) >= 1, (
+        "RecommendationItem.model_construct must be called at least once per request"
+    )
+
+
+def test_predict_response_still_serializes_correctly_after_model_construct() -> None:
+    """model_construct path must produce identical JSON wire format to the validated path.
+
+    Builds a PredictResponse via model_construct (the new hot path) and via
+    normal __init__ (the validated path) and asserts that FastAPI's jsonable_encoder
+    produces the same output for both, confirming the optimization doesn't break
+    the wire format.
+    """
+    import json
+
+    from fastapi.encoders import jsonable_encoder
+
+    from recotem.serving.routes import ModelInfo, PredictResponse, RecommendationItem
+
+    # Construct via normal __init__ (fully validated path).
+    validated = PredictResponse(
+        items=[
+            RecommendationItem(item_id="item1", score=0.9),
+            RecommendationItem(item_id="item2", score=0.8),
+        ],
+        model=ModelInfo(
+            recipe="test_recipe",
+            trained_at="2026-01-01T00:00:00Z",
+            best_class="TopPopRecommender",
+            kid="active",
+        ),
+        request_id="test-request-id-123",
+    )
+
+    # Construct via model_construct (the optimized hot path).
+    optimized = PredictResponse.model_construct(
+        items=[
+            # scores cast to float, item_id is str from IDMappedRecommender
+            RecommendationItem.model_construct(item_id="item1", score=0.9),
+            RecommendationItem.model_construct(item_id="item2", score=0.8),
+        ],
+        # name is FastAPI-validated, trained_at/best_class/kid from artifact header
+        model=ModelInfo.model_construct(
+            recipe="test_recipe",
+            trained_at="2026-01-01T00:00:00Z",
+            best_class="TopPopRecommender",
+            kid="active",
+        ),
+        request_id="test-request-id-123",
+    )
+
+    validated_json = json.dumps(jsonable_encoder(validated), sort_keys=True)
+    optimized_json = json.dumps(jsonable_encoder(optimized), sort_keys=True)
+
+    assert validated_json == optimized_json, (
+        f"model_construct and __init__ must produce identical JSON wire format.\n"
+        f"validated:  {validated_json}\n"
+        f"optimized:  {optimized_json}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P-1: /predict uses metadata_index for O(1) lookup
+# ---------------------------------------------------------------------------
+
+
+def test_predict_uses_metadata_index_O1_lookup() -> None:
+    """When metadata_index is populated, /predict uses dict.get rather than
+    iterating the DataFrame.
+
+    This test verifies the fast path at the integration level:
+    - Build a ModelEntry with metadata_index set and metadata_df=None.
+    - POST /predict and confirm metadata fields appear in the response.
+    - The DataFrame path is unreachable (metadata_df is None), proving the
+      response must have come from the dict index.
+    """
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+
+    metadata_index = {
+        "item1": {"title": "Widget Alpha", "category": "tools"},
+        "item2": {"title": "Widget Beta", "category": "garden"},
+    }
+
+    recommender = MagicMock()
+    recommender.get_recommendation_for_known_user_id.return_value = [
+        ("item1", 0.9),
+        ("item2", 0.8),
+    ]
+
+    entry = ModelEntry(
+        name="index_recipe",
+        recommender=recommender,
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="k1",
+        metadata_df=None,  # DataFrame path explicitly unavailable.
+        metadata_index=metadata_index,  # Only the index is set.
+    )
+    registry = ModelRegistry()
+    registry.replace("index_recipe", entry)
+
+    router = make_router(registry=registry, api_keys=[])
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/predict/index_recipe",
+        json={"user_id": "user1", "cutoff": 2},
+    )
+    assert response.status_code == 200, (
+        f"Expected 200; got {response.status_code}: {response.text}"
+    )
+    items = response.json()["items"]
+    assert len(items) == 2
+
+    # item1 must carry its metadata fields from the pre-flattened index.
+    item1 = next(it for it in items if it["item_id"] == "item1")
+    assert item1.get("title") == "Widget Alpha", (
+        f"'title' from metadata_index must appear in response; got {item1!r}"
+    )
+    assert item1.get("category") == "tools", (
+        f"'category' from metadata_index must appear in response; got {item1!r}"
+    )
+
+    # item2 must also carry its fields.
+    item2 = next(it for it in items if it["item_id"] == "item2")
+    assert item2.get("title") == "Widget Beta"
+    assert item2.get("category") == "garden"
+
+
+def test_predict_metadata_index_missing_item_returns_empty_fields() -> None:
+    """When item_id is absent from the metadata_index, no extra fields are added.
+
+    dict.get(item_id, {}) returns an empty dict for unknown items — the
+    response item contains only item_id and score, never crashes.
+    """
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+
+    metadata_index = {"known_item": {"title": "Known"}}
+
+    recommender = MagicMock()
+    recommender.get_recommendation_for_known_user_id.return_value = [
+        ("known_item", 0.9),
+        ("unknown_item", 0.5),  # not in index
+    ]
+
+    entry = ModelEntry(
+        name="partial_index_recipe",
+        recommender=recommender,
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="k1",
+        metadata_df=None,
+        metadata_index=metadata_index,
+    )
+    registry = ModelRegistry()
+    registry.replace("partial_index_recipe", entry)
+
+    router = make_router(registry=registry, api_keys=[])
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/predict/partial_index_recipe",
+        json={"user_id": "user1", "cutoff": 2},
+    )
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 2
+
+    known = next(it for it in items if it["item_id"] == "known_item")
+    assert known.get("title") == "Known"
+
+    unknown = next(it for it in items if it["item_id"] == "unknown_item")
+    # No title or extra fields -- only item_id and score.
+    assert "title" not in unknown, "Unknown item must not have metadata fields"
+    assert "item_id" in unknown and "score" in unknown

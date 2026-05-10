@@ -8,6 +8,11 @@ The ``/metrics`` endpoint itself is opt-in via the
 ``yes``, ``on``).  When the variable is unset or any other value, the
 endpoint returns 404 even if recorders are populating the registry.
 
+All metrics share the default ``prometheus_client`` registry, which means
+``generate_latest()`` exposes both the serving-layer metrics defined here
+and the datasource-layer metrics defined in ``recotem._metrics_bigquery``
+(e.g. ``recotem_bigquery_storage_fallback_total``).
+
 Metric inventory (matches docs/operations.md):
 
 | Name                                           | Type       | Labels             |
@@ -22,6 +27,8 @@ Metric inventory (matches docs/operations.md):
 | ``recotem_watcher_unhandled_errors_total``     | Counter    | —                  |
 | ``recotem_metadata_lookup_errors_total``       | Counter    | recipe             |
 | ``recotem_recipe_rescan_errors_total``         | Counter    | recipe             |
+| ``recotem_bigquery_storage_fallback_total``    | Counter    | reason             |
+| ``recotem_recipes_dir_scan_failures_total``    | Counter    | error_class        |
 """
 
 from __future__ import annotations

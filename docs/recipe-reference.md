@@ -227,6 +227,13 @@ Path schemes for `source.path` and `item_metadata.path`: any fsspec-supported
 scheme is accepted. Schemes `http://` and `https://` additionally require an
 `sha256` integrity pin on the same config block.
 
+> **Decompressed-size cap not enforced.** `RECOTEM_MAX_DOWNLOAD_BYTES` caps
+> raw I/O bytes only. Compressed CSV and columnar Parquet sources can expand
+> to a multiple of the raw size after decompression; the resulting DataFrame
+> is not size-capped. Run `recotem train` inside a cgroup or Kubernetes Pod
+> with a memory limit to contain the impact. See
+> [security.md — Decompressed-size cap not enforced](security.md#decompressed-size-cap-not-enforced-medium-5).
+
 `output.path` rejects schemes that fsspec does not implement for writes:
 `http://`, `https://`, `ftp://`, `ftps://`, `memory://`. Acceptable output
 schemes: bare local, `file://`, `s3://`, `gs://`, `az://`, `abfs://`, `abfss://`.

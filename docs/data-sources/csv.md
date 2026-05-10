@@ -38,6 +38,14 @@ source:
 
 Compressed files (`.gz`, `.bz2`, `.zip`, `.xz`) are decompressed transparently.
 
+> **Decompressed-size cap not enforced.** `RECOTEM_MAX_DOWNLOAD_BYTES` caps
+> the raw bytes read from `source.path`. It does **not** cap the pandas
+> DataFrame produced after decompression. A highly compressed CSV that fits
+> within the raw cap can expand to many times that size in memory. Run
+> `recotem train` inside a cgroup, systemd unit with `MemoryMax=`, or a
+> Kubernetes Pod with `resources.limits.memory` to contain the train process.
+> See [security.md — Decompressed-size cap not enforced](../security.md#decompressed-size-cap-not-enforced-medium-5).
+
 ## Parquet source
 
 ```yaml

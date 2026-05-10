@@ -1207,6 +1207,84 @@ def test_compute_recipe_hash_differs_for_different_recipes(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
+# MAJOR-3: _compute_recipe_hash must normalise Path separators to POSIX style
+# ---------------------------------------------------------------------------
+
+
+def test_compute_recipe_hash_normalizes_windows_style_paths() -> None:
+    """Paths on Windows serialize as '\\'-separated strings; hash must be identical
+    to the POSIX forward-slash form so that artifact headers produced on
+    different OSes are comparable.
+
+    We bypass the Recipe constructor (which would reject a PureWindowsPath for
+    source.path) and call ``_normalize_paths_for_hash`` directly with a dict
+    that mimics what ``model_dump`` returns when a ``PureWindowsPath`` slips
+    through (e.g. via an ``Any``-typed field on a Windows host).
+    """
+    import pathlib
+
+    from recotem.training.pipeline import _normalize_paths_for_hash
+
+    win_path = pathlib.PureWindowsPath("C:\\data\\recipes\\file.csv")
+    posix_path = pathlib.PurePosixPath("C:/data/recipes/file.csv")
+
+    # Both must normalise to the same POSIX string.
+    win_result = _normalize_paths_for_hash({"path": win_path})
+    posix_result = _normalize_paths_for_hash({"path": posix_path})
+
+    assert win_result == {"path": "C:/data/recipes/file.csv"}, (
+        f"PureWindowsPath must be converted to POSIX; got {win_result!r}"
+    )
+    assert posix_result == {"path": "C:/data/recipes/file.csv"}, (
+        f"PurePosixPath must be converted to POSIX; got {posix_result!r}"
+    )
+    assert win_result == posix_result, (
+        "Windows-style and POSIX-style paths for the same location must "
+        f"produce identical normalised dicts; got {win_result!r} vs {posix_result!r}"
+    )
+
+
+def test_compute_recipe_hash_path_independent_serialization(tmp_path: Path) -> None:
+    """The recipe hash must not vary based on which pathlib class holds the path.
+
+    We inject a ``Path`` instance into the dump dict by hand (simulating what
+    happens when ``model_dump`` encounters a ``pathlib.Path`` inside an
+    ``Any``-typed field) and verify the hash equals the one produced when the
+    same path is represented as a plain POSIX string.
+    """
+    import json
+    import pathlib
+
+    from recotem.training.pipeline import (
+        _json_default_for_hash,
+        _normalize_paths_for_hash,
+    )
+
+    posix_str = "/data/recipes/news_articles.csv"
+
+    # Dict with a plain string path (baseline).
+    string_dict = {"source": {"path": posix_str, "type": "csv"}}
+
+    # Dict with a pathlib.Path instance (what might come from an Any-typed field).
+    path_dict = {"source": {"path": pathlib.Path(posix_str), "type": "csv"}}
+
+    def _canonical(d: dict) -> str:
+        return json.dumps(
+            _normalize_paths_for_hash(d),
+            sort_keys=True,
+            separators=(",", ":"),
+            default=_json_default_for_hash,
+        )
+
+    assert _canonical(string_dict) == _canonical(path_dict), (
+        "The canonical JSON for a plain string path and a pathlib.Path with the "
+        "same value must be identical; got:\n"
+        f"  string: {_canonical(string_dict)!r}\n"
+        f"  path:   {_canonical(path_dict)!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # B-1 regression: _train_final filters best_params to __init__-accepted keys
 # ---------------------------------------------------------------------------
 

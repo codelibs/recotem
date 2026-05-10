@@ -1804,3 +1804,266 @@ def test_build_entry_memory_error_propagates_through_load_recipe(
             force=True,
             marker=("v1", None),
         )
+
+
+# ---------------------------------------------------------------------------
+# M-6: recipes_dir scan failure counter
+# ---------------------------------------------------------------------------
+
+
+def test_recipes_dir_scan_failure_increments_counter_on_recipe_error(
+    tmp_path: Path,
+) -> None:
+    """When _scan_recipes_dir encounters a per-recipe load failure for a
+    brand-new YAML (not previously registered), the neutral
+    recotem_recipes_dir_scan_failures_total counter must be incremented.
+
+    This ensures operators can observe silent per-recipe load errors even
+    when the recipe has never made it into the registry.
+    """
+    from unittest.mock import patch
+
+    from recotem._metrics_watcher import inc_recipes_dir_scan_failure
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    # Write a YAML that is syntactically broken so load_recipe raises.
+    bad_yaml = recipes_dir / "broken.yaml"
+    bad_yaml.write_text("name: [invalid yaml {{{\n")
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+
+    call_args: list[str] = []
+    original = inc_recipes_dir_scan_failure
+
+    def _spy(error_class: str) -> None:
+        call_args.append(error_class)
+        original(error_class)
+
+    with patch(
+        "recotem.serving.watcher._inc_scan_failure",
+        side_effect=_spy,
+    ):
+        watcher._scan_recipes_dir()
+
+    watcher._executor.shutdown(wait=False)
+
+    assert call_args, (
+        "inc_recipes_dir_scan_failure must be called when a per-recipe YAML "
+        "load fails in _scan_recipes_dir"
+    )
+
+
+def test_recipes_dir_scan_failure_counter_label_is_error_class_name(
+    tmp_path: Path,
+) -> None:
+    """The error_class label passed to inc_recipes_dir_scan_failure must be
+    ``type(exc).__name__``, not a generic constant.
+
+    Strategy: write a YAML file whose load_recipe call (imported locally inside
+    _scan_recipes_dir) will raise ValueError.  Patch the module-level import in
+    recotem.recipe.loader so the local import inside the method resolves to the
+    stub.  Assert the spy receives 'ValueError'.
+    """
+    from unittest.mock import patch
+
+    import recotem.recipe.loader as _loader_mod
+    from recotem._metrics_watcher import inc_recipes_dir_scan_failure
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    # Any YAML file will do — load_recipe is patched to raise before it reads.
+    (recipes_dir / "target.yaml").write_text("name: target\n")
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+
+    call_args: list[str] = []
+
+    def _spy(error_class: str) -> None:
+        call_args.append(error_class)
+        inc_recipes_dir_scan_failure(error_class)
+
+    # _scan_recipes_dir does `from recotem.recipe.loader import load_recipe`
+    # inside the loop.  Patching the attribute on the module object redirects
+    # that local import to our stub.
+    with patch.object(_loader_mod, "load_recipe", side_effect=ValueError("boom")):
+        with patch("recotem.serving.watcher._inc_scan_failure", side_effect=_spy):
+            watcher._scan_recipes_dir()
+
+    watcher._executor.shutdown(wait=False)
+
+    assert call_args, "inc_recipes_dir_scan_failure must be called"
+    assert call_args[0] == "ValueError", (
+        f"error_class label must be 'ValueError'; got {call_args[0]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# S-4: _extract_kid_safe log-DoS guard
+# ---------------------------------------------------------------------------
+
+
+def test_extract_kid_safe_truncates_long_kid_in_log(tmp_path: Path) -> None:
+    """_extract_kid_safe must truncate any kid longer than _KID_LOG_MAX_LEN
+    characters and append '...<truncated>' so log aggregators are not flooded.
+
+    We build a synthetic artifact whose kid field is artificially long by
+    exploiting the _format_kid_for_log helper directly (since MAX_KID_LEN
+    is only 32, we can't embed an actual >64-char kid in a real artifact).
+    """
+    from recotem.serving.watcher import _KID_LOG_MAX_LEN, _format_kid_for_log
+
+    long_kid = "a" * (_KID_LOG_MAX_LEN + 10)
+    result = _format_kid_for_log(long_kid)
+
+    assert len(result) <= _KID_LOG_MAX_LEN + len("...<truncated>"), (
+        "Formatted kid must not exceed _KID_LOG_MAX_LEN + truncation suffix"
+    )
+    assert result.endswith("...<truncated>"), (
+        f"Long kid must be suffixed with '...<truncated>'; got {result!r}"
+    )
+    assert result.startswith("a" * _KID_LOG_MAX_LEN), (
+        "First _KID_LOG_MAX_LEN chars must be preserved before the suffix"
+    )
+
+
+def test_extract_kid_safe_strips_non_printable_chars(tmp_path: Path) -> None:
+    """_format_kid_for_log must replace non-printable bytes with '?' to prevent
+    terminal escape-sequence injection in log output.
+    """
+    from recotem.serving.watcher import _format_kid_for_log
+
+    # Include an ANSI escape, a null byte, and a tab (non-printable)
+    evil_kid = "hello\x1b[31mred\x00\tworld"
+    result = _format_kid_for_log(evil_kid)
+
+    assert "\x1b" not in result, "ESC character must be replaced with '?'"
+    assert "\x00" not in result, "Null byte must be replaced with '?'"
+    assert "\t" not in result, "Tab must be replaced with '?'"
+    assert "?" in result, "Non-printable characters must become '?'"
+    # Printable chars must be preserved
+    assert "hello" in result
+    assert "world" in result
+
+
+# ---------------------------------------------------------------------------
+# P-4: pointer-only poll for append-sha sidecar files
+# ---------------------------------------------------------------------------
+
+
+def test_pointer_only_poll_skips_full_read_when_sidecar_unchanged(
+    tmp_path: Path,
+) -> None:
+    """When a ``.sha256`` sidecar exists and its contents are unchanged,
+    _check_sidecar_changed must return False and log a
+    'pointer_unchanged_skip_read' debug event, so the expensive full
+    artifact read is skipped.
+    """
+    import structlog.testing
+
+    from recotem.serving.watcher import _check_sidecar_changed, _RecipeWatchState
+
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(b"placeholder")
+    sidecar_path = Path(str(artifact_path) + ".sha256")
+    sidecar_contents = "model.abc12345.recotem\n"
+    sidecar_path.write_text(sidecar_contents)
+
+    recipe = MagicMock()
+    recipe.name = "sidecar_test"
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_sidecar_contents=sidecar_contents,  # already known — unchanged
+    )
+
+    with structlog.testing.capture_logs() as cap:
+        changed = _check_sidecar_changed(state)
+
+    assert changed is False, (
+        "_check_sidecar_changed must return False when sidecar contents are unchanged"
+    )
+    skip_events = [e for e in cap if e.get("event") == "pointer_unchanged_skip_read"]
+    assert skip_events, (
+        "pointer_unchanged_skip_read debug event must be emitted when sidecar is unchanged"
+    )
+
+
+def test_pointer_change_triggers_full_read(tmp_path: Path) -> None:
+    """When the ``.sha256`` sidecar contents differ from last-known,
+    _check_sidecar_changed must return True and update
+    state.last_sidecar_contents in-place.
+    """
+    from recotem.serving.watcher import _check_sidecar_changed, _RecipeWatchState
+
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(b"placeholder")
+    sidecar_path = Path(str(artifact_path) + ".sha256")
+    old_contents = "model.abc12345.recotem\n"
+    new_contents = "model.def67890.recotem\n"
+    sidecar_path.write_text(new_contents)
+
+    recipe = MagicMock()
+    recipe.name = "sidecar_change_test"
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_sidecar_contents=old_contents,  # stale: file now has new_contents
+    )
+
+    changed = _check_sidecar_changed(state)
+
+    assert changed is True, (
+        "_check_sidecar_changed must return True when sidecar contents changed"
+    )
+    assert state.last_sidecar_contents == new_contents, (
+        "state.last_sidecar_contents must be updated to the new sidecar value"
+    )
+
+
+def test_no_sidecar_falls_back_to_full_stat_compare(tmp_path: Path) -> None:
+    """When no ``.sha256`` sidecar exists, _check_sidecar_changed must return
+    False so the caller falls back to the existing full-stat marker comparison.
+    """
+    from recotem.serving.watcher import _check_sidecar_changed, _RecipeWatchState
+
+    artifact_path = tmp_path / "model_no_sidecar.recotem"
+    artifact_path.write_bytes(b"placeholder")
+    # Confirm no sidecar exists
+    sidecar_path = Path(str(artifact_path) + ".sha256")
+    assert not sidecar_path.exists(), "Test setup error: sidecar must not exist"
+
+    recipe = MagicMock()
+    recipe.name = "no_sidecar_test"
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_sidecar_contents=None,
+    )
+
+    changed = _check_sidecar_changed(state)
+
+    assert changed is False, (
+        "_check_sidecar_changed must return False when no sidecar file exists; "
+        "caller must use full-stat comparison as fallback"
+    )

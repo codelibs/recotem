@@ -771,6 +771,66 @@ def test_safe_unpickler_rejects_numpy_random() -> None:
     assert _is_allowed("numpy.random._pickle", "__bit_generator_ctor") is False
 
 
+def test_numpy_random_module_rejected() -> None:
+    """numpy.random.* is in _DENIED_MODULE_PREFIXES; SafeUnpickler must refuse
+    any class from that subtree via find_class.
+
+    numpy.random is denied defensively: bit-generator state (PCG64, MT19937,
+    Generator, RandomState) is never needed in Recotem artifacts.  Rejecting
+    the entire subtree prevents a future numpy release from smuggling a
+    side-effect-carrying reduce-callable through the broad numpy._core.*
+    prefix allow-list.
+    """
+    import io
+
+    from recotem.artifact.signing import SafeUnpickler, _is_allowed
+
+    # _is_allowed helper must deny these via the deny-list
+    assert _is_allowed("numpy.random", "RandomState") is False
+    assert _is_allowed("numpy.random", "Generator") is False
+    assert _is_allowed("numpy.random._pickle", "__bit_generator_ctor") is False
+    assert _is_allowed("numpy.random._pickle", "__generator_ctor") is False
+
+    # SafeUnpickler.find_class (the real hook fired for every GLOBAL opcode)
+    # must raise ArtifactError -- not just the helper.
+    unpickler = SafeUnpickler(io.BytesIO(b""))
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickler.find_class("numpy.random", "RandomState")
+
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickler.find_class("numpy.random._pickle", "__bit_generator_ctor")
+
+
+def test_numpy_core_exceptions_module_rejected() -> None:
+    """numpy._core._exceptions is in _DENIED_MODULE_PREFIXES; SafeUnpickler
+    must refuse any class from that subtree via find_class.
+
+    numpy._core._exceptions is numpy's internal exception hierarchy.  It is
+    not referenced by any irspack / scipy reconstruction path, so it is denied
+    explicitly to narrow the attack surface exposed through the broad
+    numpy._core.* prefix allow-list (which permits only reconstruction helpers
+    and dtype factories).
+    """
+    import io
+
+    from recotem.artifact.signing import SafeUnpickler, _is_allowed
+
+    # _is_allowed helper must deny these via the deny-list
+    assert _is_allowed("numpy._core._exceptions", "_ArrayMemoryError") is False
+    assert _is_allowed("numpy._core._exceptions", "_UFuncNoLoopError") is False
+    # Children of the module (submodule dot) are also denied
+    assert _is_allowed("numpy._core._exceptions.foo", "_SomeError") is False
+
+    # SafeUnpickler.find_class (the real hook fired for every GLOBAL opcode)
+    # must raise ArtifactError -- not just the helper.
+    unpickler = SafeUnpickler(io.BytesIO(b""))
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickler.find_class("numpy._core._exceptions", "_ArrayMemoryError")
+
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickler.find_class("numpy._core._exceptions", "_UFuncNoLoopError")
+
+
 def test_module_prefix_allows_numpy_core_reconstruct() -> None:
     """Both numpy 1.x (``numpy.core.multiarray._reconstruct``) and numpy 2.x
     (``numpy._core.multiarray._reconstruct``) reconstruction helpers are

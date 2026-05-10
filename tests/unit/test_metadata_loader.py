@@ -655,3 +655,155 @@ def test_metadata_sha256_cap_fires_when_stat_silent(
             _Config("csv", str(csv_file), sha256=real_sha256),
             fields=["title"],
         )
+
+
+# ---------------------------------------------------------------------------
+# P-1: build_metadata_index — pre-flattened dict for O(1) /predict lookups
+# ---------------------------------------------------------------------------
+
+
+def test_load_metadata_returns_dict_indexed_by_item_id(tmp_path: Path) -> None:
+    """build_metadata_index returns a dict[str, dict[str, Any]] keyed by item_id.
+
+    Every item_id from the DataFrame index must appear as a key in the
+    returned dict, and each value must be a dict of field->value pairs.
+    """
+    from recotem.metadata.loader import build_metadata_index
+
+    csv_file = _write_csv(
+        tmp_path,
+        "item_id,title,category\ni1,Widget A,tools\ni2,Widget B,garden\ni3,Widget C,home\n",
+    )
+    df = load_item_metadata(
+        _Config("csv", str(csv_file)),
+        fields=["title", "category"],
+    )
+    index = build_metadata_index(df)
+
+    assert isinstance(index, dict), "build_metadata_index must return a dict"
+    assert set(index.keys()) == {"i1", "i2", "i3"}, (
+        f"Keys must match item_ids; got {set(index.keys())}"
+    )
+    assert index["i1"] == {"title": "Widget A", "category": "tools"}
+    assert index["i2"] == {"title": "Widget B", "category": "garden"}
+    assert index["i3"] == {"title": "Widget C", "category": "home"}
+
+
+def test_load_metadata_strips_denylisted_fields_at_flatten_time(tmp_path: Path) -> None:
+    """build_metadata_index omits deny-listed fields from every per-item dict.
+
+    Deny filtering applied once at flatten time means /predict can use
+    the pre-filtered dict directly without any runtime column check.
+    """
+    from recotem.metadata.loader import build_metadata_index
+
+    csv_file = _write_csv(
+        tmp_path,
+        "item_id,title,secret_col\ni1,Public Title,secret-value\n",
+    )
+    df = load_item_metadata(
+        _Config("csv", str(csv_file)),
+        fields=["title", "secret_col"],
+    )
+    # Deny 'secret_col' at flatten time -- case-folded as per router convention.
+    deny_set: frozenset[str] = frozenset({"secret_col"})
+    index = build_metadata_index(df, deny_set=deny_set)
+
+    assert "i1" in index
+    assert "title" in index["i1"], "'title' must be present (not denied)"
+    assert "secret_col" not in index["i1"], (
+        "'secret_col' must be absent (denied at flatten time)"
+    )
+
+    # Case-insensitivity: deny entry is lowercase, column may be mixed-case.
+    csv_file2 = _write_csv(
+        tmp_path,
+        "item_id,title,Secret_Col\ni2,Another,hide-me\n",
+        "meta2.csv",
+    )
+    df2 = load_item_metadata(
+        _Config("csv", str(csv_file2)),
+        fields=["title", "Secret_Col"],
+    )
+    deny_set2: frozenset[str] = frozenset({"secret_col"})  # lowercase deny entry
+    index2 = build_metadata_index(df2, deny_set=deny_set2)
+    assert "Secret_Col" not in index2.get("i2", {}), (
+        "Deny set must be case-insensitive (lowercase deny blocks mixed-case column)"
+    )
+
+
+def test_load_metadata_converts_NaN_to_None_for_json_safety(tmp_path: Path) -> None:
+    """build_metadata_index replaces float NaN with None for JSON safety.
+
+    pandas uses float NaN for missing values (even in object columns).
+    Standard json.dumps raises on NaN; Pydantic model_construct passes it
+    through.  The index must contain None so the response serialises cleanly.
+    """
+    import io
+
+    import pandas as pd
+
+    from recotem.metadata.loader import build_metadata_index
+
+    parquet_buf = io.BytesIO()
+    pd.DataFrame(
+        {
+            "item_id": ["p1", "p2"],
+            "title": ["Alpha", "Beta"],
+            "score": [float("nan"), 7.5],
+        }
+    ).to_parquet(parquet_buf, index=False)
+    parquet_buf.seek(0)
+    parquet_file = tmp_path / "nan_meta.parquet"
+    parquet_file.write_bytes(parquet_buf.read())
+
+    df = load_item_metadata(
+        _Config("parquet", str(parquet_file)),
+        fields=["title", "score"],
+    )
+    index = build_metadata_index(df)
+
+    # p1 has NaN score -- must be None in the index.
+    assert index["p1"]["score"] is None, (
+        f"float NaN must be converted to None; got {index['p1']['score']!r}"
+    )
+    # p2 has a real float score -- must be preserved.
+    assert index["p2"]["score"] == 7.5, (
+        f"Non-NaN float must be preserved; got {index['p2']['score']!r}"
+    )
+
+
+def test_load_metadata_handles_duplicate_item_ids(tmp_path: Path) -> None:
+    """build_metadata_index reflects first-wins deduplication from load_item_metadata.
+
+    load_item_metadata already drops duplicate item_ids (keeping the FIRST
+    occurrence via drop_duplicates(keep='first')).  build_metadata_index
+    therefore receives a DataFrame with a unique index, so each item_id maps
+    to exactly one dict.  This test documents and pins the first-wins contract.
+    """
+    from recotem.metadata.loader import build_metadata_index
+
+    # The CSV has two rows for 'dup_id'. load_item_metadata keeps the first.
+    csv_file = _write_csv(
+        tmp_path,
+        "item_id,title\ndup_id,First Title\ndup_id,Second Title\ni2,Unique\n",
+    )
+    df = load_item_metadata(
+        _Config("csv", str(csv_file)),
+        fields=["title"],
+    )
+    # The DataFrame must already be deduplicated (first-wins) by load_item_metadata.
+    assert list(df.index).count("dup_id") == 1, (
+        "load_item_metadata must deduplicate -- first-wins"
+    )
+    assert df.loc["dup_id", "title"] == "First Title", (
+        "First occurrence must be kept when deduplicating"
+    )
+
+    index = build_metadata_index(df)
+
+    # The index must contain exactly one entry for 'dup_id'.
+    assert "dup_id" in index
+    assert index["dup_id"]["title"] == "First Title", (
+        "build_metadata_index must reflect first-wins deduplication from loader"
+    )

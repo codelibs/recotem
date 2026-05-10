@@ -63,6 +63,27 @@ class LockContestedError(Exception):
     code = "lock_contested"
 
 
+class LockTimeoutError(LockContestedError):
+    """Raised when the recipe lock could not be acquired within the timeout.
+
+    This is a subclass of ``LockContestedError`` so existing
+    ``except LockContestedError`` handlers continue to work without change.
+
+    Attributes
+    ----------
+    waited_seconds:
+        Approximate wall-clock seconds spent waiting for the lock before
+        giving up.  Useful for distinguishing "timed out after waiting" from
+        "immediately unavailable" in operational logs.
+    """
+
+    code = "lock_timeout"
+
+    def __init__(self, message: str, *, waited_seconds: float) -> None:
+        super().__init__(message)
+        self.waited_seconds = waited_seconds
+
+
 _LOCAL_SCHEMES = {"", "file"}
 
 
@@ -115,7 +136,12 @@ def recipe_lock(
     Raises
     ------
     LockContestedError
-        Only when *fail_on_busy* is ``True`` and the lock cannot be acquired.
+        Only when *fail_on_busy* is ``True`` and the lock cannot be acquired
+        immediately (i.e. ``timeout=0`` or first-attempt failure).
+    LockTimeoutError
+        Subclass of ``LockContestedError``.  Raised when *timeout* > 0 and
+        the deadline expires before the lock is acquired.  Carries
+        ``waited_seconds`` for operational log correlation.
     """
     output_str = str(output_path)
     scheme = urlparse(output_str).scheme.lower() if "://" in output_str else ""
@@ -175,7 +201,8 @@ def recipe_lock(
                 # Polling loop for a timed acquire.
                 import time  # noqa: PLC0415
 
-                deadline = time.monotonic() + timeout
+                start = time.monotonic()
+                deadline = start + timeout
                 while True:
                     try:
                         fcntl.flock(fd, lock_op | fcntl.LOCK_NB)
@@ -190,8 +217,20 @@ def recipe_lock(
                             errno.EAGAIN,
                         ):
                             raise
-                        if time.monotonic() >= deadline:
-                            raise
+                        now = time.monotonic()
+                        if now >= deadline:
+                            waited = now - start
+                            logger.warning(
+                                "recipe_lock_timeout",
+                                lock_path=str(lock_path),
+                                waited_seconds=round(waited, 3),
+                                timeout=timeout,
+                            )
+                            raise LockTimeoutError(
+                                f"Recipe lock at {lock_path} could not be acquired "
+                                f"within {timeout}s (waited {waited:.3f}s).",
+                                waited_seconds=waited,
+                            ) from _poll_exc
                         time.sleep(0.05)
             else:
                 fcntl.flock(fd, lock_op)

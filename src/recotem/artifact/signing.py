@@ -159,6 +159,20 @@ _DENIED_MODULE_PREFIXES: tuple[str, ...] = (
     "numpy.lib.",
     "numpy.compat",
     "numpy.compat.",
+    # numpy.random: RNG state and bit-generator state (PCG64, MT19937, etc.)
+    # are not needed in Recotem artifacts.  Denied defensively because a future
+    # numpy release could introduce a reduce-callable in the random module that
+    # carries side-effects.  Any legitimate RNG class needed by a future irspack
+    # version should be added by exact FQCN to _ALLOWED_CLASSES rather than
+    # widening this deny-list (prefer explicit allow over implicit leak).
+    "numpy.random",
+    "numpy.random.",
+    # numpy._core._exceptions: internal exception hierarchy; not referenced by
+    # any irspack / scipy reconstruction path.  Denied to shrink the internal
+    # attack surface exposed through the broad numpy._core.* prefix allow-list
+    # (the prefix only permits reconstruction helpers and dtype factories).
+    "numpy._core._exceptions",
+    "numpy._core._exceptions.",
     # scipy.sparse: linalg.LinearOperator accepts an arbitrary callable
     # (matvec=...), test runner internals, csgraph C extensions.  Recotem
     # payloads only need csr / csc / coo from scipy.sparse._{csr,csc,coo}.

@@ -26,6 +26,9 @@ Environment variables:
                                  (default 256 MiB; clamped 1 MiB–16 GiB)
   RECOTEM_HTTP_TIMEOUT_SECONDS Timeout in seconds for HTTP/HTTPS datasource
                                  fetch (default 30; clamped 1–600)
+  RECOTEM_STARTUP_PARALLELISM  Number of parallel threads used to load
+                                 artifacts at startup (default min(recipes, 8);
+                                 clamped 1–32)
 """
 
 from __future__ import annotations
@@ -71,6 +74,12 @@ _MIN_PAYLOAD_BYTES = 1 * 1024 * 1024  # 1 MiB
 _MAX_PAYLOAD_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
 _DEFAULT_DRAIN_SECONDS = 30
 _DEFAULT_ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+
+# Startup parallelism for artifact loading (per-recipe threads at serve startup)
+_MIN_STARTUP_PARALLELISM = 1
+_MAX_STARTUP_PARALLELISM = 32
+# Sentinel: 0 means "derive from len(recipes) at startup, capped at 8"
+_DEFAULT_STARTUP_PARALLELISM_SENTINEL = 0
 
 # Exact hex length for a sha256 hash: 64 hex chars = 32 bytes.
 _SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -230,6 +239,11 @@ class ServeConfig:
     # Not sourced from an env var; must be set explicitly.
     recipes_dir: str = ""
 
+    # Startup parallelism — number of threads used to load artifacts in parallel
+    # at startup.  0 = sentinel meaning "min(len(recipes), 8)" (resolved in
+    # create_app).  Set via RECOTEM_STARTUP_PARALLELISM (clamped [1, 32]).
+    startup_parallelism: int = _DEFAULT_STARTUP_PARALLELISM_SENTINEL
+
     @classmethod
     def from_env(cls) -> ServeConfig:
         """Build a :class:`ServeConfig` from the current environment.
@@ -348,6 +362,17 @@ class ServeConfig:
         )
 
         cfg.metadata_field_deny = _split_csv_env("RECOTEM_METADATA_FIELD_DENY", [])
+
+        # RECOTEM_STARTUP_PARALLELISM (clamped 1–32; 0 = derive from recipe count)
+        raw_parallelism = os.environ.get("RECOTEM_STARTUP_PARALLELISM", "").strip()
+        if raw_parallelism:
+            cfg.startup_parallelism = _clamped_int_env(
+                "RECOTEM_STARTUP_PARALLELISM",
+                _DEFAULT_STARTUP_PARALLELISM_SENTINEL,
+                _MIN_STARTUP_PARALLELISM,
+                _MAX_STARTUP_PARALLELISM,
+            )
+        # else leave as sentinel 0 → resolved at startup in create_app
 
         # Invariant: payload cap must not exceed the artifact cap.
         # RECOTEM_MAX_PAYLOAD_BYTES is documented as "Smaller than

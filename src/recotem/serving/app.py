@@ -21,6 +21,8 @@ Notes:
 from __future__ import annotations
 
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -107,22 +109,79 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # we still insert a stub (loaded=False, last_load_error=<reason>) so
     # /health returns degraded and operators can see which recipes are not
     # serving.  /predict checks `loaded` and returns 503 for stubs.
+    #
+    # Loads are parallelised via a ThreadPoolExecutor so startup time is
+    # bounded by the slowest single artifact rather than the sum of all
+    # artifact load times.  Parallelism is configurable via
+    # RECOTEM_STARTUP_PARALLELISM (clamped [1, 32]; default min(N, 8)).
     registry = ModelRegistry()
     loaded_entries: dict[str, ModelEntry] = {}
 
-    for recipe in recipes:
-        entry = _try_load_artifact(recipe, key_ring, serve_config)
-        registry.replace(recipe.name, entry)
-        _metrics.set_model_loaded(recipe.name, entry.loaded)
-        if entry.loaded:
-            loaded_entries[recipe.name] = entry
-        else:
-            _metrics.inc_artifact_load_failure(recipe.name)
-            logger.warning(
-                "recipe_not_loaded_at_startup",
-                name=recipe.name,
-                error=entry.last_load_error,
-            )
+    n_recipes = len(recipes)
+    if serve_config.startup_parallelism <= 0:
+        # Sentinel: derive default from recipe count, capped at 8.
+        max_workers = min(n_recipes, 8) if n_recipes > 0 else 1
+    else:
+        max_workers = serve_config.startup_parallelism
+
+    _startup_t0 = time.perf_counter()
+
+    if n_recipes == 0:
+        # Nothing to load; emit the summary immediately.
+        logger.info(
+            "startup_artifact_load_complete",
+            total_recipes=0,
+            succeeded=0,
+            failed=0,
+            wall_seconds=0.0,
+            max_workers=max_workers,
+        )
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_recipe = {
+                executor.submit(
+                    _try_load_artifact, recipe, key_ring, serve_config
+                ): recipe
+                for recipe in recipes
+            }
+            # executor.shutdown(wait=True) is called on __exit__; we consume
+            # results as they complete so we can register entries promptly
+            # even if one recipe is slow.
+            for future in as_completed(future_to_recipe):
+                recipe = future_to_recipe[future]
+                # _try_load_artifact never raises (it catches internally and
+                # returns a stub), but guard defensively.
+                try:
+                    entry = future.result()
+                except Exception as exc:  # pragma: no cover — defensive only
+                    logger.warning(
+                        "recipe_load_future_error",
+                        name=recipe.name,
+                        error=str(exc),
+                    )
+                    entry = _failed_entry(recipe, f"unexpected error: {exc}")
+
+                registry.replace(recipe.name, entry)
+                _metrics.set_model_loaded(recipe.name, entry.loaded)
+                if entry.loaded:
+                    loaded_entries[recipe.name] = entry
+                else:
+                    _metrics.inc_artifact_load_failure(recipe.name)
+                    logger.warning(
+                        "recipe_not_loaded_at_startup",
+                        name=recipe.name,
+                        error=entry.last_load_error,
+                    )
+
+        _wall_seconds = time.perf_counter() - _startup_t0
+        logger.info(
+            "startup_artifact_load_complete",
+            total_recipes=n_recipes,
+            succeeded=len(loaded_entries),
+            failed=n_recipes - len(loaded_entries),
+            wall_seconds=round(_wall_seconds, 3),
+            max_workers=max_workers,
+        )
 
     _metrics.set_active_recipes(len(loaded_entries))
 

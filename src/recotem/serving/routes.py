@@ -167,24 +167,42 @@ def make_router(
                 structlog.contextvars.clear_contextvars()
 
             # Build item list, joining metadata if available.
-            items: list[dict[str, Any]] = []
-            meta_df = entry.metadata_df
+            # Fast path: use the pre-flattened metadata_index (O(1) dict.get
+            # per item, deny filtering and NaN→None already applied at load
+            # time).  Fallback to the DataFrame path only for entries that
+            # pre-date the index field (e.g. stubs created directly in tests).
+            rec_items: list[RecommendationItem] = []
+            meta_index = entry.metadata_index
+            meta_df = entry.metadata_df if meta_index is None else None
 
             for item_id, score in raw_results:
-                item: dict[str, Any] = {"item_id": item_id, "score": float(score)}
-                if meta_df is not None:
+                fields: dict[str, Any] = {
+                    "item_id": item_id,
+                    "score": float(score),
+                }
+                if meta_index is not None:
+                    fields.update(meta_index.get(item_id, {}))
+                elif meta_df is not None:
                     row = _lookup_metadata(meta_df, item_id, _deny_set, name)
-                    item.update(row)
-                items.append(item)
+                    fields.update(row)
+                # item_id is str (IDMappedRecommender internal key), score is
+                # cast to float above; extra metadata fields are preserved as-is
+                # by extra="allow" with no coercion in either path.
+                rec_items.append(RecommendationItem.model_construct(**fields))
 
-            predict_response = PredictResponse(
-                items=[RecommendationItem(**it) for it in items],
-                model=ModelInfo(
-                    recipe=name,
-                    trained_at=entry.trained_at,
-                    best_class=entry.best_class,
-                    kid=entry.kid,
-                ),
+            # name is FastAPI-validated (Path regex), trained_at/best_class/kid
+            # are str|None straight from the trusted artifact header and registry.
+            model_info = ModelInfo.model_construct(
+                recipe=name,
+                trained_at=entry.trained_at,
+                best_class=entry.best_class,
+                kid=entry.kid,
+            )
+            # rec_items are RecommendationItem instances; model_info is a
+            # ModelInfo instance; request_id is a str (echo or uuid4).
+            predict_response = PredictResponse.model_construct(
+                items=rec_items,
+                model=model_info,
                 request_id=request_id,
             )
 

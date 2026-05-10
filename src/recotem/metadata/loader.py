@@ -15,12 +15,18 @@ enforced here too: sha256 byte-content verification, ``RECOTEM_MAX_DOWNLOAD_BYTE
 cap, ``RECOTEM_HTTP_TIMEOUT_SECONDS`` timeout, capped redirect loop with a
 scheme allow-list, and userinfo redaction in logs. See
 ``docs/security.md`` for the threat model.
+
+``build_metadata_index`` converts a loaded DataFrame into a
+``dict[str, dict[str, Any]]`` keyed by item_id for O(1) per-item lookups
+during ``/predict`` — NaN values are converted to ``None`` for JSON safety
+and deny-listed fields are stripped once at build time.
 """
 
 from __future__ import annotations
 
+import math
 from io import BytesIO
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -176,6 +182,76 @@ def load_item_metadata(
         item_id_column=item_id_col,
     )
     return df
+
+
+def build_metadata_index(
+    df: pd.DataFrame,
+    deny_set: frozenset[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Convert a metadata DataFrame into a pre-flattened dict for O(1) lookups.
+
+    This function is called once at model-load time (in the watcher's
+    ``_build_entry``) so that ``/predict`` can perform an O(1) dict ``.get()``
+    per recommended item rather than an O(n) DataFrame index lookup followed by
+    row serialisation.
+
+    Parameters
+    ----------
+    df:
+        DataFrame returned by :func:`load_item_metadata` — indexed by
+        string item_id, columns are the metadata fields.
+    deny_set:
+        Optional set of **lowercase** field names to strip from every
+        per-item dict.  Filtering is applied here once rather than on
+        every request.  Pass ``frozenset(s.lower() for s in deny_list)``
+        (the same normalisation used in :func:`~recotem.serving.routes.make_router`).
+
+    Returns
+    -------
+    dict[str, dict[str, Any]]
+        ``{item_id: {field: value, ...}, ...}`` where:
+
+        - ``item_id`` is the string index value (already str-coerced by
+          :func:`load_item_metadata`).
+        - Duplicate item_ids are not possible here because
+          :func:`load_item_metadata` already drops them (first-wins).
+        - ``float NaN`` values are replaced by ``None`` so the dict is
+          safe to pass directly to ``json.dumps`` or Pydantic's
+          ``model_construct``.
+        - Fields whose lowercased name appears in *deny_set* are omitted.
+        - Non-string column names are omitted (same guard as
+          :func:`~recotem.serving.routes._lookup_metadata`).
+    """
+    _deny: frozenset[str] = deny_set or frozenset()
+    index: dict[str, dict[str, Any]] = {}
+
+    # Iterate over records once; orient="index" keys by the DataFrame index.
+    # Using .iterrows() is explicit and avoids loading the entire dict into
+    # memory twice (to_dict(orient="index") materialises all rows at once
+    # but so does iterrows; they are equivalent here — iterrows chosen for
+    # clarity and to avoid a second full pass over to_dict).
+    for item_id, row in df.iterrows():
+        item_dict: dict[str, Any] = {}
+        for col, val in row.items():
+            if not isinstance(col, str):
+                continue
+            if col.lower() in _deny:
+                continue
+            # Convert float NaN to None for JSON-safety.  Pandas uses float
+            # NaN for missing values even in object-typed columns; standard
+            # json.dumps raises on NaN by default (or silently emits 'NaN'
+            # which is not valid JSON).
+            if isinstance(val, float) and math.isnan(val):
+                val = None
+            item_dict[col] = val
+        index[str(item_id)] = item_dict
+
+    logger.debug(
+        "metadata_index_built",
+        n_items=len(index),
+        deny_fields=len(_deny),
+    )
+    return index
 
 
 # ---------------------------------------------------------------------------

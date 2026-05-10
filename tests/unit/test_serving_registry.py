@@ -418,3 +418,64 @@ def test_models_dict_normal_header_has_no_hmac_or_key() -> None:
     assert set(result.keys()) == expected_keys, (
         f"models_dict() added unexpected keys: {set(result.keys()) - expected_keys}"
     )
+
+
+# ---------------------------------------------------------------------------
+# P-1: ModelEntry carries metadata_index dict
+# ---------------------------------------------------------------------------
+
+
+def test_registry_entry_carries_metadata_index_dict() -> None:
+    """ModelEntry must accept and expose a metadata_index dict.
+
+    The metadata_index field is the pre-flattened dict[str, dict[str, Any]]
+    built by build_metadata_index at model-load time.  Verify that:
+    - ModelEntry can be constructed with metadata_index set.
+    - The field value is preserved exactly (same object identity).
+    - metadata_index defaults to None when not supplied.
+    - Both metadata_df and metadata_index can coexist (dual-carry design).
+    """
+    import pandas as pd
+
+    metadata_index = {
+        "i1": {"title": "Widget A", "category": "tools"},
+        "i2": {"title": "Widget B", "category": "garden"},
+    }
+    df = pd.DataFrame(
+        {"title": ["Widget A", "Widget B"], "category": ["tools", "garden"]},
+        index=pd.Index(["i1", "i2"], name="item_id"),
+    )
+
+    entry = ModelEntry(
+        name="recipe_with_index",
+        recommender=MagicMock(),
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="active",
+        metadata_df=df,
+        metadata_index=metadata_index,
+    )
+
+    # The index is carried as-is (same object).
+    assert entry.metadata_index is metadata_index, (
+        "ModelEntry.metadata_index must be the same object passed at construction"
+    )
+    # The DataFrame is also carried alongside the index.
+    assert entry.metadata_df is df, (
+        "ModelEntry.metadata_df must be carried alongside metadata_index"
+    )
+    # Spot-check a lookup.
+    assert entry.metadata_index["i1"]["title"] == "Widget A"
+    assert entry.metadata_index["i2"]["category"] == "garden"
+
+
+def test_registry_entry_metadata_index_defaults_to_none() -> None:
+    """ModelEntry.metadata_index must default to None when not provided."""
+    entry = ModelEntry(
+        name="no_metadata_recipe",
+        recommender=MagicMock(),
+        header={},
+        kid="active",
+    )
+    assert entry.metadata_index is None, (
+        "metadata_index must default to None when not set"
+    )

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from recotem.training.lock import LockContestedError, recipe_lock
+from recotem.training.lock import LockContestedError, LockTimeoutError, recipe_lock
 
 
 @pytest.fixture(autouse=True)
@@ -503,6 +503,118 @@ def test_lock_refuses_to_follow_symlink(tmp_path: Path) -> None:
     assert target_file.read_text() == "attacker controlled content", (
         "recipe_lock must not write to the symlink target file"
     )
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-5: LockTimeoutError — distinguish timeout from immediate-busy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_LockTimeoutError_is_LockContestedError_subclass() -> None:
+    """LockTimeoutError must be a subclass of LockContestedError so that
+    existing ``except LockContestedError`` handlers catch it without change."""
+    assert issubclass(LockTimeoutError, LockContestedError), (
+        "LockTimeoutError must be a subclass of LockContestedError to preserve "
+        "all existing exception-handling paths"
+    )
+    # Instances must satisfy isinstance checks in both directions.
+    exc = LockTimeoutError("timed out", waited_seconds=1.5)
+    assert isinstance(exc, LockContestedError)
+    assert isinstance(exc, LockTimeoutError)
+    assert exc.waited_seconds == 1.5
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_recipe_lock_timeout_raises_LockTimeoutError(tmp_path: Path) -> None:
+    """When timeout > 0 and the lock cannot be acquired within the deadline,
+    recipe_lock must raise LockTimeoutError (not the base LockContestedError)
+    and the waited_seconds attribute must reflect the actual wait time."""
+    import fcntl
+    import os
+
+    output_path = tmp_path / "timeout_test.recotem"
+    lock_path = Path(str(output_path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _hold_lock(lock_path_str: str, ready_event, release_event) -> None:
+        fd = os.open(lock_path_str, os.O_CREAT | os.O_WRONLY, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ready_event.set()
+        release_event.wait(timeout=5.0)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Event()
+    release = ctx.Event()
+
+    p = ctx.Process(target=_hold_lock, args=(str(lock_path), ready, release))
+    p.start()
+    ready.wait(timeout=3.0)
+
+    try:
+        with pytest.raises(LockTimeoutError) as exc_info:
+            with recipe_lock(output_path, timeout=0.1, fail_on_busy=True):
+                pass  # pragma: no cover
+        assert exc_info.value.waited_seconds == pytest.approx(0.1, abs=0.05), (
+            f"waited_seconds should be ~0.1 ± 0.05, "
+            f"got {exc_info.value.waited_seconds:.3f}"
+        )
+    finally:
+        release.set()
+        p.join(timeout=3.0)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_recipe_lock_immediate_busy_raises_base_LockContestedError_not_timeout(
+    tmp_path: Path,
+) -> None:
+    """When timeout=0 (non-blocking, immediate failure) and fail_on_busy=True,
+    recipe_lock must raise the base LockContestedError, NOT LockTimeoutError.
+
+    This allows operators to distinguish:
+    - "never tried to wait" (LockContestedError, not LockTimeoutError)
+    - "waited but deadline expired" (LockTimeoutError)
+    """
+    import fcntl
+    import os
+
+    output_path = tmp_path / "immediate_busy.recotem"
+    lock_path = Path(str(output_path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _hold_lock(lock_path_str: str, ready_event, release_event) -> None:
+        fd = os.open(lock_path_str, os.O_CREAT | os.O_WRONLY, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ready_event.set()
+        release_event.wait(timeout=5.0)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Event()
+    release = ctx.Event()
+
+    p = ctx.Process(target=_hold_lock, args=(str(lock_path), ready, release))
+    p.start()
+    ready.wait(timeout=3.0)
+
+    try:
+        with pytest.raises(LockContestedError) as exc_info:
+            with recipe_lock(output_path, timeout=0.0, fail_on_busy=True):
+                pass  # pragma: no cover
+        # Must be base class, not the timeout subclass
+        assert type(exc_info.value) is LockContestedError, (
+            f"Immediate-busy path must raise exactly LockContestedError, "
+            f"not {type(exc_info.value).__name__}"
+        )
+        assert not isinstance(exc_info.value, LockTimeoutError), (
+            "Immediate-busy (timeout=0) must NOT raise LockTimeoutError"
+        )
+    finally:
+        release.set()
+        p.join(timeout=3.0)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")

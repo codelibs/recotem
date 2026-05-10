@@ -46,10 +46,54 @@ The internet-facing boundary is `recotem serve`. `recotem train` has no inbound 
 | SQL injection via recipe | Env expansion never performed inside `source.query`; dynamic values must use `@param` BigQuery placeholders |
 | Path traversal via recipe | `name` validated with `^[A-Za-z0-9_-]{1,64}$` at load and before every filesystem use; artifact root confinement via `RECOTEM_ARTIFACT_ROOT` |
 | Tampered or rotated network-fetched data | `sha256` integrity pin is **mandatory** on `source.path` / `item_metadata.path` when the scheme is `http://` or `https://`; mismatch raises `DataSourceError` (exit 3) before the bytes reach the parser |
-| Resource exhaustion via giant network fetch | `RECOTEM_MAX_DOWNLOAD_BYTES` (default 256 MiB) caps the in-memory body during HTTP/HTTPS fetch; cap exceeded → `DataSourceError` mid-stream |
+| Resource exhaustion via giant network fetch | `RECOTEM_MAX_DOWNLOAD_BYTES` (default 256 MiB) caps the raw I/O body during fetch; cap exceeded → `DataSourceError` mid-stream. Does NOT cap the decompressed DataFrame — see [Decompressed-size cap not enforced](#decompressed-size-cap-not-enforced-medium-5) |
 | Plaintext HTTP source on the public internet | Operator policy. `http://` is allowed (legitimate inside trusted networks) but operators MUST avoid plaintext on the public internet; sha256 mitigates content tampering for any reachable response |
 | Unrecognised plugin loading arbitrary code | Conflicting plugin `type_name` fails startup; installed plugins are treated as trusted code (pin versions) |
 | Unauthenticated external access | Default bind `127.0.0.1`; `--insecure-no-auth` gated by `RECOTEM_ENV=development`; `TrustedHostMiddleware` blocks unrecognized hosts |
+
+## Decompressed-size cap not enforced (MEDIUM-5)
+
+`RECOTEM_MAX_DOWNLOAD_BYTES` caps the number of raw bytes read from any source
+path (HTTP/HTTPS body, local file I/O, object-store stream). It does **not**
+cap the size of the pandas DataFrame that Pandas constructs after decompression
+and parsing.
+
+### How the gap arises
+
+Compressed CSV files (`.gz`, `.bz2`, `.zip`, `.xz`) and columnar Parquet files
+with aggressive compression can expand by an order of magnitude or more when
+decompressed. A 256 MiB `.csv.gz` that compresses at 20:1 produces a ~5 GiB
+in-memory DataFrame without any raw I/O byte ever being refused by the cap.
+`item_metadata.path` is subject to the same gap.
+
+### Attack scenario
+
+A recipe author who has permission to create or modify recipes can point
+`source.path` at a highly compressed CSV and submit it to `recotem train`.
+The train process will accept the raw bytes (under the cap), decompress the
+file, and attempt to build a DataFrame that exceeds the available process
+memory, causing the train process to be killed by the OOM killer. No signing
+key is required; recipe-authoring permission is the only prerequisite.
+
+### Current mitigations (incomplete)
+
+The raw I/O cap (`RECOTEM_MAX_DOWNLOAD_BYTES`) prevents unbounded network
+downloads but does not constrain decompressed size. There is no DataFrame-level
+memory cap in the current implementation.
+
+### Recommended operator-side mitigations
+
+Until a DataFrame-level cap is implemented in a future release, operators
+should apply one or more of the following controls:
+
+| Control | How to apply |
+|---------|-------------|
+| Restrict recipe-authoring permission | Treat recipe creation and modification as a privileged action. Only operators or CI pipelines with write access to the recipes directory should be able to submit new recipes to `recotem train`. |
+| cgroup memory limit | Run `recotem train` inside a cgroup with a hard memory limit (`MemoryMax=` in a systemd unit, `docker run --memory`, or an equivalent). The OOM kill remains, but it is scoped to the train container rather than the host. |
+| `RLIMIT_AS` | Set `resource.setrlimit(resource.RLIMIT_AS, (limit, limit))` in a wrapper before invoking the train binary, or use `ulimit -v` in the wrapper shell. This caps the virtual address space of the process. |
+| Kubernetes `resources.limits.memory` | Set a memory limit on the train Pod or CronJob. The Pod is evicted rather than the node being destabilised. Example: `resources: { limits: { memory: "4Gi" } }`. See `docs/deployment/k8s.md`. |
+
+**Note:** cgroup / RLIMIT controls do not prevent the OOM event — they contain it. A deliberately malicious recipe will still abort the current training run. The real prevention is restricting who can author recipes.
 
 ## Network-source fetch behaviour
 

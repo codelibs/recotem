@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 import fsspec
 import structlog
 
+from recotem._metrics_watcher import inc_recipes_dir_scan_failure as _inc_scan_failure
 from recotem.artifact.format import ArtifactError
 from recotem.serving import metrics as _metrics
 from recotem.serving.registry import ModelEntry, ModelRegistry
@@ -163,6 +164,9 @@ class _RecipeWatchState:
     artifact_path: str
     last_marker: Any = None
     last_sha256: str = ""
+    #: Last-known contents of the ``.sha256`` sidecar pointer file.
+    #: ``None`` means we have not yet read the sidecar (or it does not exist).
+    last_sidecar_contents: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +313,7 @@ class ArtifactWatcher(threading.Thread):
                 # Strategy: recipe names conventionally match the YAML file
                 # stem (e.g. "news.yaml" → recipe name "news").  Use the stem
                 # as the candidate name and cross-check against current_names.
+                error_class = type(exc).__name__
                 yaml_stem = yaml_file.stem
                 if yaml_stem in current_names:
                     # Keep the entry in found_names → it won't be deleted.
@@ -330,6 +335,12 @@ class ArtifactWatcher(threading.Thread):
                         file=yaml_file.name,
                         error=str(exc),
                     )
+                # Always increment the neutral scan-failure counter regardless
+                # of whether the recipe was previously registered.  This gives
+                # operators a reliable signal that per-recipe load errors are
+                # occurring, even for brand-new YAML files that have not yet
+                # entered the registry (M-6).
+                _inc_scan_failure(error_class)
                 continue
 
             found_names.add(recipe.name)
@@ -426,6 +437,22 @@ class ArtifactWatcher(threading.Thread):
                 continue
 
             if marker == state.last_marker:
+                # Fast path: pointer/mtime unchanged.  For append_sha
+                # artifacts we additionally check the cheap ``.sha256``
+                # sidecar pointer file so the watcher can skip the full
+                # artifact stat on the *resolved* target when neither the
+                # pointer file nor the sidecar have changed (P-4).
+                sidecar_changed = _check_sidecar_changed(state)
+                if not sidecar_changed:
+                    continue
+                # Sidecar changed — fall through to full reload below.
+                # If the full read subsequently fails, record it so the
+                # operator can see the sidecar-stale condition in metrics.
+                try:
+                    self._load_recipe(name, state, force=False, marker=marker)
+                except Exception:
+                    _inc_scan_failure("sidecar_stale")
+                    raise
                 continue
 
             self._load_recipe(name, state, force=False, marker=marker)
@@ -528,7 +555,7 @@ class ArtifactWatcher(threading.Thread):
         logger.info(
             "artifact_hot_swapped",
             name=name,
-            kid=entry.kid,
+            kid=_format_kid_for_log(entry.kid),
             trained_at=entry.trained_at,
         )
 
@@ -563,7 +590,7 @@ class ArtifactWatcher(threading.Thread):
             logger.warning(
                 "artifact_hmac_skipped_dev_allow_unsigned",
                 name=name,
-                kid=hdr.kid,
+                kid=_format_kid_for_log(hdr.kid),
             )
 
         # Decode header JSON BEFORE deserializing the payload so a corrupt
@@ -577,8 +604,15 @@ class ArtifactWatcher(threading.Thread):
         recommender = unpickle_payload(payload_bytes)
 
         metadata_df = None
+        metadata_index = None
         if recipe.item_metadata is not None:
             metadata_df = _load_metadata(recipe, name)
+            from recotem.metadata.loader import build_metadata_index
+
+            deny_set: frozenset[str] = frozenset(
+                s.lower() for s in (self._config.metadata_field_deny or [])
+            )
+            metadata_index = build_metadata_index(metadata_df, deny_set)
 
         return ModelEntry(
             name=name,
@@ -586,6 +620,7 @@ class ArtifactWatcher(threading.Thread):
             header=header_dict,
             kid=hdr.kid,
             metadata_df=metadata_df,
+            metadata_index=metadata_index,
             last_load_error=None,
             artifact_path=artifact_path,
         )
@@ -610,6 +645,48 @@ class ArtifactWatcher(threading.Thread):
 # Utility helpers
 # ---------------------------------------------------------------------------
 
+#: Maximum number of ASCII characters shown for a kid in log messages.
+#: Prevents a malicious artifact from flooding log aggregation (S-4).
+_KID_LOG_MAX_LEN: int = 64
+
+
+def _format_kid_for_log(raw: bytes | str) -> str:
+    """Sanitize a raw kid value for safe inclusion in structured log fields.
+
+    Applies two defences (S-4):
+
+    1. **Length cap** — truncates to ``_KID_LOG_MAX_LEN`` characters and
+       appends ``...<truncated>`` so the log line stays bounded regardless
+       of what a malicious file embeds in the kid field.
+    2. **Non-printable scrub** — replaces any character whose ``isprintable()``
+       check fails with ``?`` to prevent terminal escape-sequence injection.
+
+    Parameters
+    ----------
+    raw:
+        The kid value extracted from the artifact header, either as ``bytes``
+        (will be decoded with ``errors="replace"``) or as a plain ``str``.
+
+    Returns
+    -------
+    str
+        A safe, human-readable representation of the kid, suitable for
+        structured log fields.
+    """
+    if isinstance(raw, (bytes, bytearray)):
+        kid_str = raw.decode("utf-8", errors="replace")
+    else:
+        kid_str = str(raw)
+
+    # Replace non-printable characters with '?' (blocks terminal escape injection)
+    kid_str = "".join(c if c.isprintable() else "?" for c in kid_str)
+
+    # Cap length to prevent log aggregation DoS
+    if len(kid_str) > _KID_LOG_MAX_LEN:
+        kid_str = kid_str[:_KID_LOG_MAX_LEN] + "...<truncated>"
+
+    return kid_str
+
 
 def _extract_kid_safe(data: bytes) -> str:
     """Best-effort extraction of kid from raw artifact bytes.
@@ -619,6 +696,10 @@ def _extract_kid_safe(data: bytes) -> str:
     truncated artifact.  Programming bugs (``AttributeError``,
     ``ImportError``, etc.) are allowed to propagate so the caller's existing
     ``artifact_load_unexpected_error`` handler can surface them.
+
+    The returned string is already sanitized via ``_format_kid_for_log``
+    so it is safe to embed in structured log fields without further processing
+    (length-capped, non-printables replaced with ``?``).
     """
     from recotem.artifact.format import FIXED_PREFIX_SIZE, MAX_KID_LEN
 
@@ -630,11 +711,77 @@ def _extract_kid_safe(data: bytes) -> str:
             return "<unknown>"
         if len(data) < FIXED_PREFIX_SIZE + kid_len:
             return "<unknown>"
-        return data[FIXED_PREFIX_SIZE : FIXED_PREFIX_SIZE + kid_len].decode(
-            "utf-8", errors="replace"
-        )
+        raw_kid = data[FIXED_PREFIX_SIZE : FIXED_PREFIX_SIZE + kid_len]
+        return _format_kid_for_log(raw_kid)
     except (IndexError, UnicodeDecodeError, ValueError):
         return "<unknown>"
+
+
+def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
+    """Return ``True`` when the ``.sha256`` sidecar pointer has changed.
+
+    For ``versioning: append_sha`` artifacts the recipe's ``output.path`` is
+    a small ASCII pointer file.  A ``.sha256`` sidecar (``<output_path>.sha256``)
+    may be written alongside it by external tooling that manages artifact
+    versions; the sidecar's contents summarise which sha-suffixed artifact is
+    current.  When the sidecar exists and its contents are unchanged, the
+    watcher can skip the full artifact stat/read entirely (P-4 pointer-only
+    poll optimisation).
+
+    Behaviour
+    ---------
+    - If no ``.sha256`` sidecar exists next to the artifact path, returns
+      ``False`` (caller falls back to full-stat comparison).
+    - If the sidecar exists and its contents are identical to
+      ``state.last_sidecar_contents``, returns ``False`` (skip full read).
+    - If the sidecar exists and its contents differ (or have not yet been
+      read), updates ``state.last_sidecar_contents`` and returns ``True``
+      (proceed with full reload).
+    - On any I/O error reading the sidecar, returns ``False`` (conservative:
+      let the full-stat path decide).
+
+    Parameters
+    ----------
+    state:
+        The per-recipe watcher state.  ``last_sidecar_contents`` is updated
+        in-place when the sidecar changes.
+
+    Returns
+    -------
+    bool
+        ``True`` if the sidecar changed and a full reload should be triggered.
+        ``False`` if unchanged or absent (let the outer marker comparison decide).
+    """
+    artifact_path = state.artifact_path
+    # Only meaningful for local-FS paths where we can form a sibling sidecar.
+    # For remote URIs (s3://, gs://) this is a no-op; the marker comparison
+    # (ETag / mtime) is already cheap enough.
+    try:
+        sidecar_path = Path(artifact_path + ".sha256")
+    except TypeError:
+        return False
+
+    if not sidecar_path.exists():
+        return False
+
+    try:
+        sidecar_contents = sidecar_path.read_text(encoding="utf-8")
+    except OSError:
+        # Can't read the sidecar — be conservative and let the full stat run.
+        return False
+
+    if sidecar_contents == state.last_sidecar_contents:
+        # Sidecar unchanged — the artifact itself has not changed.
+        logger.debug(
+            "pointer_unchanged_skip_read",
+            recipe=state.recipe.name if hasattr(state.recipe, "name") else "<unknown>",
+            sidecar=str(sidecar_path),
+        )
+        return False
+
+    # Sidecar changed — signal to the caller that a reload is needed.
+    state.last_sidecar_contents = sidecar_contents
+    return True
 
 
 def _load_metadata(recipe: Any, recipe_name: str) -> Any:

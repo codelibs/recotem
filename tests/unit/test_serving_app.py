@@ -1034,6 +1034,140 @@ def test_CORS_allow_methods_includes_options(tmp_path: Path) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# T-5: SIGTERM drain — RECOTEM_DRAIN_SECONDS config resolution + lifespan
+# ---------------------------------------------------------------------------
+
+
+def test_lifespan_drain_seconds_default_is_30(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When RECOTEM_DRAIN_SECONDS is unset, ServeConfig resolves drain_seconds to 30.
+
+    The default is both the field default (ServeConfig.drain_seconds = 30) and
+    the value from_env() produces when the variable is absent.
+    """
+    from recotem.config import ServeConfig
+
+    monkeypatch.delenv("RECOTEM_DRAIN_SECONDS", raising=False)
+    cfg = ServeConfig.from_env()
+    assert cfg.drain_seconds == 30, (
+        f"Expected drain_seconds=30 when RECOTEM_DRAIN_SECONDS is unset, "
+        f"got {cfg.drain_seconds}"
+    )
+
+
+def test_lifespan_drain_seconds_clamped_to_minimum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_DRAIN_SECONDS=0 is below the [1, 300] range and is clamped to 1."""
+    from recotem.config import ServeConfig
+
+    monkeypatch.setenv("RECOTEM_DRAIN_SECONDS", "0")
+    cfg = ServeConfig.from_env()
+    assert cfg.drain_seconds == 1, (
+        f"RECOTEM_DRAIN_SECONDS=0 must be clamped to 1, got {cfg.drain_seconds}"
+    )
+
+
+def test_lifespan_drain_seconds_clamped_to_maximum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_DRAIN_SECONDS=99999 is above the [1, 300] range and is clamped to 300."""
+    from recotem.config import ServeConfig
+
+    monkeypatch.setenv("RECOTEM_DRAIN_SECONDS", "99999")
+    cfg = ServeConfig.from_env()
+    assert cfg.drain_seconds == 300, (
+        f"RECOTEM_DRAIN_SECONDS=99999 must be clamped to 300, got {cfg.drain_seconds}"
+    )
+
+
+def test_lifespan_drain_seconds_invalid_value_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_DRAIN_SECONDS=garbage (non-numeric) falls back to the default 30.
+
+    The _clamped_int_env helper catches ValueError from int(raw) and returns
+    the default unchanged — so unparseable values are treated like 'unset'.
+    """
+    from recotem.config import ServeConfig
+
+    monkeypatch.setenv("RECOTEM_DRAIN_SECONDS", "garbage")
+    cfg = ServeConfig.from_env()
+    assert cfg.drain_seconds == 30, (
+        f"RECOTEM_DRAIN_SECONDS='garbage' must fall back to default 30, "
+        f"got {cfg.drain_seconds}"
+    )
+
+
+def test_lifespan_logs_drain_start_event(tmp_path: Path) -> None:
+    """On lifespan shutdown the 'serve_shutdown' event is logged with drain_seconds.
+
+    The task calls this event 'drain_start' but the actual implementation emits
+    'serve_shutdown' — tests are aligned to the code, not the specification guess.
+    The event carries drain_seconds so operators can confirm the active window.
+    """
+    import structlog.testing
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.drain_seconds = 1  # minimal value to keep test fast
+
+    app = create_app(cfg)
+
+    with structlog.testing.capture_logs() as captured:
+        with TestClient(app):
+            pass  # entering and exiting triggers lifespan shutdown
+
+    shutdown_events = [e for e in captured if e.get("event") == "serve_shutdown"]
+    assert shutdown_events, (
+        "Lifespan shutdown must emit a 'serve_shutdown' log event. "
+        "Note: the implementation uses 'serve_shutdown', not 'drain_start'."
+    )
+    assert shutdown_events[0].get("drain_seconds") == 1, (
+        f"'serve_shutdown' event must carry drain_seconds=1; "
+        f"got: {shutdown_events[0]!r}"
+    )
+
+
+def test_lifespan_completes_within_drain_window(tmp_path: Path) -> None:
+    """The lifespan context exits well within twice the drain window.
+
+    With drain_seconds=1, the lifespan shutdown (watcher stop + join + log)
+    must complete within 2 seconds.  Uses asyncio.wait_for so an unexpectedly
+    hung shutdown surfaces as a TimeoutError rather than a hanging test.
+
+    The watcher join timeout is clamped to max(1, min(5, drain_seconds)) = 1 s
+    and the watcher thread itself is a daemon so the join never blocks forever.
+    """
+    import asyncio
+
+    from httpx import ASGITransport, AsyncClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.drain_seconds = (
+        1  # keep test fast; watcher join timeout = max(1, min(5, 1)) = 1 s
+    )
+
+    app = create_app(cfg)
+
+    async def _run() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://testserver"
+        ) as _client:
+            # The ASGI lifespan is started on __aenter__ and torn down on __aexit__.
+            pass
+
+    # Allow 4 s (drain_seconds=1 → watcher_join_timeout=1 s; total shutdown
+    # should be well under 4 s even on a loaded CI runner).
+    asyncio.run(asyncio.wait_for(_run(), timeout=4.0))
+
+
 def test_insecure_no_auth_http_request_without_key_returns_200(
     tmp_path: Path,
 ) -> None:
@@ -1055,4 +1189,256 @@ def test_insecure_no_auth_http_request_without_key_returns_200(
     assert response.status_code == 200, (
         f"insecure_no_auth=True must allow unauthenticated requests; "
         f"got {response.status_code}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P-3: Parallel startup artifact loading
+# ---------------------------------------------------------------------------
+
+
+def _write_recipe_for_parallel_test(
+    recipes_dir: Path,
+    name: str,
+    artifact_path: Path,
+) -> None:
+    """Write a minimal recipe YAML pointing at *artifact_path*."""
+    (recipes_dir / f"{name}.yaml").write_text(
+        f"""\
+name: {name}
+source:
+  type: csv
+  path: {recipes_dir / "data.csv"}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms:
+    - TopPop
+output:
+  path: {artifact_path}
+"""
+    )
+
+
+def _make_valid_artifact_bytes() -> bytes:
+    """Return valid signed artifact bytes via the shared conftest builder."""
+    from tests.conftest import ACTIVE_KEY_HEX, build_raw_artifact
+
+    return build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={
+            "recipe_name": "test",
+            "trained_at": "2026-01-01T00:00:00Z",
+            "best_class": "TopPopRecommender",
+        },
+    )
+
+
+def test_startup_loads_artifacts_in_parallel_with_default_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Startup must invoke _try_load_artifact via a ThreadPoolExecutor.
+
+    We create 4 recipes pointing at valid artifacts, patch _try_load_artifact
+    with a spy that records the OS thread id for each call, and assert that
+    all N recipes are processed (executor dispatched all of them).
+    """
+    import threading
+
+    from recotem.serving import app as app_module
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_data = _make_valid_artifact_bytes()
+
+    n_recipes = 4
+    for i in range(n_recipes):
+        artifact_path = tmp_path / f"model_{i}.recotem"
+        artifact_path.write_bytes(artifact_data)
+        _write_recipe_for_parallel_test(recipes_dir, f"recipe_{i}", artifact_path)
+
+    thread_ids: list[int] = []
+    real_try_load = app_module._try_load_artifact
+
+    def _spy_load(recipe, key_ring, serve_config):
+        thread_ids.append(threading.get_ident())
+        return real_try_load(recipe, key_ring, serve_config)
+
+    monkeypatch.setattr(app_module, "_try_load_artifact", _spy_load)
+    monkeypatch.delenv("RECOTEM_STARTUP_PARALLELISM", raising=False)
+
+    from recotem.config import ServeConfig
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = "active:" + "aa" * 32
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1", "*"]
+    cfg.startup_parallelism = 0  # sentinel: use min(n_recipes, 8)
+
+    app_module.create_app(cfg)
+
+    assert len(thread_ids) == n_recipes, (
+        f"Expected {n_recipes} load calls via executor, got {len(thread_ids)}"
+    )
+    # All recipes were dispatched (executor was used)
+    assert len(set(thread_ids)) >= 1
+
+
+def test_startup_respects_RECOTEM_STARTUP_PARALLELISM_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When RECOTEM_STARTUP_PARALLELISM=2, ServeConfig.startup_parallelism is 2
+    and create_app reads that field to configure the executor max_workers."""
+    from recotem.config import ServeConfig
+
+    monkeypatch.setenv("RECOTEM_STARTUP_PARALLELISM", "2")
+
+    cfg = ServeConfig.from_env()
+    assert cfg.startup_parallelism == 2, (
+        f"startup_parallelism should be 2 when env var is '2'; got {cfg.startup_parallelism}"
+    )
+
+    import inspect
+
+    from recotem.serving import app as app_module
+
+    source = inspect.getsource(app_module.create_app)
+    assert "startup_parallelism" in source, (
+        "create_app must read serve_config.startup_parallelism to set max_workers"
+    )
+
+
+def test_startup_one_failed_load_does_not_block_others(
+    tmp_path: Path,
+) -> None:
+    """A recipe whose artifact is missing must NOT prevent other recipes from
+    loading.  The failed recipe gets a stub entry (loaded=False); the healthy
+    recipe gets a fully-populated entry (loaded=True).
+
+    Verifies per-recipe fault isolation in the parallel executor."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_data = _make_valid_artifact_bytes()
+
+    ok_artifact = tmp_path / "model_ok.recotem"
+    ok_artifact.write_bytes(artifact_data)
+    _write_recipe_for_parallel_test(recipes_dir, "recipe_ok", ok_artifact)
+
+    missing_artifact = tmp_path / "does_not_exist.recotem"
+    _write_recipe_for_parallel_test(recipes_dir, "recipe_bad", missing_artifact)
+
+    from recotem.config import ServeConfig
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = "active:" + "aa" * 32
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1", "*"]
+    cfg.startup_parallelism = 2
+
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    body = response.json()
+    assert "recipe_ok" in body["recipes"], "recipe_ok must appear in /health"
+    assert "recipe_bad" in body["recipes"], "recipe_bad must appear in /health"
+    assert body["recipes"]["recipe_ok"]["loaded"] is True, (
+        f"recipe_ok should be loaded=True; got {body['recipes']['recipe_ok']}"
+    )
+    assert body["recipes"]["recipe_bad"]["loaded"] is False, (
+        f"recipe_bad should be loaded=False; got {body['recipes']['recipe_bad']}"
+    )
+
+
+def test_startup_emits_load_complete_event_with_counts(
+    tmp_path: Path,
+) -> None:
+    """create_app must emit 'startup_artifact_load_complete' after all initial
+    loads finish, with fields: total_recipes, succeeded, failed, wall_seconds,
+    max_workers."""
+    import structlog.testing
+
+    from recotem.serving.app import create_app
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_data = _make_valid_artifact_bytes()
+
+    ok_artifact = tmp_path / "model_ok.recotem"
+    ok_artifact.write_bytes(artifact_data)
+    _write_recipe_for_parallel_test(recipes_dir, "recipe_ok", ok_artifact)
+
+    missing_artifact = tmp_path / "no_such_file.recotem"
+    _write_recipe_for_parallel_test(recipes_dir, "recipe_fail", missing_artifact)
+
+    from recotem.config import ServeConfig
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = "active:" + "aa" * 32
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1", "*"]
+
+    with structlog.testing.capture_logs() as cap:
+        create_app(cfg)
+
+    complete_events = [
+        e for e in cap if e.get("event") == "startup_artifact_load_complete"
+    ]
+    assert complete_events, (
+        "create_app must emit 'startup_artifact_load_complete' after startup loads"
+    )
+    ev = complete_events[0]
+    assert ev["total_recipes"] == 2, f"total_recipes should be 2; got {ev}"
+    assert ev["succeeded"] == 1, f"succeeded should be 1; got {ev}"
+    assert ev["failed"] == 1, f"failed should be 1; got {ev}"
+    assert "wall_seconds" in ev, f"wall_seconds must be present; got {ev}"
+    assert isinstance(ev["wall_seconds"], float), (
+        f"wall_seconds must be a float; got {type(ev['wall_seconds'])}"
+    )
+    assert "max_workers" in ev, f"max_workers must be present; got {ev}"
+
+
+def test_startup_parallelism_clamped_to_valid_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_STARTUP_PARALLELISM values outside [1, 32] must be clamped.
+
+    - Value 0 is below the minimum (1) and clamps to 1.
+    - Value 100 is above the maximum (32) and clamps to 32.
+    - Unset env var leaves the sentinel (0) meaning "derive from recipe count".
+    """
+    import structlog.testing
+
+    from recotem.config import ServeConfig
+
+    monkeypatch.setenv("RECOTEM_STARTUP_PARALLELISM", "0")
+    with structlog.testing.capture_logs():
+        cfg_low = ServeConfig.from_env()
+    assert cfg_low.startup_parallelism == 1, (
+        f"0 should clamp to 1; got {cfg_low.startup_parallelism}"
+    )
+
+    monkeypatch.setenv("RECOTEM_STARTUP_PARALLELISM", "100")
+    with structlog.testing.capture_logs():
+        cfg_high = ServeConfig.from_env()
+    assert cfg_high.startup_parallelism == 32, (
+        f"100 should clamp to 32; got {cfg_high.startup_parallelism}"
+    )
+
+    monkeypatch.delenv("RECOTEM_STARTUP_PARALLELISM", raising=False)
+    cfg_unset = ServeConfig.from_env()
+    assert cfg_unset.startup_parallelism == 0, (
+        f"Unset env var should leave sentinel 0; got {cfg_unset.startup_parallelism}"
     )

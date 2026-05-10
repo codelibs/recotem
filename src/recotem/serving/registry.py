@@ -41,6 +41,17 @@ class ModelEntry:
     metadata_df:
         Optional pandas DataFrame of item metadata, indexed by item_id string.
         ``None`` if no item_metadata is configured for this recipe.
+        Retained alongside ``metadata_index`` to allow debug introspection
+        and to support future analytics without re-loading the file.
+        Memory cost is less than 2× because ``metadata_index`` stores the
+        same string/scalar data that the DataFrame already holds in object
+        columns — no large numeric arrays are duplicated.
+    metadata_index:
+        Pre-flattened ``dict[str, dict[str, Any]]`` keyed by item_id for
+        O(1) per-item lookups during ``/predict``.  Built once at model-load
+        time by :func:`~recotem.metadata.loader.build_metadata_index` with
+        NaN→None normalisation and deny-list filtering already applied.
+        ``None`` when no item_metadata is configured for this recipe.
     last_load_error:
         If the most recent load attempt failed, this holds the error string.
         A non-None value here means the entry is *stale* (it was loaded on a
@@ -60,6 +71,7 @@ class ModelEntry:
     header: dict[str, Any]
     kid: str
     metadata_df: Any | None = None  # pd.DataFrame | None
+    metadata_index: dict[str, Any] | None = None  # dict[str, dict[str, Any]] | None
     last_load_error: str | None = None
     artifact_path: str = ""
     loaded: bool = True

@@ -352,8 +352,6 @@ The `/metrics` endpoint is opt-in and off by default. Set `RECOTEM_METRICS_ENABL
 > template ships with a deny-all baseline; allow only the scrapers and
 > probes you actually need.
 
-<!-- TODO(post-merge): re-sync metric inventory after pending serving/ additions -->
-
 Available metrics:
 
 | Metric | Type | Labels |
@@ -368,6 +366,8 @@ Available metrics:
 | `recotem_watcher_unhandled_errors_total` | Counter | — |
 | `recotem_metadata_lookup_errors_total` | Counter | `recipe` |
 | `recotem_recipe_rescan_errors_total` | Counter | `recipe` |
+| `recotem_bigquery_storage_fallback_total` | Counter | `reason` |
+| `recotem_recipes_dir_scan_failures_total` | Counter | `error_class` |
 
 ---
 
@@ -442,6 +442,8 @@ The high-signal metrics for production alerting:
 | Predict error rate | `rate(recotem_predict_total{status="error"}[5m]) / rate(recotem_predict_total[5m])` | warn at 1%, page at 10% |
 | Predict latency | `histogram_quantile(0.99, recotem_predict_latency_seconds_bucket)` | per-recipe SLO |
 | Active recipes | `recotem_active_recipes` drop > 0 since last scrape | warn (recipe removed or all stub) |
+| BigQuery Storage API fallback | `rate(recotem_bigquery_storage_fallback_total{reason="api_error"}[5m]) > 0` | warn — grant `bigquery.readSessions.create` to restore fast path |
+| Recipes-dir scan failures | `rate(recotem_recipes_dir_scan_failures_total[5m]) > 0` | warn — broken recipe YAML or artifact path; check `error_class` label for `RecipeError` (schema), `OSError` (permissions), or `sidecar_stale` (artifact read failed after sidecar change) |
 
 Pair these with the structured log events `artifact_load_failed`,
 `artifact_disappeared`, `recipe_not_loaded_at_startup`, `auth_invalid_key`

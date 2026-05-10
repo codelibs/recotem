@@ -602,3 +602,53 @@ def test_verify_api_key_uses_compare_digest_at_runtime() -> None:
     assert len(compare_digest_calls) >= 1, (
         "hmac.compare_digest must be called at least once during verify_api_key"
     )
+
+
+# ---------------------------------------------------------------------------
+# m-1: length-matched dummy for constant-time equalisation
+# ---------------------------------------------------------------------------
+
+
+def test_oversized_header_dummy_uses_max_len_not_min_len() -> None:
+    """The constant-time dummy on the oversized path must hash exactly
+    _API_KEY_MAX_LEN bytes (not _API_KEY_MIN_LEN bytes), so the scrypt
+    input size matches the maximum legitimate key length and removes the
+    residual timing difference.
+
+    Without this, hashing _API_KEY_MIN_LEN (32) bytes on the oversized path
+    vs up to _API_KEY_MAX_LEN (256) bytes on the normal path creates a
+    measurable scrypt timing difference that leaks the accepted key-length
+    range.
+    """
+    import recotem.serving.auth as auth_module
+    from recotem.serving.auth import _API_KEY_MAX_LEN, _hash_api_key, verify_api_key
+
+    entry = _make_entry("k1", "exact_secret_padding_to_32_bytes")
+    oversize_key = "A" * (_API_KEY_MAX_LEN + 1)
+
+    request = _make_request(oversize_key)
+
+    # Capture the arguments passed to _hash_api_key by substituting a
+    # recording wrapper that calls the real function.
+    called_with: list[str] = []
+    _real_hash = _hash_api_key  # hold the real function before patching
+
+    def _recording_hash(value: str) -> str:
+        called_with.append(value)
+        return _real_hash(value)
+
+    from unittest.mock import patch
+
+    with patch.object(auth_module, "_hash_api_key", side_effect=_recording_hash):
+        with pytest.raises(HTTPException):
+            verify_api_key(request, [entry])
+
+    assert len(called_with) == 1, (
+        f"_hash_api_key must be called exactly once; got {len(called_with)} calls"
+    )
+    dummy = called_with[0]
+    assert len(dummy) == _API_KEY_MAX_LEN, (
+        f"Oversized-path dummy must be _API_KEY_MAX_LEN={_API_KEY_MAX_LEN} chars, "
+        f"got len={len(dummy)}: first 20 chars={dummy[:20]!r}..."
+    )
+    assert dummy == "\x00" * _API_KEY_MAX_LEN, "Dummy value must consist of null bytes"

@@ -46,6 +46,8 @@ from urllib.parse import urlparse
 
 import structlog
 
+from recotem.config import get_lock_dir
+
 logger = structlog.get_logger(__name__)
 
 # Process-wide set of remote lock paths for which the WARN-level advisory has
@@ -72,7 +74,7 @@ def _remote_lock_path(output_str: str) -> Path:
     ``readOnlyRootFilesystem: true``. Map remote URIs to a stable path
     under ``$RECOTEM_LOCK_DIR`` (preferred) or the system temp dir.
     """
-    base_env = os.environ.get("RECOTEM_LOCK_DIR", "").strip()
+    base_env = get_lock_dir()
     base = Path(base_env) if base_env else Path(tempfile.gettempdir()) / "recotem-locks"
     digest = hashlib.sha256(output_str.encode("utf-8")).hexdigest()
     return base / f"{digest}.lock"

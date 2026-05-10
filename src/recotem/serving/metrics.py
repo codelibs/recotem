@@ -20,6 +20,8 @@ Metric inventory (matches docs/operations.md):
 | ``recotem_swap_total``                         | Counter    | recipe, result     |
 | ``recotem_artifact_stat_failures_total``       | Counter    | recipe             |
 | ``recotem_watcher_unhandled_errors_total``     | Counter    | —                  |
+| ``recotem_metadata_lookup_errors_total``       | Counter    | recipe             |
+| ``recotem_recipe_rescan_errors_total``         | Counter    | recipe             |
 """
 
 from __future__ import annotations
@@ -43,6 +45,8 @@ _ACTIVE_RECIPES: Any = None
 _SWAP_TOTAL: Any = None
 _ARTIFACT_STAT_FAILURES: Any = None
 _WATCHER_UNHANDLED_ERRORS: Any = None
+_METADATA_LOOKUP_ERRORS: Any = None
+_RECIPE_RESCAN_ERRORS: Any = None
 
 
 def _truthy_env(name: str) -> bool:
@@ -70,6 +74,7 @@ def _ensure_initialized() -> None:
     global _PREDICT_TOTAL, _PREDICT_LATENCY, _MODEL_LOADED
     global _ARTIFACT_LOAD_FAILURES, _ACTIVE_RECIPES, _SWAP_TOTAL
     global _ARTIFACT_STAT_FAILURES, _WATCHER_UNHANDLED_ERRORS
+    global _METADATA_LOOKUP_ERRORS, _RECIPE_RESCAN_ERRORS
 
     if not _PROMETHEUS_AVAILABLE or _PREDICT_TOTAL is not None:
         return
@@ -113,6 +118,17 @@ def _ensure_initialized() -> None:
         "recotem_watcher_unhandled_errors_total",
         "Total unhandled exceptions in the watcher poll loop. "
         "A high rate here indicates a broken polling environment.",
+    )
+    _METADATA_LOOKUP_ERRORS = Counter(
+        "recotem_metadata_lookup_errors_total",
+        "Metadata lookup errors during /predict response enrichment.",
+        ["recipe"],
+    )
+    _RECIPE_RESCAN_ERRORS = Counter(
+        "recotem_recipe_rescan_errors_total",
+        "Total recipe YAML parse/load errors during watcher directory rescan "
+        "(transient failures that leave the existing model serving).",
+        ["recipe"],
     )
 
 
@@ -197,6 +213,33 @@ def inc_watcher_unhandled_error() -> None:
     if _WATCHER_UNHANDLED_ERRORS is None:
         return
     _WATCHER_UNHANDLED_ERRORS.inc()
+
+
+def inc_metadata_lookup_error(recipe: str) -> None:
+    """Increment the per-recipe metadata-lookup-errors counter.
+
+    Called when ``_lookup_metadata`` encounters an unexpected error (not a
+    plain ``KeyError`` / missing-item) during ``/predict`` response enrichment
+    — e.g. ``AttributeError`` from a non-unique index returning a DataFrame
+    instead of a Series, or ``TypeError`` from a non-string column name.
+    """
+    _ensure_initialized()
+    if _METADATA_LOOKUP_ERRORS is None:
+        return
+    _METADATA_LOOKUP_ERRORS.labels(recipe=recipe).inc()
+
+
+def inc_recipe_rescan_error(recipe: str) -> None:
+    """Increment the per-recipe rescan-errors counter.
+
+    Called when the watcher's ``_scan_recipes_dir`` fails to load a YAML for
+    a recipe that was previously registered.  The existing model keeps serving;
+    this counter surfaces the transient failure in metrics.
+    """
+    _ensure_initialized()
+    if _RECIPE_RESCAN_ERRORS is None:
+        return
+    _RECIPE_RESCAN_ERRORS.labels(recipe=recipe).inc()
 
 
 def generate_latest() -> tuple[bytes, str]:

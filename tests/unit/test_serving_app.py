@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from recotem.config import ServeConfig
+from recotem.config import ConfigError, ServeConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -112,11 +112,11 @@ def test_dev_allow_unsigned_emits_warning_banner_at_startup(tmp_path: Path) -> N
 
 
 def test_insecure_no_auth_refused_unless_RECOTEM_ENV_dev(tmp_path: Path) -> None:
-    """--insecure-no-auth in a production env raises ValueError."""
+    """--insecure-no-auth in a production env raises ConfigError."""
     cfg = _minimal_config(tmp_path)
     cfg.env = "production"
     cfg.insecure_no_auth = True
-    with pytest.raises(ValueError, match="RECOTEM_ENV"):
+    with pytest.raises(ConfigError, match="RECOTEM_ENV"):
         cfg.validate_insecure_flags()
 
 
@@ -143,7 +143,7 @@ def test_dev_allow_unsigned_requires_development_env(tmp_path: Path) -> None:
     cfg = _minimal_config(tmp_path)
     cfg.env = "staging"
     cfg.dev_allow_unsigned = True
-    with pytest.raises(ValueError, match="development"):
+    with pytest.raises(ConfigError, match="development"):
         cfg.validate_insecure_flags()
 
 

@@ -181,10 +181,13 @@ def _module_matches(module: str, patterns: tuple[str, ...]) -> bool:
 
 
 def _is_allowed(module: str, name: str) -> bool:
-    if (module, name) in _ALLOWED_CLASSES:
-        return True
+    # Deny-list is checked first: a future allow-list addition must never
+    # accidentally re-permit a denied submodule.  The HMAC verify is the
+    # primary defence; this is the secondary RCE backstop.
     if _module_matches(module, _DENIED_MODULE_PREFIXES):
         return False
+    if (module, name) in _ALLOWED_CLASSES:
+        return True
     return _module_matches(module, _ALLOWED_MODULE_PREFIXES)
 
 

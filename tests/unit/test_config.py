@@ -11,7 +11,12 @@ from __future__ import annotations
 
 import pytest
 
-from recotem.config import ServeConfig, get_http_allow_private, get_max_download_bytes
+from recotem.config import (
+    ConfigError,
+    ServeConfig,
+    get_http_allow_private,
+    get_max_download_bytes,
+)
 
 # ---------------------------------------------------------------------------
 # A1. _split_csv_env whitespace-only falls back to default
@@ -123,9 +128,9 @@ def test_watch_interval_clamped_within_1_30(
 def test_watch_interval_non_numeric_falls_back_to_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Non-numeric RECOTEM_WATCH_INTERVAL raises ValueError (per from_env docstring)."""
+    """Non-numeric RECOTEM_WATCH_INTERVAL raises ConfigError (per from_env docstring)."""
     monkeypatch.setenv("RECOTEM_WATCH_INTERVAL", "not_a_number")
-    with pytest.raises(ValueError):
+    with pytest.raises(ConfigError):
         ServeConfig.from_env()
 
 
@@ -188,8 +193,14 @@ def test_max_artifact_bytes_clamped(
     expected: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RECOTEM_MAX_ARTIFACT_BYTES values outside [1 MiB, 16 GiB] are clamped."""
+    """RECOTEM_MAX_ARTIFACT_BYTES values outside [1 MiB, 16 GiB] are clamped.
+
+    Set RECOTEM_MAX_PAYLOAD_BYTES to 1 MiB (the minimum) so the
+    payload <= artifact invariant is not violated when the artifact cap
+    is clamped to a low value like 1 MiB.
+    """
     monkeypatch.setenv("RECOTEM_MAX_ARTIFACT_BYTES", raw_value)
+    monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", str(_1_MIB))
     cfg = ServeConfig.from_env()
     assert cfg.max_artifact_bytes == expected, (
         f"RECOTEM_MAX_ARTIFACT_BYTES={raw_value!r}: expected {expected}, "
@@ -237,8 +248,13 @@ def test_max_payload_bytes_clamp_low(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_max_payload_bytes_clamp_high(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Values above 16 GiB are clamped to 16 GiB."""
+    """Values above 16 GiB are clamped to 16 GiB.
+
+    We must also set RECOTEM_MAX_ARTIFACT_BYTES to the same ceiling so the
+    payload <= artifact invariant is satisfied after clamping.
+    """
     monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", str(_16_GIB + 1))
+    monkeypatch.setenv("RECOTEM_MAX_ARTIFACT_BYTES", str(_16_GIB))
     cfg = ServeConfig.from_env()
     assert cfg.max_payload_bytes == _16_GIB
 
@@ -260,20 +276,20 @@ def test_max_payload_bytes_separate_from_artifact_bytes(
 
 
 def test_dev_allow_unsigned_refused_when_recotem_env_empty() -> None:
-    """dev_allow_unsigned=True with env='' raises ValueError."""
+    """dev_allow_unsigned=True with env='' raises ConfigError."""
     cfg = ServeConfig()
     cfg.env = ""
     cfg.dev_allow_unsigned = True
-    with pytest.raises(ValueError, match="development"):
+    with pytest.raises(ConfigError, match="development"):
         cfg.validate_insecure_flags()
 
 
 def test_dev_allow_unsigned_refused_when_recotem_env_test() -> None:
-    """dev_allow_unsigned=True with env='test' raises ValueError (development only)."""
+    """dev_allow_unsigned=True with env='test' raises ConfigError (development only)."""
     cfg = ServeConfig()
     cfg.env = "test"
     cfg.dev_allow_unsigned = True
-    with pytest.raises(ValueError, match="development"):
+    with pytest.raises(ConfigError, match="development"):
         cfg.validate_insecure_flags()
 
 
@@ -292,7 +308,7 @@ def test_insecure_no_auth_recotem_env_variants_rejected(env_value: str) -> None:
     cfg = ServeConfig()
     cfg.env = env_value
     cfg.insecure_no_auth = True
-    with pytest.raises(ValueError, match="RECOTEM_ENV"):
+    with pytest.raises(ConfigError, match="RECOTEM_ENV"):
         cfg.validate_insecure_flags()
 
 
@@ -311,7 +327,7 @@ def test_dev_allow_unsigned_recotem_env_variants_rejected(env_value: str) -> Non
     cfg = ServeConfig()
     cfg.env = env_value
     cfg.dev_allow_unsigned = True
-    with pytest.raises(ValueError, match="development"):
+    with pytest.raises(ConfigError, match="development"):
         cfg.validate_insecure_flags()
 
 
@@ -361,9 +377,9 @@ def test_drain_seconds_unset_uses_default(monkeypatch: pytest.MonkeyPatch) -> No
 def test_port_out_of_range_raises(
     port_value: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """RECOTEM_PORT values outside 1–65535 raise ValueError."""
+    """RECOTEM_PORT values outside 1–65535 raise ConfigError."""
     monkeypatch.setenv("RECOTEM_PORT", port_value)
-    with pytest.raises(ValueError, match="RECOTEM_PORT"):
+    with pytest.raises(ConfigError, match="RECOTEM_PORT"):
         ServeConfig.from_env()
 
 
@@ -383,9 +399,9 @@ def test_port_valid_values_accepted(
 
 
 def test_log_format_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Invalid RECOTEM_LOG_FORMAT value raises ValueError with allowed values listed."""
+    """Invalid RECOTEM_LOG_FORMAT value raises ConfigError with allowed values listed."""
     monkeypatch.setenv("RECOTEM_LOG_FORMAT", "jsonl")
-    with pytest.raises(ValueError, match="RECOTEM_LOG_FORMAT"):
+    with pytest.raises(ConfigError, match="RECOTEM_LOG_FORMAT"):
         ServeConfig.from_env()
 
 
@@ -417,7 +433,70 @@ def test_log_format_typo_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_log_format_clearly_invalid_typo_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Clearly invalid value 'structured' raises ValueError."""
+    """Clearly invalid value 'structured' raises ConfigError."""
     monkeypatch.setenv("RECOTEM_LOG_FORMAT", "structured")
-    with pytest.raises(ValueError, match="RECOTEM_LOG_FORMAT"):
+    with pytest.raises(ConfigError, match="RECOTEM_LOG_FORMAT"):
         ServeConfig.from_env()
+
+
+# ---------------------------------------------------------------------------
+# M-5: RECOTEM_MAX_PAYLOAD_BYTES > RECOTEM_MAX_ARTIFACT_BYTES invariant
+# ---------------------------------------------------------------------------
+
+
+def test_payload_bytes_exceeds_artifact_bytes_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_MAX_PAYLOAD_BYTES > RECOTEM_MAX_ARTIFACT_BYTES must raise ConfigError.
+
+    CLAUDE.md: 'Smaller than RECOTEM_MAX_ARTIFACT_BYTES to bound deserialization
+    memory expansion.'  This is enforced at from_env() time so a misconfigured
+    server fails loudly at startup.
+    """
+    _1_MIB_local = 1 * 1024 * 1024
+    _2_MIB_local = 2 * 1024 * 1024
+    monkeypatch.setenv("RECOTEM_MAX_ARTIFACT_BYTES", str(_1_MIB_local))
+    monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", str(_2_MIB_local))
+    with pytest.raises(ConfigError, match="RECOTEM_MAX_PAYLOAD_BYTES"):
+        ServeConfig.from_env()
+
+
+def test_payload_bytes_equal_artifact_bytes_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_MAX_PAYLOAD_BYTES == RECOTEM_MAX_ARTIFACT_BYTES is a valid configuration."""
+    _4_MIB_local = 4 * 1024 * 1024
+    monkeypatch.setenv("RECOTEM_MAX_ARTIFACT_BYTES", str(_4_MIB_local))
+    monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", str(_4_MIB_local))
+    cfg = ServeConfig.from_env()
+    assert cfg.max_payload_bytes == _4_MIB_local
+    assert cfg.max_artifact_bytes == _4_MIB_local
+
+
+# ---------------------------------------------------------------------------
+# m-12: duplicate API kid raises ConfigError
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_api_kid_raises_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate kid in RECOTEM_API_KEYS must raise ConfigError.
+
+    The first kid silently wins in KeyRing but the config is almost certainly
+    wrong — fail fast so operators notice the mistake.
+    """
+    hash1 = "aa" * 32
+    hash2 = "bb" * 32
+    monkeypatch.setenv("RECOTEM_API_KEYS", f"k1:sha256:{hash1},k1:sha256:{hash2}")
+    with pytest.raises(ConfigError, match="duplicate kid"):
+        ServeConfig.from_env()
+
+
+def test_unique_api_kids_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two entries with distinct kids must be accepted without error."""
+    hash1 = "aa" * 32
+    hash2 = "bb" * 32
+    monkeypatch.setenv("RECOTEM_API_KEYS", f"k1:sha256:{hash1},k2:sha256:{hash2}")
+    cfg = ServeConfig.from_env()
+    assert len(cfg.api_keys) == 2

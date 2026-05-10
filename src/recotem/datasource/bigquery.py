@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import structlog
 from pydantic import BaseModel
 
 from recotem.datasource.base import DataSourceError, FetchContext
+
+# ---------------------------------------------------------------------------
+# Environment helpers
+# ---------------------------------------------------------------------------
+
+_TRUTHY_ENV_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+
+
+def _truthy_env(name: str) -> bool:
+    """Return True iff the env var *name* is set to a truthy value."""
+    return os.environ.get(name, "").strip().lower() in _TRUTHY_ENV_VALUES
+
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -215,17 +228,40 @@ class BigQuerySource:
                 )
                 df = query_job.to_dataframe()
             except GoogleAPICallError as storage_exc:
-                # Storage-specific API failure (PermissionDenied, ServiceUnavailable,
-                # etc.) — fall back to the slower REST path and log the cause.
+                # Storage-specific API failure (commonly PermissionDenied when
+                # the service account lacks bigquery.readSessions.create on the
+                # project).  By default we fall back to the slower REST path;
+                # operators should monitor this log event and consider granting
+                # the IAM permission to restore fast-path throughput.
+                #
+                # Set RECOTEM_BQ_REQUIRE_STORAGE_API=1 to disable the fallback
+                # and surface this as a hard DataSourceError instead.
+                #
+                # TODO(post-PR-85): emit recotem_bigquery_storage_fallback_total
+                # counter once metrics.py is merged.
+                if _truthy_env("RECOTEM_BQ_REQUIRE_STORAGE_API"):
+                    raise DataSourceError(
+                        f"BigQuery Storage Read API failed and "
+                        "RECOTEM_BQ_REQUIRE_STORAGE_API is set — no REST "
+                        "fallback. Grant bigquery.readSessions.create on the "
+                        f"project to fix this. Original error: {storage_exc}"
+                    ) from storage_exc
                 logger.warning(
                     "bigquery_storage_fallback",
-                    reason="GoogleAPICallError from Storage Read API",
+                    reason="GoogleAPICallError from Storage Read API — "
+                    "grant bigquery.readSessions.create to restore fast path; "
+                    "set RECOTEM_BQ_REQUIRE_STORAGE_API=1 to disable fallback",
+                    iam_permission_needed="bigquery.readSessions.create",
                     exc_type=type(storage_exc).__name__,
                     exc=str(storage_exc),
                 )
                 df = query_job.to_dataframe()
             # Any other exception (MemoryError, RuntimeError, etc.) propagates
             # out of the inner try and is caught by the outer handler below.
+        except DataSourceError:
+            # Re-raise DataSourceError from RECOTEM_BQ_REQUIRE_STORAGE_API path
+            # without wrapping it again.
+            raise
         except GoogleAPICallError as exc:
             raise DataSourceError(f"BigQuery query execution failed: {exc}") from exc
         except Exception as exc:

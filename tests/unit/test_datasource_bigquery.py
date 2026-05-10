@@ -458,6 +458,124 @@ def test_bigquery_deadline_exceeded_wraps_DataSourceError() -> None:
             source.fetch(_ctx())
 
 
+# ---------------------------------------------------------------------------
+# M-15: Storage API fallback IAM permission in log + RECOTEM_BQ_REQUIRE_STORAGE_API
+# ---------------------------------------------------------------------------
+
+
+def test_storage_api_fallback_logs_iam_permission(monkeypatch) -> None:
+    """When the Storage Read API raises GoogleAPICallError, the warning log must
+    include the required IAM permission 'bigquery.readSessions.create'.
+
+    Operators monitoring for this event need to know which permission to grant.
+    """
+    import structlog.testing
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    import pandas as pd
+
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    def _to_dataframe_side_effect(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise mock_api_error_cls("PERMISSION_DENIED: bigquery.readSessions.create")
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_side_effect
+
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with structlog.testing.capture_logs() as cap_logs:
+            source.fetch(_ctx())
+
+    # Find the fallback warning event.
+    fallback_events = [
+        e for e in cap_logs if e.get("event") == "bigquery_storage_fallback"
+    ]
+    assert fallback_events, (
+        f"Expected 'bigquery_storage_fallback' log event; got events: "
+        f"{[e.get('event') for e in cap_logs]}"
+    )
+    log_entry = fallback_events[0]
+    # The log entry must surface the IAM permission name so operators know what
+    # to grant.
+    log_str = str(log_entry)
+    assert "bigquery.readSessions.create" in log_str, (
+        f"Expected IAM permission 'bigquery.readSessions.create' in log entry; "
+        f"got: {log_entry!r}"
+    )
+
+
+def test_bq_require_storage_api_disables_fallback(monkeypatch) -> None:
+    """When RECOTEM_BQ_REQUIRE_STORAGE_API is set to a truthy value,
+    a GoogleAPICallError from the Storage Read API must surface as DataSourceError
+    rather than triggering the REST fallback.
+    """
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    mock_query_job.to_dataframe.side_effect = mock_api_error_cls(
+        "PERMISSION_DENIED: bigquery.readSessions.create"
+    )
+
+    monkeypatch.setenv("RECOTEM_BQ_REQUIRE_STORAGE_API", "1")
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(
+            DataSourceError, match="RECOTEM_BQ_REQUIRE_STORAGE_API|Storage Read API"
+        ):
+            source.fetch(_ctx())
+
+
 def test_storage_oom_propagates() -> None:
     """A MemoryError from the Storage Read API must propagate, not trigger fallback.
 

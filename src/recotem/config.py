@@ -36,6 +36,24 @@ from dataclasses import dataclass, field
 
 import structlog
 
+# ---------------------------------------------------------------------------
+# ConfigError — typed exception for configuration failures
+# ---------------------------------------------------------------------------
+
+
+class ConfigError(Exception):
+    """Raised for operator-visible configuration failures (exit code 8).
+
+    Covers: missing RECOTEM_SIGNING_KEYS, malformed RECOTEM_API_KEYS (duplicate
+    kid, bad format), invalid RECOTEM_PORT, and insecure-flag misuse outside
+    permitted environments.
+
+    This exception type is intentionally kept at the top-level config module so
+    both the training and serving sub-packages can import it without a circular
+    dependency (training/ and serving/ never import each other).
+    """
+
+
 _logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -208,16 +226,21 @@ class ServeConfig:
     insecure_no_auth: bool = False
     dev_allow_unsigned: bool = False
 
+    # Recipes directory — injected by the CLI before calling create_app().
+    # Not sourced from an env var; must be set explicitly.
+    recipes_dir: str = ""
+
     @classmethod
     def from_env(cls) -> ServeConfig:
         """Build a :class:`ServeConfig` from the current environment.
 
         Raises
         ------
-        ValueError
+        ConfigError
             If any env var has an invalid value (malformed API key entry,
-            out-of-range port, etc.).  The error message never includes the
-            key plaintext.
+            duplicate API key kid, out-of-range port,
+            RECOTEM_MAX_PAYLOAD_BYTES > RECOTEM_MAX_ARTIFACT_BYTES, etc.).
+            The error message never includes key plaintext.
         """
         cfg = cls()
 
@@ -232,9 +255,19 @@ class ServeConfig:
                 try:
                     entries.append(ApiKeyEntry.parse(raw_entry))
                 except ValueError as exc:
-                    raise ValueError(
+                    raise ConfigError(
                         f"RECOTEM_API_KEYS contains an invalid entry: {exc}"
                     ) from exc
+            # Detect duplicate kids — the first kid wins in KeyRing but the
+            # config is almost certainly wrong, so fail fast.
+            seen_kids: set[str] = set()
+            for entry in entries:
+                if entry.kid in seen_kids:
+                    raise ConfigError(
+                        f"RECOTEM_API_KEYS contains duplicate kid {entry.kid!r}; "
+                        "each kid must appear at most once"
+                    )
+                seen_kids.add(entry.kid)
             cfg.api_keys = entries
 
         # RECOTEM_HOST
@@ -248,11 +281,11 @@ class ServeConfig:
             try:
                 port_val = int(port_env)
             except ValueError as exc:
-                raise ValueError(
+                raise ConfigError(
                     f"RECOTEM_PORT must be an integer, got {port_env!r}: {exc}"
                 ) from exc
             if not (1 <= port_val <= 65535):
-                raise ValueError(
+                raise ConfigError(
                     f"RECOTEM_PORT must be in range 1–65535, got {port_val}"
                 )
             cfg.port = port_val
@@ -263,7 +296,7 @@ class ServeConfig:
             try:
                 raw_interval = float(interval_env)
             except ValueError as exc:
-                raise ValueError(
+                raise ConfigError(
                     f"RECOTEM_WATCH_INTERVAL must be a number, "
                     f"got {interval_env!r}: {exc}"
                 ) from exc
@@ -274,7 +307,7 @@ class ServeConfig:
         fmt_env = os.environ.get("RECOTEM_LOG_FORMAT", "").strip().lower()
         if fmt_env:
             if fmt_env not in _VALID_LOG_FORMATS:
-                raise ValueError(
+                raise ConfigError(
                     f"RECOTEM_LOG_FORMAT must be one of {sorted(_VALID_LOG_FORMATS)}, "
                     f"got {fmt_env!r}"
                 )
@@ -316,6 +349,16 @@ class ServeConfig:
 
         cfg.metadata_field_deny = _split_csv_env("RECOTEM_METADATA_FIELD_DENY", [])
 
+        # Invariant: payload cap must not exceed the artifact cap.
+        # RECOTEM_MAX_PAYLOAD_BYTES is documented as "Smaller than
+        # RECOTEM_MAX_ARTIFACT_BYTES to bound deserialization memory expansion."
+        if cfg.max_payload_bytes > cfg.max_artifact_bytes:
+            raise ConfigError(
+                f"RECOTEM_MAX_PAYLOAD_BYTES ({cfg.max_payload_bytes}) must be "
+                f"<= RECOTEM_MAX_ARTIFACT_BYTES ({cfg.max_artifact_bytes}); "
+                "reduce RECOTEM_MAX_PAYLOAD_BYTES or increase RECOTEM_MAX_ARTIFACT_BYTES"
+            )
+
         return cfg
 
     def apply_auth_posture(self) -> None:
@@ -334,19 +377,19 @@ class ServeConfig:
 
         Raises
         ------
-        ValueError
+        ConfigError
             If ``--insecure-no-auth`` or ``--dev-allow-unsigned`` is used in
             a non-development environment.
         """
         if self.insecure_no_auth and self.env.lower() not in _INSECURE_ALLOWED_ENVS:
-            raise ValueError(
+            raise ConfigError(
                 "--insecure-no-auth is only permitted when RECOTEM_ENV is "
                 f"one of {sorted(_INSECURE_ALLOWED_ENVS)}. "
                 f"Current RECOTEM_ENV={self.env!r}."
             )
 
         if self.dev_allow_unsigned and self.env.lower() != "development":
-            raise ValueError(
+            raise ConfigError(
                 "--dev-allow-unsigned requires RECOTEM_ENV=development. "
                 f"Current RECOTEM_ENV={self.env!r}."
             )
@@ -432,3 +475,13 @@ def get_http_allow_private() -> bool:
     """
     raw = os.environ.get("RECOTEM_HTTP_ALLOW_PRIVATE", "").strip().lower()
     return raw in _TRUTHY_ENV_VALUES
+
+
+def get_lock_dir() -> str:
+    """Return ``RECOTEM_LOCK_DIR`` (host-local lock dir for remote outputs).
+
+    Empty string falls back to ``<tempdir>/recotem-locks/`` at the call site.
+    Centralised here so every ``RECOTEM_*`` variable is enumerable via
+    :mod:`recotem.config`.
+    """
+    return os.environ.get("RECOTEM_LOCK_DIR", "").strip()

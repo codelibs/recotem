@@ -193,7 +193,7 @@ uv run ruff format --check src tests
 | `RECOTEM_ALLOWED_HOSTS` | 127.0.0.1,localhost | TrustedHostMiddleware list. Whitespace-only comma input falls back to default. |
 | `RECOTEM_ALLOWED_ORIGINS` | (empty) | CORS allow-list. Empty = deny. |
 | `RECOTEM_ENV` | (empty) | `--insecure-no-auth` permitted when set to `development`, `dev`, or `test`; `--dev-allow-unsigned` permitted only when set to `development`. See `docs/security.md`. |
-| `RECOTEM_DRAIN_SECONDS` | 30 | SIGTERM grace window. |
+| `RECOTEM_DRAIN_SECONDS` | 30 | SIGTERM grace window. Clamped [1, 300]. |
 | `RECOTEM_LOG_FORMAT` | auto | `auto` / `json` / `console`. |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | 512 MiB | Per-payload cap (post-HMAC-verify) for serve-side deserialization. Clamped [1 MiB, 16 GiB]. Smaller than `RECOTEM_MAX_ARTIFACT_BYTES` to bound deserialization memory expansion. |
 | `RECOTEM_ARTIFACT_ROOT` | (empty) | If set, local `output.path` must lie under it. |
@@ -201,6 +201,7 @@ uv run ruff format --check src tests
 | `RECOTEM_METADATA_FIELD_DENY` | (empty) | Comma-separated columns stripped from `/predict` responses. |
 | `RECOTEM_METRICS_ENABLED` | (empty) | Opt-in Prometheus `/metrics` endpoint. Truthy values: `1`, `true`, `yes`, `on`. Requires `recotem[metrics]` extra. |
 | `RECOTEM_LOCK_DIR` | (empty) | Override directory for per-recipe training lock files. Local outputs always lock at `<output_path>.lock`; remote outputs (`s3://`, `gs://`, ...) need a host-local path and fall back to `<tempdir>/recotem-locks/`. `flock` is host-local — across hosts use scheduler-level mutex (`concurrencyPolicy: Forbid`). |
+| `RECOTEM_BQ_REQUIRE_STORAGE_API` | (empty) | When truthy (`1`/`true`/`yes`/`on`), the BigQuery source raises `DataSourceError` instead of falling back to the REST path when the Storage Read API fails. Requires the service account to hold `bigquery.readSessions.create`. |
 
 ## CI
 

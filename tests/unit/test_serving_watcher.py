@@ -1226,11 +1226,10 @@ def test_poll_artifacts_concurrent_stat_bounded_by_max(tmp_path: Path) -> None:
     peak_concurrent = [0]
     count_lock = threading.Lock()
 
-    real_stat_marker = __import__(
-        "recotem.serving.watcher", fromlist=["_stat_marker"]
-    )._stat_marker
-
-    def _slow_stat(path: str, recipe_name: str = "<unknown>"):
+    # _poll_artifacts calls _stat_marker_with_error (returns a tuple).
+    # The slow stub must return the same marker as state.last_marker so
+    # _load_recipe is NOT triggered (marker unchanged → no hot-swap).
+    def _slow_stat_with_error(path: str, recipe_name: str = "<unknown>"):
         with count_lock:
             concurrent_count[0] += 1
             if concurrent_count[0] > peak_concurrent[0]:
@@ -1239,11 +1238,14 @@ def test_poll_artifacts_concurrent_stat_bounded_by_max(tmp_path: Path) -> None:
         with count_lock:
             concurrent_count[0] -= 1
         # Return the same marker so _load_recipe is not triggered
-        return "old"
+        return "old", None
 
     from unittest.mock import patch
 
-    with patch("recotem.serving.watcher._stat_marker", side_effect=_slow_stat):
+    with patch(
+        "recotem.serving.watcher._stat_marker_with_error",
+        side_effect=_slow_stat_with_error,
+    ):
         watcher._poll_artifacts()
 
     watcher._executor.shutdown(wait=False)
@@ -1379,4 +1381,313 @@ def test_startup_stat_failure_logs_real_recipe_name(
     )
     assert evt.get("recipe") != "<unknown>", (
         "artifact_stat_failed must NOT log '<unknown>' when recipe_name is provided"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M-2: rescan YAML syntax error keeps loaded model
+# ---------------------------------------------------------------------------
+
+
+def test_rescan_yaml_syntax_error_keeps_loaded_model(tmp_path: Path) -> None:
+    """When a YAML file becomes unparseable during rescan, the registry must
+    retain the existing loaded model and set last_load_error; the recipe must
+    NOT be removed from the registry.
+
+    Also: recotem_recipe_rescan_errors_total must be incremented.
+    """
+    from unittest.mock import patch
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "rescan_test", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+
+    registry = ModelRegistry()
+    entry = _make_entry("rescan_test")
+    entry.artifact_path = str(artifact_path)
+    entry.last_load_error = None
+    registry.replace("rescan_test", entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    initial_states = build_initial_states([recipe], {"rescan_test": entry})
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+
+    # Corrupt the YAML file (syntax error)
+    yaml_path.write_text("name: [this is: invalid yaml {{{\n")
+
+    rescan_error_calls: list[str] = []
+    original_inc = _metrics.inc_recipe_rescan_error
+
+    def _counting_inc(name: str) -> None:
+        rescan_error_calls.append(name)
+        original_inc(name)
+
+    with patch.object(_metrics, "inc_recipe_rescan_error", side_effect=_counting_inc):
+        # Call _scan_recipes_dir directly so we don't need the thread running.
+        watcher._scan_recipes_dir()
+
+    # Registry must still contain the entry (not deleted).
+    surviving_entry = registry.get("rescan_test")
+    assert surviving_entry is not None, (
+        "Recipe must NOT be removed when its YAML fails to parse on rescan"
+    )
+
+    # last_load_error must be populated with the parse error.
+    assert surviving_entry.last_load_error is not None, (
+        "last_load_error must be set on the registry entry when YAML parse fails"
+    )
+    assert "rescan" in surviving_entry.last_load_error.lower() or (
+        "parse" in surviving_entry.last_load_error.lower()
+        or "error" in surviving_entry.last_load_error.lower()
+    ), (
+        f"last_load_error should describe a YAML parse error; "
+        f"got: {surviving_entry.last_load_error!r}"
+    )
+
+    # recotem_recipe_rescan_errors_total must be incremented.
+    assert "rescan_test" in rescan_error_calls, (
+        "inc_recipe_rescan_error must be called with the recipe name on YAML parse failure"
+    )
+
+    watcher._executor.shutdown(wait=False)
+
+
+def test_rescan_recipe_truly_deleted_removes_entry(tmp_path: Path) -> None:
+    """Regression: when the YAML file is genuinely deleted (not just broken),
+    the registry entry must still be removed after _scan_recipes_dir.
+
+    This preserves the existing behavior — only transient parse errors on
+    an existing YAML must be retained; actual deletion must purge the entry.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "to_delete", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+
+    registry = ModelRegistry()
+    entry = _make_entry("to_delete")
+    entry.artifact_path = str(artifact_path)
+    registry.replace("to_delete", entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    initial_states = build_initial_states([recipe], {"to_delete": entry})
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+
+    # Delete the YAML file entirely.
+    yaml_path.unlink()
+
+    # One scan should remove the entry.
+    watcher._scan_recipes_dir()
+
+    assert registry.get("to_delete") is None, (
+        "Recipe must be removed from registry when its YAML file is deleted"
+    )
+
+    watcher._executor.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# M-9: _stat_marker error class surfaced in /health via set_load_error
+# ---------------------------------------------------------------------------
+
+
+def test_stat_marker_permission_error_sets_descriptive_load_error(
+    tmp_path: Path,
+) -> None:
+    """When _stat_marker encounters a non-FileNotFoundError (e.g. permission denied),
+    the watcher must set a descriptive last_load_error that includes the error
+    class name rather than the generic 'artifact missing or unreadable'.
+    """
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "perm_recipe", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_marker="initial",  # force marker to differ from None
+        last_sha256="",
+    )
+
+    registry = ModelRegistry()
+    from recotem.serving.registry import ModelEntry
+
+    stub = ModelEntry(
+        name="perm_recipe",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+        last_load_error=None,
+    )
+    registry.replace("perm_recipe", stub)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states={"perm_recipe": state},
+    )
+
+    # Monkeypatch fsspec to raise OSError("permission denied") on stat.
+    def _raising_url_to_fs(path, **kwargs):
+        fs_mock = MagicMock()
+        fs_mock.info.side_effect = OSError("permission denied")
+        return fs_mock, path
+
+    with patch(
+        "recotem.serving.watcher.fsspec.core.url_to_fs",
+        side_effect=_raising_url_to_fs,
+    ):
+        watcher._poll_artifacts()
+
+    entry = registry.get("perm_recipe")
+    assert entry is not None
+    assert entry.last_load_error is not None, (
+        "last_load_error must be set when stat fails with OSError"
+    )
+    # The error message must contain the error class name (M-9).
+    assert "OSError" in entry.last_load_error, (
+        f"last_load_error must include error class 'OSError'; "
+        f"got: {entry.last_load_error!r}"
+    )
+
+    watcher._executor.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# M-11: ETag-based hot-swap on object store path
+# ---------------------------------------------------------------------------
+
+
+def test_hot_swap_triggered_by_etag_change_on_object_store(
+    tmp_path: Path,
+) -> None:
+    """When fsspec info() returns ETag metadata, the watcher must detect a swap
+    when the ETag changes between poll ticks.
+
+    Strategy:
+    - Monkeypatch fsspec to return ETag='v1' first, then 'v2'.
+    - On ETag change the watcher calls _load_recipe; monkeypatch
+      _read_artifact_bytes to return a valid artifact.
+    - Assert that record_swap (ok=True) was called on the second tick.
+    """
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "etag_recipe", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_marker="v1",  # ETag 'v1' is the current known marker
+        last_sha256="",
+    )
+
+    registry = ModelRegistry()
+    from recotem.serving.registry import ModelEntry
+
+    stub = ModelEntry(
+        name="etag_recipe",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+        last_load_error=None,
+    )
+    registry.replace("etag_recipe", stub)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states={"etag_recipe": state},
+    )
+
+    swap_ok_calls: list[str] = []
+    original_record_swap = _metrics.record_swap
+
+    def _spy_swap(recipe: str, ok: bool) -> None:
+        if ok:
+            swap_ok_calls.append(recipe)
+        original_record_swap(recipe, ok)
+
+    # Monkeypatch _stat_marker_with_error to return ETag='v2' (changed from v1).
+    # _poll_artifacts detects the marker change and calls _load_recipe which
+    # reads the actual artifact file from disk via _read_artifact_bytes
+    # (real fsspec, real file I/O — artifact was written above).
+    import recotem.serving.watcher as watcher_module
+
+    def _etag_v2_stat(path: str, recipe_name: str = "<unknown>"):
+        # Return ETag 'v2' so marker differs from state.last_marker='v1'
+        return "v2", None
+
+    with patch.object(
+        watcher_module, "_stat_marker_with_error", side_effect=_etag_v2_stat
+    ):
+        with patch.object(_metrics, "record_swap", side_effect=_spy_swap):
+            watcher._poll_artifacts()
+
+    # Wait for any submitted futures to complete (load runs in thread pool too)
+    watcher._executor.shutdown(wait=True)
+
+    assert "etag_recipe" in swap_ok_calls, (
+        "record_swap(ok=True) must be called when ETag changes from 'v1' to 'v2'; "
+        f"got swap_ok_calls={swap_ok_calls!r}"
     )

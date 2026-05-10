@@ -13,6 +13,7 @@ import pydantic
 import structlog
 import yaml
 
+from recotem.datasource.base import DataSourceError
 from recotem.recipe.envvars import expand_env_vars
 from recotem.recipe.errors import RecipeError
 from recotem.recipe.models import Recipe
@@ -203,9 +204,14 @@ def _check_local_output_containment(local_path: Path) -> None:
             "Symlink escapes are rejected."
         ) from None
 
-    # Also resolve the full path (non-strict) and check it, guarding against
-    # any remaining path components that could walk out with '..'.
-    resolved = local_path.resolve()
+    # Compose the final path from the already-resolved parent plus the
+    # terminal filename component.  This avoids relying on a non-strict
+    # resolve() of the full path, which does NOT follow nonexistent terminal
+    # symlinks and could therefore miss an escape when the output file does
+    # not yet exist but its name is a symlink that resolves outside the root.
+    # By appending only the plain filename to the strictly-resolved parent we
+    # guarantee no additional symlink traversal can occur.
+    resolved = resolved_parent / local_path.name
     try:
         resolved.relative_to(artifact_root)
     except ValueError:
@@ -310,10 +316,20 @@ def _expand_with_source_no_expand(
                     extra_no_expand = frozenset(
                         getattr(src_cls, "no_expand_fields", frozenset())
                     )
-                except Exception:
-                    # Unknown source type — will be caught by later validation;
-                    # fall back to global _NO_EXPAND_KEYS only.
+                except DataSourceError:
+                    # Unknown source type — later validation surfaces the real
+                    # error; fall back to the global _NO_EXPAND_KEYS only.
                     pass
+                except Exception as exc:
+                    logger.warning(
+                        "source_class_lookup_failed_during_expand",
+                        type=type_name,
+                        error_class=type(exc).__name__,
+                    )
+                    raise RecipeError(
+                        f"Failed to resolve source plugin {type_name!r} "
+                        f"during recipe load: {exc}"
+                    ) from exc
             result[key] = _expand_node(
                 value,
                 extra_allowed=extra_allowed,

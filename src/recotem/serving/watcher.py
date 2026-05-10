@@ -104,26 +104,46 @@ def _stat_marker(path: str, recipe_name: str = "<unknown>") -> Any:
     ``None`` so the watcher loop can continue.  Repeated failures keep
     emitting WARN — no rate-limiting at this level.
     """
+    marker, _err = _stat_marker_with_error(path, recipe_name=recipe_name)
+    return marker
+
+
+def _stat_marker_with_error(
+    path: str, recipe_name: str = "<unknown>"
+) -> tuple[Any, str | None]:
+    """Return ``(marker, error_class)`` for *path*.
+
+    Identical to :func:`_stat_marker` but also returns the exception class
+    name when a non-FileNotFoundError occurs, so callers can surface a more
+    descriptive error in ``/health`` (distinguishing missing-file from
+    network/IAM failure — M-9).
+
+    Returns:
+        ``(marker, None)``   — success; marker is the opaque change token.
+        ``(None, None)``     — file not found (normal, no error to surface).
+        ``(None, cls_name)`` — unexpected error; cls_name is the exc class.
+    """
     try:
         fs, fpath = fsspec.core.url_to_fs(path)
         info = fs.info(fpath)
         etag = info.get("ETag") or info.get("etag") or info.get("VersionId")
         if etag:
-            return etag
+            return etag, None
         mtime = info.get("mtime") or info.get("LastModified")
         size = info.get("size") or info.get("Size") or 0
-        return (mtime, size)
+        return (mtime, size), None
     except FileNotFoundError:
-        return None
+        return None, None
     except Exception as exc:
+        error_class = type(exc).__name__
         logger.warning(
             "artifact_stat_failed",
             recipe=recipe_name,
-            error_class=type(exc).__name__,
+            error_class=error_class,
             error=str(exc),
         )
         _metrics.inc_artifact_stat_failure(recipe_name)
-        return None
+        return None, error_class
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -280,11 +300,36 @@ class ArtifactWatcher(threading.Thread):
 
                 recipe: Recipe = load_recipe(yaml_file, recipes_root=self._recipes_dir)
             except Exception as exc:
-                logger.warning(
-                    "recipe_rescan_load_error",
-                    file=yaml_file.name,
-                    error=str(exc),
-                )
+                # YAML parse/load failed on rescan.  Distinguish "transient
+                # error on an existing recipe" from "brand-new YAML that has
+                # never been loaded" to uphold the availability contract:
+                # a transient parse error must NOT evict the currently-loaded
+                # model (M-2).
+                #
+                # Strategy: recipe names conventionally match the YAML file
+                # stem (e.g. "news.yaml" → recipe name "news").  Use the stem
+                # as the candidate name and cross-check against current_names.
+                yaml_stem = yaml_file.stem
+                if yaml_stem in current_names:
+                    # Keep the entry in found_names → it won't be deleted.
+                    found_names.add(yaml_stem)
+                    self._registry.set_load_error(
+                        yaml_stem,
+                        f"recipe YAML parse error on rescan: {exc}",
+                    )
+                    _metrics.inc_recipe_rescan_error(yaml_stem)
+                    logger.warning(
+                        "recipe_rescan_load_error",
+                        file=yaml_file.name,
+                        recipe=yaml_stem,
+                        error=str(exc),
+                    )
+                else:
+                    logger.warning(
+                        "recipe_rescan_load_error",
+                        file=yaml_file.name,
+                        error=str(exc),
+                    )
                 continue
 
             found_names.add(recipe.name)
@@ -331,15 +376,17 @@ class ArtifactWatcher(threading.Thread):
         if not names:
             return
 
-        def _check(name: str) -> tuple[str, Any]:
+        def _check(name: str) -> tuple[str, Any, str | None]:
             state = self._states[name]
-            marker = _stat_marker(state.artifact_path, recipe_name=name)
-            return name, marker
+            marker, error_class = _stat_marker_with_error(
+                state.artifact_path, recipe_name=name
+            )
+            return name, marker, error_class
 
         futures = {self._executor.submit(_check, n): n for n in names}
         for fut in as_completed(futures):
             try:
-                name, marker = fut.result()
+                name, marker, stat_error_class = fut.result()
             except Exception as exc:
                 _failed_recipe = futures[fut]
                 logger.warning(
@@ -362,10 +409,19 @@ class ArtifactWatcher(threading.Thread):
                 # — we do NOT flip loaded=False — so hot-swap resumes when
                 # the file reappears.  Only emit the log on the first
                 # transition to avoid log spam on repeated missing polls.
+                #
+                # Distinguish a genuinely missing file from a network/IAM
+                # failure (M-9): when stat_error_class is set, the error
+                # message includes the class name so /health can surface
+                # "stat failed: ClientError(403)" vs "artifact missing".
                 entry = self._registry.get(name)
-                if entry is not None and entry.last_load_error is None:
-                    logger.warning("artifact_disappeared", name=name)
-                self._registry.set_load_error(name, "artifact missing or unreadable")
+                if stat_error_class is not None:
+                    error_msg = f"stat failed: {stat_error_class}"
+                else:
+                    error_msg = "artifact missing or unreadable"
+                    if entry is not None and entry.last_load_error is None:
+                        logger.warning("artifact_disappeared", name=name)
+                self._registry.set_load_error(name, error_msg)
                 _metrics.inc_artifact_load_failure(name)
                 continue
 

@@ -14,21 +14,14 @@ artifacts are pickled under the ``recotem._idmap`` FQCN.
 
 from __future__ import annotations
 
-import sys
-from types import ModuleType
-
 # Apply a minimal IPython stub so that fastprogress (transitive irspack dep)
 # can be imported without a real IPython installation.  This is safe: the stub
 # provides only the display symbols that fastprogress references at import time.
-if "IPython" not in sys.modules:
-    _ipython = ModuleType("IPython")
-    _display = ModuleType("IPython.display")
-    _display.display = lambda *a, **kw: None  # type: ignore[attr-defined]
-    _display.HTML = str  # type: ignore[attr-defined]
-    _display.Markdown = str  # type: ignore[attr-defined]
-    _ipython.display = _display  # type: ignore[attr-defined]
-    sys.modules["IPython"] = _ipython
-    sys.modules["IPython.display"] = _display
+# Both "IPython" and "IPython.display" are checked independently so a partial
+# real-IPython install (IPython present but IPython.display absent) is handled.
+from recotem._ipython_stub import install as _install_ipython_stub
+
+_install_ipython_stub()
 
 # IDMappedRecommender is now defined in recotem._idmap (neutral location).
 # Import it here for internal training-package callers that use this path.

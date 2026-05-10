@@ -32,7 +32,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from recotem.artifact.format import ArtifactError, parse_header_from_bytes
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
-from recotem.config import ServeConfig
+from recotem.config import ConfigError, ServeConfig
 from recotem.recipe.loader import load_recipes_directory
 from recotem.serving import metrics as _metrics
 from recotem.serving.registry import ModelEntry, ModelRegistry
@@ -45,6 +45,7 @@ from recotem.serving.watcher import (
     _stat_marker,
     build_initial_states,
 )
+from recotem.version import __version__
 
 if TYPE_CHECKING:
     pass
@@ -73,10 +74,9 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
 
     Raises
     ------
-    ValueError
-        If security posture rules are violated.
-    ArtifactError
-        If signing keys are missing and dev_allow_unsigned is False.
+    ConfigError
+        If security posture rules are violated or signing keys are missing
+        and dev_allow_unsigned is False.
     """
     # 1. Validate unsafe flags.
     serve_config.validate_insecure_flags()
@@ -91,7 +91,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     _emit_security_posture(serve_config, key_ring)
 
     # 5. Load recipes directory.
-    recipes_dir_str: str = getattr(serve_config, "recipes_dir", "")
+    recipes_dir_str: str = serve_config.recipes_dir
     if not recipes_dir_str:
         raise ValueError(
             "serve_config.recipes_dir must be set before calling create_app()"
@@ -182,7 +182,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # 8. Build app.
     app = FastAPI(
         title="Recotem Inference API",
-        version="2.0.0",
+        version=__version__,
         lifespan=lifespan,
         docs_url="/docs",
         openapi_url="/openapi.json",
@@ -240,10 +240,11 @@ def _build_key_ring(serve_config: ServeConfig) -> KeyRing | None:
         return None
 
     if not serve_config.signing_keys_raw:
-        raise ArtifactError(
+        raise ConfigError(
             "RECOTEM_SIGNING_KEYS is not set. "
             "A signing key is required to verify artifacts. "
-            "Use 'recotem keygen --type signing' to generate one."
+            "Use 'recotem keygen --type signing' to generate one, "
+            "or set RECOTEM_SIGNING_KEYS=<kid>:<hex64>."
         )
 
     return KeyRing(serve_config.signing_keys_raw)

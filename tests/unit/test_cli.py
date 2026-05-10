@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from recotem.cli import app
@@ -1457,3 +1458,258 @@ def test_inspect_max_payload_bytes_small_artifact_passes(
         f"inspect must succeed for artifact within cap; output={result.stdout}"
     )
     assert "HMAC: OK" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# C-1: _EXIT_CONFIG (8) — serve path exit codes
+# ---------------------------------------------------------------------------
+
+
+def test_serve_missing_signing_keys_exits_8(tmp_path: Path, monkeypatch) -> None:
+    """recotem serve with RECOTEM_SIGNING_KEYS unset must exit 8 (ConfigError).
+
+    Previously _build_key_ring raised ArtifactError which mapped to exit 5.
+    After the C-1 fix it raises ConfigError which maps to exit 8.
+    """
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
+    monkeypatch.setenv("RECOTEM_ENV", "test")
+
+    result = runner.invoke(
+        app,
+        ["serve", "--recipes", str(recipes_dir), "--insecure-no-auth"],
+    )
+    assert result.exit_code == 8, (
+        f"Missing RECOTEM_SIGNING_KEYS on serve must produce exit 8 (ConfigError), "
+        f"got {result.exit_code}. Output: {result.stdout}"
+    )
+
+
+def test_serve_malformed_api_keys_exits_8(tmp_path: Path, monkeypatch) -> None:
+    """recotem serve with malformed RECOTEM_API_KEYS must exit 8 (ConfigError).
+
+    Previously a ValueError from ServeConfig.from_env() was caught and mapped
+    to _EXIT_RECIPE (2).  After the C-1 fix, ConfigError maps to exit 8.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_API_KEYS", "garbage-not-valid")
+
+    result = runner.invoke(
+        app,
+        ["serve", "--recipes", str(recipes_dir)],
+    )
+    assert result.exit_code == 8, (
+        f"Malformed RECOTEM_API_KEYS must produce exit 8 (ConfigError), "
+        f"got {result.exit_code}. Output: {result.stdout}"
+    )
+
+
+def test_serve_insecure_no_auth_in_prod_exits_8(tmp_path: Path, monkeypatch) -> None:
+    """recotem serve --insecure-no-auth outside allowed envs must exit 8 (ConfigError).
+
+    validate_insecure_flags() now raises ConfigError, which _map_exception_to_exit
+    routes to exit 8.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_ENV", "production")
+
+    result = runner.invoke(
+        app,
+        ["serve", "--recipes", str(recipes_dir), "--insecure-no-auth"],
+    )
+    assert result.exit_code == 8, (
+        f"--insecure-no-auth in production must produce exit 8, "
+        f"got {result.exit_code}. Output: {result.stdout}"
+    )
+
+
+def test_train_missing_signing_keys_still_exits_8(tmp_path: Path, monkeypatch) -> None:
+    """Regression guard: train with missing RECOTEM_SIGNING_KEYS still exits 8.
+
+    The train path uses TrainingError(code='signing_key_missing') → exit 8.
+    This test ensures the C-1 ConfigError changes on the serve path did not
+    accidentally break the existing train path mapping.
+    """
+    yaml_path = _minimal_recipe_yaml(tmp_path, "train_no_key_regression")
+    monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
+    monkeypatch.delenv("RECOTEM_ENV", raising=False)
+
+    result = runner.invoke(app, ["train", str(yaml_path)])
+    assert result.exit_code == 8, (
+        f"Missing RECOTEM_SIGNING_KEYS on train must still produce exit 8; "
+        f"got {result.exit_code}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M-3: SystemExit code preservation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("code", [0, 2, 3, 4, 5, 6, 7, 8])
+def test_train_systemexit_known_code_preserved(
+    code: int, tmp_path: Path, monkeypatch
+) -> None:
+    """train must propagate well-known recotem exit codes without modification.
+
+    M-3: the old SystemExit handler only passed code 0; codes 2–8 were all
+    normalized to 1.  After the fix, codes in {0, 2, 3, 4, 5, 6, 7, 8} are
+    preserved.
+    """
+    from unittest.mock import patch
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, f"se_code_{code}")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    def _raises(*_a, **_kw):
+        raise SystemExit(code)
+
+    with patch("recotem.training.pipeline.run_training", side_effect=_raises):
+        result = runner.invoke(app, ["train", str(yaml_path)])
+
+    assert result.exit_code == code, (
+        f"SystemExit({code}) must be preserved; got {result.exit_code}"
+    )
+
+
+@pytest.mark.parametrize("code", [1, 99, "string"])
+def test_train_systemexit_unknown_code_normalizes_to_exit1(
+    code: object, tmp_path: Path, monkeypatch
+) -> None:
+    """train must normalize unrecognised SystemExit codes to _EXIT_UNKNOWN (1)."""
+    from unittest.mock import patch
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, f"se_unknown_{code}")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    def _raises(*_a, **_kw):
+        raise SystemExit(code)
+
+    with patch("recotem.training.pipeline.run_training", side_effect=_raises):
+        result = runner.invoke(app, ["train", str(yaml_path)])
+
+    assert result.exit_code == 1, (
+        f"SystemExit({code!r}) must normalize to exit 1; got {result.exit_code}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M-5: RECOTEM_MAX_PAYLOAD_BYTES > RECOTEM_MAX_ARTIFACT_BYTES exits 8
+# ---------------------------------------------------------------------------
+
+
+def test_serve_payload_exceeds_artifact_cap_exits_8(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """serve must exit 8 when RECOTEM_MAX_PAYLOAD_BYTES > RECOTEM_MAX_ARTIFACT_BYTES.
+
+    CLAUDE.md documents 'payload must be smaller than artifact to bound
+    deserialization memory expansion'.  Violating this invariant is a
+    configuration error (exit 8).
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_ENV", "test")
+    # Set payload cap larger than artifact cap — must be rejected.
+    monkeypatch.setenv("RECOTEM_MAX_ARTIFACT_BYTES", str(1 * 1024 * 1024))  # 1 MiB
+    monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", str(2 * 1024 * 1024))  # 2 MiB
+
+    result = runner.invoke(
+        app,
+        ["serve", "--recipes", str(recipes_dir), "--insecure-no-auth"],
+    )
+    # ConfigError from from_env() raises before create_app — exit 8.
+    assert result.exit_code == 8, (
+        f"PAYLOAD > ARTIFACT cap must produce exit 8; got {result.exit_code}. "
+        f"Output: {result.stdout}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# m-12: duplicate API kid exits 8
+# ---------------------------------------------------------------------------
+
+
+def test_serve_duplicate_api_kid_exits_8(tmp_path: Path, monkeypatch) -> None:
+    """serve must exit 8 when RECOTEM_API_KEYS contains a duplicate kid.
+
+    Duplicate kids are a configuration mistake — the first key silently wins
+    in KeyRing, masking the second.  Failing fast at startup is safer.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    # Two entries with the same kid "k1" but different hashes.
+    hash1 = "aa" * 32
+    hash2 = "bb" * 32
+    monkeypatch.setenv("RECOTEM_API_KEYS", f"k1:sha256:{hash1},k1:sha256:{hash2}")
+
+    result = runner.invoke(
+        app,
+        ["serve", "--recipes", str(recipes_dir)],
+    )
+    assert result.exit_code == 8, (
+        f"Duplicate API key kid must produce exit 8; got {result.exit_code}. "
+        f"Output: {result.stdout}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M-12 (test addition): recotem schema includes echo plugin
+# ---------------------------------------------------------------------------
+
+
+def test_schema_includes_echo_plugin_source_type() -> None:
+    """recotem schema must include 'echo' in the source discriminator union
+    when a plugin is registered via a monkeypatched entry-point.
+
+    The echo plugin (examples/plugins/echo-source) has its own Config but
+    lacks the ``type: Literal["echo"]`` discriminator field that pydantic
+    requires to build the union schema.  We therefore stub the plugin with a
+    minimal conforming class that has the discriminator, mirroring what a
+    properly-written production plugin would look like.  This tests the
+    ``recotem schema`` code path (that it correctly includes extra sources),
+    not the completeness of the example plugin.
+    """
+    from typing import ClassVar, Literal
+    from unittest.mock import patch
+
+    from pydantic import BaseModel
+
+    class _EchoStubConfig(BaseModel):
+        """Minimal Config for the echo stub — type discriminator required."""
+
+        type: Literal["echo"] = "echo"
+
+    class _EchoStub:
+        """Minimal plugin stub conforming to the DataSource contract."""
+
+        type_name: ClassVar[str] = "echo"
+        extras_required: ClassVar[list[str]] = []
+        no_expand_fields: ClassVar[frozenset[str]] = frozenset()
+        Config = _EchoStubConfig
+
+    # get_source_types() is lru_cached; patch it to return real built-ins + echo.
+    import recotem.datasource.registry as _reg_mod
+
+    real_types = dict(_reg_mod.get_source_types())  # built-ins only (no echo)
+    extended_types = {**real_types, "echo": _EchoStub}
+
+    with patch.object(_reg_mod, "get_source_types", return_value=extended_types):
+        result = runner.invoke(app, ["schema"])
+
+    assert result.exit_code == 0, (
+        f"schema with echo plugin registered must succeed; output: {result.stdout}"
+    )
+    schema_str = result.stdout
+    assert '"echo"' in schema_str, (
+        f"'echo' source type must appear in schema JSON when plugin is registered; "
+        f"schema excerpt: {schema_str[:500]}"
+    )

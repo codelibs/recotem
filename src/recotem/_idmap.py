@@ -29,9 +29,7 @@ this change -- this is intentional for the 2.0.0a0 pre-release.
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Iterable
-from types import ModuleType
 
 # IPython stub: install before any irspack import.  Irspack pulls in fastprogress
 # at import time, which in turn imports IPython.display.  The stub provides only
@@ -39,15 +37,11 @@ from types import ModuleType
 # `recotem.training._compat` installs the same stub for callers that go through
 # the training sub-package, but importing `_idmap` directly (e.g. from serving)
 # must also work, so we self-bootstrap here.
-if "IPython" not in sys.modules:
-    _ipython = ModuleType("IPython")
-    _display = ModuleType("IPython.display")
-    _display.display = lambda *a, **kw: None  # type: ignore[attr-defined]
-    _display.HTML = str  # type: ignore[attr-defined]
-    _display.Markdown = str  # type: ignore[attr-defined]
-    _ipython.display = _display  # type: ignore[attr-defined]
-    sys.modules["IPython"] = _ipython
-    sys.modules["IPython.display"] = _display
+# Both "IPython" and "IPython.display" are checked independently so a partial
+# real-IPython install (IPython present but IPython.display absent) is handled.
+from recotem._ipython_stub import install as _install_ipython_stub
+
+_install_ipython_stub()
 
 from irspack.utils.id_mapping import IDMapper  # noqa: E402
 

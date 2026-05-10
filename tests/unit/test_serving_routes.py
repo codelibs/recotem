@@ -601,19 +601,22 @@ def test_metrics_endpoint_exposes_documented_metrics(monkeypatch) -> None:
     )
     assert response.status_code == 200
 
-    # The other four metrics are populated by app startup / watcher in
-    # production; in this unit test we exercise the recorders directly so
-    # the gauges/counters appear in the exposition output.
+    # The other metrics are populated by app startup / watcher in production;
+    # in this unit test we exercise the recorders directly so the
+    # gauges/counters appear in the exposition output.
     metrics.set_model_loaded("test_recipe", True)
     metrics.inc_artifact_load_failure("test_recipe")
     metrics.set_active_recipes(1)
     metrics.record_swap("test_recipe", ok=True)
+    metrics.inc_metadata_lookup_error("test_recipe")
+    metrics.inc_recipe_rescan_error("test_recipe")
 
     response = client.get("/metrics")
     assert response.status_code == 200
     body = response.text
 
-    # All six metric series documented in operations.md must be present.
+    # All metric series documented in operations.md (plus the two new ones)
+    # must be present in the /metrics output.
     for name in (
         "recotem_predict_total",
         "recotem_predict_latency_seconds",
@@ -621,6 +624,8 @@ def test_metrics_endpoint_exposes_documented_metrics(monkeypatch) -> None:
         "recotem_artifact_load_failures_total",
         "recotem_active_recipes",
         "recotem_swap_total",
+        "recotem_metadata_lookup_errors_total",
+        "recotem_recipe_rescan_errors_total",
     ):
         assert name in body, f"missing {name!r} in /metrics output"
 
@@ -782,3 +787,139 @@ def test_yaml_deleted_then_predict_returns_503() -> None:
     assert detail.get("detail", {}).get("code") == "recipe_unavailable", (
         f"503 response must include code='recipe_unavailable'; got: {detail!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# C-2 + M-13: _lookup_metadata error handling
+# ---------------------------------------------------------------------------
+
+
+def test_lookup_metadata_returns_empty_on_keyerror() -> None:
+    """_lookup_metadata returns {} when item_id is absent from the index."""
+    import pandas as pd
+
+    from recotem.serving.routes import _lookup_metadata
+
+    df = pd.DataFrame({"item_id": ["i1", "i2"], "title": ["A", "B"]}).set_index(
+        "item_id"
+    )
+
+    result = _lookup_metadata(df, "not_in_index", frozenset(), "test_recipe")
+    assert result == {}
+
+
+def test_lookup_metadata_swallows_attribute_error_increments_metric(
+    monkeypatch,
+) -> None:
+    """AttributeError during row.to_dict() returns empty dict, logs, and increments
+    recotem_metadata_lookup_errors_total.
+
+    A non-unique index makes .loc[] return a DataFrame (not a Series), whose
+    .to_dict() returns a dict-of-lists rather than a flat dict — iterating it
+    with (.items() → .lower()) raises AttributeError on the list values.
+    We simulate this by using a mock that raises AttributeError on to_dict().
+    """
+    import structlog.testing
+
+    from recotem.serving import metrics
+    from recotem.serving.routes import _lookup_metadata
+
+    # Build a mock row object that raises AttributeError on to_dict()
+    class _BadRow:
+        def to_dict(self):
+            raise AttributeError("simulated: non-unique index returned DataFrame")
+
+    class _BadDf:
+        def loc(self, item_id):  # noqa: B019
+            return _BadRow()
+
+    # Patch .loc as a property that returns _BadRow for any key
+    bad_df = MagicMock()
+    bad_df.loc.__getitem__ = MagicMock(return_value=_BadRow())
+
+    metrics._ensure_initialized()
+    before = 0.0
+    if metrics._METADATA_LOOKUP_ERRORS is not None:
+        try:
+            before = metrics._METADATA_LOOKUP_ERRORS.labels(
+                recipe="attr_err_recipe"
+            )._value.get()
+        except Exception:
+            before = 0.0
+
+    with structlog.testing.capture_logs() as cap:
+        result = _lookup_metadata(bad_df, "some_item", frozenset(), "attr_err_recipe")
+
+    assert result == {}, "AttributeError must result in empty dict return"
+
+    after = 0.0
+    if metrics._METADATA_LOOKUP_ERRORS is not None:
+        try:
+            after = metrics._METADATA_LOOKUP_ERRORS.labels(
+                recipe="attr_err_recipe"
+            )._value.get()
+        except Exception:
+            after = 0.0
+
+    import pytest
+
+    pytest.importorskip("prometheus_client")
+    assert after == before + 1, (
+        f"recotem_metadata_lookup_errors_total must increment by 1 on AttributeError; "
+        f"before={before}, after={after}"
+    )
+
+    warn_events = [e for e in cap if e.get("event") == "metadata_lookup_failed"]
+    assert warn_events, "metadata_lookup_failed WARN must be emitted on AttributeError"
+    evt = warn_events[0]
+    assert evt.get("recipe") == "attr_err_recipe"
+    assert evt.get("error_class") == "AttributeError"
+
+
+def test_lookup_metadata_skips_non_string_columns() -> None:
+    """DataFrame with int column names must not crash — int columns are skipped."""
+    import pandas as pd
+
+    from recotem.serving.routes import _lookup_metadata
+
+    # Construct a DataFrame with an int column name and a string column name.
+    df = pd.DataFrame([[1, "hello"]], columns=[42, "title"])
+    df.index = pd.Index(["item_x"], name="item_id")
+
+    result = _lookup_metadata(df, "item_x", frozenset(), "int_col_recipe")
+
+    # int column 42 must be silently skipped, string column 'title' kept.
+    assert 42 not in result, "int column name must be omitted from the output"
+    assert "title" in result, "'title' string column must be present"
+    assert result["title"] == "hello"
+
+
+# ---------------------------------------------------------------------------
+# M-14: {name} path param regex validation
+# ---------------------------------------------------------------------------
+
+
+def test_predict_with_invalid_name_returns_422_not_503() -> None:
+    """Arbitrary strings in the recipe name path param must return 422.
+
+    FastAPI should validate the ``name`` path parameter against the pattern
+    ``^[A-Za-z0-9_-]{1,64}$`` before reaching any business logic.  Sending
+    characters outside that set (e.g. slashes, unicode, shell metacharacters)
+    must produce a 422 Unprocessable Entity, not a 503 that reflects the
+    arbitrary string into the response body.
+    """
+    client, _ = _make_test_client()
+
+    for bad_name in [
+        "recipe with spaces",  # space not in [A-Za-z0-9_-]
+        "recipe!@#meta",  # special characters
+        "a" * 65,  # over 64 chars
+        "recipe.dotted",  # dot not in character class
+    ]:
+        response = client.post(
+            "/predict/" + bad_name,
+            json={"user_id": "user1"},
+        )
+        assert response.status_code == 422, (
+            f"Expected 422 for name={bad_name!r}, got {response.status_code}"
+        )

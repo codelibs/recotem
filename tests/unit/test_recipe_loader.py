@@ -962,6 +962,57 @@ def test_output_path_symlink_in_parent_rejected(
 
 
 # ---------------------------------------------------------------------------
+# M-8: terminal-filename symlink TOCTOU — parent inside root, symlink as filename
+# ---------------------------------------------------------------------------
+
+
+def test_output_path_terminal_symlink_parent_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loader's containment check is authoritative on the *parent* directory.
+
+    When output.path is ``<artifact_root>/model.recotem`` and a symlink named
+    ``model.recotem`` already exists inside the root pointing to an outside
+    target, the loader composes the containment path as
+    ``resolved_parent / local_path.name`` — which is ``artifact_root/model.recotem``
+    (inside the root) — rather than following the symlink via a non-strict
+    ``Path.resolve()``.
+
+    This means load_recipe PASSES for a terminal-filename symlink whose
+    *parent directory* resolves inside the artifact root.  The write-time
+    defence (artifact/io.py) catches any actual escape attempt.
+
+    Regression: previously the code called ``local_path.resolve()`` (non-strict),
+    which CAN follow existing terminal symlinks to their target.  The new code
+    avoids this non-deterministic behaviour (depends on whether the file exists)
+    by using the composed path exclusively.
+    """
+    artifact_root = tmp_path / "root"
+    artifact_root.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+
+    # Terminal symlink inside the artifact root pointing to an outside target.
+    symlink_path = artifact_root / "model.recotem"
+    symlink_path.symlink_to(outside_dir / "model.recotem")
+
+    monkeypatch.setenv("RECOTEM_ARTIFACT_ROOT", str(artifact_root))
+
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="terminal_symlink_parent_auth",
+        output_path=str(symlink_path),
+    )
+    p = _write_recipe(tmp_path, content)
+
+    # The parent (artifact_root) is strictly inside the root.  The loader
+    # composes the containment path as resolved_parent/model.recotem — which
+    # IS inside the root — so load_recipe must succeed.  Write-time escape is
+    # the responsibility of artifact/io.py (defense-in-depth).
+    recipe = load_recipe(p)
+    assert recipe.name == "terminal_symlink_parent_auth"
+
+
+# ---------------------------------------------------------------------------
 # S-3: TOKEN / KEY blacklist patterns
 # ---------------------------------------------------------------------------
 
@@ -1368,6 +1419,54 @@ def test_envvars_blacklist_legacy_patterns_still_rejected(
     p = _write_recipe(tmp_path, content)
     with pytest.raises(RecipeError, match="blacklisted|not allowed"):
         load_recipe(p)
+
+
+# ---------------------------------------------------------------------------
+# m-10: narrowed except clause — ImportError from get_source_class raises RecipeError
+# ---------------------------------------------------------------------------
+
+
+def test_source_class_import_error_raises_recipe_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ImportError from get_source_class during env expansion must surface as
+    RecipeError, not be silently swallowed by the old bare ``except Exception: pass``.
+
+    Previously the except clause was bare ``except Exception: pass``, which
+    silently fell back to the global no-expand list when a plugin raised
+    ImportError (e.g. missing optional dependency).  This meant ${...} expansion
+    would run on plugin-protected fields like ``api_token``.
+
+    The fix narrows the catch: DataSourceError (unknown type) is allowed to pass
+    silently (later validation surfaces it); any other exception including
+    ImportError is re-raised as RecipeError.
+    """
+    from unittest.mock import patch
+
+    content = """\
+name: import_error_test
+source:
+  type: my_plugin_source
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: /tmp/import_error_test.recotem
+"""
+    p = _write_recipe(tmp_path, content)
+
+    # Patch get_source_class to raise ImportError (simulates a plugin with a
+    # missing optional dependency that defers the import to the class body).
+    with patch(
+        "recotem.datasource.registry.get_source_class",
+        side_effect=ImportError("optional dependency 'my-plugin' is not installed"),
+    ):
+        with pytest.raises(RecipeError, match="my_plugin_source"):
+            load_recipe(p)
 
 
 # ---------------------------------------------------------------------------

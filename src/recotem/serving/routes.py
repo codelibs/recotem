@@ -14,7 +14,7 @@ import uuid
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 from pydantic import BaseModel, Field
 
 from recotem.config import ApiKeyEntry
@@ -101,7 +101,7 @@ def make_router(
         summary="Get recommendations for a single user",
     )
     def predict(
-        name: str,
+        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")],
         body: PredictRequest,
         request: Request,
         response: Response,
@@ -173,7 +173,7 @@ def make_router(
             for item_id, score in raw_results:
                 item: dict[str, Any] = {"item_id": item_id, "score": float(score)}
                 if meta_df is not None:
-                    row = _lookup_metadata(meta_df, item_id, _deny_set)
+                    row = _lookup_metadata(meta_df, item_id, _deny_set, name)
                     item.update(row)
                 items.append(item)
 
@@ -261,17 +261,45 @@ def _lookup_metadata(
     meta_df: Any,
     item_id: str,
     deny_set: frozenset[str],
+    recipe_name: str = "",
 ) -> dict[str, Any]:
     """Return a flat dict of metadata fields for *item_id*.
 
     Returns an empty dict if the item is not found or any error occurs.
+    The documented error set that returns empty dict:
+
+    - ``KeyError``      — item not in metadata index (normal, not an error).
+    - ``AttributeError`` — non-unique index returned a DataFrame instead of a
+                           Series so ``.to_dict()`` behaves unexpectedly.
+    - ``TypeError``     — a non-string column name caused ``.lower()`` to fail.
+    - ``ValueError``    — malformed row data that cannot be iterated.
+
+    All unexpected errors are logged at WARNING level and increment
+    ``recotem_metadata_lookup_errors_total`` so operators can detect
+    metadata misconfiguration without silencing it completely.
     """
     try:
         row = meta_df.loc[item_id]
     except KeyError:
         return {}
-    return {
-        k: (None if isinstance(v, float) and math.isnan(v) else v)
-        for k, v in row.to_dict().items()
-        if k.lower() not in deny_set
-    }
+    try:
+        out: dict[str, Any] = {}
+        for k, v in row.to_dict().items():
+            # Guard: skip non-string column names (M-13 — .lower() would raise
+            # AttributeError on an int column name).
+            if not isinstance(k, str):
+                continue
+            if k.lower() in deny_set:
+                continue
+            # Preserve existing NaN → None normalisation.
+            out[k] = None if isinstance(v, float) and math.isnan(v) else v
+        return out
+    except (AttributeError, TypeError, ValueError) as exc:
+        logger.warning(
+            "metadata_lookup_failed",
+            recipe=recipe_name,
+            item_id=str(item_id),
+            error_class=type(exc).__name__,
+        )
+        _metrics.inc_metadata_lookup_error(recipe_name)
+        return {}

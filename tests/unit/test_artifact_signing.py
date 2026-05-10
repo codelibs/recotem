@@ -915,3 +915,51 @@ def test_keyring_forward_rotation_new_key_signs_verifies() -> None:
 
     with pytest.raises(ArtifactError, match="HMAC"):
         verify_hmac(kr_old_only, kid, kid_bytes, header_json, payload, digest)
+
+
+# ---------------------------------------------------------------------------
+# M-6 regression: deny-list precedence over allow-list in _is_allowed
+# ---------------------------------------------------------------------------
+
+
+def test_is_allowed_deny_takes_precedence_over_exact_allow_list_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A class whose (module, name) is in _ALLOWED_CLASSES but whose module is
+    also in _DENIED_MODULE_PREFIXES MUST be rejected.
+
+    This guards against a future allow-list addition accidentally re-permitting
+    a denied submodule.  The deny check must run before the exact-match check.
+
+    Scenario: monkeypatch _ALLOWED_CLASSES to include
+    ("numpy.testing._private", "Tester") -- numpy.testing is in
+    _DENIED_MODULE_PREFIXES -- and assert that _is_allowed returns False.
+    """
+    import io
+
+    from recotem.artifact.signing import (
+        _ALLOWED_CLASSES,
+        SafeUnpickler,
+        _is_allowed,
+    )
+
+    # The entry to inject: module is in the deny-prefix list even after the
+    # allow-list injection, so it must still be rejected.
+    poisoned_entry = ("numpy.testing._private", "Tester")
+
+    # Monkeypatch _ALLOWED_CLASSES to include the entry.
+    patched = _ALLOWED_CLASSES | {poisoned_entry}
+    monkeypatch.setattr("recotem.artifact.signing._ALLOWED_CLASSES", patched)
+
+    # _is_allowed must reject despite the exact FQCN match.
+    module, name = poisoned_entry
+    result = _is_allowed(module, name)
+    assert result is False, (
+        f"_is_allowed must return False for {module!r}.{name!r} because the module "
+        "is in _DENIED_MODULE_PREFIXES -- deny takes precedence over allow-list."
+    )
+
+    # SafeUnpickler.find_class must also raise for the same entry.
+    unpickler = SafeUnpickler(io.BytesIO(b""))
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickler.find_class(module, name)

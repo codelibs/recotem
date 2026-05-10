@@ -118,7 +118,8 @@ def _resolve_host_addresses(host: str) -> list[ipaddress._BaseAddress]:
         pass
     try:
         infos = socket.getaddrinfo(host, None)
-    except OSError:
+    except OSError as exc:
+        logger.debug("dns_resolution_failed", host=host, error_class=type(exc).__name__)
         return []
     addrs: list[ipaddress._BaseAddress] = []
     seen: set[str] = set()
@@ -302,7 +303,14 @@ class _NoFollowRedirectHandler(urllib.request.HTTPRedirectHandler):
 # whose host is already a numeric IP literal) assert_host_public validates
 # the address and returns the IP string, so the IP-pinned opener is used
 # instead.
-_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoFollowRedirectHandler())
+#
+# Implemented as a factory rather than a module-level constant so that each
+# fetch request gets a fresh OpenerDirector with no shared mutable state.
+# Using a module-level singleton would mean any caller that mutates the opener
+# (e.g. adding handlers) would affect all subsequent fetches in the process.
+def _build_no_redirect_opener() -> urllib.request.OpenerDirector:
+    """Return a fresh urllib opener with redirect-passthrough and no IP pinning."""
+    return urllib.request.build_opener(_NoFollowRedirectHandler())
 
 
 # ---------------------------------------------------------------------------
@@ -469,9 +477,9 @@ def fetch_http_bytes(
     ctx: dict[str, object] = dict(log_context or {})
 
     while True:
-        if redirects > MAX_REDIRECTS:
+        if redirects >= MAX_REDIRECTS:
             raise HttpFetchError(
-                f"Too many redirects (>{MAX_REDIRECTS}) fetching {safe_url}"
+                f"Too many redirects (>={MAX_REDIRECTS}) fetching {safe_url}"
             )
         if current_url in visited:
             raise HttpFetchError(f"Redirect loop detected fetching {safe_url}")
@@ -488,7 +496,7 @@ def fetch_http_bytes(
         opener = (
             _build_pinned_opener(pinned_ip)
             if pinned_ip is not None
-            else _NO_REDIRECT_OPENER
+            else _build_no_redirect_opener()
         )
 
         req = urllib.request.Request(
@@ -564,7 +572,9 @@ def fetch_http_bytes(
             ) from exc
         except HttpFetchError:
             raise
+        except TimeoutError as exc:
+            raise HttpFetchError(f"Timeout ({timeout}s) fetching {safe_url}") from exc
         except Exception as exc:  # pragma: no cover - defensive
             raise HttpFetchError(
-                f"Unexpected error fetching {safe_url}: {exc}"
+                f"Unexpected {type(exc).__name__} fetching {safe_url}: {exc}"
             ) from exc

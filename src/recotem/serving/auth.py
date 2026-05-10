@@ -174,7 +174,14 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
             length=len(raw_header),
             cap=_API_KEY_MAX_LEN,
         )
-        _hash_api_key("\x00" * _API_KEY_MIN_LEN)  # constant-time equalisation
+        # Length-matched dummy: hash exactly _API_KEY_MAX_LEN null bytes so
+        # the scrypt input size equals the maximum legitimate key length,
+        # rather than the fixed _API_KEY_MIN_LEN.  This removes the residual
+        # timing difference between the oversized path (which was always
+        # _API_KEY_MIN_LEN bytes) and the normal path (up to _API_KEY_MAX_LEN
+        # bytes).  The result is discarded; only the KDF wall-time matters.
+        _dummy_len = _API_KEY_MAX_LEN
+        _hash_api_key("\x00" * _dummy_len)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
             detail={"detail": "Invalid API key", "code": "invalid_api_key"},
@@ -200,7 +207,11 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
             length=len(raw_header),
             min_len=_API_KEY_MIN_LEN,
         )
-        _hash_api_key("\x00" * _API_KEY_MIN_LEN)  # constant-time equalisation
+        # Length-matched dummy: scrypt input size is clamped to
+        # [_API_KEY_MIN_LEN, _API_KEY_MAX_LEN] to remove residual timing
+        # differences between this path and the normal hashing path.
+        _dummy_len = max(_API_KEY_MIN_LEN, min(len(raw_header), _API_KEY_MAX_LEN))
+        _hash_api_key("\x00" * _dummy_len)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
             detail={"detail": "Invalid API key", "code": "invalid_api_key"},

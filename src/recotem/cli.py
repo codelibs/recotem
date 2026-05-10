@@ -26,9 +26,12 @@ import base64
 import hashlib
 import json
 import os
+import re
+import uuid
 from pathlib import Path
 from typing import Annotated
 
+import structlog
 import typer
 
 app = typer.Typer(
@@ -110,6 +113,16 @@ def _map_exception_to_exit(exc: Exception) -> int:
 
         if isinstance(exc, _DataSourceError):
             return _EXIT_DATASOURCE
+    except ImportError:
+        pass
+
+    # --- config errors (must come before ArtifactError so that a signing-key
+    # misconfiguration on the serve path exits 8, not 5)
+    try:
+        from recotem.config import ConfigError as _ConfigError
+
+        if isinstance(exc, _ConfigError):
+            return _EXIT_CONFIG
     except ImportError:
         pass
 
@@ -235,18 +248,14 @@ def train(
         _exit(_map_exception_to_exit(exc), f"Recipe error: {exc}")
 
     if run_id_opt is not None:
-        import re as _re
-
-        if not _re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", run_id_opt):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", run_id_opt):
             _exit(
                 _EXIT_RECIPE,
                 "--run-id must match [A-Za-z0-9_.-]{1,64}.",
             )
         run_id = run_id_opt
     else:
-        import uuid as _uuid
-
-        run_id = _uuid.uuid4().hex[:12]
+        run_id = uuid.uuid4().hex[:12]
 
     try:
         from recotem.training.pipeline import (
@@ -263,12 +272,13 @@ def train(
             dev_allow_unsigned=dev_allow_unsigned,
         )
     except SystemExit as exc:
-        # exc.code or 0 would collapse None/falsy codes to success (C-2).
-        # Only literal int 0 is success; everything else (None, non-zero int,
-        # str) maps to a non-zero exit so we never suppress a real failure.
+        # Preserve well-known recotem exit codes (0 and 2–8); normalize
+        # everything else (None, arbitrary int, str) to _EXIT_UNKNOWN so
+        # we never collapse a real failure to 0 or pass an unrecognised code
+        # to the shell.  Literal int 0 is the only success sentinel.
         code = exc.code
-        if isinstance(code, int) and code == 0:
-            raise typer.Exit(code=0) from exc
+        if isinstance(code, int) and code in (0, 2, 3, 4, 5, 6, 7, 8):
+            raise typer.Exit(code=code) from exc
         raise typer.Exit(code=_EXIT_UNKNOWN) from exc
     except Exception as exc:
         # The canonical train_error event is emitted inside run_training so
@@ -343,11 +353,11 @@ def serve(
         )
 
     try:
-        from recotem.config import ServeConfig
+        from recotem.config import ConfigError, ServeConfig
 
         cfg = ServeConfig.from_env()
-    except ValueError as exc:
-        _exit(_EXIT_RECIPE, f"Configuration error: {exc}")
+    except ConfigError as exc:
+        _exit(_EXIT_CONFIG, f"Configuration error: {exc}")
 
     if host is not None:
         cfg.host = host
@@ -355,7 +365,7 @@ def serve(
         cfg.port = port
     cfg.insecure_no_auth = insecure_no_auth
     cfg.dev_allow_unsigned = dev_allow_unsigned
-    cfg.recipes_dir = str(recipes.resolve())  # type: ignore[attr-defined]
+    cfg.recipes_dir = str(recipes.resolve())
 
     try:
         from recotem.serving.app import create_app
@@ -365,10 +375,9 @@ def serve(
         code = _map_exception_to_exit(exc)
         _exit(code, f"Server startup failed: {exc}")
 
-    import structlog as _structlog
     import uvicorn
 
-    _srv_log = _structlog.get_logger(__name__)
+    _srv_log = structlog.get_logger(__name__)
 
     try:
         uvicorn.run(
@@ -652,8 +661,6 @@ def keygen(
         _exit(_EXIT_UNKNOWN, f"--type must be 'signing' or 'api', got {key_type!r}.")
 
     if kid is None:
-        import uuid
-
         kid = str(uuid.uuid4())[:8]
 
     raw_bytes = os.urandom(32)

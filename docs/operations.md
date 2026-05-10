@@ -227,7 +227,7 @@ as the basis for SLO and alerting rules.
 | `training_final_model` / `final_model_trained` | refit | `recommender` |
 | `artifact_written` | persist | `versioning`, `artifact`, `pointer` (append_sha), `kid` |
 | `train_done` | end | `name`, `run_id`, `exit_code`, `artifact`, `best_class`, `best_score`, `trials`, `n_orphaned`, `trained_at`, `kid` |
-| `train_error` | failure | `error`, `code` (`internal_error` for non-domain exceptions), `recipe`, `run_id`, `exit_code`; additionally `n_rows`, `n_users`, `n_items`, `min_rows`, `min_users`, `min_items` when `code=min_data_violation` |
+| `train_error` | failure | `error`, `code` (`internal_error` for non-domain exceptions), `recipe`, `run_id`, `exit_code`, `trained_at`; additionally `n_rows`, `n_users`, `n_items`, `min_rows`, `min_users`, `min_items` when `code=min_data_violation` |
 | `recipe_lock_contended_skipping` | start | `recipe`, `run_id` (default `--fail-on-busy=False` exits 0) |
 | `csv_source_redirect`, `csv_source_size_exceeded` | datasource | `path`, `status`, `cap` |
 | `metadata_source_redirect`, `metadata_source_size_exceeded` | datasource | `path`, `status`, `cap` |
@@ -352,6 +352,8 @@ The `/metrics` endpoint is opt-in and off by default. Set `RECOTEM_METRICS_ENABL
 > template ships with a deny-all baseline; allow only the scrapers and
 > probes you actually need.
 
+<!-- TODO(post-merge): re-sync metric inventory after pending serving/ additions -->
+
 Available metrics:
 
 | Metric | Type | Labels |
@@ -364,6 +366,8 @@ Available metrics:
 | `recotem_swap_total` | Counter | `recipe`, `result` |
 | `recotem_artifact_stat_failures_total` | Counter | `recipe` |
 | `recotem_watcher_unhandled_errors_total` | Counter | — |
+| `recotem_metadata_lookup_errors_total` | Counter | `recipe` |
+| `recotem_recipe_rescan_errors_total` | Counter | `recipe` |
 
 ---
 
@@ -488,6 +492,20 @@ For BigQuery: run `gcloud auth application-default print-access-token` to confir
 ```bash
 recotem train recipe.yaml 2>&1 | grep '"event":"train_error"' | jq .
 ```
+
+#### BigQuery Storage Read API fallback
+
+When the service account lacks `bigquery.readSessions.create`, the BigQuery source logs a `bigquery_storage_fallback` warning and falls back to the slower REST API. Monitor for this event in your log aggregator — sustained fallbacks indicate a missing IAM permission.
+
+To grant the permission:
+
+```bash
+gcloud projects add-iam-policy-binding <PROJECT_ID> \
+  --member="serviceAccount:<SA>@<PROJECT_ID>.iam.gserviceaccount.com" \
+  --role="roles/bigquery.readSessionUser"
+```
+
+To disable the fallback and surface the error instead, set `RECOTEM_BQ_REQUIRE_STORAGE_API=1`. When set, a `PermissionDenied` from the Storage Read API raises `DataSourceError` (exit 3) rather than silently retrying via REST.
 
 ### `recotem train` exits 4 with `min_data_violation`
 

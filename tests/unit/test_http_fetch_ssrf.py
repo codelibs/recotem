@@ -398,15 +398,17 @@ def test_redirect_https_to_http_rejected(httpserver) -> None:
         def read(self, n):
             return b""
 
-    original_opener_open = _mod._NO_REDIRECT_OPENER.open
-
     call_count = [0]
 
     def _fake_open(req, timeout=None):
         call_count[0] += 1
         return _FakeResponse()
 
-    with patch.object(_mod._NO_REDIRECT_OPENER, "open", side_effect=_fake_open):
+    # _build_no_redirect_opener is now a factory; patch it to return a fake opener.
+    fake_opener = urllib.request.build_opener()
+    fake_opener.open = _fake_open  # type: ignore[method-assign]
+
+    with patch.object(_mod, "_build_no_redirect_opener", return_value=fake_opener):
         with patch.object(_mod, "assert_host_public", return_value=None):
             with pytest.raises(HttpFetchError, match="scheme-changing redirect"):
                 fetch_http_bytes(
@@ -508,7 +510,7 @@ def test_fetch_http_bytes_timeout_actually_fires() -> None:
     t.start()
     start = time.monotonic()
     try:
-        with pytest.raises(HttpFetchError, match="URL error|timed out|timeout"):
+        with pytest.raises(HttpFetchError, match="URL error|timed out|[Tt]imeout"):
             fetch_http_bytes(
                 f"http://127.0.0.1:{port}/",
                 timeout=1,
@@ -765,7 +767,11 @@ def test_https_to_file_redirect_rejected() -> None:
         call_count[0] += 1
         return _FakeResponse()
 
-    with patch.object(_mod._NO_REDIRECT_OPENER, "open", side_effect=_fake_open):
+    # _build_no_redirect_opener is now a factory; patch it to return a fake opener.
+    fake_opener = urllib.request.build_opener()
+    fake_opener.open = _fake_open  # type: ignore[method-assign]
+
+    with patch.object(_mod, "_build_no_redirect_opener", return_value=fake_opener):
         with patch.object(_mod, "assert_host_public", return_value=None):
             with pytest.raises(HttpFetchError) as exc_info:
                 fetch_http_bytes(
@@ -1201,4 +1207,109 @@ def test_assert_host_public_returns_none_only_for_allow_private(
     assert result_public is not None, (
         "assert_host_public must NOT return None for a public IP when "
         "allow_private=False. Only allow_private=True triggers None."
+    )
+
+
+# ---------------------------------------------------------------------------
+# M-1 regression: redirect cap is exactly MAX_REDIRECTS (off-by-one fixed)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "num_redirects,should_raise",
+    [
+        (4, False),  # strictly under the cap: succeeds
+        (5, True),  # exactly at MAX_REDIRECTS: raises (was off-by-one bug)
+        (6, True),  # above cap: raises
+    ],
+)
+def test_fetch_http_bytes_redirect_cap_exact(
+    httpserver, num_redirects: int, should_raise: bool
+) -> None:
+    """Redirect cap is exactly MAX_REDIRECTS hops.
+
+    Previously ``redirects > MAX_REDIRECTS`` allowed MAX_REDIRECTS+1 hops.
+    After the fix ``redirects >= MAX_REDIRECTS`` allows exactly MAX_REDIRECTS-1
+    redirects to complete before the (MAX_REDIRECTS)th iteration fires the check.
+
+    Wait — the counter increments AFTER each redirect, and the check fires at
+    the TOP of the loop.  So:
+      - iteration 1: redirects=0 (< MAX_REDIRECTS=5) → follow redirect → counter=1
+      - ...
+      - iteration 5: redirects=4 (< 5) → follow redirect → counter=5
+      - iteration 6: redirects=5 (>= 5) → raise
+
+    Net result: 4 redirects are completed; the 5th triggers the check.
+    The parametrize values reflect this: num_redirects=4 builds 4 server-side
+    redirects (5 paths), completing cleanly; num_redirects=5 builds 5 server-side
+    redirects but the 5th is never fetched — the cap fires first.
+    """
+
+    # Build num_redirects+1 paths: /r0 → /r1 → ... → /r<num> (final returns 200).
+    paths = [f"/rc{i}" for i in range(num_redirects + 1)]
+    for i in range(num_redirects):
+        httpserver.expect_request(paths[i]).respond_with_data(
+            b"",
+            status=302,
+            headers={"Location": httpserver.url_for(paths[i + 1])},
+        )
+    httpserver.expect_request(paths[-1]).respond_with_data(b"ok", status=200)
+
+    if should_raise:
+        with pytest.raises(HttpFetchError, match="Too many redirects"):
+            fetch_http_bytes(
+                httpserver.url_for(paths[0]),
+                timeout=10,
+                max_bytes=65536,
+                allow_private=True,
+            )
+    else:
+        result = fetch_http_bytes(
+            httpserver.url_for(paths[0]),
+            timeout=10,
+            max_bytes=65536,
+            allow_private=True,
+        )
+        assert result == b"ok"
+
+
+# ---------------------------------------------------------------------------
+# m-4 regression: socket.timeout raises HttpFetchError with "Timeout" message
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_http_bytes_socket_timeout_raises_http_fetch_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When urllib raises socket.timeout, fetch_http_bytes must raise HttpFetchError
+    with a message that includes "Timeout" and the configured timeout seconds.
+
+    Previously, socket.timeout fell into the generic ``except Exception`` branch
+    and produced a message like "Unexpected error fetching ..." without indicating
+    the timeout duration.  The dedicated branch now produces
+    "Timeout (<n>s) fetching ..." for clearer diagnosis.
+    """
+    import recotem._http_fetch as _mod
+
+    def _raise_socket_timeout(*args, **kwargs):
+        raise TimeoutError("timed out")
+
+    with patch.object(_mod, "assert_host_public", return_value=None):
+        with patch.object(_mod, "_build_no_redirect_opener") as mock_factory:
+            fake_opener = urllib.request.build_opener()
+            fake_opener.open = _raise_socket_timeout  # type: ignore[method-assign]
+            mock_factory.return_value = fake_opener
+
+            with pytest.raises(HttpFetchError) as exc_info:
+                fetch_http_bytes(
+                    "http://example.com/data.csv",
+                    timeout=7,
+                    max_bytes=65536,
+                    allow_private=True,
+                )
+
+    err = str(exc_info.value)
+    assert "Timeout" in err, f"HttpFetchError must mention 'Timeout'; got: {err!r}"
+    assert "7" in err, (
+        f"HttpFetchError must include the configured timeout seconds (7); got: {err!r}"
     )

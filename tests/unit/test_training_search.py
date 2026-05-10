@@ -499,16 +499,20 @@ def test_orphan_thread_periodic_warn() -> None:
             import threading as _threading
 
             _orphan_lock = _threading.Lock()
-            _orphaned_count: list[int] = [0]
+            _orphaned_live: list[int] = [0]
+            _orphaned_total: list[int] = [0]
 
             for _ in range(16):
                 with _orphan_lock:
-                    _orphaned_count[0] += 1
-                    current_count = _orphaned_count[0]
-                if current_count % 16 == 0:
+                    _orphaned_live[0] += 1
+                    _orphaned_total[0] += 1
+                    current_live = _orphaned_live[0]
+                    current_total = _orphaned_total[0]
+                if current_total % 16 == 0:
                     spy_logger.warning(
                         "training_orphaned_threads",
-                        count=current_count,
+                        live=current_live,
+                        total=current_total,
                         ceiling=search_mod._MAX_LIVE_ORPHANED_THREADS,
                         recipe="periodic_test",
                         run_id="pw1",
@@ -526,11 +530,299 @@ def test_orphan_thread_periodic_warn() -> None:
             f"Expected 'training_orphaned_threads' warning at 16th orphan; "
             f"warning calls: {spy_logger.warning.call_args_list}"
         )
-        # The warning must carry count and ceiling fields.
+        # The warning must carry live, total, and ceiling fields.
         warn_kwargs = periodic_warns[0].kwargs
-        assert "count" in warn_kwargs, f"Warning missing 'count' field: {warn_kwargs}"
+        assert "live" in warn_kwargs, f"Warning missing 'live' field: {warn_kwargs}"
+        assert "total" in warn_kwargs, f"Warning missing 'total' field: {warn_kwargs}"
         assert "ceiling" in warn_kwargs, (
             f"Warning missing 'ceiling' field: {warn_kwargs}"
+        )
+    finally:
+        search_mod._MAX_LIVE_ORPHANED_THREADS = original_ceiling
+
+
+# ---------------------------------------------------------------------------
+# New tests: live-count decrement correctness
+# ---------------------------------------------------------------------------
+
+# A recommender that sleeps a short but deterministic amount.  We use a
+# per_trial_timeout of 0.1 s (passed as a float — the type annotation is
+# int|None but Python does not enforce it at runtime, and the code converts
+# the value via float() before passing to thread.join).  0.3 s keeps the
+# test runtime well under 2 s even with a 0.4 s inter-trial gap.
+_BRIEF_SLEEP_S = 0.3
+_BRIEF_TIMEOUT_S = 0.1  # < _BRIEF_SLEEP_S so the thread is orphaned
+
+
+class _BriefSleepRecommender:
+    """Recommender that sleeps _BRIEF_SLEEP_S then returns normally."""
+
+    learnt_config: dict = {}
+
+    def __init__(self, X, **kwargs):
+        pass
+
+    @staticmethod
+    def default_suggest_parameter(trial, space):
+        return {}
+
+    def learn_with_optimizer(self, evaluator, trial):
+        time.sleep(_BRIEF_SLEEP_S)
+
+    def learn(self):
+        return self
+
+
+class _InfiniteRecommender:
+    """Recommender that sleeps indefinitely so every trial is orphaned."""
+
+    learnt_config: dict = {}
+
+    def __init__(self, X, **kwargs):
+        pass
+
+    @staticmethod
+    def default_suggest_parameter(trial, space):
+        return {}
+
+    def learn_with_optimizer(self, evaluator, trial):
+        time.sleep(60)  # far beyond any test timeout
+
+    def learn(self):
+        return self
+
+
+def _make_fake_completed_trial(number: int) -> MagicMock:
+    t = MagicMock(spec=optuna.trial.FrozenTrial)
+    t.state = optuna.trial.TrialState.COMPLETE
+    t.value = -0.5
+    t.number = number
+    t.params = {"recommender_class_name": "TopPopRecommender"}
+    t.user_attrs = {"recommender_class_name": "TopPopRecommender"}
+    return t
+
+
+def test_orphan_live_count_decrements_on_completion() -> None:
+    """_orphaned_live is decremented when an orphaned thread eventually finishes.
+
+    Two SEQUENTIAL trials each have a 0.1 s timeout with a _BriefSleepRecommender
+    that sleeps 0.3 s.  Between the two objective invocations we wait long enough
+    that the first orphan thread has finished, decrementing _orphaned_live back
+    to 0.  The second trial therefore also sees live=1 (not 2) and should NOT
+    trip the ceiling (patched to 2).  Without the fix, the cumulative count
+    would reach 2 and abort with SearchError.
+
+    Post-search, orphaned_count (cumulative) must equal 2.
+    """
+    import recotem.training.search as search_mod
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    original_ceiling = search_mod._MAX_LIVE_ORPHANED_THREADS
+    try:
+        search_mod._MAX_LIVE_ORPHANED_THREADS = 2  # ceiling just above single-live
+
+        with patch(
+            "recotem.training.search.get_recommender_cls",
+            return_value=_BriefSleepRecommender,
+        ):
+            with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+                mock_study = MagicMock()
+                fake_trials = [_make_fake_completed_trial(i) for i in range(4)]
+                best_fake_trial = fake_trials[0]
+
+                def _optimize_two_sequential_orphans(objective, n_trials, **kwargs):
+                    """Fire objective twice with a gap so the first orphan finishes."""
+                    for trial_num in range(2):
+                        fake_t = MagicMock(spec=optuna.Trial)
+                        fake_t.number = trial_num
+                        fake_t.suggest_categorical.return_value = "TopPopRecommender"
+                        fake_t.set_user_attr = MagicMock()
+                        try:
+                            objective(fake_t)
+                        except optuna.TrialPruned:
+                            pass
+                        # Wait long enough for the previous orphan thread to finish
+                        # its _BRIEF_SLEEP_S sleep and decrement _orphaned_live.
+                        time.sleep(_BRIEF_SLEEP_S + 0.1)
+                    mock_study.trials = fake_trials
+                    mock_study.best_trial = best_fake_trial
+
+                mock_study.trials = []
+                mock_study.optimize = _optimize_two_sequential_orphans
+                mock_study_fn.return_value = mock_study
+
+                X = sps.csr_matrix(np.ones((5, 3)))
+                evaluator = MagicMock()
+
+                with ProgressReporter(
+                    n_trials=2, recipe_name="live_decrement_test", run_id="ld1"
+                ) as rep:
+                    # Should NOT raise SearchError: live never reaches ceiling=2
+                    # because the first orphan completes before the second is created.
+                    result = run_search(
+                        algorithms=["TopPopRecommender"],
+                        X_tv_train=X,
+                        evaluator=evaluator,
+                        n_trials=2,
+                        per_algorithm_trials=None,
+                        # Use float: the type hint is int|None but Python does not
+                        # enforce it; run_search converts via float() before join.
+                        per_trial_timeout_seconds=_BRIEF_TIMEOUT_S,  # type: ignore[arg-type]
+                        timeout_seconds=None,
+                        parallelism=1,
+                        storage_path="",
+                        random_seed=42,
+                        reporter=rep,
+                        recipe_name="live_decrement_test",
+                        run_id="ld1",
+                    )
+
+        # Cumulative count must reflect both orphans.
+        assert result.orphaned_count == 2, (
+            f"Expected orphaned_count=2 (cumulative), got {result.orphaned_count}"
+        )
+    finally:
+        search_mod._MAX_LIVE_ORPHANED_THREADS = original_ceiling
+
+
+def test_orphan_live_ceiling_uses_concurrent_count() -> None:
+    """The ceiling check uses live (concurrent) count, not cumulative count.
+
+    Three _InfiniteRecommender trials run sequentially, all spawning orphan
+    threads that never finish.  With ceiling=3, the 3rd trial raises
+    SearchError because live=3 >= ceiling=3.
+    """
+    import recotem.training.search as search_mod
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    original_ceiling = search_mod._MAX_LIVE_ORPHANED_THREADS
+    try:
+        search_mod._MAX_LIVE_ORPHANED_THREADS = 3
+
+        with patch(
+            "recotem.training.search.get_recommender_cls",
+            return_value=_InfiniteRecommender,
+        ):
+            with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+                mock_study = MagicMock()
+
+                def _optimize_three_orphans(objective, n_trials, **kwargs):
+                    for trial_num in range(3):
+                        fake_t = MagicMock(spec=optuna.Trial)
+                        fake_t.number = trial_num
+                        fake_t.suggest_categorical.return_value = "TopPopRecommender"
+                        fake_t.set_user_attr = MagicMock()
+                        try:
+                            objective(fake_t)
+                        except optuna.TrialPruned:
+                            pass
+                        except Exception:  # noqa: BLE001
+                            raise
+
+                mock_study.trials = []
+                mock_study.optimize = _optimize_three_orphans
+                mock_study_fn.return_value = mock_study
+
+                X = sps.csr_matrix(np.ones((5, 3)))
+                evaluator = MagicMock()
+
+                with ProgressReporter(
+                    n_trials=3, recipe_name="concurrent_ceiling_test", run_id="cc1"
+                ) as rep:
+                    with pytest.raises(
+                        SearchError, match="orphaned thread ceiling exceeded"
+                    ):
+                        run_search(
+                            algorithms=["TopPopRecommender"],
+                            X_tv_train=X,
+                            evaluator=evaluator,
+                            n_trials=3,
+                            per_algorithm_trials=None,
+                            per_trial_timeout_seconds=1,
+                            timeout_seconds=None,
+                            parallelism=1,
+                            storage_path="",
+                            random_seed=42,
+                            reporter=rep,
+                            recipe_name="concurrent_ceiling_test",
+                            run_id="cc1",
+                        )
+    finally:
+        search_mod._MAX_LIVE_ORPHANED_THREADS = original_ceiling
+
+
+def test_orphaned_total_field_remains_cumulative() -> None:
+    """SearchResult.orphaned_count reflects cumulative orphans, not live count.
+
+    Four sequential _BriefSleepRecommender trials each orphan (0.1s timeout,
+    0.3s sleep) but each orphan finishes before the next trial starts (0.4s gap).
+    With ceiling=100, live never trips the abort.  Post-search orphaned_count
+    must equal 4.
+    """
+    import recotem.training.search as search_mod
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    original_ceiling = search_mod._MAX_LIVE_ORPHANED_THREADS
+    try:
+        search_mod._MAX_LIVE_ORPHANED_THREADS = 100
+
+        with patch(
+            "recotem.training.search.get_recommender_cls",
+            return_value=_BriefSleepRecommender,
+        ):
+            with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+                mock_study = MagicMock()
+                fake_trials = [_make_fake_completed_trial(i) for i in range(8)]
+                best_fake_trial = fake_trials[0]
+
+                def _optimize_four_sequential_orphans(objective, n_trials, **kwargs):
+                    for trial_num in range(4):
+                        fake_t = MagicMock(spec=optuna.Trial)
+                        fake_t.number = trial_num
+                        fake_t.suggest_categorical.return_value = "TopPopRecommender"
+                        fake_t.set_user_attr = MagicMock()
+                        try:
+                            objective(fake_t)
+                        except optuna.TrialPruned:
+                            pass
+                        # Wait long enough for the orphan thread to decrement live count.
+                        time.sleep(_BRIEF_SLEEP_S + 0.1)
+                    mock_study.trials = fake_trials
+                    mock_study.best_trial = best_fake_trial
+
+                mock_study.trials = []
+                mock_study.optimize = _optimize_four_sequential_orphans
+                mock_study_fn.return_value = mock_study
+
+                X = sps.csr_matrix(np.ones((5, 3)))
+                evaluator = MagicMock()
+
+                with ProgressReporter(
+                    n_trials=4, recipe_name="cumulative_test", run_id="ct1"
+                ) as rep:
+                    result = run_search(
+                        algorithms=["TopPopRecommender"],
+                        X_tv_train=X,
+                        evaluator=evaluator,
+                        n_trials=4,
+                        per_algorithm_trials=None,
+                        # Use float: the type hint is int|None but Python does not
+                        # enforce it; run_search converts via float() before join.
+                        per_trial_timeout_seconds=_BRIEF_TIMEOUT_S,  # type: ignore[arg-type]
+                        timeout_seconds=None,
+                        parallelism=1,
+                        storage_path="",
+                        random_seed=42,
+                        reporter=rep,
+                        recipe_name="cumulative_test",
+                        run_id="ct1",
+                    )
+
+        assert result.orphaned_count == 4, (
+            f"Expected cumulative orphaned_count=4, got {result.orphaned_count}"
         )
     finally:
         search_mod._MAX_LIVE_ORPHANED_THREADS = original_ceiling

@@ -40,6 +40,12 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 # causes OOM.  32 is a conservative ceiling — operators whose dataset+algorithm
 # combination genuinely needs longer training should raise
 # per_trial_timeout_seconds rather than bumping this constant.
+#
+# "Live" means the orphaned thread has not yet returned from its underlying
+# learn step.  The live count is decremented when the orphaned thread
+# eventually finishes (see the ``_learn`` finally clause in ``run_search``).
+# A separate cumulative counter tracks the total number of orphaned threads
+# ever created (surfaced as ``SearchResult.orphaned_count``).
 _MAX_LIVE_ORPHANED_THREADS: int = 32
 
 
@@ -248,9 +254,14 @@ def run_search(
 
     has_per_trial_timeout = per_trial_timeout_seconds is not None
 
-    # Thread-safe counter for per-trial-timeout orphaned threads.
+    # Thread-safe counters for per-trial-timeout orphaned threads.
+    # _orphaned_live: currently outstanding orphan threads (decremented when the
+    #   thread eventually returns from its learn step); used for ceiling abort.
+    # _orphaned_total: cumulative count, never decremented; surfaced as
+    #   SearchResult.orphaned_count and used for the post-search heuristic.
     _orphan_lock = threading.Lock()
-    _orphaned_count: list[int] = [0]
+    _orphaned_live: list[int] = [0]
+    _orphaned_total: list[int] = [0]
 
     trial_progress_cb = make_trial_callback(reporter)
 
@@ -282,14 +293,21 @@ def run_search(
         if has_per_trial_timeout:
             result_holder: list[Any] = []
             exc_holder: list[BaseException] = []
+            trial_state = {"completed": False, "orphaned": False}
 
             def _learn() -> None:
                 try:
-                    rec = rec_cls(X_tv_train, **params)
-                    rec.learn_with_optimizer(evaluator, trial)
-                    result_holder.append(rec)
-                except Exception as exc:  # noqa: BLE001
-                    exc_holder.append(exc)
+                    try:
+                        rec = rec_cls(X_tv_train, **params)
+                        rec.learn_with_optimizer(evaluator, trial)
+                        result_holder.append(rec)
+                    except Exception as exc:  # noqa: BLE001
+                        exc_holder.append(exc)
+                finally:
+                    with _orphan_lock:
+                        trial_state["completed"] = True
+                        if trial_state["orphaned"]:
+                            _orphaned_live[0] -= 1
 
             thread = threading.Thread(target=_learn, daemon=True)
             thread.start()
@@ -298,51 +316,68 @@ def run_search(
             thread.join(timeout=float(timeout_val))
 
             if thread.is_alive():
-                # The learn thread is still running and CANNOT be killed —
-                # irspack's recommenders execute in C extensions that don't
-                # honour Python's interpreter-level interrupt.  We prune the
-                # Optuna trial so the search keeps making progress, but the
-                # orphaned thread continues to consume memory / CPU until it
-                # finishes its current learn step.  Operators should treat
-                # repeated occurrences as a sign that ``per_trial_timeout_seconds``
-                # is too aggressive for this dataset+algorithm combination.
+                # Re-check completion under the lock: the thread may have finished
+                # between `thread.is_alive()` returning True and our acquiring the
+                # lock.  If so, the orphan path does not apply — fall through to
+                # the normal completion handling below.
+                was_orphaned = False
+                current_live = 0
+                current_total = 0
                 with _orphan_lock:
-                    _orphaned_count[0] += 1
-                    current_orphan_count = _orphaned_count[0]
-                logger.warning(
-                    "per_trial_timeout_thread_orphaned",
-                    recipe=recipe_name,
-                    run_id=run_id,
-                    trial=trial.number,
-                    class_name=class_name,
-                    timeout_seconds=per_trial_timeout_seconds,
-                )
-                # Emit a periodic aggregate warning every 16 orphaned threads
-                # so operators can detect systematic timeout misconfiguration
-                # without being spammed every trial.
-                if current_orphan_count % 16 == 0:
+                    if not trial_state["completed"]:
+                        trial_state["orphaned"] = True
+                        _orphaned_live[0] += 1
+                        _orphaned_total[0] += 1
+                        current_live = _orphaned_live[0]
+                        current_total = _orphaned_total[0]
+                        was_orphaned = True
+                if was_orphaned:
+                    # The learn thread is still running and CANNOT be killed —
+                    # irspack's recommenders execute in C extensions that don't
+                    # honour Python's interpreter-level interrupt.  We prune the
+                    # Optuna trial so the search keeps making progress, but the
+                    # orphaned thread continues to consume memory / CPU until it
+                    # finishes its current learn step.  When that happens, the
+                    # `_learn` finally clause decrements `_orphaned_live` so the
+                    # ceiling check correctly tracks concurrent (not cumulative)
+                    # orphans.  Operators should treat repeated occurrences as a
+                    # sign that ``per_trial_timeout_seconds`` is too aggressive
+                    # for this dataset+algorithm combination.
                     logger.warning(
-                        "training_orphaned_threads",
-                        count=current_orphan_count,
-                        ceiling=_MAX_LIVE_ORPHANED_THREADS,
+                        "per_trial_timeout_thread_orphaned",
                         recipe=recipe_name,
                         run_id=run_id,
+                        trial=trial.number,
+                        class_name=class_name,
+                        timeout_seconds=per_trial_timeout_seconds,
                     )
-                # Runtime ceiling: abort the study if the number of live orphaned
-                # threads reaches the configured maximum.  Beyond this point the
-                # process is at risk of OOM and the search is not making useful
-                # progress — raising SearchError here propagates out of
-                # study.optimize and surfaces as a fatal training failure.
-                if current_orphan_count >= _MAX_LIVE_ORPHANED_THREADS:
-                    raise SearchError(
-                        f"orphaned thread ceiling exceeded ({current_orphan_count} >= "
-                        f"{_MAX_LIVE_ORPHANED_THREADS}); "
-                        "check per_trial_timeout vs algorithm runtime"
+                    # Emit a periodic aggregate warning every 16 cumulative
+                    # orphan events so operators can detect systematic timeout
+                    # misconfiguration without being spammed every trial.
+                    if current_total % 16 == 0:
+                        logger.warning(
+                            "training_orphaned_threads",
+                            live=current_live,
+                            total=current_total,
+                            ceiling=_MAX_LIVE_ORPHANED_THREADS,
+                            recipe=recipe_name,
+                            run_id=run_id,
+                        )
+                    # Runtime ceiling: abort the study if the number of live orphaned
+                    # threads reaches the configured maximum.  Beyond this point the
+                    # process is at risk of OOM and the search is not making useful
+                    # progress — raising SearchError here propagates out of
+                    # study.optimize and surfaces as a fatal training failure.
+                    if current_live >= _MAX_LIVE_ORPHANED_THREADS:
+                        raise SearchError(
+                            f"orphaned thread ceiling exceeded ({current_live} >= "
+                            f"{_MAX_LIVE_ORPHANED_THREADS}); "
+                            "check per_trial_timeout vs algorithm runtime"
+                        )
+                    raise optuna.TrialPruned(
+                        f"Trial {trial.number} exceeded per_trial_timeout_seconds "
+                        f"({per_trial_timeout_seconds}s)."
                     )
-                raise optuna.TrialPruned(
-                    f"Trial {trial.number} exceeded per_trial_timeout_seconds "
-                    f"({per_trial_timeout_seconds}s)."
-                )
             if exc_holder:
                 raise exc_holder[0]
             recommender = result_holder[0]
@@ -383,7 +418,7 @@ def run_search(
     # Post-search analysis.
     completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
     n_completed = len(completed)
-    orphaned_count = _orphaned_count[0]
+    orphaned_count = _orphaned_total[0]
 
     if n_completed == 0:
         raise SearchError(

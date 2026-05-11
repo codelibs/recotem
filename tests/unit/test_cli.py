@@ -2045,3 +2045,306 @@ def test_inspect_importerror_unknown_scheme_surfaces_generic_hint(
     assert "install" in combined.lower(), (
         f"Error message must contain install hint; got: {combined!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# CLI-1: inspect URI repair — remote URIs must not be mangled by pathlib.Path
+# ---------------------------------------------------------------------------
+
+
+def test_repair_uri_restores_double_slash_for_s3() -> None:
+    """_repair_uri must restore 's3://bucket/key' from 's3:/bucket/key'."""
+    from recotem.cli import _repair_uri
+
+    assert _repair_uri("s3:/bucket/key.recotem") == "s3://bucket/key.recotem"
+
+
+def test_repair_uri_restores_double_slash_for_gs() -> None:
+    """_repair_uri must restore 'gs://bucket/key' from 'gs:/bucket/key'."""
+    from recotem.cli import _repair_uri
+
+    assert _repair_uri("gs:/bucket/key.recotem") == "gs://bucket/key.recotem"
+
+
+def test_repair_uri_restores_double_slash_for_https() -> None:
+    """_repair_uri must restore 'https://host/path' from 'https:/host/path'."""
+    from recotem.cli import _repair_uri
+
+    assert _repair_uri("https:/host/path.recotem") == "https://host/path.recotem"
+
+
+def test_repair_uri_leaves_already_correct_uri_unchanged() -> None:
+    """_repair_uri must not modify an already-correct double-slash URI."""
+    from recotem.cli import _repair_uri
+
+    assert _repair_uri("s3://bucket/key.recotem") == "s3://bucket/key.recotem"
+    assert _repair_uri("gs://bucket/key.recotem") == "gs://bucket/key.recotem"
+    assert (
+        _repair_uri("file:///abs/path/model.recotem")
+        == "file:///abs/path/model.recotem"
+    )
+
+
+def test_repair_uri_leaves_local_absolute_path_unchanged() -> None:
+    """_repair_uri must not modify absolute local paths."""
+    from recotem.cli import _repair_uri
+
+    assert _repair_uri("/abs/path/model.recotem") == "/abs/path/model.recotem"
+
+
+def test_repair_uri_leaves_local_relative_path_unchanged() -> None:
+    """_repair_uri must not modify relative local paths."""
+    from recotem.cli import _repair_uri
+
+    assert _repair_uri("relative/path/model.recotem") == "relative/path/model.recotem"
+
+
+def test_inspect_s3_uri_passes_double_slash_to_fsspec(monkeypatch) -> None:
+    """inspect must call url_to_fs with exactly 's3://bucket/key.recotem',
+    not 's3:/bucket/key.recotem' (the pathlib-mangled form).
+
+    On POSIX, Path('s3://bucket/key') normalises to 's3:/bucket/key'.
+    By accepting the artifact argument as str (not Path), inspect preserves
+    the double-slash and _repair_uri restores any single-slash that may have
+    been introduced by the shell or argument processing.
+    """
+    from unittest.mock import patch
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    captured_uris: list[str] = []
+
+    def _mock_url_to_fs(uri, **kw):
+        captured_uris.append(uri)
+        # Raise an OSError so the CLI exits without needing real s3 content.
+        raise OSError("no such bucket")
+
+    with patch("fsspec.core.url_to_fs", side_effect=_mock_url_to_fs):
+        runner.invoke(app, ["inspect", "s3://bucket/key.recotem"])
+
+    assert captured_uris, "url_to_fs must be called"
+    assert captured_uris[0] == "s3://bucket/key.recotem", (
+        f"url_to_fs must receive exactly 's3://bucket/key.recotem'; "
+        f"got {captured_uris[0]!r}"
+    )
+
+
+def test_inspect_gs_uri_passes_double_slash_to_fsspec(monkeypatch) -> None:
+    """Same as above for gs:// (Google Cloud Storage)."""
+    from unittest.mock import patch
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    captured_uris: list[str] = []
+
+    def _mock_url_to_fs(uri, **kw):
+        captured_uris.append(uri)
+        raise OSError("no bucket")
+
+    with patch("fsspec.core.url_to_fs", side_effect=_mock_url_to_fs):
+        runner.invoke(app, ["inspect", "gs://bucket/key.recotem"])
+
+    assert captured_uris and captured_uris[0] == "gs://bucket/key.recotem", (
+        f"url_to_fs must receive 'gs://bucket/key.recotem'; got {captured_uris!r}"
+    )
+
+
+def test_inspect_file_abs_uri_passes_triple_slash_to_fsspec(monkeypatch) -> None:
+    """file:///abs/path must be passed verbatim (not mangled)."""
+    from unittest.mock import patch
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    captured_uris: list[str] = []
+
+    def _mock_url_to_fs(uri, **kw):
+        captured_uris.append(uri)
+        raise OSError("not found")
+
+    with patch("fsspec.core.url_to_fs", side_effect=_mock_url_to_fs):
+        runner.invoke(app, ["inspect", "file:///abs/path/model.recotem"])
+
+    assert captured_uris and captured_uris[0] == "file:///abs/path/model.recotem", (
+        f"url_to_fs must receive 'file:///abs/path/model.recotem'; got {captured_uris!r}"
+    )
+
+
+def test_inspect_local_path_passes_unchanged_to_fsspec(tmp_path, monkeypatch) -> None:
+    """A local file path must be passed verbatim (as a string) to url_to_fs."""
+    from unittest.mock import patch
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    local = str(tmp_path / "model.recotem")
+
+    captured_uris: list[str] = []
+
+    def _mock_url_to_fs(uri, **kw):
+        captured_uris.append(uri)
+        raise OSError("not found")
+
+    with patch("fsspec.core.url_to_fs", side_effect=_mock_url_to_fs):
+        runner.invoke(app, ["inspect", local])
+
+    assert captured_uris and captured_uris[0] == local, (
+        f"url_to_fs must receive local path unchanged; got {captured_uris!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CLI-4: inspect missing signing keys → exit 8 (CONFIG), not exit 5
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_missing_signing_keys_exits_8(tmp_path: Path, monkeypatch) -> None:
+    """inspect must exit 8 (_EXIT_CONFIG) when RECOTEM_SIGNING_KEYS is unset.
+
+    CLAUDE.md documents the 'signing keys missing' case as exit 8 (ConfigError),
+    matching the train side.  The previous code used _EXIT_ARTIFACT (5).
+    """
+    from tests.conftest import build_raw_artifact
+
+    artifact_path = tmp_path / "model.recotem"
+    data = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={"recipe_name": "config_exit_test", "best_score": 0.5},
+        payload_bytes=b"dummy",
+    )
+    artifact_path.write_bytes(data)
+    monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
+    monkeypatch.delenv("RECOTEM_ENV", raising=False)
+
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+
+    assert result.exit_code == 8, (
+        f"Missing RECOTEM_SIGNING_KEYS must produce exit 8 (_EXIT_CONFIG); "
+        f"got {result.exit_code}. Output: {result.output!r}"
+    )
+    combined = result.output + (result.stderr if result.stderr else "")
+    assert "RECOTEM_SIGNING_KEYS" in combined
+
+
+# ---------------------------------------------------------------------------
+# CLI-5: serve must not swallow MemoryError/RecursionError
+# ---------------------------------------------------------------------------
+
+
+def test_serve_memory_error_propagates(tmp_path: Path, monkeypatch) -> None:
+    """serve must propagate MemoryError from uvicorn.run, not catch it.
+
+    Round-12 OOM-propagation policy: MemoryError and RecursionError must never
+    be collapsed into a mapped exit code — the operator needs the real signal.
+    """
+    from unittest.mock import patch
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_ENV", "test")
+
+    with patch("uvicorn.run", side_effect=MemoryError("OOM")):
+        # CliRunner catches all exceptions by default (catch_exceptions=True),
+        # so the MemoryError is stored in result.exception instead of being
+        # converted to an exit code.
+        result = runner.invoke(
+            app,
+            ["serve", "--recipes", str(recipes_dir), "--insecure-no-auth"],
+            catch_exceptions=True,
+        )
+
+    # MemoryError must propagate: result.exception must be the MemoryError.
+    assert isinstance(result.exception, MemoryError), (
+        f"serve must propagate MemoryError; got exit {result.exit_code}, "
+        f"exception {result.exception!r}"
+    )
+
+
+def test_serve_recursion_error_propagates(tmp_path: Path, monkeypatch) -> None:
+    """serve must propagate RecursionError from uvicorn.run."""
+    from unittest.mock import patch
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_ENV", "test")
+
+    with patch("uvicorn.run", side_effect=RecursionError("max recursion")):
+        result = runner.invoke(
+            app,
+            ["serve", "--recipes", str(recipes_dir), "--insecure-no-auth"],
+            catch_exceptions=True,
+        )
+
+    assert isinstance(result.exception, RecursionError), (
+        f"serve must propagate RecursionError; got exit {result.exit_code}, "
+        f"exception {result.exception!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CLI-7: --dev-allow-unsigned warns when RECOTEM_SIGNING_KEYS is set
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_dev_allow_unsigned_warns_when_keys_set(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """inspect --dev-allow-unsigned must emit a warning when RECOTEM_SIGNING_KEYS
+    is already set (the flag has no effect in that case).
+
+    The 'dev_allow_unsigned_ignored' structlog event should be emitted.
+    We verify by monkey-patching the module-level logger in cli so the call
+    is captured regardless of the structlog processor chain.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import recotem.cli as cli_mod
+    from tests.conftest import build_raw_artifact
+
+    dev_key_hex = "0" * 64
+    artifact_path = tmp_path / "model.recotem"
+    data = build_raw_artifact(
+        kid="dev",
+        key_hex=dev_key_hex,
+        header_dict={"recipe_name": "warn_test", "best_score": 0.5},
+        payload_bytes=b"dummy",
+    )
+    artifact_path.write_bytes(data)
+
+    # Set BOTH the signing key and the dev flag — the warning should fire.
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"dev:{dev_key_hex}")
+    monkeypatch.setenv("RECOTEM_ENV", "development")
+
+    warning_calls: list = []
+
+    original_get_logger = cli_mod.structlog.get_logger
+
+    def _capturing_get_logger(*args, **kwargs):
+        real = original_get_logger(*args, **kwargs)
+        spy = MagicMock(wraps=real)
+
+        # Track warning calls
+        def _warning(*a, **kw):
+            warning_calls.append((a, kw))
+            return real.warning(*a, **kw)
+
+        spy.warning = MagicMock(side_effect=_warning)
+        return spy
+
+    with patch.object(
+        cli_mod.structlog, "get_logger", side_effect=_capturing_get_logger
+    ):
+        result = runner.invoke(
+            app,
+            ["inspect", "--dev-allow-unsigned", str(artifact_path)],
+        )
+
+    # Check that any warning call had the expected event name
+    warned = any(
+        (len(a) > 0 and a[0] == "dev_allow_unsigned_ignored") for a, kw in warning_calls
+    )
+    assert warned, (
+        f"dev_allow_unsigned_ignored warning must be emitted when RECOTEM_SIGNING_KEYS "
+        f"is set and --dev-allow-unsigned is passed; captured warning calls: "
+        f"{warning_calls}"
+    )

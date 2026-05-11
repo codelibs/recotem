@@ -28,6 +28,7 @@ Versioning modes
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -238,8 +239,15 @@ def _write_atomic(
                 fh.flush()
                 try:
                     os.fsync(fh.fileno())
-                except OSError:
-                    pass  # not all FS support fsync; best-effort
+                except OSError as exc:
+                    # Only ignore errnos that indicate the filesystem
+                    # does not support fsync (e.g. EINVAL on some virtual
+                    # filesystems, ENOTSUP on macOS FATfs).  ENOSPC / EIO
+                    # mean the bytes did NOT reach storage — those must
+                    # propagate so the caller does not treat a failed write
+                    # as successful (IO-3 fix).
+                    if exc.errno not in (errno.EINVAL, errno.ENOTSUP):
+                        raise
             # Re-check containment immediately before rename to close TOCTOU.
             _assert_output_root_containment(dest)
             os.replace(tmp_path, dest)

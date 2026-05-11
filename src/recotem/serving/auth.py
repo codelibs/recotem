@@ -23,6 +23,7 @@ Security design:
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import hmac
 
@@ -32,6 +33,18 @@ from fastapi import HTTPException, Request
 from recotem.config import ApiKeyEntry
 
 logger = structlog.get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Anonymous-bypass audit state
+# ---------------------------------------------------------------------------
+
+# LRU-bounded set of client_hosts that have already received a first-bypass
+# INFO log.  Bounded to _ANON_SEEN_MAX entries to prevent unbounded memory
+# growth under high client-IP churn (e.g. rotating CI IPs or attacker scanning).
+# When the set reaches the cap, the oldest entry is evicted (OrderedDict used
+# as an LRU cache: each hit moves the key to the tail; eviction removes the head).
+_ANON_SEEN_MAX = 1024
+_anon_seen: collections.OrderedDict[str, None] = collections.OrderedDict()
 
 # Header name used by the client (lowercase for case-insensitive lookup).
 _API_KEY_HEADER = "x-api-key"
@@ -137,6 +150,39 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
     # No keys configured → no auth enforcement.
     if not api_keys:
         request.state.kid = "anonymous"
+        # Resolve client host safely — Starlette may expose .client as a
+        # two-tuple (host, port) or as an object with a .host attribute
+        # depending on the ASGI server version.
+        _client = request.client
+        if _client is None:
+            client_host = "unknown"
+        elif isinstance(_client, tuple):
+            client_host = str(_client[0])
+        else:
+            client_host = str(getattr(_client, "host", "unknown"))
+
+        # DEBUG log on EVERY anonymous bypass — correlates with access logs.
+        logger.debug(
+            "auth_anonymous_bypass",
+            client_host=client_host,
+            path=request.url.path,
+        )
+
+        # INFO log only on the FIRST bypass per client_host (process-local).
+        if client_host not in _anon_seen:
+            if len(_anon_seen) >= _ANON_SEEN_MAX:
+                # Evict the oldest entry (LRU head).
+                _anon_seen.popitem(last=False)
+            _anon_seen[client_host] = None
+            logger.info(
+                "auth_anonymous_bypass_first_seen",
+                client_host=client_host,
+                path=request.url.path,
+            )
+        else:
+            # Move to tail so it stays in the LRU (recently used).
+            _anon_seen.move_to_end(client_host)
+
         return "anonymous"
 
     raw_header: str | None = request.headers.get(_API_KEY_HEADER)

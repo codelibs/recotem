@@ -27,7 +27,7 @@ import hashlib
 import json
 import random
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -44,11 +44,18 @@ from recotem.serving.registry import ModelEntry, ModelRegistry
 if TYPE_CHECKING:
     from recotem.artifact.signing import KeyRing
     from recotem.config import ServeConfig
-    from recotem.recipe.models import Recipe
 
 logger = structlog.get_logger(__name__)
 
 _MAX_CONCURRENT_STATS = 16
+
+# Sentinel used by build_initial_states to mark a recipe whose first stat
+# raised an unexpected error (not just FileNotFoundError).  Distinct from
+# ``None`` (file missing / not yet observed) so that the watcher's
+# ``marker == state.last_marker`` fast-path is never wrongly satisfied:
+# ``_STAT_ERROR_SENTINEL != None`` guarantees the recipe is retried on the
+# next tick rather than silently frozen in the "unchanged" state (W-2).
+_STAT_ERROR_SENTINEL = object()
 
 
 # ---------------------------------------------------------------------------
@@ -233,16 +240,37 @@ class ArtifactWatcher(threading.Thread):
         # given path, the parse-error fallback in _scan_recipes_dir falls back
         # to yaml_file.stem as a best-effort recipe name.
         self._yaml_path_to_name: dict[Path, str] = {}
+        # Per-YAML mtime cache: maps Path → (mtime_float, Recipe) so that
+        # _scan_recipes_dir can skip calling load_recipe() on files whose mtime
+        # has not changed since the last successful parse (W-7).
+        self._yaml_mtime_cache: dict[Path, tuple[float, Any]] = {}
 
     def stop(self) -> None:
-        """Signal the watcher thread to exit on its next poll tick.
+        """Signal the watcher thread to exit and cancel any pending futures.
 
-        The executor is intentionally NOT shut down here: an in-flight poll
-        may still be submitting work.  The run() loop owns the executor and
-        shuts it down in its finally block once the loop exits.  Callers
-        should follow up with ``join(timeout=...)`` to wait for clean exit.
+        Sets the stop event so the run() loop exits on its next iteration,
+        then immediately shuts down the executor with ``cancel_futures=True``
+        (Python 3.9+) so queued-but-not-started tasks are discarded and no
+        new submissions are accepted.  In-flight calls (e.g. a hung
+        ``fs.info()`` on an unreachable S3) are NOT interrupted — OS-level
+        I/O is non-interruptible — but no *new* work is queued, and the
+        process can exit once its daemon thread is collected by the OS.
+
+        This method is idempotent: calling it multiple times is safe.
         """
         self._stop_event.set()
+        # cancel_futures=True (Python 3.9+) discards work not yet started,
+        # preventing a K8s pod from blocking at shutdown on a queued stat()
+        # against an unreachable object store (W-3).  ``wait=False`` means we
+        # do not block here; the run() finally block's ``shutdown(wait=True)``
+        # will block (briefly) until actually-running futures complete, but by
+        # then the stop_event has already broken the poll loop so no new
+        # futures are submitted.
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except RuntimeError:
+            # Executor was already shut down — idempotent.
+            pass
 
     # ------------------------------------------------------------------
     # Thread main loop
@@ -275,7 +303,11 @@ class ArtifactWatcher(threading.Thread):
                     if self._consecutive_errors >= self._unhealthy_threshold:
                         self._mark_all_unhealthy()
         finally:
-            self._executor.shutdown(wait=True)
+            try:
+                self._executor.shutdown(wait=True)
+            except RuntimeError:
+                # Already shut down via stop() — safe to ignore.
+                pass
             logger.info("artifact_watcher_stopped")
 
     def _mark_all_unhealthy(self) -> None:
@@ -310,13 +342,22 @@ class ArtifactWatcher(threading.Thread):
         except (MemoryError, RecursionError):
             raise
         except Exception as exc:
-            logger.warning(
+            error_class = type(exc).__name__
+            # Upgrade to ERROR — a PermissionError here may indicate that
+            # someone tampered with directory permissions (security-relevant).
+            logger.error(
                 "recipes_dir_scan_error",
                 error=str(exc),
-                error_class=type(exc).__name__,
+                error_class=error_class,
             )
             # Surface to ops via the neutral scan-failure counter.
-            _inc_scan_failure(f"dir_iter_{type(exc).__name__}")
+            _inc_scan_failure(f"dir_iter_{error_class}")
+            # Immediately mark every known recipe's load error so /health
+            # surfaces the scan failure right away rather than waiting for
+            # _unhealthy_threshold ticks (W-6).
+            scan_error_msg = f"recipes-dir scan failed: {exc}"
+            for _name in list(self._states.keys()):
+                self._registry.set_load_error(_name, scan_error_msg)
             return
 
         current_names = set(self._states.keys())
@@ -324,9 +365,29 @@ class ArtifactWatcher(threading.Thread):
 
         for yaml_file in yaml_files:
             try:
+                import os
+
                 from recotem.recipe.loader import load_recipe
 
-                recipe: Recipe = load_recipe(yaml_file, recipes_root=self._recipes_dir)
+                # W-7: skip re-parsing YAML files whose mtime has not changed
+                # since the last successful parse, avoiding repeated disk reads
+                # and Pydantic validation on every poll tick.
+                try:
+                    current_mtime = os.stat(yaml_file).st_mtime
+                except OSError:
+                    current_mtime = None
+
+                cached = self._yaml_mtime_cache.get(yaml_file)
+                if (
+                    cached is not None
+                    and current_mtime is not None
+                    and cached[0] == current_mtime
+                ):
+                    recipe = cached[1]
+                else:
+                    recipe = load_recipe(yaml_file, recipes_root=self._recipes_dir)
+                    if current_mtime is not None:
+                        self._yaml_mtime_cache[yaml_file] = (current_mtime, recipe)
             except Exception as exc:
                 # YAML parse/load failed on rescan.  Distinguish "transient
                 # error on an existing recipe" from "brand-new YAML that has
@@ -422,11 +483,12 @@ class ArtifactWatcher(threading.Thread):
             stale_paths = [p for p, n in self._yaml_path_to_name.items() if n == gone]
             for p in stale_paths:
                 del self._yaml_path_to_name[p]
+                # Also evict the mtime cache entry so a re-added YAML with the
+                # same path is fully re-parsed (W-7).
+                self._yaml_mtime_cache.pop(p, None)
 
         if found_names != current_names:
-            _metrics.set_active_recipes(
-                sum(1 for e in self._registry.list() if e.loaded)
-            )
+            _metrics.set_active_recipes(self._registry.loaded_count())
 
     # ------------------------------------------------------------------
     # Artifact polling
@@ -434,9 +496,17 @@ class ArtifactWatcher(threading.Thread):
 
     def _poll_artifacts(self) -> None:
         """Check all known recipes for artifact changes (bounded at 16 concurrent)."""
+        import concurrent.futures
+
         names = list(self._states.keys())
         if not names:
             return
+
+        # Per-future timeout: never longer than the poll interval so a single
+        # hung stat() (e.g. S3 TCP blackhole) cannot block the entire tick
+        # beyond one watch interval.  Minimum 1s to avoid over-aggressive
+        # cancellation in fast test environments (W-4).
+        _per_future_timeout = max(1.0, min(self._config.watch_interval, 30.0))
 
         def _check(name: str) -> tuple[str, Any, str | None]:
             state = self._states[name]
@@ -446,96 +516,151 @@ class ArtifactWatcher(threading.Thread):
             return name, marker, error_class
 
         futures = {self._executor.submit(_check, n): n for n in names}
-        for fut in as_completed(futures):
-            try:
-                name, marker, stat_error_class = fut.result()
-            except Exception as exc:
-                _failed_recipe = futures[fut]
-                logger.warning(
-                    "artifact_stat_error",
-                    recipe_name=_failed_recipe,
-                    error=str(exc),
-                    exc_type=type(exc).__name__,
-                )
-                _metrics.inc_artifact_stat_failure(_failed_recipe)
-                continue
 
-            state = self._states.get(name)
-            if state is None:
-                continue
+        # Use concurrent.futures.wait with FIRST_COMPLETED + per-iteration
+        # timeout so that a single hung stat() (e.g. S3 TCP blackhole) cannot
+        # block the tick for longer than _per_future_timeout seconds.
+        # as_completed() blocks until a future is done before yielding; using
+        # wait(FIRST_COMPLETED, timeout=...) lets us time-cap each wait and
+        # mark still-pending futures as timed-out (W-4).
+        pending = set(futures.keys())
+        while pending:
+            # Respect stop_event before waiting for any future (W-4).
+            if self._stop_event.is_set():
+                for f in pending:
+                    f.cancel()
+                break
 
-            if marker is None:
-                # Artifact file is missing or stat failed.  Record the
-                # failure unconditionally so /health reflects the problem.
-                # The stale model (if any) stays in memory and keeps serving
-                # — we do NOT flip loaded=False — so hot-swap resumes when
-                # the file reappears.  Only emit the log on the first
-                # transition to avoid log spam on repeated missing polls.
-                #
-                # Distinguish a genuinely missing file from a network/IAM
-                # failure (M-9): when stat_error_class is set, the error
-                # message includes the class name so /health can surface
-                # "stat failed: ClientError(403)" vs "artifact missing".
-                #
-                # OBS-1: the first occurrence of a given error class emits
-                # WARNING; subsequent identical errors are demoted to DEBUG
-                # to avoid flooding log aggregation during sustained outages.
-                entry = self._registry.get(name)
-                if stat_error_class is not None:
-                    error_msg = f"stat failed: {stat_error_class}"
-                    if state._last_stat_error_class == stat_error_class:
-                        logger.debug(
-                            "artifact_stat_failed_repeated",
-                            recipe=name,
-                            error_class=stat_error_class,
-                        )
-                    else:
-                        # First occurrence (or changed error class) — already
-                        # logged at WARNING inside _stat_marker_with_error;
-                        # update state so the next occurrence is demoted.
-                        state._last_stat_error_class = stat_error_class
-                else:
-                    # stat_error_class is None → file genuinely missing.
-                    # Reset the error-class tracker (file was accessible before).
-                    state._last_stat_error_class = None
-                    error_msg = "artifact missing or unreadable"
-                    if entry is not None and entry.last_load_error is None:
-                        logger.warning("artifact_disappeared", name=name)
-                self._registry.set_load_error(name, error_msg)
-                _metrics.inc_artifact_load_failure(name)
-                continue
+            done, pending = concurrent.futures.wait(
+                pending,
+                timeout=_per_future_timeout,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
 
-            # Successful stat — clear the error-class tracker (OBS-1).
-            state._last_stat_error_class = None
-
-            if marker == state.last_marker:
-                # Fast path: pointer/mtime unchanged.  For append_sha
-                # artifacts we additionally check the cheap ``.sha256``
-                # sidecar pointer file so the watcher can skip the full
-                # artifact stat on the *resolved* target when neither the
-                # pointer file nor the sidecar have changed (P-4).
-                #
-                # Always record the most-recently seen marker so that on
-                # object stores with unstable ETags, a successful stat that
-                # compares equal is still acknowledged.  Without this, a
-                # watcher that receives a transiently different ETag on one
-                # poll and then returns to the original ETag on the next
-                # poll would re-trigger a full reload unnecessarily.
-                state.last_marker = marker
-                sidecar_changed = _check_sidecar_changed(state)
-                if not sidecar_changed:
-                    continue
-                # Sidecar changed — fall through to full reload below.
-                # If the full read subsequently fails, record it so the
-                # operator can see the sidecar-stale condition in metrics.
+            # Process all futures that finished in this window.
+            for fut in done:
                 try:
-                    self._load_recipe(name, state, force=False, marker=marker)
-                except Exception:
-                    _inc_scan_failure("sidecar_stale")
-                    raise
-                continue
+                    name, marker, stat_error_class = fut.result()
+                except Exception as exc:
+                    _failed_recipe = futures[fut]
+                    logger.warning(
+                        "artifact_stat_error",
+                        recipe_name=_failed_recipe,
+                        error=str(exc),
+                        exc_type=type(exc).__name__,
+                    )
+                    _metrics.inc_artifact_stat_failure(_failed_recipe)
+                    continue
 
+                self._process_stat_result(name, marker, stat_error_class)
+
+            # Any futures still pending after the wait timeout have hung
+            # (e.g. blocked inside fs.info() on a non-responsive object store).
+            # Mark them as timed-out and remove them from the pending set so
+            # the loop can exit.
+            if not done and pending:
+                for fut in pending:
+                    _failed_recipe = futures[fut]
+                    logger.warning(
+                        "artifact_stat_timeout",
+                        recipe_name=_failed_recipe,
+                        timeout=_per_future_timeout,
+                    )
+                    _inc_scan_failure("stat_timeout")
+                    self._record_load_failure(
+                        _failed_recipe,
+                        f"stat timeout after {_per_future_timeout:.0f}s",
+                    )
+                    fut.cancel()
+                pending = set()
+                break
+
+    def _process_stat_result(
+        self,
+        name: str,
+        marker: Any,
+        stat_error_class: str | None,
+    ) -> None:
+        """Handle a completed stat result for *name* (called from _poll_artifacts).
+
+        Encapsulates the "missing / error / changed / unchanged" decision tree
+        that was previously inline in the as_completed loop.
+        """
+        state = self._states.get(name)
+        if state is None:
+            return
+
+        if marker is None:
+            # Artifact file is missing or stat failed.  Record the
+            # failure unconditionally so /health reflects the problem.
+            # The stale model (if any) stays in memory and keeps serving
+            # — we do NOT flip loaded=False — so hot-swap resumes when
+            # the file reappears.  Only emit the log on the first
+            # transition to avoid log spam on repeated missing polls.
+            #
+            # Distinguish a genuinely missing file from a network/IAM
+            # failure (M-9): when stat_error_class is set, the error
+            # message includes the class name so /health can surface
+            # "stat failed: ClientError(403)" vs "artifact missing".
+            #
+            # OBS-1: the first occurrence of a given error class emits
+            # WARNING; subsequent identical errors are demoted to DEBUG
+            # to avoid flooding log aggregation during sustained outages.
+            entry = self._registry.get(name)
+            if stat_error_class is not None:
+                error_msg = f"stat failed: {stat_error_class}"
+                if state._last_stat_error_class == stat_error_class:
+                    logger.debug(
+                        "artifact_stat_failed_repeated",
+                        recipe=name,
+                        error_class=stat_error_class,
+                    )
+                else:
+                    # First occurrence (or changed error class) — already
+                    # logged at WARNING inside _stat_marker_with_error;
+                    # update state so the next occurrence is demoted.
+                    state._last_stat_error_class = stat_error_class
+            else:
+                # stat_error_class is None → file genuinely missing.
+                # Reset the error-class tracker (file was accessible before).
+                state._last_stat_error_class = None
+                error_msg = "artifact missing or unreadable"
+                if entry is not None and entry.last_load_error is None:
+                    logger.warning("artifact_disappeared", name=name)
+            self._registry.set_load_error(name, error_msg)
+            _metrics.inc_artifact_load_failure(name)
+            return
+
+        # Successful stat — clear the error-class tracker (OBS-1).
+        state._last_stat_error_class = None
+
+        if marker == state.last_marker:
+            # Fast path: pointer/mtime unchanged.  For append_sha
+            # artifacts we additionally check the cheap ``.sha256``
+            # sidecar pointer file so the watcher can skip the full
+            # artifact stat on the *resolved* target when neither the
+            # pointer file nor the sidecar have changed (P-4).
+            #
+            # Always record the most-recently seen marker so that on
+            # object stores with unstable ETags, a successful stat that
+            # compares equal is still acknowledged.  Without this, a
+            # watcher that receives a transiently different ETag on one
+            # poll and then returns to the original ETag on the next
+            # poll would re-trigger a full reload unnecessarily.
+            state.last_marker = marker
+            sidecar_changed = _check_sidecar_changed(state)
+            if not sidecar_changed:
+                return
+            # Sidecar changed — fall through to full reload below.
+            # If the full read subsequently fails, _load_recipe already
+            # calls _record_load_failure (per-recipe) so /health reflects
+            # the problem.  Do NOT call _inc_scan_failure here — that feeds
+            # the watcher-global consecutive-error counter and a single
+            # misbehaving recipe must not mark all others unhealthy (W-5).
             self._load_recipe(name, state, force=False, marker=marker)
+            return
+
+        self._load_recipe(name, state, force=False, marker=marker)
 
     # ------------------------------------------------------------------
     # Load / verify / replace
@@ -591,10 +716,18 @@ class ArtifactWatcher(threading.Thread):
         try:
             entry = self._build_entry(name, state.recipe, data, artifact_path)
         except ArtifactError as exc:
+            kid_log, kid_reason = _extract_kid_safe(data)
+            if kid_reason is not None:
+                logger.warning(
+                    "kid_extraction_failed",
+                    name=name,
+                    reason=kid_reason,
+                    kid=kid_log,
+                )
             logger.error(
                 "artifact_load_failed",
                 name=name,
-                kid=_extract_kid_safe(data),
+                kid=kid_log,
                 error=str(exc),
             )
             self._record_load_failure(name, str(exc))
@@ -630,7 +763,7 @@ class ArtifactWatcher(threading.Thread):
         state.last_marker = new_marker
         _metrics.set_model_loaded(name, True)
         _metrics.record_swap(name, ok=True)
-        _metrics.set_active_recipes(sum(1 for e in self._registry.list() if e.loaded))
+        _metrics.set_active_recipes(self._registry.loaded_count())
         logger.info(
             "artifact_hot_swapped",
             name=name,
@@ -732,33 +865,44 @@ class ArtifactWatcher(threading.Thread):
 _KID_LOG_MAX_LEN: int = 64
 
 
-def _extract_kid_safe(data: bytes) -> str:
+def _extract_kid_safe(data: bytes) -> tuple[str, str | None]:
     """Best-effort extraction of kid from raw artifact bytes.
+
+    Returns ``(kid_log_str, failure_reason)`` where:
+
+    - On success: ``(sanitised_kid, None)`` — *sanitised_kid* is already
+      processed through ``_format_kid_for_log`` (length-capped, non-printables
+      hex-escaped).
+    - On structural failure: ``("\\x00<unparseable>", reason)`` — the sentinel
+      contains a ``\\x00`` byte that ``_format_kid_for_log`` renders as
+      ``\\x00``, making it impossible to collide with a valid UTF-8 kid; any
+      ``KeyRing`` lookup will reject it immediately.
+
+    *reason* is one of ``"too_short"``, ``"kid_len_out_of_range"``,
+    ``"truncated"``, or ``"decode_error"``.
 
     Catches only structural / encoding errors (``IndexError``,
     ``UnicodeDecodeError``, ``ValueError``) that indicate a corrupt or
     truncated artifact.  Programming bugs (``AttributeError``,
     ``ImportError``, etc.) are allowed to propagate so the caller's existing
     ``artifact_load_unexpected_error`` handler can surface them.
-
-    The returned string is already sanitized via ``_format_kid_for_log``
-    so it is safe to embed in structured log fields without further processing
-    (length-capped, non-printables rendered as ``\\xHH`` escapes).
     """
     from recotem.artifact.format import FIXED_PREFIX_SIZE, MAX_KID_LEN
 
+    _UNPARSEABLE_SENTINEL = "\x00<unparseable>"
+
     try:
         if len(data) < FIXED_PREFIX_SIZE:
-            return "<unknown>"
+            return _UNPARSEABLE_SENTINEL, "too_short"
         kid_len = data[FIXED_PREFIX_SIZE - 1]
         if kid_len < 1 or kid_len > MAX_KID_LEN:
-            return "<unknown>"
+            return _UNPARSEABLE_SENTINEL, "kid_len_out_of_range"
         if len(data) < FIXED_PREFIX_SIZE + kid_len:
-            return "<unknown>"
+            return _UNPARSEABLE_SENTINEL, "truncated"
         raw_kid = data[FIXED_PREFIX_SIZE : FIXED_PREFIX_SIZE + kid_len]
-        return _format_kid_for_log(raw_kid)
+        return _format_kid_for_log(raw_kid), None
     except (IndexError, UnicodeDecodeError, ValueError):
-        return "<unknown>"
+        return _UNPARSEABLE_SENTINEL, "decode_error"
 
 
 def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
@@ -899,10 +1043,30 @@ def build_initial_states(
         artifact_path = recipe.output.path
         state = _RecipeWatchState(recipe=recipe, artifact_path=artifact_path)
         if recipe.name in loaded_entries:
-            marker = _stat_marker(artifact_path, recipe_name=recipe.name)
+            marker, stat_error = _stat_marker_with_error(
+                artifact_path, recipe_name=recipe.name
+            )
+            if stat_error is not None:
+                # A real stat failure (not just file-missing): use the sentinel
+                # so that on the next poll tick ``marker != state.last_marker``
+                # is guaranteed, forcing a reload attempt rather than silently
+                # treating the recipe as "unchanged" (W-2).
+                state.last_marker = _STAT_ERROR_SENTINEL
+            else:
+                state.last_marker = marker
             entry = loaded_entries[recipe.name]
-            state.last_marker = marker
             loaded_marker = entry._loaded_marker
             state.last_sha256 = loaded_marker[1] if loaded_marker[1] else ""
+            # W-8: Pre-populate last_sidecar_contents so the first poll tick
+            # does not treat an unchanged sidecar as "newly changed" and
+            # trigger a redundant full reload.
+            try:
+                sidecar_path = Path(artifact_path + ".sha256")
+                if sidecar_path.exists():
+                    state.last_sidecar_contents = sidecar_path.read_text(
+                        encoding="utf-8"
+                    )
+            except (TypeError, OSError):
+                pass  # Remote URIs or unreadable sidecars: leave as None.
         states[recipe.name] = state
     return states

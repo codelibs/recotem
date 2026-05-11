@@ -515,6 +515,17 @@ def fetch_http_bytes(
                         )
                     redirects += 1
                     current_url = urllib.request.urljoin(current_url, location)
+                    # IO-2: reject redirects that embed credentials in the URL.
+                    # urljoin preserves userinfo from a Location header such as
+                    # "http://user:pass@host/path", which would cause urllib to
+                    # send Authorization: Basic to the redirect target — a
+                    # credential-hijacking vector the caller did not opt into.
+                    _redirect_parsed = urlparse(current_url)
+                    if _redirect_parsed.username or _redirect_parsed.password:
+                        raise HttpFetchError(
+                            "Refusing redirect with embedded credentials from "
+                            f"{redact_url_userinfo(current_url)}"
+                        )
                     new_scheme = urlparse(current_url).scheme.lower()
                     if new_scheme not in NETWORK_SCHEMES:
                         raise HttpFetchError(

@@ -268,6 +268,28 @@ Most plugins ignore `ctx`. It is useful for logging and for idempotency keys whe
   recipe-declared `Config` fields (but never accept secrets in YAML —
   reference an env var via `${RECOTEM_RECIPE_*}` instead).
 
+## Item metadata loading
+
+If your plugin's recipe uses `item_metadata`, the metadata is loaded by
+`recotem.metadata.loader.load_item_metadata`. Failures surface as
+`MetadataError` (not `DataSourceError`) so they are distinguishable from
+source-fetch failures. The exception carries a `.cause` attribute indicating
+the failure origin:
+
+| `.cause` | Meaning |
+|---------|---------|
+| `"http_fetch"` | HTTP/HTTPS fetch failed (SSRF guard, byte cap, sha256 mismatch). `__cause__` is `HttpFetchError`. |
+| `"parse"` | File could not be parsed as the declared type (CSV/Parquet). |
+| `"field_missing"` | A required field is absent and `on_field_missing="error"`. |
+| `"io"` | Local or object-store read failed. |
+| `"unknown"` | Catch-all for unexpected failures. |
+
+The loader accepts an optional `recipe_name=` keyword argument. When provided,
+the recipe name is threaded into HTTP fetcher log context so that redirect and
+byte-cap log events (e.g. `metadata_source_redirect`) are correlated with the
+recipe that triggered the load. This is set automatically by the watcher; you
+only need it when calling `load_item_metadata` directly (e.g. in tests).
+
 ## Compatibility
 
 The plugin contract is part of the recotem 2.x public surface. Pin

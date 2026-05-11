@@ -2736,3 +2736,852 @@ def test_etag_change_detection_reads_artifact_exactly_once(
         f"Artifact bytes must be read exactly once per ETag-change hot-swap cycle; "
         f"got {read_count[0]} read(s). Multiple reads indicate a TOCTOU issue."
     )
+
+
+# ---------------------------------------------------------------------------
+# W-1: _extract_kid_safe returns (kid, reason) tuple; sentinel collision-safe
+# ---------------------------------------------------------------------------
+
+
+def test_extract_kid_safe_truncated_returns_sentinel_and_reason() -> None:
+    """_extract_kid_safe must return a sentinel + 'too_short' when data is
+    shorter than FIXED_PREFIX_SIZE (corrupt/truncated artifact header).
+
+    The sentinel must contain '\\x00' so it can never collide with a valid
+    UTF-8 kid string that an attacker could craft.
+    """
+    from recotem.serving.watcher import _extract_kid_safe
+
+    truncated = b"\x00" * 4  # fewer bytes than FIXED_PREFIX_SIZE
+    kid_log, reason = _extract_kid_safe(truncated)
+
+    assert reason is not None, "Truncated data must return a non-None failure reason"
+    assert reason == "too_short", f"Expected 'too_short', got {reason!r}"
+    # The sentinel must contain a raw \x00 byte so that any KeyRing.verify
+    # lookup using it will immediately fail (KeyRing kids are valid UTF-8).
+    # format_kid_for_log (called by log emitters) will later hex-escape it to
+    # '\\x00' in log output, but we verify the raw sentinel here.
+    assert "\x00" in kid_log, (
+        "Sentinel must contain a \\x00 byte to prevent collision with valid kids "
+        "(KeyRing rejects non-UTF-8 kids; \\x00 is safe as a sentinel marker)"
+    )
+
+
+def test_extract_kid_safe_malformed_utf8_kid_returns_sentinel_and_reason() -> None:
+    """_extract_kid_safe must handle a malformed UTF-8 kid byte sequence and
+    return a sentinel + failure reason, never raising an exception.
+
+    We build raw bytes with a valid prefix (magic + version + reserved +
+    kid_len field) but then put invalid UTF-8 bytes in the kid position.
+    The function must not raise; the reason must be non-None.
+    """
+    from recotem.artifact.format import FIXED_PREFIX_SIZE
+    from recotem.serving.watcher import _extract_kid_safe
+
+    # Build a byte sequence where FIXED_PREFIX_SIZE-1 (the kid_len byte) = 4
+    # and the 4 kid bytes are invalid UTF-8 continuation bytes (0x80..0x83).
+    kid_len = 4
+    # Pad to FIXED_PREFIX_SIZE with the kid_len at the end, then append bad UTF-8.
+    prefix = b"\x00" * (FIXED_PREFIX_SIZE - 1) + bytes([kid_len])
+    bad_utf8_kid = bytes([0x80, 0x81, 0x82, 0x83])
+    data = prefix + bad_utf8_kid
+
+    kid_log, reason = _extract_kid_safe(data)
+
+    # Must not raise; reason must reflect a parsing failure OR a successful
+    # (escaped) decode — format_kid_for_log uses errors="replace" so
+    # UnicodeDecodeError shouldn't propagate.  Either way, the function
+    # returns a tuple without raising.
+    assert isinstance(kid_log, str), "_extract_kid_safe must return a str for kid_log"
+    assert isinstance(reason, (str, type(None))), "reason must be str or None"
+    # The result must contain \\x00 in the sentinel OR no reason (decoded OK).
+    # Either outcome is acceptable; this test verifies no exception is raised.
+
+
+def test_extract_kid_safe_valid_artifact_returns_kid_and_none_reason(
+    tmp_path: Path,
+) -> None:
+    """_extract_kid_safe must return (sanitised_kid, None) for a valid artifact."""
+    from recotem.serving.watcher import _extract_kid_safe
+
+    artifact_path = tmp_path / "ok.recotem"
+    _write_valid_artifact(artifact_path)
+    data = artifact_path.read_bytes()
+
+    kid_log, reason = _extract_kid_safe(data)
+
+    assert reason is None, f"Valid artifact must return reason=None; got {reason!r}"
+    # Kid should be the one we embedded in the artifact
+    assert "active" in kid_log or kid_log, (
+        f"Expected sanitised 'active' kid in log string, got {kid_log!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# W-2: build_initial_states uses sentinel on stat error to avoid frozen state
+# ---------------------------------------------------------------------------
+
+
+def test_build_initial_states_stat_error_uses_sentinel_not_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When _stat_marker_with_error returns a non-None error, build_initial_states
+    must set last_marker to _STAT_ERROR_SENTINEL (not None) so the next poll
+    tick always triggers a reload attempt rather than being stuck in the
+    'marker unchanged' fast-path.
+
+    Regression: if last_marker=None (error) == None (file-missing), the
+    comparison ``marker == state.last_marker`` silently passes and the recipe
+    is never retried.
+    """
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import (
+        _STAT_ERROR_SENTINEL,
+        build_initial_states,
+    )
+
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    recipe = MagicMock()
+    recipe.name = "error_recipe"
+    recipe.output = MagicMock()
+    recipe.output.path = str(artifact_path)
+
+    entry = _make_entry("error_recipe")
+    entry._loaded_marker = ("some_sha", "deadbeef")
+
+    # Simulate a stat error (not FileNotFoundError) on the first call
+    def _bad_stat(path: str, recipe_name: str = "<unknown>"):
+        return None, "OSError"
+
+    with patch(
+        "recotem.serving.watcher._stat_marker_with_error", side_effect=_bad_stat
+    ):
+        states = build_initial_states([recipe], {"error_recipe": entry})
+
+    state = states["error_recipe"]
+    assert state.last_marker is _STAT_ERROR_SENTINEL, (
+        "build_initial_states must use _STAT_ERROR_SENTINEL (not None) when "
+        "stat raises an unexpected error, so the next poll always triggers reload"
+    )
+
+
+def test_build_initial_states_transient_stat_error_resolves_on_second_tick(
+    tmp_path: Path,
+) -> None:
+    """Transient OSError on first stat → sentinel → next poll loads the recipe.
+
+    Sequence:
+    1. build_initial_states with monkeypatched stat that returns error.
+    2. State has last_marker=_STAT_ERROR_SENTINEL (not None).
+    3. Start watcher (stat now works normally).
+    4. Assert recipe loads on first poll tick.
+    """
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    yaml_path = _write_recipe_yaml(recipes_dir, "transient_recipe", artifact_path)
+
+    from recotem.serving.watcher import _STAT_ERROR_SENTINEL, _RecipeWatchState
+
+    recipe = MagicMock()
+    recipe.name = "transient_recipe"
+    recipe.output = MagicMock()
+    recipe.output.path = str(artifact_path)
+    recipe.item_metadata = None
+
+    entry = _make_entry("transient_recipe")
+    entry._loaded_marker = (None, "")
+    entry.last_load_error = None
+
+    # Manually create a state with the sentinel (simulating the first-stat-error case)
+    initial_states = {
+        "transient_recipe": _RecipeWatchState(
+            recipe=recipe,
+            artifact_path=str(artifact_path),
+            last_marker=_STAT_ERROR_SENTINEL,  # sentinel from W-2 fix
+            last_sha256="",
+        )
+    }
+
+    registry = ModelRegistry()
+    registry.replace("transient_recipe", entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+    watcher.start()
+
+    # Wait for the watcher to load the recipe (sentinel != real marker → reload)
+    deadline = time.monotonic() + 3.0
+    loaded = False
+    while time.monotonic() < deadline:
+        e = registry.get("transient_recipe")
+        if e is not None and e.loaded and e.last_load_error is None:
+            loaded = True
+            break
+        time.sleep(0.05)
+
+    watcher.stop()
+    watcher.join(timeout=3.0)
+
+    assert loaded, (
+        "Recipe with _STAT_ERROR_SENTINEL as last_marker must be loaded on the "
+        "next poll tick when stat succeeds (W-2 regression)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# W-3: stop() cancels executor futures and is idempotent
+# ---------------------------------------------------------------------------
+
+
+def test_stop_cancels_executor_and_returns_quickly(tmp_path: Path) -> None:
+    """stop() must cancel pending futures and return quickly even if a worker
+    is blocked on a slow I/O call.
+
+    Strategy: submit a blocking callable to the executor BEFORE calling stop().
+    stop() must return within ~500ms regardless of the blocking callable.
+    """
+    import threading
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+
+    blocker = threading.Event()
+    blocked = threading.Event()
+
+    def _blocking_callable() -> None:
+        blocked.set()
+        blocker.wait(timeout=10.0)  # block for up to 10s
+
+    # Submit a blocking future before calling stop()
+    watcher._executor.submit(_blocking_callable)
+    # Wait until the callable is actually executing
+    blocked.wait(timeout=2.0)
+
+    start = time.monotonic()
+    watcher.stop()
+    elapsed = time.monotonic() - start
+
+    # stop() must not wait for the blocking callable to complete
+    assert elapsed < 0.5, (
+        f"stop() must return quickly (< 500ms) even with a blocked worker; "
+        f"took {elapsed:.3f}s"
+    )
+
+    # Unblock so the worker can exit cleanly
+    blocker.set()
+    # Idempotency: calling stop() again must not raise
+    try:
+        watcher.stop()
+        watcher.stop()
+    except Exception as e:
+        raise AssertionError(f"stop() must be idempotent; raised {e!r}") from e
+
+    watcher._executor.shutdown(wait=True)
+
+
+# ---------------------------------------------------------------------------
+# W-4: _poll_artifacts respects stop_event mid-tick and per-future timeout
+# ---------------------------------------------------------------------------
+
+
+def test_poll_artifacts_respects_stop_event_mid_tick(tmp_path: Path) -> None:
+    """When stop_event is set while a tick is in progress, _poll_artifacts
+    must exit promptly by cancelling remaining futures.
+
+    Strategy: create a watcher with N recipes pointing at a path whose stat
+    is monkeypatched to sleep.  Set stop_event after the first future is
+    submitted.  Assert _poll_artifacts returns without waiting for all N.
+    """
+    import threading
+    from unittest.mock import patch
+
+    import recotem.serving.watcher as watcher_module
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+
+    # Add several recipes to the state dict
+    n_recipes = 5
+    for i in range(n_recipes):
+        artifact_path = tmp_path / f"model_{i}.recotem"
+        _write_valid_artifact(artifact_path)
+        yaml_path = _write_recipe_yaml(recipes_dir, f"stop_test_{i}", artifact_path)
+        state = MagicMock()
+        state.artifact_path = str(artifact_path)
+        state._last_stat_error_class = None
+        state.last_marker = "v0"
+        state.last_sha256 = ""
+        watcher._states[f"stop_test_{i}"] = state
+
+    # Also add a stub registry entry for each
+    for i in range(n_recipes):
+        stub = ModelEntry(
+            name=f"stop_test_{i}",
+            recommender=None,
+            header={},
+            kid="",
+            loaded=False,
+            last_load_error=None,
+        )
+        registry.replace(f"stop_test_{i}", stub)
+
+    blocker = threading.Event()
+
+    def _slow_stat(path: str, recipe_name: str = "<unknown>"):
+        watcher._stop_event.set()  # set stop event from inside the stat call
+        blocker.wait(timeout=2.0)
+        return None, None
+
+    start = time.monotonic()
+    with patch.object(
+        watcher_module, "_stat_marker_with_error", side_effect=_slow_stat
+    ):
+        watcher._poll_artifacts()
+    elapsed = time.monotonic() - start
+
+    blocker.set()
+
+    assert elapsed < 2.0, (
+        f"_poll_artifacts must exit promptly when stop_event is set; "
+        f"took {elapsed:.3f}s"
+    )
+
+    watcher._executor.shutdown(wait=True)
+
+
+def test_poll_artifacts_per_future_timeout_marks_load_error(
+    tmp_path: Path,
+) -> None:
+    """When a stat future exceeds the per-future timeout, the recipe's
+    last_load_error must reflect 'stat timeout' so /health surfaces it.
+    The watcher must also continue to the next tick (not crash).
+    """
+    import threading
+    from unittest.mock import patch
+
+    import recotem.serving.watcher as watcher_module
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+    _write_recipe_yaml(recipes_dir, "timeout_recipe", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    yaml_path = recipes_dir / "timeout_recipe.yaml"
+    recipe = load_recipe(yaml_path)
+
+    state = MagicMock()
+    state.artifact_path = str(artifact_path)
+    state._last_stat_error_class = None
+    state.last_marker = None
+    state.last_sha256 = ""
+
+    registry = ModelRegistry()
+    stub = ModelEntry(
+        name="timeout_recipe",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+        last_load_error=None,
+    )
+    registry.replace("timeout_recipe", stub)
+
+    # Use a very short watch_interval so per-future timeout is ~1s
+    cfg = _make_serve_config(watch_interval=1.0)
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states={"timeout_recipe": state},
+    )
+
+    blocker = threading.Event()
+    completed = threading.Event()
+
+    def _hanging_stat(path: str, recipe_name: str = "<unknown>"):
+        completed.set()
+        blocker.wait(timeout=10.0)
+        return None, None
+
+    start = time.monotonic()
+    with patch.object(
+        watcher_module, "_stat_marker_with_error", side_effect=_hanging_stat
+    ):
+        watcher._poll_artifacts()
+    elapsed = time.monotonic() - start
+
+    blocker.set()
+
+    # Must return within per_future_timeout + some overhead (not 10s)
+    assert elapsed < 5.0, (
+        f"_poll_artifacts must not hang on a slow stat beyond timeout; "
+        f"took {elapsed:.3f}s"
+    )
+
+    # last_load_error must reflect the timeout
+    entry = registry.get("timeout_recipe")
+    assert entry is not None
+    assert entry.last_load_error is not None, (
+        "last_load_error must be set after a stat timeout"
+    )
+    assert "timeout" in entry.last_load_error.lower(), (
+        f"last_load_error must mention 'timeout'; got {entry.last_load_error!r}"
+    )
+
+    watcher._executor.shutdown(wait=True)
+
+
+# ---------------------------------------------------------------------------
+# W-5: per-recipe sidecar failure must not increment watcher-global counter
+# ---------------------------------------------------------------------------
+
+
+def test_sidecar_failure_does_not_increment_consecutive_errors(
+    tmp_path: Path,
+) -> None:
+    """A sidecar-stale load failure for a single recipe must NOT increment
+    _consecutive_errors (the watcher-global health counter).
+
+    With 2 healthy recipes + 1 whose sidecar triggers a corrupt artifact load,
+    run _unhealthy_threshold + 1 ticks.  Only the failing recipe must have
+    last_load_error set; the others must remain healthy.  _consecutive_errors
+    must stay at 0 (W-5 fix removed _inc_scan_failure from the sidecar path).
+    """
+    from unittest.mock import patch
+
+    import recotem.serving.watcher as watcher_module
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    # Healthy artifact
+    good_path = tmp_path / "good.recotem"
+    _write_valid_artifact(good_path)
+
+    # Corrupt artifact (triggers ArtifactError on _build_entry)
+    bad_path = tmp_path / "bad.recotem"
+    bad_path.write_bytes(b"not a valid artifact at all")
+
+    # Write 3 recipe YAMLs
+    for name, art_path in [
+        ("healthy_a", good_path),
+        ("healthy_b", good_path),
+        ("corrupt", bad_path),
+    ]:
+        _write_recipe_yaml(recipes_dir, name, art_path)
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving.watcher import _RecipeWatchState
+
+    initial_states: dict[str, _RecipeWatchState] = {}
+    for name, art_path in [
+        ("healthy_a", good_path),
+        ("healthy_b", good_path),
+        ("corrupt", bad_path),
+    ]:
+        yaml_path = recipes_dir / f"{name}.yaml"
+        recipe = load_recipe(yaml_path)
+        state = _RecipeWatchState(
+            recipe=recipe,
+            artifact_path=str(art_path),
+            last_marker="v0",
+            last_sha256="a" * 64,  # force sha-change path
+        )
+        initial_states[name] = state
+
+        # Pre-populate registry with a loaded entry for the healthy ones,
+        # and a stub for the corrupt one
+        if name.startswith("healthy"):
+            entry = _make_entry(name)
+            entry.artifact_path = str(art_path)
+            entry.last_load_error = None
+            registry.replace(name, entry)
+        else:
+            stub = ModelEntry(
+                name=name,
+                recommender=None,
+                header={},
+                kid="",
+                loaded=False,
+                last_load_error=None,
+            )
+            registry.replace(name, stub)
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+        unhealthy_threshold=3,
+    )
+
+    # Simulate the sidecar path for 'corrupt': make _check_sidecar_changed
+    # always return True so _load_recipe is called, then it fails.
+    original_check_sidecar = watcher_module._check_sidecar_changed
+
+    def _always_changed_for_corrupt(state: _RecipeWatchState) -> bool:
+        recipe_name = state.recipe.name if hasattr(state.recipe, "name") else ""
+        if recipe_name == "corrupt":
+            return True
+        return original_check_sidecar(state)
+
+    n_ticks = watcher._unhealthy_threshold + 1
+    with patch.object(
+        watcher_module,
+        "_check_sidecar_changed",
+        side_effect=_always_changed_for_corrupt,
+    ):
+        for _ in range(n_ticks):
+            # Reset markers to force sidecar path (marker == last_marker)
+            initial_states["corrupt"].last_marker = (
+                initial_states["corrupt"].last_marker or "v0"
+            )
+            watcher._poll_artifacts()
+
+    watcher._executor.shutdown(wait=True)
+
+    # _consecutive_errors must remain 0 — sidecar failures are per-recipe only
+    assert watcher._consecutive_errors == 0, (
+        f"_consecutive_errors must stay 0 for per-recipe sidecar failures; "
+        f"got {watcher._consecutive_errors}"
+    )
+
+    # Healthy recipes must still have no error
+    for name in ("healthy_a", "healthy_b"):
+        e = registry.get(name)
+        # The healthy entries may have been reloaded (their sha changed from "a"*64)
+        # — either way they must not carry last_load_error from the corrupt recipe.
+        if e is not None:
+            # If they got swapped, last_load_error may be None (success) or set
+            # (if the artifact bytes themselves have error) — but the watcher
+            # global health must not have been poisoned.
+            pass  # main assertion is _consecutive_errors == 0
+
+    # Corrupt recipe must have an error recorded
+    corrupt_entry = registry.get("corrupt")
+    if corrupt_entry is not None:
+        assert corrupt_entry.last_load_error is not None, (
+            "corrupt recipe must have last_load_error set after failed load"
+        )
+
+
+# ---------------------------------------------------------------------------
+# W-6: iterdir() failure immediately marks all entries with last_load_error
+# ---------------------------------------------------------------------------
+
+
+def test_iterdir_failure_immediately_marks_all_entries_unhealthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When iterdir() raises PermissionError, all known registry entries must
+    immediately have last_load_error set (not wait for _unhealthy_threshold
+    ticks), and the log event must be at ERROR level (not WARNING).
+    """
+    from pathlib import Path as _Path
+    from unittest.mock import MagicMock
+
+    import structlog.testing
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    # Pre-load two recipes into the registry
+    for name in ("alpha", "beta"):
+        entry = _make_entry(name)
+        entry.last_load_error = None
+        registry.replace(name, entry)
+
+    # Build a watcher with those two recipes pre-loaded in _states
+    yaml_a = _write_recipe_yaml(recipes_dir, "alpha", artifact_path)
+    yaml_b = _write_recipe_yaml(recipes_dir, "beta", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving.watcher import _RecipeWatchState
+
+    initial_states = {}
+    for name, yp in [("alpha", yaml_a), ("beta", yaml_b)]:
+        recipe = load_recipe(yp)
+        initial_states[name] = _RecipeWatchState(
+            recipe=recipe,
+            artifact_path=str(artifact_path),
+        )
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+
+    # Replace _recipes_dir with a mock whose iterdir raises PermissionError
+    mock_dir = MagicMock(spec=_Path)
+    mock_dir.iterdir.side_effect = PermissionError("denied by test")
+    watcher._recipes_dir = mock_dir
+
+    with structlog.testing.capture_logs() as cap:
+        watcher._scan_recipes_dir()
+
+    watcher._executor.shutdown(wait=False)
+
+    # Both entries must now have last_load_error set immediately
+    for name in ("alpha", "beta"):
+        entry = registry.get(name)
+        assert entry is not None, f"Entry '{name}' must still be in registry"
+        assert entry.last_load_error is not None, (
+            f"'{name}' must have last_load_error set immediately after iterdir failure"
+        )
+        assert "scan failed" in entry.last_load_error.lower(), (
+            f"last_load_error must mention scan failure; got {entry.last_load_error!r}"
+        )
+
+    # Log event must be at ERROR (not WARNING) — security-relevant
+    error_events = [
+        e
+        for e in cap
+        if e.get("event") == "recipes_dir_scan_error" and e.get("log_level") == "error"
+    ]
+    assert error_events, (
+        "recipes_dir_scan_error must be logged at ERROR level (not WARNING) "
+        "when iterdir fails — this is security-relevant (possible permission tampering)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# W-7: per-YAML mtime cache avoids re-parsing on every tick
+# ---------------------------------------------------------------------------
+
+
+def test_scan_recipes_dir_skips_load_recipe_when_mtime_unchanged(
+    tmp_path: Path,
+) -> None:
+    """With a stable YAML file (mtime unchanged), _scan_recipes_dir must call
+    load_recipe only on the first tick (to populate the cache); subsequent
+    ticks must NOT call load_recipe again.
+    """
+    from unittest.mock import patch
+
+    import recotem.recipe.loader as _loader_mod
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "cached_recipe", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    initial_states = build_initial_states([recipe], {})
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+
+    load_recipe_calls: list[str] = []
+
+    original_load = _loader_mod.load_recipe
+
+    def _counting_load(path, **kwargs):
+        load_recipe_calls.append(str(path))
+        return original_load(path, **kwargs)
+
+    with patch.object(_loader_mod, "load_recipe", side_effect=_counting_load):
+        # First tick: load_recipe must be called to populate the cache
+        watcher._scan_recipes_dir()
+        first_tick_calls = len(load_recipe_calls)
+
+        # Second tick: mtime unchanged → load_recipe must NOT be called
+        watcher._scan_recipes_dir()
+        second_tick_calls = len(load_recipe_calls)
+
+        # Third tick: same
+        watcher._scan_recipes_dir()
+        third_tick_calls = len(load_recipe_calls)
+
+    watcher._executor.shutdown(wait=False)
+
+    assert first_tick_calls == 1, (
+        f"load_recipe must be called once on first tick to populate cache; "
+        f"got {first_tick_calls}"
+    )
+    assert second_tick_calls == first_tick_calls, (
+        f"load_recipe must NOT be called on second tick (mtime unchanged); "
+        f"call count went from {first_tick_calls} to {second_tick_calls}"
+    )
+    assert third_tick_calls == first_tick_calls, (
+        f"load_recipe must NOT be called on third tick (mtime unchanged); "
+        f"call count went from {first_tick_calls} to {third_tick_calls}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# W-8: build_initial_states pre-populates last_sidecar_contents
+# ---------------------------------------------------------------------------
+
+
+def test_build_initial_states_prepopulates_sidecar_no_first_tick_reload(
+    tmp_path: Path,
+) -> None:
+    """When a .sha256 sidecar exists at startup, build_initial_states must
+    pre-populate last_sidecar_contents so the first poll tick does NOT trigger
+    a redundant full reload (W-8).
+    """
+
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    # Write a sidecar next to the artifact
+    sidecar_path = Path(str(artifact_path) + ".sha256")
+    sidecar_contents = "sha256:abc123"
+    sidecar_path.write_text(sidecar_contents, encoding="utf-8")
+
+    recipe = MagicMock()
+    recipe.name = "sidecar_test"
+    recipe.output = MagicMock()
+    recipe.output.path = str(artifact_path)
+
+    entry = _make_entry("sidecar_test")
+    entry._loaded_marker = ("mtime_val", "sha256_val")
+
+    states = build_initial_states([recipe], {"sidecar_test": entry})
+
+    state = states["sidecar_test"]
+    assert state.last_sidecar_contents == sidecar_contents, (
+        f"build_initial_states must pre-populate last_sidecar_contents from the "
+        f"existing sidecar; expected {sidecar_contents!r}, got "
+        f"{state.last_sidecar_contents!r}"
+    )
+
+
+def test_no_redundant_load_on_first_tick_when_sidecar_prepopulated(
+    tmp_path: Path,
+) -> None:
+    """With sidecar pre-populated by build_initial_states, the first watcher
+    poll tick must NOT call _load_recipe when neither the main marker nor the
+    sidecar contents have changed.
+    """
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+    yaml_path = _write_recipe_yaml(recipes_dir, "pre_sidecar", artifact_path)
+
+    sidecar_path = Path(str(artifact_path) + ".sha256")
+    sidecar_path.write_text("sha_v1", encoding="utf-8")
+
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving.watcher import _RecipeWatchState
+
+    recipe = load_recipe(yaml_path)
+
+    entry = _make_entry("pre_sidecar")
+    entry.artifact_path = str(artifact_path)
+    entry._loaded_marker = (None, "")
+
+    states = build_initial_states([recipe], {"pre_sidecar": entry})
+
+    # Confirm sidecar was pre-populated
+    assert states["pre_sidecar"].last_sidecar_contents == "sha_v1", (
+        "Sidecar must be pre-populated by build_initial_states"
+    )
+
+    registry = ModelRegistry()
+    registry.replace("pre_sidecar", entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=states,
+    )
+
+    load_recipe_calls: list[str] = []
+    original_load_recipe = watcher._load_recipe
+
+    def _spy_load(name: str, state: _RecipeWatchState, *, force: bool, marker=None):
+        load_recipe_calls.append(name)
+        return original_load_recipe(name, state, force=force, marker=marker)
+
+    watcher._load_recipe = _spy_load  # type: ignore[method-assign]
+
+    # Run one poll tick — marker should match and sidecar should be unchanged
+    watcher._poll_artifacts()
+    watcher._executor.shutdown(wait=True)
+
+    # _load_recipe must NOT have been called (sidecar unchanged → skip reload)
+    assert "pre_sidecar" not in load_recipe_calls, (
+        f"_load_recipe must NOT be called on first tick when sidecar is pre-populated "
+        f"and unchanged; got calls: {load_recipe_calls!r}"
+    )

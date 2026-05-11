@@ -154,6 +154,27 @@ def _scrub_string_value(s: str) -> str:
     return s
 
 
+def _redact_bytes_value(value: bytes | bytearray) -> Any:
+    """Redact or summarise a bytes/bytearray log value.
+
+    Strategy (in order):
+    1. Take the lowercase hex representation of the bytes.
+    2. If that hex string matches the high-entropy hex64 pattern (64+ hex
+       chars), the raw bytes are signing-key-shaped and must be redacted.
+    3. Otherwise return a length-only summary ``<bytes len=N>`` so arbitrary
+       binary blobs are never logged verbatim.
+
+    We never try to decode arbitrary bytes as UTF-8 — invalid sequences would
+    raise ``UnicodeDecodeError`` and might mask the original log event.
+    """
+    n = len(value)
+    hex_repr = value.hex()  # pure hex, always valid, no decoding needed
+    if _HEX64_RE.fullmatch(hex_repr):
+        return _REDACTED
+    # Not signing-key-shaped, but still never log raw bytes verbatim.
+    return f"<bytes len={n}>"
+
+
 def _redact_value(value: Any) -> Any:
     """Recursively walk dicts/lists and redact matched keys; scrub string values."""
     if isinstance(value, dict):
@@ -165,6 +186,8 @@ def _redact_value(value: Any) -> Any:
         return [_redact_value(item) for item in value]
     if isinstance(value, str):
         return _scrub_string_value(value)
+    if isinstance(value, (bytes, bytearray)):
+        return _redact_bytes_value(value)
     return value
 
 

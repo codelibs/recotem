@@ -390,6 +390,86 @@ def test_value_scrub_hex63_not_redacted_as_hex64() -> None:
     # That is intentional — better to over-redact than to under-redact.
 
 
+# ---------------------------------------------------------------------------
+# LR-1: bytes/bytearray values do not leak raw bytes into logs
+# ---------------------------------------------------------------------------
+
+
+def test_bytes_value_signing_key_shaped_is_redacted() -> None:
+    """A bytes value whose hex() is 64 hex chars (32-byte signing-key shaped)
+    must be fully redacted — not logged as repr(b'...').
+    """
+    from recotem.log_redaction import _REDACTED
+
+    # 32 raw bytes → 64 hex chars when .hex() is called.
+    raw_key = b"\xab\xcd" * 16  # 32 bytes; hex = 'abcd' * 16 = 64 chars
+    assert len(raw_key.hex()) == 64, "sanity: must be 64 hex chars"
+
+    result = _invoke({"signing_key_bytes": raw_key, "event": "startup"})
+    # Key name contains 'key' → redacted by name.
+    assert result["signing_key_bytes"] == _REDACTED
+
+
+def test_bytes_value_on_non_sensitive_key_signing_key_shaped_is_redacted() -> None:
+    """A bytes value whose hex representation is 64+ chars must be replaced with
+    _REDACTED even if the key name is not itself sensitive.
+
+    This prevents raw signing-key bytes escaping via a non-obvious key name
+    like 'raw_value' or 'body'.
+    """
+    from recotem.log_redaction import _REDACTED
+
+    raw_key = b"\x01\x02" * 16  # 32 bytes → 64-char hex
+    assert len(raw_key.hex()) == 64
+
+    result = _invoke({"raw_value": raw_key, "event": "debug"})
+    # Value-side bytes redaction must fire.
+    assert result["raw_value"] == _REDACTED, (
+        f"64-hex-char bytes value must be redacted; got {result['raw_value']!r}"
+    )
+    # The raw repr must not appear in the output.
+    assert repr(raw_key) not in str(result), (
+        "Raw bytes repr must never appear in log output"
+    )
+
+
+def test_bytes_value_not_key_shaped_returns_length_summary() -> None:
+    """A short bytes value that is NOT signing-key-shaped must be replaced with
+    a safe length summary '<bytes len=N>' rather than logged raw.
+    """
+    short_bytes = b"hello"  # 5 bytes → 10 hex chars, not key-shaped
+    result = _invoke({"body": short_bytes, "event": "debug"})
+    assert result["body"] == "<bytes len=5>", (
+        f"Short bytes must become '<bytes len=5>'; got {result['body']!r}"
+    )
+    assert b"hello" not in str(result).encode(), (
+        "Raw bytes must never appear in log output"
+    )
+
+
+def test_bytearray_value_signing_key_shaped_is_redacted() -> None:
+    """bytearray values with 64+ hex chars must also be redacted."""
+    from recotem.log_redaction import _REDACTED
+
+    raw_key = bytearray(b"\xff\xee" * 16)  # 32 bytes → 64-char hex
+    assert len(raw_key.hex()) == 64
+
+    result = _invoke({"raw_value": raw_key, "event": "debug"})
+    assert result["raw_value"] == _REDACTED, (
+        f"64-char-hex bytearray must be redacted; got {result['raw_value']!r}"
+    )
+
+
+def test_bytes_value_nested_in_dict_redacted() -> None:
+    """Bytes values nested inside a dict value must also be handled."""
+    from recotem.log_redaction import _REDACTED
+
+    raw_key = b"\xde\xad" * 16  # 32 bytes → 64-char hex
+    result = _invoke({"event": "e", "context": {"signing_key": raw_key}})
+    # Key name 'signing_key' triggers name-based redaction → _REDACTED.
+    assert result["context"]["signing_key"] == _REDACTED
+
+
 def test_redact_processor_is_first_in_chain() -> None:
     """configure_logging must place _redact_sensitive_keys first in the chain.
 

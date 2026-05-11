@@ -34,6 +34,19 @@ from typing import Annotated
 import structlog
 import typer
 
+from recotem._exit_codes import (
+    _EXIT_ARTIFACT,
+    _EXIT_CONFIG,
+    _EXIT_DATASOURCE,
+    _EXIT_HTTP_FETCH,
+    _EXIT_LOCK_CONTESTED,
+    _EXIT_RECIPE,
+    _EXIT_SUCCESS,
+    _EXIT_TRAINING,
+    _EXIT_UNKNOWN,
+    _map_exception_to_exit,
+)
+
 app = typer.Typer(
     name="recotem",
     help="Recipe-driven recommender training and serving.",
@@ -45,15 +58,21 @@ app = typer.Typer(
 # Exit-code helpers
 # ---------------------------------------------------------------------------
 
-_EXIT_SUCCESS = 0
-_EXIT_UNKNOWN = 1
-_EXIT_RECIPE = 2
-_EXIT_DATASOURCE = 3
-_EXIT_TRAINING = 4
-_EXIT_ARTIFACT = 5
-_EXIT_LOCK_CONTESTED = 6
-_EXIT_HTTP_FETCH = 7
-_EXIT_CONFIG = 8
+# Re-export constants for backward-compat with existing tests that import from
+# recotem.cli directly (e.g. ``from recotem.cli import _EXIT_HTTP_FETCH``).
+# The canonical definitions live in recotem._exit_codes.
+__all__ = [
+    "_EXIT_SUCCESS",
+    "_EXIT_UNKNOWN",
+    "_EXIT_RECIPE",
+    "_EXIT_DATASOURCE",
+    "_EXIT_TRAINING",
+    "_EXIT_ARTIFACT",
+    "_EXIT_LOCK_CONTESTED",
+    "_EXIT_HTTP_FETCH",
+    "_EXIT_CONFIG",
+    "_map_exception_to_exit",
+]
 
 
 def _exit(code: int, message: str | None = None) -> None:
@@ -61,99 +80,6 @@ def _exit(code: int, message: str | None = None) -> None:
     if message:
         typer.echo(message, err=True)
     raise typer.Exit(code=code)
-
-
-def _map_exception_to_exit(exc: Exception) -> int:
-    """Map a known exception type to its canonical exit code.
-
-    Checked in priority order so that the most-specific mapping wins when
-    exception hierarchies overlap (e.g. a subclass of TrainingError that
-    signals a configuration problem should map to _EXIT_CONFIG).
-    """
-    # --- configuration errors (missing signing keys, bad env) ---
-    try:
-        from recotem.training.errors import TrainingError as _TrainingError
-
-        if isinstance(exc, _TrainingError) and getattr(exc, "code", "") in (
-            "signing_key_missing",
-        ):
-            return _EXIT_CONFIG
-    except (ImportError, AttributeError):
-        pass
-
-    # --- recipe errors ---
-    try:
-        from recotem.recipe.errors import RecipeError as _RecipeError
-
-        if isinstance(exc, _RecipeError):
-            return _EXIT_RECIPE
-    except ImportError:
-        pass
-
-    # --- HTTP fetch errors (checked BEFORE DataSourceError so that a
-    # DataSourceError wrapping an HttpFetchError still maps to exit 7).
-    # CronJob retry semantics distinguish transient HTTP/SSRF failures (7)
-    # from structural data-source failures (3).
-    try:
-        from recotem._http_fetch import HttpFetchError as _HttpFetchError
-
-        # Walk the __cause__ chain — datasource layers wrap HttpFetchError
-        # into DataSourceError via ``raise DataSourceError(...) from exc``.
-        cur: BaseException | None = exc
-        while cur is not None:
-            if isinstance(cur, _HttpFetchError):
-                return _EXIT_HTTP_FETCH
-            cur = cur.__cause__
-    except (ImportError, AttributeError):
-        pass
-
-    # --- datasource errors ---
-    try:
-        from recotem.datasource.base import DataSourceError as _DataSourceError
-
-        if isinstance(exc, _DataSourceError):
-            return _EXIT_DATASOURCE
-    except ImportError:
-        pass
-
-    # --- config errors (must come before ArtifactError so that a signing-key
-    # misconfiguration on the serve path exits 8, not 5)
-    try:
-        from recotem.config import ConfigError as _ConfigError
-
-        if isinstance(exc, _ConfigError):
-            return _EXIT_CONFIG
-    except ImportError:
-        pass
-
-    # --- artifact errors ---
-    try:
-        from recotem.artifact.format import ArtifactError as _ArtifactError
-
-        if isinstance(exc, _ArtifactError):
-            return _EXIT_ARTIFACT
-    except ImportError:
-        pass
-
-    # --- lock contested ---
-    try:
-        from recotem.training.lock import LockContestedError as _LockContestedError
-
-        if isinstance(exc, _LockContestedError):
-            return _EXIT_LOCK_CONTESTED
-    except (ImportError, AttributeError):
-        pass
-
-    # --- general training errors ---
-    try:
-        from recotem.training.errors import TrainingError as _TrainingError2
-
-        if isinstance(exc, _TrainingError2):
-            return _EXIT_TRAINING
-    except (ImportError, AttributeError):
-        pass
-
-    return _EXIT_UNKNOWN
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +320,10 @@ def serve(
     except KeyboardInterrupt:
         _srv_log.info("serve_terminated", reason="KeyboardInterrupt")
         raise typer.Exit(code=0) from None
+    except (MemoryError, RecursionError):
+        # Never collapse OOM/recursion — the operator needs the real cause to
+        # size the host correctly.  Round-12 OOM-propagation policy.
+        raise
     except OSError as exc:
         _srv_log.error(
             "serve_startup_failed",
@@ -413,14 +343,37 @@ def serve(
 # ---------------------------------------------------------------------------
 
 
+def _repair_uri(value: str) -> str:
+    """Restore a double-slash URI collapsed by pathlib.Path on POSIX.
+
+    ``pathlib.Path("s3://bucket/key")`` normalises to ``s3:/bucket/key``.
+    Detect the single-slash form (``scheme:/non-slash``) and reinsert the
+    missing slash so fsspec receives a valid ``scheme://…`` URI.
+
+    Local paths (``/abs/path``, ``relative/path``) and already-correct URIs
+    (``scheme://…``) are returned unchanged.
+
+    Pattern matched: ``^[a-z][a-z0-9+.\\-]+:/[^/]``  (RFC 3986 scheme +
+    exactly one slash + a non-slash character).
+    """
+    import re as _re
+
+    if _re.match(r"^[a-z][a-z0-9+.\-]+:/[^/]", value):
+        scheme, rest = value.split(":/", 1)
+        return f"{scheme}://{rest}"
+    return value
+
+
 @app.command()
 def inspect(
     artifact: Annotated[
-        Path,
-        # exists=True is intentionally omitted: read_artifact_header / fsspec
-        # support remote schemes (s3://, gs://, etc.) that Typer cannot stat
-        # locally.  Missing-path errors are surfaced by the fsspec.open() call
-        # inside this function and reported as exit 5 (ArtifactError).
+        str,
+        # Accepted as str (not Path) so that Typer does not collapse remote
+        # URIs: pathlib.Path("s3://bucket/key") → "s3:/bucket/key" on POSIX.
+        # The raw string is passed verbatim to fsspec.core.url_to_fs() after
+        # applying _repair_uri() to restore any collapsed double-slash.
+        # Missing-path errors are surfaced by the fsspec.open() call inside
+        # this function and reported as exit 5 (ArtifactError).
         typer.Argument(help="Path or URI to the .recotem artifact file."),
     ],
     dev_allow_unsigned: Annotated[
@@ -475,20 +428,18 @@ def inspect(
     cfg = ServeConfig.from_env()
     read_cap = cfg.max_artifact_bytes
     parse_cap = cfg.max_payload_bytes
+    artifact_uri = _repair_uri(artifact)
     try:
         # Bounded read so a 100 GiB file cannot OOM the CLI before the cap
         # check fires; matches the serving-watcher protocol.
-        fs, resolved_path = fsspec.core.url_to_fs(str(artifact))
+        fs, resolved_path = fsspec.core.url_to_fs(artifact_uri)
         with fs.open(resolved_path, "rb") as fh:
             data = fh.read(read_cap + 1)
     except ImportError as exc:
         # A missing optional fsspec backend (gcsfs, s3fs, adlfs, …) raises
         # ImportError when url_to_fs resolves the scheme.  Surface a targeted
         # install hint so the operator can fix it without deciphering a stack trace.
-        # Note: when *artifact* is a Typer Path argument, Path() normalizes
-        # "gs://bucket/key" to "gs:/bucket/key" (collapses double-slash), so
-        # we must match on the leading "scheme:/" prefix, not "scheme://".
-        artifact_str = str(artifact)
+        artifact_str = artifact_uri
         _SCHEME_EXTRA: dict[str, str] = {
             "gs": "gcs",
             "gcs": "gcs",
@@ -498,12 +449,11 @@ def inspect(
             "abfs": "azure",
             "abfss": "azure",
         }
-        # Try both "scheme://" (original) and "scheme:/" (Path-normalized) forms.
+        # artifact_uri has been repaired by _repair_uri, so double-slash URIs
+        # are already restored.  Only match "scheme://" here.
         extra = None
         for prefix, extra_name in _SCHEME_EXTRA.items():
-            if artifact_str.lower().startswith(
-                f"{prefix}://"
-            ) or artifact_str.lower().startswith(f"{prefix}:/"):
+            if artifact_str.lower().startswith(f"{prefix}://"):
                 extra = extra_name
                 break
         if extra:
@@ -512,12 +462,12 @@ def inspect(
             hint = "pip install the required fsspec backend for your storage scheme"
         _exit(
             _EXIT_ARTIFACT,
-            f"Cannot open artifact '{artifact}': missing optional dependency "
+            f"Cannot open artifact '{artifact_uri}': missing optional dependency "
             f"({type(exc).__name__}: {exc}). "
             f"Hint: {hint}",
         )
     except OSError as exc:
-        _exit(_EXIT_ARTIFACT, f"Cannot read artifact '{artifact}': {exc}")
+        _exit(_EXIT_ARTIFACT, f"Cannot read artifact '{artifact_uri}': {exc}")
     except (MemoryError, RecursionError):
         # Never collapse OOM/recursion into a "read failed" message — the
         # operator needs to see the real cause to size the host correctly.
@@ -529,7 +479,7 @@ def inspect(
         # and surface as exit 1, breaking the documented exit-code contract.
         _exit(
             _EXIT_ARTIFACT,
-            f"Cannot open artifact '{artifact}' ({type(exc).__name__}): {exc}",
+            f"Cannot open artifact '{artifact_uri}' ({type(exc).__name__}): {exc}",
         )
 
     try:
@@ -549,7 +499,14 @@ def inspect(
         code = _map_exception_to_exit(exc)
         _exit(code, f"Artifact parse failed: {exc}")
 
+    _inspect_log = structlog.get_logger(__name__)
     signing_keys_raw = os.environ.get("RECOTEM_SIGNING_KEYS", "").strip()
+    if signing_keys_raw and dev_allow_unsigned:
+        # Keys are configured; --dev-allow-unsigned has no effect here.
+        _inspect_log.warning(
+            "dev_allow_unsigned_ignored",
+            reason="RECOTEM_SIGNING_KEYS is set; --dev-allow-unsigned is ignored",
+        )
     if not signing_keys_raw and dev_allow_unsigned:
         # Same in-memory dev key as run_training / serve dev mode.
         signing_keys_raw = "dev:" + ("0" * 64)
@@ -574,8 +531,11 @@ def inspect(
             code = _map_exception_to_exit(exc)
             _exit(code, f"HMAC verification failed: {exc}")
     else:
+        # Missing signing keys without --dev-allow-unsigned is a configuration
+        # error (exit 8), not an artifact error (exit 5).  CLAUDE.md documents
+        # this as _EXIT_CONFIG matching the train side.
         _exit(
-            _EXIT_ARTIFACT,
+            _EXIT_CONFIG,
             f"Cannot verify artifact (kid={hdr.kid!r}): RECOTEM_SIGNING_KEYS is "
             "not set and --dev-allow-unsigned was not passed.\n"
             "  - Set RECOTEM_SIGNING_KEYS=<kid>:<hex64> to verify the HMAC, or\n"

@@ -81,6 +81,10 @@ filterwarnings = [
     "ignore::pydantic.warnings.PydanticDeprecatedSince20",
     "ignore::DeprecationWarning:irspack.*",
     "ignore::DeprecationWarning:fastprogress.*",
+    # pytest-httpserver / werkzeug sockets are closed but their FDs are
+    # surfaced as unraisable ResourceWarnings during a later test's teardown
+    # on CPython 3.12. The warning has no production analog.
+    "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
 
 [tool.ruff]

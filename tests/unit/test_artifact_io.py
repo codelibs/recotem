@@ -691,3 +691,73 @@ def test_append_sha_sha_suffixed_written_before_pointer(tmp_path: Path) -> None:
         "Pointer file must not exist when sha-suffixed write succeeded but "
         "pointer write failed"
     )
+
+
+# ---------------------------------------------------------------------------
+# IO-3: _write_atomic fsync OSError narrowed — ENOSPC/EIO must propagate
+# ---------------------------------------------------------------------------
+
+
+def test_write_atomic_fsync_enospc_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ENOSPC from os.fsync must propagate so the caller knows bytes did not persist.
+
+    Previously the broad except OSError: pass silently swallowed all
+    fsync errors, including ENOSPC (no space left on device) and EIO (I/O
+    error), which mean the written bytes never made it to storage.  A caller
+    treating the subsequent os.replace as a successful write would then serve
+    corrupt or missing artifact data.
+
+    The fix narrows the except to only the errnos that indicate the filesystem
+    does not support fsync (EINVAL, ENOTSUP); all others are re-raised.
+    """
+    import errno as _errno
+    import os as _os
+
+    from recotem.artifact.io import _write_atomic
+
+    dest = str(tmp_path / "enospc.recotem")
+    data = b"artifact bytes"
+
+    def _enospc_fsync(fd: int) -> None:
+        raise OSError(_errno.ENOSPC, "no space left on device")
+
+    monkeypatch.setattr(_os, "fsync", _enospc_fsync)
+
+    with pytest.raises(OSError) as exc_info:
+        _write_atomic(None, dest, data, is_local=True)  # type: ignore[arg-type]
+
+    assert exc_info.value.errno == _errno.ENOSPC, (
+        f"Expected ENOSPC ({_errno.ENOSPC}), got errno={exc_info.value.errno!r}"
+    )
+
+
+def test_write_atomic_fsync_einval_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EINVAL from os.fsync must be silently ignored (filesystem does not support it).
+
+    Some virtual filesystems (tmpfs, certain Docker mounts) return EINVAL
+    for fsync calls because the kernel declines to honour the call, not
+    because the write failed.  The fix allows EINVAL and ENOTSUP through
+    as best-effort "not supported" signals and lets the write proceed.
+    """
+    import errno as _errno
+    import os as _os
+
+    from recotem.artifact.io import _write_atomic
+
+    dest = str(tmp_path / "einval.recotem")
+    data = b"artifact bytes for einval test"
+
+    def _einval_fsync(fd: int) -> None:
+        raise OSError(_errno.EINVAL, "invalid argument (fsync not supported)")
+
+    monkeypatch.setattr(_os, "fsync", _einval_fsync)
+
+    # Must NOT raise — EINVAL means "not supported", not a write failure.
+    _write_atomic(None, dest, data, is_local=True)  # type: ignore[arg-type]
+
+    # Verify data was actually written (rename completed).
+    assert Path(dest).read_bytes() == data

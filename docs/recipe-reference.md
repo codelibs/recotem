@@ -223,9 +223,14 @@ output:
 
 Applies to `output.path`, `source.path`, and `item_metadata.path`.
 
-Path schemes for `source.path` and `item_metadata.path`: any fsspec-supported
-scheme is accepted. Schemes `http://` and `https://` additionally require an
-`sha256` integrity pin on the same config block.
+Path schemes for `source.path` and `item_metadata.path` are restricted to an
+explicit allow-list: bare local path (no scheme prefix), `file://`, `s3://`,
+`gs://`, `az://`, `abfs://`, `abfss://`, `http://`, `https://`. Schemes are
+explicitly enumerated rather than relying on fsspec's full registry to prevent
+unvetted handlers from being reachable via recipe content. Chained fsspec
+protocols (paths containing `::`) are also rejected. Schemes `http://` and
+`https://` additionally require an `sha256` integrity pin on the same config
+block.
 
 > **Decompressed-size cap not enforced.** `RECOTEM_MAX_DOWNLOAD_BYTES` caps
 > raw I/O bytes only. Compressed CSV and columnar Parquet sources can expand
@@ -234,9 +239,10 @@ scheme is accepted. Schemes `http://` and `https://` additionally require an
 > with a memory limit to contain the impact. See
 > [security.md — Decompressed-size cap not enforced](security.md#decompressed-size-cap-not-enforced-medium-5).
 
-`output.path` rejects schemes that fsspec does not implement for writes:
-`http://`, `https://`, `ftp://`, `ftps://`, `memory://`. Acceptable output
-schemes: bare local, `file://`, `s3://`, `gs://`, `az://`, `abfs://`, `abfss://`.
+`output.path` is a strict subset of the input allow-list: schemes `http://`,
+`https://`, `ftp://`, `ftps://`, and `memory://` are additionally rejected
+(write not supported). Acceptable output schemes: bare local path, `file://`,
+`s3://`, `gs://`, `az://`, `abfs://`, `abfss://`.
 
 Embedded credentials (`s3://AKIA...:secret@bucket/`) are rejected at recipe
 load on every path field.

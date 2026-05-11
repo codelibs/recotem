@@ -1313,3 +1313,87 @@ def test_fetch_http_bytes_socket_timeout_raises_http_fetch_error(
     assert "7" in err, (
         f"HttpFetchError must include the configured timeout seconds (7); got: {err!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# IO-2: redirect with embedded credentials in Location header is rejected
+# ---------------------------------------------------------------------------
+
+
+def test_redirect_with_embedded_credentials_rejected(httpserver) -> None:
+    """A 302 Location header containing user:pass@ must raise HttpFetchError.
+
+    When a server responds with a Location such as
+    ``http://user:pass@127.0.0.1:port/x``, urljoin preserves the userinfo
+    component.  Without an explicit check, urllib would derive an
+    ``Authorization: Basic`` header from the embedded credentials and send it
+    to the redirect target — a credential-hijacking vector the caller did not
+    opt into.
+
+    The fix: after urljoin, parse the resulting URL and raise HttpFetchError
+    if username or password is non-empty.
+
+    Security property: the original credentials must NOT appear in any log
+    event value (they are redacted via redact_url_userinfo in the error message).
+    """
+    import logging
+
+    # httpserver binds to 127.0.0.1; allow_private=True so the SSRF guard
+    # does not block the test server itself.
+    port = httpserver.port
+    location_with_creds = f"http://user:secret_pass@127.0.0.1:{port}/final"
+
+    httpserver.expect_request("/start").respond_with_data(
+        b"",
+        status=302,
+        headers={"Location": location_with_creds},
+    )
+
+    log_records: list[str] = []
+
+    class _CapturingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            log_records.append(record.getMessage())
+
+    capturing_handler = _CapturingHandler()
+    # structlog in test mode routes through stdlib logging
+    root_logger = logging.getLogger()
+    root_logger.addHandler(capturing_handler)
+
+    try:
+        with pytest.raises(HttpFetchError, match="embedded credentials"):
+            fetch_http_bytes(
+                httpserver.url_for("/start"),
+                timeout=5,
+                max_bytes=65536,
+                allow_private=True,
+            )
+    finally:
+        root_logger.removeHandler(capturing_handler)
+
+    # Security: credentials must not appear verbatim in any log event value.
+    all_log_text = "\n".join(log_records)
+    assert "secret_pass" not in all_log_text, (
+        "The redirect password 'secret_pass' must not appear in log output. "
+        "redact_url_userinfo should have stripped it before logging."
+    )
+    # 'user' is too common a substring to check safely; focus on the secret.
+
+
+def test_redirect_without_credentials_is_allowed(httpserver) -> None:
+    """A 302 redirect without userinfo must proceed normally (no false positive)."""
+    body = b"user_id,item_id\n1,a\n"
+    httpserver.expect_request("/target").respond_with_data(body, status=200)
+    httpserver.expect_request("/start").respond_with_data(
+        b"",
+        status=302,
+        headers={"Location": httpserver.url_for("/target")},
+    )
+
+    result = fetch_http_bytes(
+        httpserver.url_for("/start"),
+        timeout=5,
+        max_bytes=65536,
+        allow_private=True,
+    )
+    assert result == body, "Redirect without credentials should succeed"

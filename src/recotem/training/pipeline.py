@@ -27,6 +27,7 @@ import structlog
 from irspack import __version__ as irspack_version
 from irspack.utils import df_to_sparse
 
+from recotem._exit_codes import _map_exception_to_exit  # shared with cli.py
 from recotem.recipe.models import Recipe
 from recotem.training._compat import IDMappedRecommender
 from recotem.training.algorithms import get_recommender_cls, resolve_algorithm_name
@@ -41,95 +42,6 @@ from recotem.training.split import split_interactions
 from recotem.version import __version__ as recotem_version
 
 logger = structlog.get_logger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Exit-code mapping (mirrors cli._map_exception_to_exit without importing cli)
-# ---------------------------------------------------------------------------
-
-_EXIT_SUCCESS = 0
-_EXIT_UNKNOWN = 1
-_EXIT_RECIPE = 2
-_EXIT_DATASOURCE = 3
-_EXIT_TRAINING = 4
-_EXIT_ARTIFACT = 5
-_EXIT_LOCK_CONTESTED = 6
-_EXIT_HTTP_FETCH = 7
-_EXIT_CONFIG = 8
-
-
-def _map_exception_to_exit(exc: BaseException) -> int:
-    """Map a known exception type to its canonical exit code.
-
-    A training-side copy of the same mapping that lives in cli.py, so that
-    pipeline.py can include ``exit_code`` in ``train_error`` events without
-    importing the CLI module.
-    """
-    if (
-        isinstance(exc, TrainingError)
-        and getattr(exc, "code", "") == "signing_key_missing"
-    ):
-        return _EXIT_CONFIG
-
-    try:
-        from recotem.recipe.errors import RecipeError as _RecipeError  # noqa: PLC0415
-
-        if isinstance(exc, _RecipeError):
-            return _EXIT_RECIPE
-    except ImportError:
-        pass
-
-    # HTTP fetch errors are checked BEFORE DataSourceError so that a
-    # DataSourceError wrapping an HttpFetchError still maps to exit 7.
-    # CronJob retry semantics distinguish transient HTTP/SSRF failures (7)
-    # from structural data-source failures (3).
-    try:
-        from recotem._http_fetch import (
-            HttpFetchError as _HttpFetchError,  # noqa: PLC0415
-        )
-
-        cur: BaseException | None = exc
-        while cur is not None:
-            if isinstance(cur, _HttpFetchError):
-                return _EXIT_HTTP_FETCH
-            cur = cur.__cause__
-    except (ImportError, AttributeError):
-        pass
-
-    try:
-        from recotem.datasource.base import (
-            DataSourceError as _DataSourceError,  # noqa: PLC0415
-        )
-
-        if isinstance(exc, _DataSourceError):
-            return _EXIT_DATASOURCE
-    except ImportError:
-        pass
-
-    try:
-        from recotem.artifact.format import (
-            ArtifactError as _ArtifactError,  # noqa: PLC0415
-        )
-
-        if isinstance(exc, _ArtifactError):
-            return _EXIT_ARTIFACT
-    except ImportError:
-        pass
-
-    try:
-        from recotem.training.lock import (
-            LockContestedError as _LockContestedError,  # noqa: PLC0415
-        )
-
-        if isinstance(exc, _LockContestedError):
-            return _EXIT_LOCK_CONTESTED
-    except (ImportError, AttributeError):
-        pass
-
-    if isinstance(exc, TrainingError):
-        return _EXIT_TRAINING
-
-    return _EXIT_UNKNOWN
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +161,10 @@ def run_training(
     if run_id is None:
         run_id = uuid.uuid4().hex[:12]
 
+    # Hoist resolved kid into outer scope so the except block can include it
+    # in the train_error event even when the failure happens inside the lock.
+    _resolved_kid: str | None = signing_key  # may stay None if key_ring fails
+
     try:
         # Resolve KeyRing if the caller didn't pass one.
         if key_ring is None:
@@ -270,6 +186,7 @@ def run_training(
                 key_ring = KeyRing(raw)
         if signing_key is None:
             signing_key = key_ring.active_kid
+        _resolved_kid = signing_key
 
         # Acquire the per-recipe lock unless suppressed.
         if no_lock:
@@ -335,9 +252,14 @@ def run_training(
                 if val is not None:
                     extra[attr] = val
 
+        # Include kid if it was resolved before the failure; omit if unknown
+        # (e.g. signing_key_missing error fires before KeyRing is built).
+        if _resolved_kid is not None:
+            extra["kid"] = _resolved_kid
+
         logger.error(
             "train_error",
-            recipe=recipe.name,
+            name=recipe.name,
             run_id=run_id,
             error=str(exc),
             code=error_code,

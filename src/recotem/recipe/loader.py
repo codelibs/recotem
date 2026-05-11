@@ -87,7 +87,8 @@ def _check_userinfo(path: str, field_name: str) -> None:
     if parsed.username or parsed.password:
         raise RecipeError(
             f"'{field_name}' contains embedded credentials in the URI. "
-            "Use environment-based authentication instead."
+            "Use environment-based authentication instead.",
+            category="security",
         )
 
 
@@ -104,7 +105,8 @@ def _validate_input_path(path: str, field_name: str) -> None:
     if "::" in path:
         raise RecipeError(
             f"'{field_name}' uses a chained scheme (contains '::'). "
-            "Chained fsspec protocols are not permitted in recipes."
+            "Chained fsspec protocols are not permitted in recipes.",
+            category="security",
         )
 
     _check_userinfo(path, field_name)
@@ -117,7 +119,8 @@ def _validate_input_path(path: str, field_name: str) -> None:
         )
         raise RecipeError(
             f"'{field_name}' uses scheme '{scheme}://' which is not supported "
-            f"for input paths. Allowed: {allowed_display}"
+            f"for input paths. Allowed: {allowed_display}",
+            category="security",
         )
 
 
@@ -137,13 +140,15 @@ def _validate_output_path(path: str, field_name: str) -> None:
         )
         raise RecipeError(
             f"'{field_name}' uses scheme '{scheme}://' which is not supported. "
-            f"Allowed: {allowed_display}"
+            f"Allowed: {allowed_display}",
+            category="security",
         )
     if scheme == "file" and parsed.netloc not in ("", "localhost"):
         raise RecipeError(
             f"'{field_name}' uses 'file://{parsed.netloc}/...' which is "
             "ambiguous as a local path. Use 'file:///absolute/path' "
-            "(empty host) instead."
+            "(empty host) instead.",
+            category="security",
         )
 
 
@@ -201,7 +206,8 @@ def _check_local_output_containment(local_path: Path) -> None:
         raise RecipeError(
             f"output.path parent '{resolved_parent}' is outside "
             f"RECOTEM_ARTIFACT_ROOT='{artifact_root}'. "
-            "Symlink escapes are rejected."
+            "Symlink escapes are rejected.",
+            category="security",
         ) from None
 
     # Compose the final path from the already-resolved parent plus the
@@ -218,7 +224,8 @@ def _check_local_output_containment(local_path: Path) -> None:
         raise RecipeError(
             f"output.path resolves to '{resolved}' which is outside "
             f"RECOTEM_ARTIFACT_ROOT='{artifact_root}'. "
-            "Symlink escapes are rejected."
+            "Symlink escapes are rejected.",
+            category="security",
         ) from None
 
 
@@ -231,7 +238,8 @@ def _check_recipe_file_containment(recipe_path: Path, recipes_root: Path) -> Non
     except ValueError:
         raise RecipeError(
             f"Recipe file '{resolved_recipe}' lies outside the recipes "
-            f"root '{resolved_root}'. Path traversal is rejected."
+            f"root '{resolved_root}'. Path traversal is rejected.",
+            category="security",
         ) from None
 
 
@@ -325,10 +333,17 @@ def _expand_with_source_no_expand(
                         f.lower()
                         for f in getattr(src_cls, "no_expand_fields", frozenset())
                     )
-                except DataSourceError:
-                    # Unknown source type — later validation surfaces the real
-                    # error; fall back to the global _NO_EXPAND_KEYS only.
-                    pass
+                except DataSourceError as exc:
+                    # Unknown source type during expansion: fail explicitly so
+                    # the operator sees the error at recipe-load time rather than
+                    # silently proceeding with only the global _NO_EXPAND_KEYS
+                    # baseline.  Silent fallback weakens plugin-declared
+                    # no_expand_fields protection and could allow SQL injection
+                    # via env expansion into a query field.
+                    raise RecipeError(
+                        f"plugin source discovery failed for type {type_name!r}: {exc}",
+                        category="schema",
+                    ) from exc
                 except Exception as exc:
                     logger.warning(
                         "source_class_lookup_failed_during_expand",
@@ -425,7 +440,9 @@ def load_recipe(
     try:
         raw_text = p.read_text(encoding="utf-8")
     except OSError as exc:
-        raise RecipeError(f"Cannot read recipe file '{p}': {exc}") from exc
+        raise RecipeError(
+            f"Cannot read recipe file '{p}': {exc}", category="io"
+        ) from exc
 
     # Parse YAML into a raw dict (no env expansion yet).
     try:
@@ -435,10 +452,14 @@ def load_recipe(
         raise RecipeError(
             f"YAML parse error in '{p}': {exc}",
             line=line,
+            category="parse",
         ) from exc
 
     if not isinstance(raw_data, dict):
-        raise RecipeError(f"Recipe '{p}' must be a YAML mapping at the top level.")
+        raise RecipeError(
+            f"Recipe '{p}' must be a YAML mapping at the top level.",
+            category="parse",
+        )
 
     # Env expansion (never touches query / query_parameters, and honours
     # plugin-declared no_expand_fields for the source subtree).
@@ -456,12 +477,16 @@ def load_recipe(
     # Extract + validate name first (needed for path checks below).
     raw_name = expanded.get("name")
     if not raw_name:
-        raise RecipeError(f"Recipe '{p}' is missing the required 'name' field.")
+        raise RecipeError(
+            f"Recipe '{p}' is missing the required 'name' field.",
+            category="schema",
+        )
 
     _name_re = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
     if not _name_re.match(str(raw_name)):
         raise RecipeError(
-            f"Recipe name {raw_name!r} must match ^[A-Za-z0-9_-]{{1,64}}$."
+            f"Recipe name {raw_name!r} must match ^[A-Za-z0-9_-]{{1,64}}$.",
+            category="schema",
         )
 
     # Path security checks.
@@ -479,7 +504,8 @@ def load_recipe(
             type_name = raw_source.get("type")
             if not type_name:
                 raise RecipeError(
-                    f"Recipe '{p}' source is missing the 'type' discriminator."
+                    f"Recipe '{p}' source is missing the 'type' discriminator.",
+                    category="schema",
                 )
             source_cls = get_source_class(str(type_name))
             config_cls = source_cls.Config
@@ -561,7 +587,8 @@ def _enforce_sha256_for_network_paths(recipe: Recipe) -> None:
             f"'source.path' uses a network scheme "
             f"({urlparse(src_path).scheme}://) and requires a 'sha256' "
             "integrity pin. Compute it with `shasum -a 256 <file>` and "
-            "set `source.sha256: <hex>`."
+            "set `source.sha256: <hex>`.",
+            category="security",
         )
 
     meta = recipe.item_metadata
@@ -575,7 +602,8 @@ def _enforce_sha256_for_network_paths(recipe: Recipe) -> None:
             raise RecipeError(
                 f"'item_metadata.path' uses a network scheme "
                 f"({urlparse(meta_path).scheme}://) and requires a "
-                "'sha256' integrity pin."
+                "'sha256' integrity pin.",
+                category="security",
             )
 
 
@@ -700,12 +728,25 @@ def load_recipes_directory_lenient(
                 recipes_root=root,
             )
         except Exception as exc:
-            logger.warning(
-                "recipe_load_error_skipped",
-                file=yaml_file.name,
-                error_class=type(exc).__name__,
-                error=str(exc),
-            )
+            # Security-category errors (symlink escapes, scheme violations,
+            # embedded credentials) are logged at ERROR so they stand out
+            # from schema / parse noise.  All other errors remain at WARN.
+            _category = getattr(exc, "category", None)
+            if isinstance(exc, RecipeError) and _category == "security":
+                logger.error(
+                    "recipe_security_violation_skipped",
+                    file=yaml_file.name,
+                    error_class=type(exc).__name__,
+                    error=str(exc),
+                    category=_category,
+                )
+            else:
+                logger.warning(
+                    "recipe_load_error_skipped",
+                    file=yaml_file.name,
+                    error_class=type(exc).__name__,
+                    error=str(exc),
+                )
             results.append((yaml_file, None, exc))
             err_count += 1
             continue

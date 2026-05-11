@@ -351,3 +351,58 @@ def test_recipe_name_assignment_accepts_valid_value() -> None:
     recipe = Recipe.model_validate(d)
     recipe.name = "new-valid-name"
     assert recipe.name == "new-valid-name"
+
+
+# ---------------------------------------------------------------------------
+# CLI-6: Recipe.source validation — unknown type raises, known Config passes
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_source_unknown_type_raises_validation_error() -> None:
+    """Recipe(source={"type": "unknown_xyz"}) must raise ValidationError.
+
+    Library callers that pass an unknown source type directly must get an
+    immediate ValidationError at construction time, not a cryptic runtime
+    error during training.
+    """
+    from recotem.recipe.models import OutputConfig, SchemaConfig, TrainingConfig
+
+    with pytest.raises(ValidationError):
+        Recipe(
+            name="test",
+            source={"type": "unknown_xyz", "path": "/tmp/data.csv"},
+            schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+            training=TrainingConfig(algorithms=["TopPop"], n_trials=1),
+            output=OutputConfig(path="/tmp/out.recotem"),
+        )
+
+
+def test_recipe_source_known_csvconfig_succeeds() -> None:
+    """Recipe(source=CSVConfig(...)) must construct successfully.
+
+    A typed, registered Config instance must pass the _validate_source check.
+    """
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import OutputConfig, SchemaConfig, TrainingConfig
+
+    recipe = Recipe(
+        name="test",
+        source=CSVConfig(type="csv", path="/tmp/data.csv"),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        training=TrainingConfig(algorithms=["TopPop"], n_trials=1),
+        output=OutputConfig(path="/tmp/out.recotem"),
+    )
+    assert recipe.source.type == "csv"
+
+
+def test_recipe_source_dict_with_known_type_passes() -> None:
+    """Recipe.model_validate(d) with source as a raw dict of known type must work.
+
+    Backward compat: existing tests and load_recipe use this form.
+    The dict is validated by load_recipe / datasource pipeline; models.py
+    only rejects unknown types.
+    """
+    d = _minimal_recipe_dict()
+    # source dict has type="csv" which is a known registered type → must pass
+    recipe = Recipe.model_validate(d)
+    assert isinstance(recipe.source, dict) or hasattr(recipe.source, "type")

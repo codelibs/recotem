@@ -839,3 +839,226 @@ def test_load_item_metadata_memory_error_propagates_unwrapped(
             _Config("csv", str(csv_file)),
             fields=["title"],
         )
+
+
+# ---------------------------------------------------------------------------
+# MD-1: build_metadata_index — to_dict(orient="index") replaces iterrows
+# ---------------------------------------------------------------------------
+
+
+def test_build_metadata_index_nan_becomes_none(tmp_path: Path) -> None:
+    """build_metadata_index converts float NaN to None (JSON safety).
+
+    Verifies that the to_dict implementation preserves the NaN→None contract
+    previously implemented via iterrows.
+    """
+    import io
+
+    import pandas as pd
+
+    from recotem.metadata.loader import build_metadata_index
+
+    parquet_buf = io.BytesIO()
+    pd.DataFrame(
+        {
+            "item_id": ["a1", "a2"],
+            "score": [float("nan"), 3.14],
+            "tag": ["x", float("nan")],
+        }
+    ).to_parquet(parquet_buf, index=False)
+    parquet_buf.seek(0)
+    f = tmp_path / "nan.parquet"
+    f.write_bytes(parquet_buf.read())
+
+    df = load_item_metadata(_Config("parquet", str(f)), fields=["score", "tag"])
+    index = build_metadata_index(df)
+
+    assert index["a1"]["score"] is None, "NaN score must become None"
+    assert index["a2"]["score"] == pytest.approx(3.14), "real float must be preserved"
+    assert index["a2"]["tag"] is None, "NaN object column must become None"
+
+
+def test_build_metadata_index_deny_set_case_insensitive(tmp_path: Path) -> None:
+    """build_metadata_index strips deny-listed fields regardless of case.
+
+    Verifies the deny_set case-fold behaviour is preserved with the
+    to_dict implementation.
+    """
+    from recotem.metadata.loader import build_metadata_index
+
+    csv_file = _write_csv(
+        tmp_path,
+        "item_id,Title,Secret_Field\ni1,Foo,hidden\ni2,Bar,also-hidden\n",
+    )
+    df = load_item_metadata(
+        _Config("csv", str(csv_file)),
+        fields=["Title", "Secret_Field"],
+    )
+    deny = frozenset({"secret_field"})  # lowercase deny vs mixed-case column
+    index = build_metadata_index(df, deny_set=deny)
+
+    assert "i1" in index
+    assert "Title" in index["i1"]
+    assert "Secret_Field" not in index["i1"], "deny_set must be case-insensitive"
+    assert index["i1"]["Title"] == "Foo"
+
+
+def test_build_metadata_index_non_string_column_skipped(tmp_path: Path) -> None:
+    """build_metadata_index skips non-string column names (defensive guard)."""
+    import pandas as pd
+
+    from recotem.metadata.loader import build_metadata_index
+
+    # Manually construct a DataFrame with an integer column name.
+    df = pd.DataFrame({0: ["v1", "v2"], "name": ["alpha", "beta"]})
+    df.index = pd.Index(["i1", "i2"], name="item_id")
+
+    index = build_metadata_index(df)
+
+    # Non-string column 0 must be skipped; "name" must be present.
+    assert "name" in index["i1"]
+    assert 0 not in index["i1"]
+
+
+def test_build_metadata_index_matches_iterrows_semantics(tmp_path: Path) -> None:
+    """to_dict(orient='index') output matches the old iterrows output byte-for-byte.
+
+    This is the key regression guard for MD-1: the replacement must produce
+    identical results for every value that the old loop would have produced.
+    """
+    import pandas as pd
+
+    from recotem.metadata.loader import build_metadata_index
+
+    csv_file = _write_csv(
+        tmp_path,
+        "item_id,price,category\np1,9.99,books\np2,,dvd\np3,14.5,games\n",
+    )
+    df = load_item_metadata(_Config("csv", str(csv_file)), fields=["price", "category"])
+    # Force a NaN into the numeric column so we exercise the NaN→None path.
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+
+    index = build_metadata_index(df)
+
+    # p1 — real float
+    assert index["p1"]["price"] == pytest.approx(9.99)
+    assert index["p1"]["category"] == "books"
+    # p2 — NaN price → None
+    assert index["p2"]["price"] is None
+    assert index["p2"]["category"] == "dvd"
+    # p3 — real float
+    assert index["p3"]["price"] == pytest.approx(14.5)
+    # item_id must be the key, not a field
+    assert "item_id" not in index["p1"]
+
+
+# ---------------------------------------------------------------------------
+# MD-2: MetadataError raised for HTTP fetch failures
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_error_raised_on_http_fetch_failure(httpserver) -> None:
+    """load_item_metadata raises MetadataError (not ValueError) on HTTP failure.
+
+    MetadataError.cause must be 'http_fetch' and __cause__ must be the
+    original HttpFetchError so the CLI exit-code mapper can traverse the chain.
+    """
+    from recotem._http_fetch import HttpFetchError
+    from recotem.metadata.loader import MetadataError, load_item_metadata
+
+    # Return a 500 so fetch_http_bytes raises HttpFetchError.
+    httpserver.expect_request("/bad.csv").respond_with_data(b"", status=500)
+    url = httpserver.url_for("/bad.csv")
+
+    with pytest.raises(MetadataError) as exc_info:
+        load_item_metadata(_Config("csv", url), fields=["title"])
+
+    err = exc_info.value
+    assert err.cause == "http_fetch"
+    assert isinstance(err.__cause__, HttpFetchError), (
+        "__cause__ must be the original HttpFetchError so CLI can traverse chain"
+    )
+
+
+def test_metadata_error_on_sha256_mismatch_http(httpserver) -> None:
+    """MetadataError with cause='http_fetch' is raised on sha256 mismatch."""
+    from recotem.metadata.loader import MetadataError
+
+    body = b"item_id,title\ni1,Foo\n"
+    httpserver.expect_request("/items.csv").respond_with_data(
+        body, content_type="text/csv"
+    )
+    url = httpserver.url_for("/items.csv")
+    bad_digest = "0" * 64
+
+    with pytest.raises(MetadataError) as exc_info:
+        load_item_metadata(_Config("csv", url, sha256=bad_digest), fields=["title"])
+
+    assert exc_info.value.cause == "http_fetch"
+
+
+# ---------------------------------------------------------------------------
+# MD-3: recipe_name threaded into fetch_http_bytes log_context
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_name_passed_as_log_context_to_http_fetcher(monkeypatch) -> None:
+    """When recipe_name is provided, it is forwarded to fetch_http_bytes as
+    log_context={'recipe': recipe_name}.
+    """
+    import recotem.metadata.loader as loader_mod
+    from recotem._http_fetch import HttpFetchError
+
+    captured: list[dict] = []
+
+    def _spy_fetch(*args, **kwargs):
+        captured.append({"log_context": kwargs.get("log_context")})
+        raise HttpFetchError("deliberate failure for spy")
+
+    monkeypatch.setattr(loader_mod, "fetch_http_bytes", _spy_fetch)
+
+    from recotem.metadata.loader import MetadataError
+
+    with pytest.raises(MetadataError):
+        load_item_metadata(
+            _Config("csv", "https://example.invalid/items.csv"),
+            fields=["title"],
+            recipe_name="my_recipe",
+        )
+
+    assert len(captured) == 1, "fetch_http_bytes must be called exactly once"
+    ctx = captured[0]["log_context"]
+    assert ctx is not None, "log_context must be provided when recipe_name is set"
+    assert ctx.get("recipe") == "my_recipe", (
+        f"log_context must contain recipe name; got {ctx!r}"
+    )
+
+
+def test_recipe_name_none_passes_no_log_context(monkeypatch) -> None:
+    """When recipe_name is None, log_context is not passed (or is None/empty)."""
+    import recotem.metadata.loader as loader_mod
+    from recotem._http_fetch import HttpFetchError
+
+    captured: list[dict] = []
+
+    def _spy_fetch(*args, **kwargs):
+        captured.append({"log_context": kwargs.get("log_context")})
+        raise HttpFetchError("deliberate failure for spy")
+
+    monkeypatch.setattr(loader_mod, "fetch_http_bytes", _spy_fetch)
+
+    from recotem.metadata.loader import MetadataError
+
+    with pytest.raises(MetadataError):
+        load_item_metadata(
+            _Config("csv", "https://example.invalid/items.csv"),
+            fields=["title"],
+            recipe_name=None,
+        )
+
+    assert len(captured) == 1
+    ctx = captured[0]["log_context"]
+    # When no recipe_name is given, log_context must be None or empty.
+    assert not ctx, (
+        f"log_context must be None/empty when recipe_name is None; got {ctx!r}"
+    )

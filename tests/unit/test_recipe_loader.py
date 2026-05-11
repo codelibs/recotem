@@ -1956,3 +1956,225 @@ def test_load_recipes_directory_lenient_all_good(tmp_path: Path) -> None:
     assert all(recipe is not None and err is None for _, recipe, err in results)
     loaded_names = {recipe.name for _, recipe, err in results if recipe}  # type: ignore[union-attr]
     assert loaded_names == set(names)
+
+
+# ---------------------------------------------------------------------------
+# RL-1: RecipeError.category + lenient loader log-level differentiation
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_error_has_category_attribute() -> None:
+    """RecipeError must have a .category attribute (defaults to 'unknown')."""
+    from recotem.recipe.errors import RecipeError
+
+    err = RecipeError("something went wrong")
+    assert hasattr(err, "category")
+    assert err.category == "unknown"
+
+
+def test_recipe_error_security_category() -> None:
+    """RecipeError with category='security' exposes it correctly."""
+    from recotem.recipe.errors import RecipeError
+
+    err = RecipeError("symlink escape", category="security")
+    assert err.category == "security"
+
+
+def test_recipe_error_invalid_category_falls_back_to_unknown() -> None:
+    """An unrecognised category string is normalised to 'unknown'."""
+    from recotem.recipe.errors import RecipeError
+
+    err = RecipeError("oops", category="totally_made_up")
+    assert err.category == "unknown"
+
+
+def test_recipe_error_all_valid_categories() -> None:
+    """All documented categories are accepted without normalisation."""
+    from recotem.recipe.errors import RecipeError
+
+    for cat in ("security", "schema", "parse", "io", "unknown"):
+        assert RecipeError("x", category=cat).category == cat
+
+
+def test_symlink_escape_logged_at_error_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symlink-escape recipe must produce an ERROR log with event
+    'recipe_security_violation_skipped' in the lenient loader.
+    """
+    import structlog.testing
+
+    from recotem.recipe.errors import RecipeError
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    # Place a valid recipe first (ensures at least one good entry).
+    good = MINIMAL_RECIPE_TEMPLATE.format(
+        name="good_recipe",
+        output_path=str(tmp_path / "good_recipe.recotem"),
+    )
+    (recipes_dir / "good.yaml").write_text(good)
+
+    # Place a well-formed recipe YAML for 'bad.yaml'.
+    bad_content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="bad_recipe",
+        output_path=str(tmp_path / "bad_recipe.recotem"),
+    )
+    (recipes_dir / "bad.yaml").write_text(bad_content)
+
+    # Monkeypatch load_recipe to raise a security-category RecipeError when
+    # processing 'bad.yaml', simulating a symlink-escape detection.
+    from recotem.recipe import loader as loader_mod
+
+    _real_load = loader_mod.load_recipe
+
+    def _patched_load(path, **kwargs):
+        if Path(path).name == "bad.yaml":
+            raise RecipeError(
+                "Recipe file outside root — path traversal rejected",
+                category="security",
+            )
+        return _real_load(path, **kwargs)
+
+    monkeypatch.setattr(loader_mod, "load_recipe", _patched_load)
+
+    with structlog.testing.capture_logs() as logs:
+        results = load_recipes_directory_lenient(recipes_dir)
+
+    # The bad entry must be present as an error.
+    failed = [(p, r, e) for p, r, e in results if e is not None]
+    assert len(failed) == 1
+    assert isinstance(failed[0][2], RecipeError)
+
+    # Security violation must be logged at ERROR with the right event name.
+    error_logs = [
+        e
+        for e in logs
+        if e.get("log_level") == "error"
+        and e.get("event") == "recipe_security_violation_skipped"
+    ]
+    assert error_logs, (
+        f"Expected ERROR log 'recipe_security_violation_skipped'; "
+        f"got log events: {[e.get('event') for e in logs]!r}"
+    )
+    assert error_logs[0].get("file") == "bad.yaml"
+
+
+def test_yaml_parse_error_logged_at_warn_level(tmp_path: Path) -> None:
+    """A YAML syntax error must produce a WARN log with event
+    'recipe_load_error_skipped' in the lenient loader.
+    """
+    import structlog.testing
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    # Malformed YAML (unbalanced bracket).
+    (recipes_dir / "bad_yaml.yaml").write_text("name: [unclosed\n")
+
+    with structlog.testing.capture_logs() as logs:
+        results = load_recipes_directory_lenient(recipes_dir)
+
+    failed = [(p, r, e) for p, r, e in results if e is not None]
+    assert len(failed) == 1
+
+    warn_logs = [
+        e
+        for e in logs
+        if e.get("log_level") in ("warning", "warn")
+        and e.get("event") == "recipe_load_error_skipped"
+    ]
+    assert warn_logs, (
+        f"Expected WARN log 'recipe_load_error_skipped'; "
+        f"got log events: {[e.get('event') for e in logs]!r}"
+    )
+
+
+def test_containment_violation_recipe_error_has_security_category(
+    tmp_path: Path,
+) -> None:
+    """_check_recipe_file_containment raises RecipeError(category='security').
+
+    Simulates a symlink that resolves outside the recipes root and asserts the
+    category is set so the lenient loader can escalate the log level.
+    """
+    from recotem.recipe.loader import _check_recipe_file_containment
+
+    root = tmp_path / "recipes"
+    root.mkdir()
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("")
+
+    with pytest.raises(RecipeError) as exc_info:
+        _check_recipe_file_containment(outside, root)
+
+    assert exc_info.value.category == "security"
+
+
+def test_userinfo_rejection_recipe_error_has_security_category(
+    tmp_path: Path,
+) -> None:
+    """Embedded URI credentials raise RecipeError(category='security')."""
+    from recotem.recipe.loader import _validate_input_path
+
+    with pytest.raises(RecipeError) as exc_info:
+        _validate_input_path("https://user:pass@example.com/data.csv", "source.path")
+
+    assert exc_info.value.category == "security"
+
+
+def test_scheme_violation_input_path_has_security_category(tmp_path: Path) -> None:
+    """A disallowed input scheme raises RecipeError(category='security')."""
+    from recotem.recipe.loader import _validate_input_path
+
+    with pytest.raises(RecipeError) as exc_info:
+        _validate_input_path("ftp://example.com/data.csv", "source.path")
+
+    assert exc_info.value.category == "security"
+
+
+# ---------------------------------------------------------------------------
+# RL-2: DataSourceError from plugin discovery re-raised as RecipeError
+# ---------------------------------------------------------------------------
+
+
+def test_datasource_error_from_plugin_discovery_re_raised_as_recipe_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the DataSource registry raises DataSourceError for the source type
+    during env-var expansion, load_recipe must raise RecipeError (not silently
+    continue with weakened no_expand_fields protection).
+    """
+    from recotem.datasource.base import DataSourceError
+    from recotem.recipe import loader as loader_mod
+
+    # A recipe with a real source type so we get past name/YAML validation.
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="ds_err_test",
+        output_path=str(tmp_path / "ds_err_test.recotem"),
+    )
+    p = _write_recipe(tmp_path, content)
+
+    # Patch get_source_class to raise DataSourceError (simulating a broken plugin).
+    _real_get = loader_mod.__dict__.get("get_source_class", None)
+
+    # Import the registry so we can patch it in the loader's namespace.
+    from recotem.datasource import registry as reg_mod
+
+    _real_get_source_class = reg_mod.get_source_class
+
+    def _bad_get(type_name: str):
+        raise DataSourceError(f"plugin {type_name!r} failed to load")
+
+    # Patch inside the loader module's imported reference.
+    monkeypatch.setattr(reg_mod, "get_source_class", _bad_get)
+
+    with pytest.raises(RecipeError) as exc_info:
+        load_recipe(p)
+
+    assert (
+        "plugin source discovery failed" in str(exc_info.value).lower()
+        or "failed" in str(exc_info.value).lower()
+    ), f"RecipeError message must mention the failure; got: {exc_info.value!r}"
+    assert exc_info.value.category == "schema"

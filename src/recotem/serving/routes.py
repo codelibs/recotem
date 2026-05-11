@@ -16,6 +16,7 @@ from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from recotem.config import ApiKeyEntry
@@ -130,6 +131,8 @@ def make_router(
         """
         raw_rid = request.headers.get("x-request-id", "")
         request_id = raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
+        # Set on the background Response object for non-predict paths (errors);
+        # the success path returns JSONResponse with its own headers dict below.
         response.headers["X-Request-ID"] = request_id
         start = time.monotonic()
         status = "error"
@@ -178,48 +181,59 @@ def make_router(
                 # set by middleware (e.g. request-id, correlation-id).
                 structlog.contextvars.unbind_contextvars("recipe", "request_id", "kid")
 
-            # Build item list, joining metadata if available.
+            # Build item list as plain dicts, joining metadata if available.
             # Fast path: use the pre-flattened metadata_index (O(1) dict.get
             # per item, deny filtering and NaN→None already applied at load
             # time).  Fallback to the DataFrame path only for entries that
             # pre-date the index field (e.g. stubs created directly in tests).
-            rec_items: list[RecommendationItem] = []
+            #
+            # R-2: Return via JSONResponse(content=...) to bypass the second
+            # pydantic serialization pass that FastAPI performs when the route
+            # returns a model instance.  response_model=PredictResponse is kept
+            # on the decorator for OpenAPI schema generation; FastAPI skips
+            # pydantic validation when the return value is a Response subclass.
+            #
+            # R-3: Re-set item_id and score AFTER metadata update so that a
+            # metadata column named "item_id" or "score" cannot shadow the
+            # trusted recommender values.
+            item_dicts: list[dict[str, Any]] = []
             meta_index = entry.metadata_index
             meta_df = entry.metadata_df if meta_index is None else None
 
             for item_id, score in raw_results:
-                fields: dict[str, Any] = {
-                    "item_id": item_id,
-                    "score": float(score),
-                }
+                fields: dict[str, Any] = {}
                 if meta_index is not None:
                     fields.update(meta_index.get(item_id, {}))
                 elif meta_df is not None:
                     row = _lookup_metadata(meta_df, item_id, _deny_set, name)
                     fields.update(row)
-                # item_id is str (IDMappedRecommender internal key), score is
-                # cast to float above; extra metadata fields are preserved as-is
-                # by extra="allow" with no coercion in either path.
-                rec_items.append(RecommendationItem.model_construct(**fields))
+                # Overwrite after metadata join: trusted recommender values
+                # must not be shadowed by metadata columns with the same name.
+                fields["item_id"] = item_id
+                fields["score"] = float(score)
+                item_dicts.append(fields)
 
             # name is FastAPI-validated (Path regex), trained_at/best_class/kid
             # are str|None straight from the trusted artifact header and registry.
-            model_info = ModelInfo.model_construct(
-                recipe=name,
-                trained_at=entry.trained_at,
-                best_class=entry.best_class,
-                kid=entry.kid,
-            )
-            # rec_items are RecommendationItem instances; model_info is a
-            # ModelInfo instance; request_id is a str (echo or uuid4).
-            predict_response = PredictResponse.model_construct(
-                items=rec_items,
-                model=model_info,
-                request_id=request_id,
-            )
+            content: dict[str, Any] = {
+                "items": item_dicts,
+                "model": {
+                    "recipe": name,
+                    "trained_at": entry.trained_at,
+                    "best_class": entry.best_class,
+                    "kid": entry.kid,
+                },
+                "request_id": request_id,
+            }
 
             status = "ok"
-            return predict_response
+            # Include X-Request-ID directly in JSONResponse headers so it is
+            # present regardless of how FastAPI merges background response
+            # headers into returned Response subclasses.
+            return JSONResponse(
+                content=content,
+                headers={"X-Request-ID": request_id},
+            )
         finally:
             _metrics.record_predict(name, status, time.monotonic() - start)
 

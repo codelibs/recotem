@@ -125,11 +125,16 @@ The server continues running and returns 503 for that recipe's `/predict/{name}`
 
 **Recovery steps:**
 
-1. **Inspect the artifact** (safe even on corrupt files — HMAC and size checks reject before deserialization):
+1. **Inspect the artifact** (safe even on corrupt files — HMAC and size checks reject before deserialization).
+   `recotem inspect` accepts both local paths and fsspec URIs (`s3://`, `gs://`,
+   `az://`, `https://`, `file://`):
 
    ```bash
    recotem inspect ./artifacts/my_recipe.recotem
-   # exit 5: ArtifactError: magic bytes mismatch
+   # local path — exit 5: ArtifactError: magic bytes mismatch
+
+   recotem inspect s3://my-bucket/artifacts/my_recipe.recotem
+   # object-store URI — same exit codes apply
    ```
 
 2. **Retrain.**
@@ -175,6 +180,20 @@ rm ./artifacts/my_recipe.abc12345.recotem
 
 ### `recotem inspect` flags
 
+`recotem inspect` accepts both local paths and fsspec URIs as the artifact argument:
+
+```bash
+recotem inspect ./artifacts/my_recipe.recotem           # local path
+recotem inspect s3://my-bucket/artifacts/my.recotem     # S3 URI
+recotem inspect gs://my-bucket/artifacts/my.recotem     # GCS URI
+recotem inspect az://my-container/artifacts/my.recotem  # Azure Blob URI
+recotem inspect https://host/artifacts/my.recotem        # HTTPS URI
+```
+
+Requires `RECOTEM_SIGNING_KEYS` to be set (or `--dev-allow-unsigned` with
+`RECOTEM_ENV=development`). When signing keys are absent and `--dev-allow-unsigned`
+is not passed, `inspect` exits 8 (`_EXIT_CONFIG`) — not 5.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--dev-allow-unsigned` | `false` | Verify against the deterministic in-memory dev key (`dev:0000…`) when `RECOTEM_SIGNING_KEYS` is unset. Useful for inspecting artifacts produced by `recotem train --dev-allow-unsigned`. |
@@ -194,10 +213,10 @@ logic instead of grepping stderr.
 | 2 | RecipeError | YAML syntax, schema violation, invalid `--env-var`, `--dev-allow-unsigned` without companion confirmation flag, `--dev-allow-unsigned` outside `RECOTEM_ENV=development` |
 | 3 | DataSourceError | Source-layer failure NOT during HTTP fetch — CSV/Parquet format error, required column missing, local-FS path not found, BigQuery schema mismatch |
 | 4 | TrainingError | Includes subcodes `signing_key_missing`, `min_data_violation`, `time_column_parse_error`, `final_training_error`, `no_completed_trials`, `zero_score`, `excessive_per_trial_timeouts` |
-| 5 | ArtifactError | Missing/invalid signing key, magic mismatch, kid unknown, HMAC mismatch, payload over cap, disallowed FQCN, header JSON over cap |
+| 5 | ArtifactError | Magic mismatch, kid unknown, HMAC mismatch, payload over cap, disallowed FQCN, header JSON over cap |
 | 6 | LockContestedError | Recipe lock held by another process when `--fail-on-busy` is set |
 | 7 | HttpFetchError | Any failure during HTTP/HTTPS source fetch — SSRF guard refused the destination, connect/read timeout, HTTP 4xx/5xx, body cap exceeded, redirect cap, scheme-changing redirect, sha256 mismatch on a network-fetched source |
-| 8 | Configuration error | Missing `RECOTEM_SIGNING_KEYS`, bind port already in use, other env-var misconfiguration |
+| 8 | Configuration error | Missing `RECOTEM_SIGNING_KEYS` (also for `recotem inspect` when signing keys are absent and `--dev-allow-unsigned` not passed), bind port already in use, other env-var misconfiguration |
 
 `--fail-on-busy` surfaces as exit 6, not exit 4 — `LockContestedError` is
 raised outside the `TrainingError` hierarchy. Without `--fail-on-busy`
@@ -233,6 +252,22 @@ as the basis for SLO and alerting rules.
 | `metadata_source_redirect`, `metadata_source_size_exceeded` | datasource | `path`, `status`, `cap` |
 
 Operators alerting on `csv_source_redirect` / `csv_source_size_exceeded` should add equivalent alerts for `metadata_source_redirect` / `metadata_source_size_exceeded`. Both event families fire when an HTTP/HTTPS fetch hits a redirect cap or byte cap — the former for the interaction data source, the latter for item-metadata loading.
+
+### Watcher and loader structured-log events
+
+Additional events emitted by the watcher, recipe loader, and size-cap helper that are useful for alerting:
+
+| Event | Level | Emitted by | Significance |
+|-------|-------|-----------|--------------|
+| `recipe_security_violation_skipped` | ERROR | `recipe/loader.py` lenient loader | A recipe file contains a security-category error (path traversal, disallowed scheme, embedded credentials). The recipe is skipped but the server keeps running. **Alertable** — indicates a misconfigured or potentially hostile recipe file. |
+| `recipe_load_error_skipped` | WARN | `recipe/loader.py` lenient loader | A recipe file failed to load for non-security reasons (schema error, YAML parse error). The recipe is skipped. |
+| `size_cap_probe_failed` | WARN | `_size_cap.py` | An fsspec `info()` call on an object-store path failed unexpectedly (not `FileNotFoundError` / `PermissionError`). The size cap check was skipped; the subsequent read proceeds but is unbounded by the pre-read cap. Indicates degraded-but-bounded behavior. |
+| `auth_anonymous_bypass` | DEBUG | `serving/auth.py` | Every request that passes without an API key (when `RECOTEM_API_KEYS` is empty). Emitted on every request for access-log correlation. |
+| `auth_anonymous_bypass_first_seen` | INFO | `serving/auth.py` | First anonymous request from a given `client_host` (per process). The LRU cache tracking first-seen IPs is bounded to 1024 entries to prevent unbounded memory growth. |
+| `kid_extraction_failed` | WARN | `serving/watcher.py` | An artifact's kid bytes could not be parsed from the raw bytes (too short, out-of-range length, decode error). The kid shown in subsequent log fields is `\x00<unparseable>` — intentionally not collidable with any real kid. |
+| `artifact_stat_timeout` | WARN | `serving/watcher.py` | A stat() future did not complete within the per-future timeout (`min(watch_interval, 30)` seconds). Hung object-store stats no longer block tick progress or delay SIGTERM handling. |
+
+The `train_error` event uses `name=` (not `recipe=`) for the recipe name field and includes `kid=` when the signing kid is known, matching the `train_done` event's field names.
 
 ## Concurrent training and persistent search storage
 
@@ -305,7 +340,7 @@ Each model replica holds every loaded model in RAM. Plan accordingly.
 
 | Factor | Impact |
 |--------|--------|
-| `RECOTEM_MAX_ARTIFACT_BYTES` | Hard cap per artifact file (default 2 GiB). Reduce this if you have many small models. |
+| `RECOTEM_MAX_ARTIFACT_BYTES` | Hard cap per artifact file (default 2 GiB, clamped [1 MiB, 16 GiB]). Reduce this if you have many small models. |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | Cap on the deserialised payload per artifact (default 512 MiB, post-HMAC-verify). Must be ≤ `RECOTEM_MAX_ARTIFACT_BYTES`; if not, `recotem serve` fails at startup with `ConfigError` (exit 8). Reduces the memory spike from deserialization relative to the raw file size. |
 | Number of recipes | Each recipe loads one model. 10 recipes × 500 MiB = 5 GiB baseline. |
 | Number of replicas | Each replica is independent. 2 replicas = 2× memory. |
@@ -378,6 +413,17 @@ Available metrics:
 
 - Polls every `RECOTEM_WATCH_INTERVAL` seconds (clamped 1–30) with ±10%
   jitter. Up to 16 stat() calls are issued in parallel via a thread pool.
+  Each parallel stat() future is subject to a per-future timeout of
+  `min(RECOTEM_WATCH_INTERVAL, 30)` seconds so a hung object-store stat
+  (e.g. S3 TCP blackhole) cannot block the entire tick. Timed-out futures
+  emit `artifact_stat_timeout` (WARN) and the recipe is marked with a
+  load error until the next successful poll.
+- On `recotem serve` shutdown (SIGTERM), `ArtifactWatcher.stop()` calls
+  `executor.shutdown(wait=False, cancel_futures=True)` so queued-but-not-
+  started futures are discarded immediately. In-flight OS-level I/O (e.g.
+  a `fs.info()` waiting for a TCP response) is not interruptible but no
+  new work is queued, allowing the process to exit promptly after the
+  `RECOTEM_DRAIN_SECONDS` window.
 - A change is detected from the artifact pointer's mtime/size (local FS) or
   ETag/VersionId (object stores). When the marker changes the watcher reads
   the full bytes once, computes sha256, and **only reloads if the sha256
@@ -544,7 +590,7 @@ The `user_id` in the request was not present in training data. This is expected 
 
 - Check `RECOTEM_WATCH_INTERVAL`. Default is 5 s.
 - For object stores, check that the IAM role on the serve process has `GetObject` (S3) or `storage.objects.get` (GCS) on the artifact bucket.
-- Run `recotem inspect` on the artifact path to confirm it is valid and signed with a kid the server knows.
+- Run `recotem inspect` on the artifact path to confirm it is valid and signed with a kid the server knows. `recotem inspect` accepts both local paths and fsspec URIs (e.g. `s3://bucket/key.recotem`, `gs://bucket/key.recotem`).
 
 ### Log redaction
 

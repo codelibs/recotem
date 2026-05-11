@@ -270,7 +270,7 @@ deny-list check.
 HMAC verification remains the primary defence; the prefix allow-list is
 the secondary layer scoped to the scientific stack only.
 
-`recotem inspect <artifact>` runs the full HMAC verify path and prints the header JSON without invoking the deserializer. It is safe to run on untrusted artifacts.
+`recotem inspect <artifact>` runs the full HMAC verify path and prints the header JSON without invoking the deserializer. It is safe to run on untrusted artifacts. The argument accepts both local paths and fsspec URIs (`s3://bucket/key.recotem`, `gs://bucket/key.recotem`, `az://container/key.recotem`, `https://host/key.recotem`, `file:///abs/path.recotem`).
 
 ## IAM scopes for BigQuery
 
@@ -444,15 +444,16 @@ environment.
 
 ## Authentication failure events
 
-| Event | Trigger | Status |
-|-------|---------|--------|
-| `auth_missing_header` | Request with no `X-API-Key` header (and `RECOTEM_API_KEYS` is non-empty) | 401, code `missing_api_key` |
-| `auth_invalid_key` | Header present but no kid hashes match | 401, code `invalid_api_key` |
+| Event | Level | Trigger | Status |
+|-------|-------|---------|--------|
+| `auth_missing_header` | WARN | Request with no `X-API-Key` header (and `RECOTEM_API_KEYS` is non-empty) | 401, code `missing_api_key` |
+| `auth_invalid_key` | WARN | Header present but no kid hashes match | 401, code `invalid_api_key` |
+| `auth_anonymous_bypass` | DEBUG | Every request when `RECOTEM_API_KEYS` is empty (no-auth mode) | — |
+| `auth_anonymous_bypass_first_seen` | INFO | First request from a given `client_host` in no-auth mode | — |
 
-Both events log `path=<request.url.path>` only; the candidate header value
-is never logged in any form. The matching kid is attached to
-`request.state.kid` (and to subsequent log lines via `structlog.contextvars`)
-on success.
+Both `auth_missing_header` and `auth_invalid_key` log `path=<request.url.path>` only; the candidate header value is never logged in any form. The matching kid is attached to `request.state.kid` (and to subsequent log lines via `structlog.contextvars`) on success.
+
+When `RECOTEM_API_KEYS` is empty, `auth_anonymous_bypass` fires on **every** request (DEBUG) so access-log correlation is possible. `auth_anonymous_bypass_first_seen` fires once per unique `client_host` (INFO) for a first-seen audit trail. The LRU cache tracking first-seen client IPs is bounded to 1024 entries to prevent unbounded memory growth under high IP churn (e.g. rotating CI IPs or attacker scanning).
 
 ## Predict response: information leakage
 

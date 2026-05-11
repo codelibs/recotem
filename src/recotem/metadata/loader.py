@@ -47,11 +47,40 @@ logger = structlog.get_logger(__name__)
 OnFieldMissing = Literal["error", "null"]
 
 
+class MetadataError(Exception):
+    """Raised when item metadata cannot be loaded or parsed.
+
+    Attributes
+    ----------
+    cause:
+        Short category string describing the failure origin.  Defined values:
+
+        ``"http_fetch"``
+            An HTTP/HTTPS fetch failed (SSRF guard, byte-cap, redirect, sha256
+            mismatch, etc.).  ``__cause__`` will be the original
+            :class:`~recotem.._http_fetch.HttpFetchError`.
+        ``"parse"``
+            The file could not be parsed as the declared type (CSV/Parquet).
+        ``"field_missing"``
+            A required field is absent from the file and
+            ``on_field_missing="error"``.
+        ``"io"``
+            A local or object-store read failed.
+        ``"unknown"``
+            Catch-all for unexpected failures.
+    """
+
+    def __init__(self, message: str, *, cause: str = "unknown") -> None:
+        super().__init__(message)
+        self.cause = cause
+
+
 def load_item_metadata(
     config: object,
     fields: list[str],
     *,
     on_field_missing: OnFieldMissing = "error",
+    recipe_name: str | None = None,
 ) -> pd.DataFrame:
     """Load item metadata from a CSV or Parquet file.
 
@@ -74,6 +103,10 @@ def load_item_metadata(
         ``"error"`` (default): raise ``ValueError`` if any column in *fields*
         is absent from the file.
         ``"null"``: fill the missing column with ``pd.NA`` (all-null column).
+    recipe_name:
+        Optional recipe name threaded into the HTTP fetcher's ``log_context``
+        so that redirect / byte-cap log events are correlated with the recipe
+        that triggered this load.  Has no effect for local or object-store paths.
 
     Returns
     -------
@@ -85,6 +118,9 @@ def load_item_metadata(
 
     Raises
     ------
+    MetadataError
+        If an HTTP/HTTPS fetch fails (``cause="http_fetch"``), wrapping the
+        original :class:`~recotem._http_fetch.HttpFetchError` as ``__cause__``.
     ValueError
         If any of the following hold:
         - *fields* is empty.
@@ -103,7 +139,7 @@ def load_item_metadata(
     # -----------------------------------------------------------------------
     # Read file
     # -----------------------------------------------------------------------
-    df = _read_file(file_type, path, sha256=sha256)
+    df = _read_file(file_type, path, sha256=sha256, recipe_name=recipe_name)
 
     # -----------------------------------------------------------------------
     # Validate item-id column exists
@@ -223,14 +259,14 @@ def build_metadata_index(
           :func:`~recotem.serving.routes._lookup_metadata`).
     """
     _deny: frozenset[str] = deny_set or frozenset()
-    index: dict[str, dict[str, Any]] = {}
 
-    # Iterate over records once; orient="index" keys by the DataFrame index.
-    # Using .iterrows() is explicit and avoids loading the entire dict into
-    # memory twice (to_dict(orient="index") materialises all rows at once
-    # but so does iterrows; they are equivalent here — iterrows chosen for
-    # clarity and to avoid a second full pass over to_dict).
-    for item_id, row in df.iterrows():
+    # Build the raw dict at C-level speed (~100× faster than iterrows for
+    # large catalogues — iterrows creates a pandas Series per row; to_dict
+    # with orient="index" materialises all rows in one vectorised pass).
+    raw: dict[Any, dict[str, Any]] = df.to_dict(orient="index")
+
+    index: dict[str, dict[str, Any]] = {}
+    for item_id, row in raw.items():
         item_dict: dict[str, Any] = {}
         for col, val in row.items():
             if not isinstance(col, str):
@@ -259,13 +295,25 @@ def build_metadata_index(
 # ---------------------------------------------------------------------------
 
 
-def _read_file(file_type: str, path: str, *, sha256: str | None = None) -> pd.DataFrame:
+def _read_file(
+    file_type: str,
+    path: str,
+    *,
+    sha256: str | None = None,
+    recipe_name: str | None = None,
+) -> pd.DataFrame:
     """Read a CSV or Parquet file via fsspec/pandas.
 
     For HTTP/HTTPS paths and for any path with a ``sha256`` pin, the bytes
     are read fully into memory and content-verified before parsing — this is
     the only place where the documented integrity / byte-cap / redirect
     controls apply to item metadata.
+
+    Parameters
+    ----------
+    recipe_name:
+        Optional recipe name forwarded to the HTTP fetcher's ``log_context``
+        so that redirect/cap log events are correlated with the loading recipe.
     """
     if file_type not in {"parquet", "csv"}:
         raise ValueError(
@@ -276,23 +324,29 @@ def _read_file(file_type: str, path: str, *, sha256: str | None = None) -> pd.Da
     safe_path = redact_url_userinfo(path)
 
     if scheme in NETWORK_SCHEMES:
+        _log_ctx: dict[str, str] = {}
+        if recipe_name is not None:
+            _log_ctx["recipe"] = recipe_name
         try:
             data = fetch_http_bytes(
                 path,
                 timeout=get_http_timeout_seconds(),
                 max_bytes=get_max_download_bytes(),
                 log_event="metadata_source",
+                log_context=_log_ctx if _log_ctx else None,
             )
         except HttpFetchError as exc:
-            raise ValueError(
-                f"failed to fetch metadata file {safe_path!r}: {exc}"
+            raise MetadataError(
+                f"failed to fetch metadata file {safe_path!r}: {exc}",
+                cause="http_fetch",
             ) from exc
         if sha256 is not None:
             try:
                 verify_sha256(data, sha256)
             except HttpFetchError as exc:
-                raise ValueError(
-                    f"metadata sha256 verification failed for {safe_path!r}: {exc}"
+                raise MetadataError(
+                    f"metadata sha256 verification failed for {safe_path!r}: {exc}",
+                    cause="http_fetch",
                 ) from exc
         return _parse_bytes(file_type, data, safe_path)
 

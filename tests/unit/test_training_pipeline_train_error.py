@@ -112,7 +112,13 @@ def test_run_training_emits_train_error_event_on_data_source_error(
         f"All error() calls: {spy_logger.error.call_args_list}"
     )
     kwargs = train_error_calls[0].kwargs
-    assert kwargs.get("recipe") == "bad_recipe"
+    # CLI-2: train_error must use 'name' (not 'recipe') to match train_done schema.
+    assert kwargs.get("name") == "bad_recipe", (
+        f"train_error must use key 'name', not 'recipe'; got keys: {list(kwargs)}"
+    )
+    assert "recipe" not in kwargs, (
+        f"train_error must NOT use key 'recipe' (schema drift); got keys: {list(kwargs)}"
+    )
     assert "run_id" in kwargs
     assert "error" in kwargs
     assert "code" in kwargs
@@ -412,4 +418,124 @@ output:
     assert train_error_count == 1, (
         f"train_error must appear exactly once (not double-emitted); "
         f"got {train_error_count}. Full CLI output:\n{result.output}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CLI-2: train_error event uses 'name' (not 'recipe') + includes 'kid' when known
+# ---------------------------------------------------------------------------
+
+
+def test_run_training_emits_train_error_event_with_canonical_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """train_error event must use 'name' key (not 'recipe') and include 'kid'
+    when the signing key was resolved before the failure.
+
+    This is the regression test for CLI-2: the old code used 'recipe=recipe.name'
+    which caused SIEM join failures when correlating with 'train_done' events
+    that used 'name=recipe.name'.
+    """
+    from recotem.training import pipeline as pipeline_mod
+
+    spy_logger = MagicMock()
+    monkeypatch.setattr(pipeline_mod, "logger", spy_logger)
+
+    recipe = _make_recipe_good(tmp_path)
+    kr = _make_key_ring()
+
+    # Inject a failure AFTER the KeyRing is resolved (inside _run_training_locked)
+    # so 'kid' should be available in the train_error event.
+    from recotem.datasource.base import DataSourceError
+
+    with patch(
+        "recotem.training.pipeline._run_training_locked",
+        side_effect=DataSourceError("simulated data failure"),
+    ):
+        with pytest.raises(DataSourceError):
+            pipeline_mod.run_training(
+                recipe,
+                key_ring=kr,
+                signing_key="active",
+                no_lock=True,
+                quiet=True,
+            )
+
+    train_error_calls = [
+        call
+        for call in spy_logger.error.call_args_list
+        if call.args and call.args[0] == "train_error"
+    ]
+    assert train_error_calls, "train_error must be emitted on DataSourceError"
+
+    kwargs = train_error_calls[0].kwargs
+
+    # CLI-2 regression: key must be 'name', NOT 'recipe'
+    assert "name" in kwargs, (
+        f"train_error event must use key 'name' (not 'recipe'); "
+        f"present keys: {list(kwargs)}"
+    )
+    assert "recipe" not in kwargs, (
+        f"train_error event must NOT contain key 'recipe' (schema drift fix); "
+        f"present keys: {list(kwargs)}"
+    )
+    assert kwargs["name"] == "good_recipe"
+
+    # CLI-2: 'kid' must be present when the signing key was resolved
+    assert "kid" in kwargs, (
+        f"train_error must include 'kid' when key_ring was resolved; "
+        f"present keys: {list(kwargs)}"
+    )
+    assert kwargs["kid"] == "active", (
+        f"kid must match the resolved signing_key; got {kwargs['kid']!r}"
+    )
+
+    # Other canonical fields must also be present
+    for field in ("run_id", "error", "code", "exit_code", "trained_at"):
+        assert field in kwargs, (
+            f"train_error must include '{field}'; present keys: {list(kwargs)}"
+        )
+
+
+def test_run_training_train_error_omits_kid_when_key_resolution_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When signing key resolution fails (signing_key_missing), 'kid' must be
+    omitted from the train_error event — it was never resolved.
+    """
+    monkeypatch.delenv("RECOTEM_SIGNING_KEYS", raising=False)
+
+    from recotem.training import pipeline as pipeline_mod
+    from recotem.training.errors import TrainingError
+
+    spy_logger = MagicMock()
+    monkeypatch.setattr(pipeline_mod, "logger", spy_logger)
+
+    recipe = _make_recipe_good(tmp_path)
+
+    with pytest.raises(TrainingError) as exc_info:
+        pipeline_mod.run_training(
+            recipe,
+            key_ring=None,  # forces auto-build from env
+            no_lock=True,
+            quiet=True,
+        )
+
+    assert exc_info.value.code == "signing_key_missing"
+
+    train_error_calls = [
+        call
+        for call in spy_logger.error.call_args_list
+        if call.args and call.args[0] == "train_error"
+    ]
+    assert train_error_calls, "train_error must be emitted on signing_key_missing"
+    kwargs = train_error_calls[0].kwargs
+
+    # 'name' must be present
+    assert "name" in kwargs
+    # 'kid' must be absent (key was never resolved)
+    assert "kid" not in kwargs, (
+        f"kid must be omitted when key resolution failed; present keys: {list(kwargs)}"
     )

@@ -302,3 +302,111 @@ def test_http_csv_fetch_redirect_loop_detected() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+# ---------------------------------------------------------------------------
+# IO-4: missing required columns raises DataSourceError (not KeyError)
+# ---------------------------------------------------------------------------
+
+
+def test_csv_missing_user_column_raises_data_source_error(tmp_path: Path) -> None:
+    """CSV that is missing the configured user_column must raise DataSourceError.
+
+    Previously a missing column surfaced as a bare KeyError from the cleansing
+    step, which mapped to _EXIT_UNKNOWN (exit code 1) instead of
+    _EXIT_DATASOURCE (exit code 3).  The fix adds explicit column validation
+    in CSVSource.fetch() when the caller passes required column names via
+    ctx.extra, converting the KeyError to a descriptive DataSourceError.
+    """
+    csv_path = tmp_path / "no_user.csv"
+    csv_path.write_text("item_id,rating\n1,5\n2,3\n")
+
+    cfg = CSVConfig(type="csv", path=str(csv_path))
+    ctx = FetchContext(
+        recipe_name="t",
+        run_id="r",
+        extra={"user_column": "user_id", "item_column": "item_id"},
+    )
+
+    with pytest.raises(DataSourceError, match="user_id"):
+        CSVSource(cfg).fetch(ctx)
+
+
+def test_csv_missing_item_column_raises_data_source_error(tmp_path: Path) -> None:
+    """CSV missing item_column must raise DataSourceError with the column name."""
+    csv_path = tmp_path / "no_item.csv"
+    csv_path.write_text("user_id,rating\n1,5\n2,3\n")
+
+    cfg = CSVConfig(type="csv", path=str(csv_path))
+    ctx = FetchContext(
+        recipe_name="t",
+        run_id="r",
+        extra={"user_column": "user_id", "item_column": "item_id"},
+    )
+
+    with pytest.raises(DataSourceError, match="item_id"):
+        CSVSource(cfg).fetch(ctx)
+
+
+def test_csv_error_message_lists_available_columns(tmp_path: Path) -> None:
+    """DataSourceError for a missing column must list available columns in message."""
+    csv_path = tmp_path / "wrong_cols.csv"
+    csv_path.write_text("uid,iid\n1,a\n2,b\n")
+
+    cfg = CSVConfig(type="csv", path=str(csv_path))
+    ctx = FetchContext(
+        recipe_name="t",
+        run_id="r",
+        extra={"user_column": "user_id", "item_column": "item_id"},
+    )
+
+    with pytest.raises(DataSourceError) as exc_info:
+        CSVSource(cfg).fetch(ctx)
+
+    err_msg = str(exc_info.value)
+    # The error must name the missing column
+    assert "user_id" in err_msg or "item_id" in err_msg, (
+        f"Error must name the missing column; got: {err_msg!r}"
+    )
+    # The error must list available columns to help diagnose typos
+    assert "uid" in err_msg or "iid" in err_msg or "available" in err_msg, (
+        f"Error must list available columns; got: {err_msg!r}"
+    )
+
+
+def test_csv_all_required_columns_present_no_error(tmp_path: Path) -> None:
+    """CSV with all required columns must fetch successfully even with ctx.extra set."""
+    csv_path = tmp_path / "full.csv"
+    csv_path.write_text("user_id,item_id,timestamp\n1,a,2024-01-01\n2,b,2024-01-02\n")
+
+    cfg = CSVConfig(type="csv", path=str(csv_path))
+    ctx = FetchContext(
+        recipe_name="t",
+        run_id="r",
+        extra={
+            "user_column": "user_id",
+            "item_column": "item_id",
+            "time_column": "timestamp",
+        },
+    )
+
+    df = CSVSource(cfg).fetch(ctx)
+    assert len(df) == 2
+    assert list(df.columns) == ["user_id", "item_id", "timestamp"]
+
+
+def test_csv_no_extra_context_skips_column_validation(tmp_path: Path) -> None:
+    """When ctx.extra has no column keys, column validation is skipped.
+
+    This preserves backward compatibility with callers that do not pass schema
+    context (e.g. plugin tests, standalone fetch() calls).
+    """
+    csv_path = tmp_path / "any_cols.csv"
+    csv_path.write_text("col_a,col_b\n1,x\n2,y\n")
+
+    cfg = CSVConfig(type="csv", path=str(csv_path))
+    ctx = FetchContext(recipe_name="t", run_id="r")  # no extra
+
+    # Must NOT raise — validation skipped when no column context is provided
+    df = CSVSource(cfg).fetch(ctx)
+    assert len(df) == 2

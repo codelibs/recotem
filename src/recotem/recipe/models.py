@@ -212,9 +212,12 @@ class Recipe(BaseModel, extra="forbid"):
     ]
     # ``source`` is typed as ``Any`` here because the discriminated union is
     # built dynamically from entry points (see datasource/registry.py).  The
-    # CLI / loader validates the source config using the dynamic union after
-    # assembly; models.py itself cannot import datasource without creating a
-    # circular dependency.
+    # ``_validate_source`` model_validator below checks that the value is an
+    # instance of a known DataSource Config class when possible.  When the
+    # registry is unavailable (import failure), the check is skipped.
+    # NOTE: the ``load_recipe`` function in recipe/loader.py performs full
+    # validated construction; direct ``Recipe(...)`` calls bypass the YAML
+    # pipeline but are still guarded by ``_validate_source``.
     source: Any
     schema_: SchemaConfig = Field(alias="schema")
     cleansing: CleansingConfig = Field(default_factory=CleansingConfig)
@@ -230,6 +233,83 @@ class Recipe(BaseModel, extra="forbid"):
         if not _NAME_RE.match(v):
             raise ValueError(f"Recipe name {v!r} must match ^[A-Za-z0-9_-]{{1,64}}$")
         return v
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> Recipe:
+        """Reject sources with a ``type`` that is not registered.
+
+        When a library caller passes ``source={"type": "unknown_xyz"}`` or a
+        pydantic BaseModel whose type_name is not in the registry, raise
+        immediately rather than allowing the error to surface obscurely at
+        training time.
+
+        Behaviour by source kind
+        ------------------------
+        * ``dict`` with a ``type`` key in the registry → allowed (backward
+          compat for ``Recipe.model_validate(d)`` and test helpers that pass
+          raw dicts).
+        * ``dict`` with a ``type`` key NOT in the registry → rejected.
+        * ``dict`` with no ``type`` key → rejected (missing discriminator).
+        * ``pydantic.BaseModel`` subclass that is a known Config class →
+          allowed.
+        * ``pydantic.BaseModel`` subclass that is NOT a known Config class →
+          rejected.
+        * Any other object (e.g. test mock, legacy opaque object) → allowed
+          silently (registry check skipped to avoid false positives).
+
+        The registry import is deferred (not at module level) to avoid
+        triggering the datasource plugin loading side-effects at recipe-model
+        import time, and to tolerate environments where the datasource extras
+        are absent.
+        """
+        src = self.source
+        if src is None:
+            raise ValueError("source must not be None")
+
+        try:
+            from pydantic import BaseModel as _BaseModel  # noqa: PLC0415
+
+            from recotem.datasource.registry import get_source_types  # noqa: PLC0415
+
+            types = get_source_types()
+            known_types_set: set[str] = {cls.type_name for cls in types.values()}  # type: ignore[union-attr]
+            known_config_classes = tuple(cls.Config for cls in types.values())  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            # Registry unavailable (import failure, broken plugin, etc.) —
+            # let the datasource path surface the error at training time.
+            return self
+
+        if isinstance(src, dict):
+            type_val = src.get("type")
+            if type_val is None:
+                raise ValueError(
+                    "source dict is missing the 'type' discriminator field. "
+                    f"Known types: {sorted(known_types_set)}."
+                )
+            if str(type_val) not in known_types_set:
+                raise ValueError(
+                    f"source type {type_val!r} is not a registered DataSource type. "
+                    f"Known types: {sorted(known_types_set)}."
+                )
+            # Known dict type — allow through (will be validated by load_recipe
+            # or the datasource pipeline).
+            return self
+
+        if isinstance(src, _BaseModel):
+            # Pydantic model: check it is one of the known Config classes.
+            if known_config_classes and not isinstance(src, known_config_classes):
+                type_hint = getattr(src, "type", type(src).__name__)
+                raise ValueError(
+                    f"source type {type_hint!r} is not a known DataSource Config. "
+                    f"Known types: {sorted(known_types_set)}. "
+                    "Pass a typed Config (e.g. CSVConfig, BigQueryConfig) or use "
+                    "load_recipe() to validate from YAML."
+                )
+            return self
+
+        # Non-pydantic, non-dict source (e.g. test mock, legacy object) —
+        # skip validation and rely on the datasource pipeline to surface errors.
+        return self
 
     @model_validator(mode="after")
     def _validate_time_split(self) -> Recipe:

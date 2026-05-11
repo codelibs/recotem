@@ -5,8 +5,12 @@ OOM from unexpectedly large local, object-store, or sha256-pinned files.
 HTTP/HTTPS paths are already capped by the streaming fetch in
 ``recotem._http_fetch`` and are skipped here.
 
-The check is best-effort: stat failures (missing file, lack of permissions,
-object-store connectivity) are swallowed — the real read will surface them.
+The object-store stat check is best-effort: when the stat cannot be performed
+because the file does not yet exist or the caller lacks permission, the cap
+check is skipped and the real read will surface the underlying error.  All
+other unexpected errors during the stat are wrapped in :class:`SizeCapProbeError`
+and re-raised so callers can decide how to handle them (typically mapping to a
+domain-specific error such as ``DataSourceError``).
 """
 
 from __future__ import annotations
@@ -28,6 +32,16 @@ class SizeCapExceededError(Exception):
 
     The message always names ``RECOTEM_MAX_DOWNLOAD_BYTES`` so operators know
     which env var to adjust.
+    """
+
+
+class SizeCapProbeError(Exception):
+    """Raised when the object-store size probe fails for an unexpected reason.
+
+    This wraps the original exception so callers (e.g. ``DataSourceError``)
+    can map it to a domain-specific error.  The probe is best-effort for
+    ``FileNotFoundError`` and ``PermissionError`` (which are skipped), but
+    any other error indicates a backend problem that the caller should surface.
     """
 
 
@@ -92,10 +106,29 @@ def check_size_cap(path: str, cap: int, *, label: str = "file") -> None:
             fs, fspath = fsspec.core.url_to_fs(path)
             info = fs.info(fspath)
             size = info.get("size")
-        except Exception:
-            # Size query failed (permissions, connectivity, etc.) — skip cap
-            # check here; the real read will surface the error.
+        except (FileNotFoundError, PermissionError):
+            # The file may not exist yet or the caller lacks permissions —
+            # skip the cap check here; the real read will surface the error.
             return
+        except (MemoryError, RecursionError):
+            # OOM / stack-exhaustion must propagate unwrapped so the process
+            # exit code reflects the true cause (OOM let-propagate policy).
+            raise
+        except Exception as exc:
+            # Any other backend error (connectivity, config, fsspec bugs)
+            # indicates a problem the caller must handle.  Log a structured
+            # event so operators can diagnose the failure without reading
+            # raw tracebacks, then re-raise as SizeCapProbeError.
+            safe_path = path.split("@")[0] if "@" in path else path
+            logger.warning(
+                "size_cap_probe_failed",
+                path=safe_path,
+                error_class=type(exc).__name__,
+            )
+            raise SizeCapProbeError(
+                f"Object-store size probe for {safe_path!r} failed "
+                f"({type(exc).__name__}): {exc}"
+            ) from exc
 
     if size is not None and size > cap:
         raise SizeCapExceededError(

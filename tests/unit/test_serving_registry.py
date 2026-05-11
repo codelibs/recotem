@@ -562,3 +562,303 @@ def test_replace_with_marker_no_stale_marker_window() -> None:
         "replace_with_marker must be atomic: no reader should see (None, '') "
         "marker after the call — that would indicate a non-atomic two-step update"
     )
+
+
+# ---------------------------------------------------------------------------
+# R-1: _loaded_count counter and loaded_count() O(1) method
+# ---------------------------------------------------------------------------
+
+
+def _make_loaded_entry(name: str) -> ModelEntry:
+    """Return an entry with loaded=True."""
+    return ModelEntry(
+        name=name,
+        recommender=MagicMock(),
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="active",
+        loaded=True,
+    )
+
+
+def _make_stub_entry(name: str) -> ModelEntry:
+    """Return an entry with loaded=False (startup load failure stub)."""
+    return ModelEntry(
+        name=name,
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+        last_load_error="initial load failed",
+    )
+
+
+def test_loaded_count_is_zero_on_empty_registry() -> None:
+    """An empty registry must report loaded_count() == 0."""
+    reg = ModelRegistry()
+    assert reg.loaded_count() == 0
+
+
+def test_loaded_count_increments_on_replace_with_loaded_entry() -> None:
+    """Replacing a missing entry with a loaded entry increments loaded_count."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+
+
+def test_loaded_count_not_incremented_by_stub_entry() -> None:
+    """Replacing a missing entry with a stub (loaded=False) does not increment."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_stub_entry("r1"))
+    assert reg.loaded_count() == 0
+
+
+def test_loaded_count_decrements_on_remove_of_loaded_entry() -> None:
+    """Removing a loaded entry decrements loaded_count."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+    reg.remove("r1")
+    assert reg.loaded_count() == 0
+
+
+def test_loaded_count_unchanged_on_remove_of_stub_entry() -> None:
+    """Removing a stub (loaded=False) entry does not change loaded_count."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_stub_entry("r1"))
+    assert reg.loaded_count() == 0
+    reg.remove("r1")
+    assert reg.loaded_count() == 0
+
+
+def test_loaded_count_unchanged_on_remove_of_missing_entry() -> None:
+    """Removing a non-existent entry (no-op) does not change loaded_count."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_loaded_entry("r1"))
+    reg.remove("ghost")  # not in registry
+    assert reg.loaded_count() == 1
+
+
+def test_loaded_count_net_change_on_swap_loaded_to_stub() -> None:
+    """Swapping a loaded entry for a stub decrements loaded_count by 1."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+    reg.replace("r1", _make_stub_entry("r1"))
+    assert reg.loaded_count() == 0
+
+
+def test_loaded_count_net_change_on_swap_stub_to_loaded() -> None:
+    """Swapping a stub for a loaded entry increments loaded_count by 1."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_stub_entry("r1"))
+    assert reg.loaded_count() == 0
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+
+
+def test_loaded_count_unchanged_on_swap_loaded_to_loaded() -> None:
+    """Replacing a loaded entry with another loaded entry keeps count constant."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+
+
+def test_loaded_count_with_replace_with_marker() -> None:
+    """replace_with_marker also maintains loaded_count correctly."""
+    reg = ModelRegistry()
+    stub = _make_stub_entry("r1")
+    reg.replace("r1", stub)
+    assert reg.loaded_count() == 0
+
+    loaded = _make_loaded_entry("r1")
+    reg.replace_with_marker("r1", loaded, ("mtime-1", "sha256-abc"))
+    assert reg.loaded_count() == 1
+
+
+def test_loaded_count_set_load_error_does_not_change_count() -> None:
+    """set_load_error annotates an entry but does not change loaded_count.
+
+    A stale-but-loaded entry that picks up a load error still counts as loaded.
+    """
+    reg = ModelRegistry()
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+    reg.set_load_error("r1", "hmac mismatch")
+    assert reg.loaded_count() == 1
+
+
+def test_loaded_count_matches_manual_count_across_operations() -> None:
+    """loaded_count() must match the manually-counted loaded entries after a
+    sequence of replace/remove/set_load_error/replace_with_marker operations.
+    """
+    reg = ModelRegistry()
+
+    # Insert 3 loaded and 2 stub entries.
+    reg.replace("loaded_a", _make_loaded_entry("loaded_a"))
+    reg.replace("loaded_b", _make_loaded_entry("loaded_b"))
+    reg.replace("loaded_c", _make_loaded_entry("loaded_c"))
+    reg.replace("stub_x", _make_stub_entry("stub_x"))
+    reg.replace("stub_y", _make_stub_entry("stub_y"))
+    assert reg.loaded_count() == 3
+
+    # Annotate with error — does not change loaded-ness.
+    reg.set_load_error("loaded_a", "stale artifact")
+    assert reg.loaded_count() == 3
+
+    # Swap one stub to loaded via replace_with_marker.
+    reg.replace_with_marker("stub_x", _make_loaded_entry("stub_x"), ("m", "s"))
+    assert reg.loaded_count() == 4
+
+    # Remove a loaded entry.
+    reg.remove("loaded_b")
+    assert reg.loaded_count() == 3
+
+    # Swap a loaded entry back to stub.
+    reg.replace("loaded_c", _make_stub_entry("loaded_c"))
+    assert reg.loaded_count() == 2
+
+    # Remove a stub entry — count unchanged.
+    reg.remove("stub_y")
+    assert reg.loaded_count() == 2
+
+    # Verify against manual count.
+    manual = sum(1 for e in reg.list() if e.loaded)
+    assert reg.loaded_count() == manual, (
+        f"loaded_count() {reg.loaded_count()} != manual count {manual}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R-1: health_snapshot() builds dicts OUTSIDE the lock
+# ---------------------------------------------------------------------------
+
+
+def test_health_snapshot_concurrent_mutations_no_exceptions() -> None:
+    """health_snapshot() must tolerate concurrent mutations without exceptions.
+
+    Spawn 10 threads calling health_snapshot() while 1 thread mutates entries.
+    Verify:
+    1. No exceptions are raised by any thread.
+    2. All snapshots return dicts (correct return type).
+    3. The final loaded_count matches the manually-counted loaded entries.
+
+    This exercises the two-phase lock design: snapshot the items list under
+    the lock, then build health_dict() outside — health() must not hold the
+    lock while building per-entry dicts or /predict threads would block.
+    """
+    reg = ModelRegistry()
+    for i in range(20):
+        reg.replace(f"recipe_{i}", _make_loaded_entry(f"recipe_{i}"))
+
+    errors: list[str] = []
+
+    def _snapshotter() -> None:
+        for _ in range(50):
+            try:
+                snap = reg.health_snapshot()
+                if not isinstance(snap, dict):
+                    errors.append(f"health_snapshot returned {type(snap)!r}")
+                # Each value must also be a dict.
+                for k, v in snap.items():
+                    if not isinstance(v, dict):
+                        errors.append(f"entry {k!r} health_dict is {type(v)!r}")
+            except Exception as exc:
+                errors.append(f"health_snapshot raised {type(exc).__name__}: {exc}")
+
+    def _mutator() -> None:
+        for i in range(30):
+            name = f"recipe_{i % 20}"
+            if i % 3 == 0:
+                reg.replace(name, _make_loaded_entry(name))
+            elif i % 3 == 1:
+                reg.replace(name, _make_stub_entry(name))
+            else:
+                reg.set_load_error(name, f"error-{i}")
+
+    threads = [threading.Thread(target=_snapshotter) for _ in range(10)]
+    threads.append(threading.Thread(target=_mutator))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+
+    assert errors == [], f"Concurrent health_snapshot errors: {errors}"
+
+    # Final consistency: loaded_count must match manual count.
+    final_count = reg.loaded_count()
+    manual = sum(1 for e in reg.list() if e.loaded)
+    assert final_count == manual, (
+        f"loaded_count() {final_count} != manual count {manual} after concurrent ops"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R-4: models_dict() returns pre-built immutable cached view (O(1))
+# ---------------------------------------------------------------------------
+
+
+def test_models_dict_returns_same_object_each_call() -> None:
+    """models_dict() must return the pre-built cached dict (same object identity).
+
+    Callers must not mutate the returned dict.  Returning the same object avoids
+    a dict copy on every /models request.
+    """
+    header = {"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"}
+    entry = ModelEntry(
+        name="cached_recipe",
+        recommender=MagicMock(),
+        header=header,
+        kid="active",
+    )
+    first = entry.models_dict()
+    second = entry.models_dict()
+    assert first is second, (
+        "models_dict() must return the same cached dict object on repeated calls"
+    )
+
+
+def test_models_dict_cached_view_contains_all_header_fields() -> None:
+    """The pre-built models_view must contain all header fields plus kid and name."""
+    header = {
+        "best_class": "TopPop",
+        "trained_at": "2026-01-01T00:00:00Z",
+        "recipe_name": "test",
+        "best_score": 0.42,
+    }
+    entry = ModelEntry(
+        name="test",
+        recommender=MagicMock(),
+        header=header,
+        kid="k1",
+    )
+    result = entry.models_dict()
+    for k in header:
+        assert k in result, f"models_dict() must include header field {k!r}"
+    assert result["kid"] == "k1"
+    assert result["name"] == "test"
+
+
+# ---------------------------------------------------------------------------
+# R-5: plain Lock (not RLock) — verify lock type
+# ---------------------------------------------------------------------------
+
+
+def test_registry_lock_is_plain_lock_not_rlock() -> None:
+    """ModelRegistry must use threading.Lock (non-reentrant), not RLock.
+
+    No public registry method calls another public method while holding the
+    lock, so RLock's reentrancy is unnecessary.  A plain Lock is lighter-weight
+    and makes deadlock from accidental recursion fail-fast rather than silently
+    succeed.
+    """
+    reg = ModelRegistry()
+    # threading.Lock() returns a _thread.lock instance on CPython.
+    # threading.RLock() returns a threading.RLock instance.
+    # We detect RLock by checking the type name.
+    lock_type_name = type(reg._lock).__name__
+    assert "RLock" not in lock_type_name, (
+        f"ModelRegistry._lock must be a plain threading.Lock, "
+        f"got {lock_type_name!r} — reentrancy is not needed and adds overhead"
+    )

@@ -105,11 +105,17 @@ See `docs/recipe-reference.md` for the full schema. Highlights:
 - `source.type` is a discriminator (`csv` | `parquet` | `bigquery` | plugins).
 - Env-var expansion is restricted to `${RECOTEM_RECIPE_*}` and never applied
   inside `source.query` / `source.query_parameters` (forecloses SQL injection).
-- Path scheme: any fsspec-supported scheme on `source.path` and
-  `item_metadata.path`. `output.path` rejects `http(s)://`, `ftp(s)://`,
-  `memory://` (write not supported). For network-scheme inputs (`http://`,
-  `https://`), `sha256` is mandatory and `RECOTEM_MAX_DOWNLOAD_BYTES`
-  (default 256 MiB) caps the body. Embedded URI credentials are rejected.
+- Path scheme: `source.path` and `item_metadata.path` accept an explicit
+  allow-list of schemes: `""` (bare local path), `file://`, `s3://`, `gs://`,
+  `az://`, `abfs://`, `abfss://`, `http://`, `https://`. Schemes are
+  explicitly enumerated rather than relying on fsspec's full registry to
+  prevent unvetted handlers from being reachable via recipe content.
+  Chained fsspec protocols (containing `::`) are rejected. `output.path`
+  is a strict subset of the above — it rejects `http://`, `https://`,
+  `ftp://`, `ftps://`, and `memory://` (write not supported). For
+  network-scheme inputs (`http://`, `https://`), `sha256` is mandatory and
+  `RECOTEM_MAX_DOWNLOAD_BYTES` (default 256 MiB) caps the body. Embedded
+  URI credentials are rejected.
 - Cleansing block: `drop_null_ids`, `dedup` policy, `min_rows / min_users /
   min_items` data preconditions.
 - Multi-algorithm Optuna search with optional per-algorithm trial budgets.
@@ -188,7 +194,7 @@ uv run ruff format --check src tests
 | `RECOTEM_API_KEYS` | (empty) | `kid:sha256:hex64,...` for serve auth. Empty forces 127.0.0.1 bind. |
 | `RECOTEM_HOST` / `RECOTEM_PORT` | 127.0.0.1 / 8080 | uvicorn bind. Must be `0.0.0.0` inside Docker; overridden to 127.0.0.1 when no API keys are set. |
 | `RECOTEM_WATCH_INTERVAL` | 5 | Watcher poll seconds (clamped 1–30). |
-| `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. |
+| `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. Clamped [1 MiB, 16 GiB]. |
 | `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Raw I/O bytes cap on source-path reads (HTTP/HTTPS, local, and object-store). Clamped [1 MiB, 16 GiB]. Does NOT cap the decompressed DataFrame size — see `docs/security.md#decompressed-size-cap-not-enforced-medium-5`. |
 | `RECOTEM_HTTP_TIMEOUT_SECONDS` | 30 | Connect/read timeout for HTTP/HTTPS source fetch. Clamped [1, 600]. |
 | `RECOTEM_HTTP_ALLOW_PRIVATE` | (empty) | Truthy (`1`/`true`/`yes`/`on`) opts the HTTP fetcher into accepting private/loopback/link-local destinations. Default refuses RFC1918 / `127.0.0.0/8` / `169.254.0.0/16` to block SSRF on cloud-metadata services. |
@@ -204,7 +210,7 @@ uv run ruff format --check src tests
 | `RECOTEM_METRICS_ENABLED` | (empty) | Opt-in Prometheus `/metrics` endpoint. Truthy values: `1`, `true`, `yes`, `on`. Requires `recotem[metrics]` extra. |
 | `RECOTEM_LOCK_DIR` | (empty) | Override directory for per-recipe training lock files. Local outputs always lock at `<output_path>.lock`; remote outputs (`s3://`, `gs://`, ...) need a host-local path and fall back to `<tempdir>/recotem-locks/`. `flock` is host-local — across hosts use scheduler-level mutex (`concurrencyPolicy: Forbid`). |
 | `RECOTEM_BQ_REQUIRE_STORAGE_API` | (empty) | When truthy (`1`/`true`/`yes`/`on`), the BigQuery source raises `DataSourceError` instead of falling back to the REST path when the Storage Read API fails. Requires the service account to hold `bigquery.readSessions.create`. |
-| `RECOTEM_STARTUP_PARALLELISM` | (empty = auto) | Number of parallel threads used to load artifacts at `recotem serve` startup. Default is `min(len(recipes), 8)`. Clamped [1, 32]. Set to `1` to force sequential loading for debugging. |
+| `RECOTEM_STARTUP_PARALLELISM` | (empty = auto) | Number of parallel threads used to load artifacts at `recotem serve` startup. Leave unset (default) for auto-sizing (`min(len(recipes), 8)`). Setting to `0` is NOT a sentinel — it clamps to 1 and emits an `env_var_clamped` warning. Clamped [1, 32]. Set to `1` to force sequential loading for debugging. |
 
 ## CI
 

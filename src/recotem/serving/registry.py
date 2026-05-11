@@ -1,13 +1,17 @@
 """ModelRegistry and ModelEntry for the Recotem serving layer.
 
-The registry is a ``dict[str, ModelEntry]`` guarded by a ``threading.RLock``.
+The registry is a ``dict[str, ModelEntry]`` guarded by a ``threading.Lock``.
 All public methods are synchronous (no asyncio) — FastAPI route handlers run
 in a threadpool so they can acquire the lock without blocking the event loop.
+
+A plain ``threading.Lock`` (non-reentrant) is sufficient because no public
+method calls another public method while holding the lock.  Every method
+acquires ``self._lock`` exactly once on entry and releases it on exit.
 
 Atomic replace strategy
 -----------------------
 ``replace(name, entry)`` acquires the lock, drops the old reference, and
-inserts the new one.  Python's GIL plus the RLock means in-flight request
+inserts the new one.  Python's GIL plus the Lock means in-flight request
 threads that already hold the old ``ModelEntry`` reference continue safely
 until they finish — there is no shared mutable state between the old and new
 entries.
@@ -101,17 +105,24 @@ class ModelEntry:
             d["error"] = self.last_load_error
         return d
 
+    def __post_init__(self) -> None:
+        """Pre-build the immutable models view so ``models_dict()`` is O(1)."""
+        # Build once at construction time.  The header and kid are set before
+        # this runs and are never mutated after construction.
+        self._models_view: dict[str, Any] = dict(self.header)
+        self._models_view["kid"] = self.kid
+        self._models_view["name"] = self.name
+
     def models_dict(self) -> dict[str, Any]:
         """Return header metadata suitable for the ``/models`` endpoint.
 
         The artifact header JSON never contains ``hmac`` or ``key`` fields —
         those are stored in separate binary regions of the artifact format
         (see ``artifact/format.py``).  All header fields are safe to expose.
+
+        Returns the pre-built immutable view; callers must not mutate it.
         """
-        safe = dict(self.header)
-        safe["kid"] = self.kid
-        safe["name"] = self.name
-        return safe
+        return self._models_view
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +147,12 @@ class ModelRegistry:
 
     def __init__(self) -> None:
         self._entries: dict[str, ModelEntry] = {}
-        self._lock = threading.RLock()
+        # Plain Lock is sufficient: no public method calls another public
+        # method while holding the lock (no reentrant code paths).
+        self._lock = threading.Lock()
+        # Maintained atomically inside the lock on every mutation that changes
+        # entry.loaded; enables O(1) loaded_count() without an O(N) walk.
+        self._loaded_count: int = 0
 
     # ------------------------------------------------------------------
     # Core CRUD
@@ -157,9 +173,17 @@ class ModelRegistry:
 
         The previous entry — if any — is dereferenced; its memory is
         reclaimed once all in-flight request threads drop their references.
+        ``_loaded_count`` is updated under the same lock.
         """
         with self._lock:
+            old = self._entries.get(name)
+            old_loaded = old.loaded if old is not None else False
             self._entries[name] = entry
+            # Adjust counter by the net change in loaded-ness.
+            if entry.loaded and not old_loaded:
+                self._loaded_count += 1
+            elif not entry.loaded and old_loaded:
+                self._loaded_count -= 1
 
     def replace_with_marker(
         self, name: str, entry: ModelEntry, marker: tuple[Any, str]
@@ -169,16 +193,28 @@ class ModelRegistry:
         Compared to calling ``replace()`` followed by ``update_loaded_marker()``,
         this method holds the lock across both mutations so readers iterating
         ``list()`` between the two ops can never observe a fresh recommender
-        with a stale ``_loaded_marker``.
+        with a stale ``_loaded_marker``.  ``_loaded_count`` is kept consistent
+        under the same lock.
         """
         with self._lock:
+            old = self._entries.get(name)
+            old_loaded = old.loaded if old is not None else False
             entry._loaded_marker = marker
             self._entries[name] = entry
+            if entry.loaded and not old_loaded:
+                self._loaded_count += 1
+            elif not entry.loaded and old_loaded:
+                self._loaded_count -= 1
 
     def remove(self, name: str) -> None:
-        """Remove the entry for *name*.  No-op if not present."""
+        """Remove the entry for *name*.  No-op if not present.
+
+        Decrements ``_loaded_count`` when a loaded entry is removed.
+        """
         with self._lock:
-            self._entries.pop(name, None)
+            old = self._entries.pop(name, None)
+            if old is not None and old.loaded:
+                self._loaded_count -= 1
 
     def set_load_error(self, name: str, error: str | None) -> bool:
         """Record the latest artifact-load failure (if any) on the entry.
@@ -187,6 +223,10 @@ class ModelRegistry:
         races with ``replace()`` / readers iterating ``list()``.  Returns
         True when the entry exists, False when there is nothing to mark
         (caller can decide whether that is worth logging).
+
+        Note: ``set_load_error`` does NOT change ``entry.loaded``; it only
+        annotates a stale-but-loaded entry with an error string.  Therefore
+        ``_loaded_count`` is not adjusted here.
         """
         with self._lock:
             entry = self._entries.get(name)
@@ -214,10 +254,37 @@ class ModelRegistry:
     # Health / observability helpers
     # ------------------------------------------------------------------
 
-    def health_snapshot(self) -> dict[str, dict[str, Any]]:
-        """Return per-recipe health info (safe copy, no model objects)."""
+    def loaded_count(self) -> int:
+        """Return the number of currently loaded (``loaded=True``) entries.
+
+        O(1) — maintained atomically inside the lock by every mutation that
+        changes the ``loaded`` boolean.  Safe to call from multiple threads.
+        """
         with self._lock:
-            return {name: entry.health_dict() for name, entry in self._entries.items()}
+            return self._loaded_count
+
+    def health_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Return per-recipe health info (safe copy, no model objects).
+
+        The snapshot is taken in two phases to minimise lock hold time:
+
+        1. Under the lock: copy ``(name, entry)`` pairs into a local list.
+           This is O(N) in item count but performs no per-entry work.
+        2. Outside the lock: call ``entry.health_dict()`` for each entry.
+
+        ``health_dict()`` reads only immutable fields (``loaded``,
+        ``trained_at``, ``best_class``, ``kid``) plus ``last_load_error``
+        which is a single reference assignment — bytecode-atomic on CPython.
+        A concurrent ``set_load_error`` between steps 1 and 2 may cause the
+        snapshot to reflect either the old or the new error string, but never
+        a partially-written value.  This is a deliberate trade-off: ``/health``
+        is a monitoring endpoint, not a consistency primitive.
+        """
+        with self._lock:
+            items = list(self._entries.items())
+        # Build the dict outside the lock so /health cannot block /predict
+        # threads waiting to acquire the lock.
+        return {name: entry.health_dict() for name, entry in items}
 
     def names(self) -> list[str]:
         """Return a sorted list of currently registered recipe names."""

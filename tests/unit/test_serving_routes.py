@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 from unittest.mock import MagicMock
 
+import pytest
 import pytest as _pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -1079,17 +1080,24 @@ def test_predict_with_invalid_name_returns_422_not_503() -> None:
 
 
 # ---------------------------------------------------------------------------
-# P-2: model_construct hot-path optimization
+# P-2: JSONResponse hot-path optimization (R-2)
 # ---------------------------------------------------------------------------
 
 
-def test_predict_response_constructs_via_model_construct_skips_validation() -> None:
-    """The /predict handler must use model_construct (not __init__) for response models.
+def test_predict_response_is_json_response_bypassing_pydantic_serialization() -> None:
+    """The /predict handler must return JSONResponse (plain dict) — not a pydantic model.
 
-    Patches model_construct on PredictResponse, ModelInfo, and RecommendationItem
-    to spy on whether the optimized no-validation path is used.  Asserts that
-    model_construct is called at least once for each response model class on a
-    successful predict call.
+    R-2 optimization: returning JSONResponse(content=dict) bypasses the second
+    pydantic serialization pass that FastAPI performs when a route returns a
+    model instance.  The route keeps ``response_model=PredictResponse`` for
+    OpenAPI schema generation but FastAPI skips validation when the return
+    value is a Response subclass.
+
+    This test verifies:
+    1. The response status code is 200.
+    2. The JSON wire format matches the documented PredictResponse schema.
+    3. Pydantic model_construct is NOT called on the hot path (plain dicts used
+       instead of model instances), confirming the optimization is in place.
     """
     from unittest.mock import call, patch
 
@@ -1098,33 +1106,14 @@ def test_predict_response_constructs_via_model_construct_skips_validation() -> N
     registry = _make_registry_with_recipe()
     client, _ = _make_test_client(registry=registry)
 
-    predict_response_calls: list[call] = []
-    model_info_calls: list[call] = []
-    rec_item_calls: list[call] = []
-
+    predict_response_construct_calls: list[call] = []
     original_pr = _routes.PredictResponse.model_construct
-    original_mi = _routes.ModelInfo.model_construct
-    original_ri = _routes.RecommendationItem.model_construct
 
     def _spy_pr(*args, **kwargs):
-        predict_response_calls.append(call(*args, **kwargs))
+        predict_response_construct_calls.append(call(*args, **kwargs))
         return original_pr(*args, **kwargs)
 
-    def _spy_mi(*args, **kwargs):
-        model_info_calls.append(call(*args, **kwargs))
-        return original_mi(*args, **kwargs)
-
-    def _spy_ri(*args, **kwargs):
-        rec_item_calls.append(call(*args, **kwargs))
-        return original_ri(*args, **kwargs)
-
-    with (
-        patch.object(_routes.PredictResponse, "model_construct", side_effect=_spy_pr),
-        patch.object(_routes.ModelInfo, "model_construct", side_effect=_spy_mi),
-        patch.object(
-            _routes.RecommendationItem, "model_construct", side_effect=_spy_ri
-        ),
-    ):
+    with patch.object(_routes.PredictResponse, "model_construct", side_effect=_spy_pr):
         response = client.post(
             "/predict/test_recipe", json={"user_id": "user1", "cutoff": 5}
         )
@@ -1132,15 +1121,26 @@ def test_predict_response_constructs_via_model_construct_skips_validation() -> N
     assert response.status_code == 200, (
         f"Predict must succeed; got {response.status_code}"
     )
-    assert len(predict_response_calls) == 1, (
-        "PredictResponse.model_construct must be called exactly once per request"
+    # R-2: hot path must NOT call PredictResponse.model_construct — it returns
+    # a plain dict via JSONResponse, bypassing the second pydantic serialization.
+    assert len(predict_response_construct_calls) == 0, (
+        "R-2: predict hot path must not call PredictResponse.model_construct; "
+        "it should return JSONResponse(content=dict) directly. "
+        f"Got {len(predict_response_construct_calls)} call(s)."
     )
-    assert len(model_info_calls) == 1, (
-        "ModelInfo.model_construct must be called exactly once per request"
-    )
-    assert len(rec_item_calls) >= 1, (
-        "RecommendationItem.model_construct must be called at least once per request"
-    )
+
+    # Wire format must match the documented PredictResponse schema.
+    data = response.json()
+    assert "items" in data, "Response must contain 'items'"
+    assert "model" in data, "Response must contain 'model'"
+    assert "request_id" in data, "Response must contain 'request_id'"
+    assert len(data["items"]) > 0, "items list must not be empty"
+    item = data["items"][0]
+    assert "item_id" in item, "Each item must have 'item_id'"
+    assert "score" in item, "Each item must have 'score'"
+    model_block = data["model"]
+    assert "recipe" in model_block, "model block must have 'recipe'"
+    assert "kid" in model_block, "model block must have 'kid'"
 
 
 def test_predict_response_still_serializes_correctly_after_model_construct() -> None:
@@ -1387,4 +1387,184 @@ def test_predict_unbinds_only_handler_keys_not_upstream_context() -> None:
     assert upstream_key_preserved[0], (
         "predict() must NOT call clear_contextvars() — it must only unbind its "
         "own keys (recipe, request_id, kid), leaving upstream bindings intact"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R-3: metadata column named 'item_id' or 'score' cannot shadow recommender values
+# ---------------------------------------------------------------------------
+
+
+def test_predict_metadata_score_column_does_not_shadow_recommender_score() -> None:
+    """A metadata column named 'score' must not override the recommender's score.
+
+    R-3 fix: item_id and score are re-written AFTER fields.update(metadata)
+    so that trusted recommender values always win regardless of what column
+    names the metadata file contains.
+    """
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+    from recotem.serving.routes import make_router
+
+    # Metadata index contains a 'score' column with a different value.
+    metadata_index = {
+        "item1": {"title": "Widget A", "score": 999.0},  # rogue column
+        "item2": {"title": "Widget B", "score": -1.0},  # rogue column
+    }
+
+    recommender = MagicMock()
+    recommender.get_recommendation_for_known_user_id.return_value = [
+        ("item1", 0.9),
+        ("item2", 0.8),
+    ]
+
+    entry = ModelEntry(
+        name="score_shadow_recipe",
+        recommender=recommender,
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="k1",
+        metadata_index=metadata_index,
+    )
+    registry = ModelRegistry()
+    registry.replace("score_shadow_recipe", entry)
+
+    router = make_router(registry=registry, api_keys=[])
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/predict/score_shadow_recipe",
+        json={"user_id": "user1", "cutoff": 2},
+    )
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 2
+
+    item1 = next(it for it in items if it["item_id"] == "item1")
+    assert item1["score"] == pytest.approx(0.9), (
+        f"item1 score must be 0.9 (recommender value), not 999.0 (metadata column); "
+        f"got {item1['score']}"
+    )
+    item2 = next(it for it in items if it["item_id"] == "item2")
+    assert item2["score"] == pytest.approx(0.8), (
+        f"item2 score must be 0.8 (recommender value), not -1.0 (metadata column); "
+        f"got {item2['score']}"
+    )
+    # The 'title' metadata column must still be present.
+    assert item1.get("title") == "Widget A", "'title' from metadata must appear"
+
+
+def test_predict_metadata_item_id_column_does_not_shadow_recommender_item_id() -> None:
+    """A metadata column named 'item_id' must not override the recommender's item_id.
+
+    R-3 fix: item_id is re-written AFTER fields.update(metadata) so that a
+    rogue metadata column cannot inject a different item_id into the response.
+    """
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+    from recotem.serving.routes import make_router
+
+    # Metadata index where 'item_id' column value differs from the key.
+    metadata_index = {
+        "real_item": {"item_id": "injected_item", "title": "Some Product"},
+    }
+
+    recommender = MagicMock()
+    recommender.get_recommendation_for_known_user_id.return_value = [
+        ("real_item", 0.7),
+    ]
+
+    entry = ModelEntry(
+        name="itemid_shadow_recipe",
+        recommender=recommender,
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="k1",
+        metadata_index=metadata_index,
+    )
+    registry = ModelRegistry()
+    registry.replace("itemid_shadow_recipe", entry)
+
+    router = make_router(registry=registry, api_keys=[])
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/predict/itemid_shadow_recipe",
+        json={"user_id": "user1", "cutoff": 1},
+    )
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 1
+
+    item = items[0]
+    assert item["item_id"] == "real_item", (
+        f"item_id must be the recommender's value 'real_item', "
+        f"not the metadata column value 'injected_item'; got {item['item_id']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R-2: /predict returns JSONResponse (wire format matches documented schema)
+# ---------------------------------------------------------------------------
+
+
+def test_predict_response_wire_format_matches_predict_response_schema() -> None:
+    """JSONResponse path must produce the same wire format as PredictResponse.
+
+    Constructs both a PredictResponse instance (validated path) and the plain
+    dict returned by the route (R-2 JSONResponse path) and asserts they encode
+    identically via jsonable_encoder.
+
+    This confirms that switching from model_construct to plain dicts does not
+    alter the documented API contract.
+    """
+    import json
+
+    from fastapi.encoders import jsonable_encoder
+
+    from recotem.serving.routes import ModelInfo, PredictResponse, RecommendationItem
+
+    # Build the reference via normal PredictResponse __init__.
+    reference = PredictResponse(
+        items=[
+            RecommendationItem(item_id="item1", score=0.9),
+            RecommendationItem(item_id="item2", score=0.8),
+        ],
+        model=ModelInfo(
+            recipe="test_recipe",
+            trained_at="2026-01-01T00:00:00Z",
+            best_class="TopPopRecommender",
+            kid="active",
+        ),
+        request_id="test-request-id-123",
+    )
+
+    # Build what the R-2 route now returns as the JSONResponse content dict.
+    route_dict: dict = {
+        "items": [
+            {"item_id": "item1", "score": 0.9},
+            {"item_id": "item2", "score": 0.8},
+        ],
+        "model": {
+            "recipe": "test_recipe",
+            "trained_at": "2026-01-01T00:00:00Z",
+            "best_class": "TopPopRecommender",
+            "kid": "active",
+        },
+        "request_id": "test-request-id-123",
+    }
+
+    ref_json = json.dumps(jsonable_encoder(reference), sort_keys=True)
+    route_json = json.dumps(route_dict, sort_keys=True)
+
+    assert ref_json == route_json, (
+        f"R-2 plain-dict route output must match PredictResponse schema.\n"
+        f"reference: {ref_json}\n"
+        f"route:     {route_json}"
     )

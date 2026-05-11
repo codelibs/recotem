@@ -720,6 +720,121 @@ def test_all_rejection_branches_use_same_canonical_dummy_length() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# AU-1: anonymous bypass audit logging
+# ---------------------------------------------------------------------------
+
+
+def _make_anon_request(
+    host: str = "127.0.0.1", path: str = "/predict/test"
+) -> MagicMock:
+    """Build a mock request with .client.host set."""
+    request = MagicMock()
+    request.url.path = path
+    request.headers = {}  # no X-API-Key → anonymous
+    request.client = MagicMock()
+    request.client.host = host
+    request.state = MagicMock()
+    return request
+
+
+def test_anonymous_bypass_debug_log_fires_every_request() -> None:
+    """DEBUG log must fire on every anonymous bypass request."""
+    import structlog.testing
+
+    import recotem.serving.auth as auth_mod
+
+    # Clear the LRU set so each test is independent.
+    auth_mod._anon_seen.clear()
+
+    with structlog.testing.capture_logs() as logs:
+        for _ in range(3):
+            verify_api_key(_make_anon_request("10.0.0.1"), [])
+
+    debug_logs = [
+        e
+        for e in logs
+        if e.get("log_level") == "debug" and e.get("event") == "auth_anonymous_bypass"
+    ]
+    assert len(debug_logs) == 3, (
+        f"Expected DEBUG log on every bypass (3×); got {len(debug_logs)}: {debug_logs!r}"
+    )
+
+
+def test_anonymous_bypass_info_log_fires_only_on_first_seen_host() -> None:
+    """INFO log must fire exactly once per new client_host."""
+    import structlog.testing
+
+    import recotem.serving.auth as auth_mod
+
+    auth_mod._anon_seen.clear()
+
+    with structlog.testing.capture_logs() as logs:
+        # Three requests from the same host.
+        for _ in range(3):
+            verify_api_key(_make_anon_request("192.168.1.1"), [])
+
+    info_logs = [
+        e
+        for e in logs
+        if e.get("log_level") == "info"
+        and e.get("event") == "auth_anonymous_bypass_first_seen"
+    ]
+    assert len(info_logs) == 1, (
+        f"Expected INFO log exactly once for first-seen host; "
+        f"got {len(info_logs)}: {info_logs!r}"
+    )
+    assert info_logs[0].get("client_host") == "192.168.1.1"
+
+
+def test_anonymous_bypass_info_log_fires_per_distinct_host() -> None:
+    """INFO log must fire once per distinct new client_host."""
+    import structlog.testing
+
+    import recotem.serving.auth as auth_mod
+
+    auth_mod._anon_seen.clear()
+
+    hosts = ["10.1.1.1", "10.1.1.2", "10.1.1.3"]
+    with structlog.testing.capture_logs() as logs:
+        for host in hosts:
+            # Two requests per host — INFO must fire only on the first.
+            verify_api_key(_make_anon_request(host), [])
+            verify_api_key(_make_anon_request(host), [])
+
+    info_logs = [
+        e
+        for e in logs
+        if e.get("log_level") == "info"
+        and e.get("event") == "auth_anonymous_bypass_first_seen"
+    ]
+    seen_hosts = {e.get("client_host") for e in info_logs}
+    assert seen_hosts == set(hosts), (
+        f"Expected one INFO log per distinct host {hosts!r}; "
+        f"got info from {seen_hosts!r}"
+    )
+    assert len(info_logs) == len(hosts), (
+        f"Expected {len(hosts)} INFO logs (one per host); got {len(info_logs)}"
+    )
+
+
+def test_anonymous_bypass_lru_eviction_bounded() -> None:
+    """The _anon_seen set must not grow beyond _ANON_SEEN_MAX entries."""
+    import recotem.serving.auth as auth_mod
+
+    auth_mod._anon_seen.clear()
+
+    cap = auth_mod._ANON_SEEN_MAX
+    # Insert one more than the cap.
+    for i in range(cap + 5):
+        verify_api_key(_make_anon_request(f"10.{i // 256}.{i % 256}.1"), [])
+
+    assert len(auth_mod._anon_seen) <= cap, (
+        f"_anon_seen must not exceed _ANON_SEEN_MAX={cap}; "
+        f"got {len(auth_mod._anon_seen)}"
+    )
+
+
 def test_kid_loop_compares_all_entries_even_after_first_match() -> None:
     """The verify loop must not short-circuit on the first matching entry.
 

@@ -20,7 +20,7 @@ from recotem._http_fetch import (
     redact_url_userinfo,
     verify_sha256,
 )
-from recotem._size_cap import SizeCapExceededError, check_size_cap
+from recotem._size_cap import SizeCapExceededError, SizeCapProbeError, check_size_cap
 from recotem.config import (
     get_http_allow_private,
     get_http_timeout_seconds,
@@ -67,6 +67,53 @@ def _check_size_cap(path: str, safe_path: str, kind: str) -> None:
         check_size_cap(path, cap=_get_max_download_bytes(), label=kind)
     except SizeCapExceededError as exc:
         raise DataSourceError(str(exc)) from exc
+    except SizeCapProbeError as exc:
+        raise DataSourceError(f"Size probe for {kind} source failed: {exc}") from exc
+
+
+def _validate_required_columns(
+    df: pd.DataFrame,
+    ctx: FetchContext,
+    safe_path: str,
+) -> None:
+    """Validate that required interaction columns exist in *df*.
+
+    The caller (pipeline or test) populates ctx.extra with the required
+    column names under the keys user_column, item_column, and
+    optionally time_column.  When these keys are absent from ctx.extra
+    (e.g. a plugin test that does not pass schema context), the check is skipped.
+
+    Raises
+    ------
+    DataSourceError
+        If a required column is absent from *df*.  The message names the
+        missing column and lists up to 10 available column names so operators
+        can diagnose typos in the recipe schema without needing to load the
+        file manually.
+    """
+    user_col: str | None = ctx.extra.get("user_column")  # type: ignore[assignment]
+    item_col: str | None = ctx.extra.get("item_column")  # type: ignore[assignment]
+    time_col: str | None = ctx.extra.get("time_column")  # type: ignore[assignment]
+
+    cols_to_check: list[str] = []
+    if user_col:
+        cols_to_check.append(user_col)
+    if item_col:
+        cols_to_check.append(item_col)
+    if time_col:
+        cols_to_check.append(time_col)
+
+    if not cols_to_check:
+        return  # no schema context — skip
+
+    df_columns = set(df.columns)
+    for col in cols_to_check:
+        if col not in df_columns:
+            available = sorted(str(c) for c in df.columns)[:10]
+            raise DataSourceError(
+                f"required column {col!r} not found in source {safe_path!r}; "
+                f"available columns: {available}"
+            )
 
 
 def _fetch_http_bytes(
@@ -192,6 +239,7 @@ class CSVSource:
                 raise DataSourceError(
                     f"CSV file '{safe_path}' is empty (no data rows after header)."
                 )
+            _validate_required_columns(df, ctx, safe_path)
             logger.info(
                 "csv_source_fetch_done",
                 recipe=ctx.recipe_name,
@@ -279,6 +327,7 @@ class CSVSource:
                 f"CSV file '{safe_path}' is empty (no data rows after header)."
             )
 
+        _validate_required_columns(df, ctx, safe_path)
         logger.info(
             "csv_source_fetch_done",
             recipe=ctx.recipe_name,

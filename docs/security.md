@@ -42,7 +42,7 @@ The internet-facing boundary is `recotem serve`. `recotem train` has no inbound 
 | Stat-then-read TOCTOU on artifact | Read-once protocol: bytes read into memory once, sha256 computed, then HMAC-verified from the same buffer |
 | Key material in logs | structlog redaction processor runs first in chain; unit test asserts no key material at any log level |
 | API key brute-force / timing attack | `hmac.compare_digest` constant-time compare; no logging of plaintext or hash |
-| Credential injection via recipe env expansion | `RECOTEM_SIGNING_KEY*`, `RECOTEM_API_KEYS`, `*_SECRET*`, `*_PASSWORD*`, `*_TOKEN*`, `*_KEY*`, `AWS_*`, `GOOGLE_*`, `GCP_*` are blacklisted from `${...}` expansion |
+| Credential injection via recipe env expansion | `RECOTEM_SIGNING_KEYS`, `RECOTEM_API_KEYS`, `*_SECRET*`, `*_PASSWORD*`, `*_TOKEN*`, `*_KEY*`, `AWS_*`, `GOOGLE_*`, `GCP_*` are blacklisted from `${...}` expansion |
 | SQL injection via recipe | Env expansion never performed inside `source.query`; dynamic values must use `@param` BigQuery placeholders |
 | Path traversal via recipe | `name` validated with `^[A-Za-z0-9_-]{1,64}$` at load and before every filesystem use; artifact root confinement via `RECOTEM_ARTIFACT_ROOT` |
 | Tampered or rotated network-fetched data | `sha256` integrity pin is **mandatory** on `source.path` / `item_metadata.path` when the scheme is `http://` or `https://`; mismatch raises `DataSourceError` (exit 3) before the bytes reach the parser |

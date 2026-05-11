@@ -15,8 +15,9 @@ dependencies = [
 # ── entry point declaration ────────────────────────────────────────────────────
 # This is the key declaration that makes recotem discover EchoSource.
 # Group: "recotem.datasources"
-# Key:   the discriminator value used in recipe YAML (source.type: echo)
-# Value: "<module>:<class>"
+# Key:   a registry/log identifier (appears in logs and error messages; does
+#        NOT determine the recipe discriminator — that comes from type_name)
+# Value: "<module>:<class>"  (the class's type_name attribute sets source.type:)
 [project.entry-points."recotem.datasources"]
 echo = "recotem_echo:EchoSource"
 

@@ -265,9 +265,14 @@ def _expand_node(
         return expand_env_vars(node, extra_allowed=extra_allowed)
     if isinstance(node, dict):
         result: dict[str, Any] = {}
-        combined_no_expand = _NO_EXPAND_KEYS | _extra_no_expand
+        # Normalise to lowercase so a plugin that declares 'SQL' and a YAML
+        # author who writes 'sql:' are both protected — case mismatch must not
+        # silently bypass env-expansion blocking (injection defence-in-depth).
+        combined_no_expand = frozenset(
+            k.lower() for k in (_NO_EXPAND_KEYS | _extra_no_expand)
+        )
         for k, v in node.items():
-            in_no_expand = _in_no_expand or (k in combined_no_expand)
+            in_no_expand = _in_no_expand or (k.lower() in combined_no_expand)
             result[k] = _expand_node(
                 v,
                 extra_allowed=extra_allowed,
@@ -313,8 +318,12 @@ def _expand_with_source_no_expand(
                     from recotem.datasource.registry import get_source_class
 
                     src_cls = get_source_class(str(type_name))
+                    # Normalise to lowercase so that a plugin declaring
+                    # 'SQL' and a YAML key 'sql:' are both blocked —
+                    # matching is case-insensitive (see _expand_node).
                     extra_no_expand = frozenset(
-                        getattr(src_cls, "no_expand_fields", frozenset())
+                        f.lower()
+                        for f in getattr(src_cls, "no_expand_fields", frozenset())
                     )
                 except DataSourceError:
                     # Unknown source type — later validation surfaces the real
@@ -641,3 +650,89 @@ def load_recipes_directory(
 
     logger.info("recipes_directory_loaded", path=str(root), count=len(recipes))
     return recipes
+
+
+def load_recipes_directory_lenient(
+    path: str | Path,
+    *,
+    extra_allowed: dict[str, str] | None = None,
+) -> list[tuple[Path, Recipe | None, Exception | None]]:
+    """Load all ``*.yaml`` files directly under *path*, returning per-file results.
+
+    Unlike :func:`load_recipes_directory`, this variant never raises on a
+    per-file parse/validation error.  Instead it returns a result triple for
+    every YAML file found, so callers (e.g. a health endpoint) can surface
+    failed-load entries without aborting the entire batch.
+
+    Returns
+    -------
+    list[tuple[Path, Recipe | None, Exception | None]]
+        Sorted by filename.  On success: ``(path, recipe, None)``.
+        On failure: ``(path, None, exc)``.
+
+    Raises
+    ------
+    RecipeError
+        Only for directory-level errors (path does not exist / not a dir) or
+        duplicate recipe names across successfully-loaded files.
+    """
+    root = Path(path).resolve()
+
+    if not root.is_dir():
+        raise RecipeError(
+            f"Recipes directory '{root}' does not exist or is not a directory."
+        )
+
+    yaml_files = sorted(
+        f for f in root.iterdir() if f.is_file() and f.suffix == ".yaml"
+    )
+
+    results: list[tuple[Path, Recipe | None, Exception | None]] = []
+    names_seen: dict[str, str] = {}  # name → filename
+
+    ok_count = 0
+    err_count = 0
+    for yaml_file in yaml_files:
+        try:
+            recipe = load_recipe(
+                yaml_file,
+                extra_allowed=extra_allowed,
+                recipes_root=root,
+            )
+        except Exception as exc:
+            logger.warning(
+                "recipe_load_error_skipped",
+                file=yaml_file.name,
+                error_class=type(exc).__name__,
+                error=str(exc),
+            )
+            results.append((yaml_file, None, exc))
+            err_count += 1
+            continue
+
+        if recipe.name in names_seen:
+            dup_err = RecipeError(
+                f"Duplicate recipe name '{recipe.name}' found in "
+                f"'{yaml_file.name}' and '{names_seen[recipe.name]}'. "
+                "Each recipe in a directory must have a unique name."
+            )
+            logger.warning(
+                "recipe_duplicate_name_skipped",
+                file=yaml_file.name,
+                name=recipe.name,
+            )
+            results.append((yaml_file, None, dup_err))
+            err_count += 1
+            continue
+
+        names_seen[recipe.name] = yaml_file.name
+        results.append((yaml_file, recipe, None))
+        ok_count += 1
+
+    logger.info(
+        "recipes_directory_loaded_lenient",
+        path=str(root),
+        ok=ok_count,
+        errors=err_count,
+    )
+    return results

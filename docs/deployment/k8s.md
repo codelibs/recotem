@@ -292,13 +292,13 @@ serviceAccountName: recotem-serve-sa   # annotated with IAM role ARN / GCP SA
 
 Recipes themselves can also live in object storage; mount them via an init container or reference them by URL in a wrapper script.
 
-> ⚠️ **Per-recipe lock is host-local.** Recotem's `<output.path>.lock` uses POSIX `flock` and only coordinates writers on the same host. With an `s3://` or `gs://` `output.path` the lock file is created at a local path derived from the URI (e.g. `./s3:/my-bucket/...lock`) and **does not prevent concurrent writes from a second pod**. Rely on the scheduler for single-writer guarantees:
+> ⚠️ **Per-recipe lock is host-local.** Recotem's `<output.path>.lock` uses POSIX `flock` and only coordinates writers on the same host. With an `s3://` or `gs://` `output.path` the lock file is created at a stable host-local path under `$RECOTEM_LOCK_DIR` (or `<tempdir>/recotem-locks/<sha256-of-output-path>.lock`) and **does not prevent concurrent writes from a second pod**. Rely on the scheduler for single-writer guarantees:
 >
 > - The bundled CronJob sets `concurrencyPolicy: Forbid` (default in `values.yaml`); keep it.
 > - When triggering training from outside Kubernetes (Argo Workflows, Airflow, custom controllers), enforce parallelism = 1 there (Argo `synchronization.mutex`, Airflow `max_active_runs=1`, etc.).
 > - `recotem train --fail-on-busy` only helps for *same-host* contention; do not depend on it for cross-pod safety with object storage outputs.
 >
-> Recotem logs `recipe_lock_local_only` on every remote-scheme run so this is visible at runtime.
+> Recotem logs `recipe_lock_local_only` at WARNING on the first occurrence per lock path; subsequent occurrences for the same path are logged at DEBUG.
 
 ## Helm chart values
 

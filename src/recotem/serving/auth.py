@@ -142,15 +142,13 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
     raw_header: str | None = request.headers.get(_API_KEY_HEADER)
     if raw_header is None:
         logger.warning("auth_missing_header", path=request.url.path)
-        # Constant-time equalisation: run the scrypt KDF on a fixed-length
-        # dummy value so that the missing-header response time is
-        # indistinguishable from the short-key and normal hashing paths.
-        # Without this call an attacker can distinguish the ~0 ms missing-
-        # header branch from the ~0.5 ms KDF branch via response latency —
-        # leaking whether a header was sent at all, which narrows the attack
-        # surface from "any header" to "header present but wrong".
-        # Same rationale as the oversized/short-key branches below.
-        _hash_api_key("\x00" * _API_KEY_MIN_LEN)  # constant-time equalisation
+        # Constant-time equalisation: run the scrypt KDF on a canonical-length
+        # dummy value (exactly _API_KEY_MAX_LEN null bytes) so that the
+        # missing-header response time is indistinguishable from the other
+        # rejection branches.  All three rejection branches (missing, oversized,
+        # short-key) use the SAME canonical dummy length so an attacker cannot
+        # distinguish rejection branches from one another by latency.
+        _hash_api_key("\x00" * _API_KEY_MAX_LEN)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
             detail={"detail": "X-API-Key header required", "code": "missing_api_key"},
@@ -160,13 +158,9 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
     # payload.  An unbounded header would let an unauthenticated attacker
     # amplify scrypt work into a denial-of-service.  See ``_API_KEY_MAX_LEN``.
     #
-    # Constant-time equalisation: we still run _hash_api_key on a fixed-
-    # length dummy value so that the response time is indistinguishable from
-    # the short-key branch and from a legitimate key whose digest simply does
-    # not match.  This prevents a length-based timing oracle — without it, an
-    # attacker could distinguish the oversized branch (~0 ms) from the hashing
-    # branch (~0.5 ms) and infer the key-length range from response latency.
-    # The result is discarded; the side effect is the scrypt wall time alone.
+    # Constant-time equalisation: hash _API_KEY_MAX_LEN null bytes (the same
+    # canonical length used in every other rejection branch and in the
+    # legitimate path) so all branches are indistinguishable by latency.
     if len(raw_header) > _API_KEY_MAX_LEN:
         logger.warning(
             "auth_oversized_header",
@@ -174,14 +168,7 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
             length=len(raw_header),
             cap=_API_KEY_MAX_LEN,
         )
-        # Length-matched dummy: hash exactly _API_KEY_MAX_LEN null bytes so
-        # the scrypt input size equals the maximum legitimate key length,
-        # rather than the fixed _API_KEY_MIN_LEN.  This removes the residual
-        # timing difference between the oversized path (which was always
-        # _API_KEY_MIN_LEN bytes) and the normal path (up to _API_KEY_MAX_LEN
-        # bytes).  The result is discarded; only the KDF wall-time matters.
-        _dummy_len = _API_KEY_MAX_LEN
-        _hash_api_key("\x00" * _dummy_len)  # constant-time equalisation
+        _hash_api_key("\x00" * _API_KEY_MAX_LEN)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
             detail={"detail": "Invalid API key", "code": "invalid_api_key"},
@@ -196,10 +183,8 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
     # identical to an invalid-key response so the caller cannot determine
     # whether the key was too short or simply unrecognised.
     #
-    # Constant-time equalisation: same rationale as the oversized branch above.
-    # Without this, timing on the short-key path (~0 ms) vs the normal path
-    # (~0.5 ms) would allow an attacker to determine from latency alone
-    # whether their probe key was too short or too long.
+    # Constant-time equalisation: hash _API_KEY_MAX_LEN null bytes (canonical
+    # length) so this path is indistinguishable from the normal hashing path.
     if len(raw_header) < _API_KEY_MIN_LEN:
         logger.warning(
             "auth_short_key_rejected",
@@ -207,11 +192,7 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
             length=len(raw_header),
             min_len=_API_KEY_MIN_LEN,
         )
-        # Length-matched dummy: scrypt input size is clamped to
-        # [_API_KEY_MIN_LEN, _API_KEY_MAX_LEN] to remove residual timing
-        # differences between this path and the normal hashing path.
-        _dummy_len = max(_API_KEY_MIN_LEN, min(len(raw_header), _API_KEY_MAX_LEN))
-        _hash_api_key("\x00" * _dummy_len)  # constant-time equalisation
+        _hash_api_key("\x00" * _API_KEY_MAX_LEN)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
             detail={"detail": "Invalid API key", "code": "invalid_api_key"},
@@ -220,12 +201,21 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
     # No stripping — whitespace is part of the key.
     candidate_hash = _hash_api_key(raw_header)
 
+    # Fold over ALL entries — never short-circuit so the number of configured
+    # kids cannot be inferred from response latency.  hmac.compare_digest
+    # is constant-time; the OR accumulation preserves that property.
+    matched_kid: str | None = None
+    matched = False
     for entry in api_keys:
         # hmac.compare_digest operates on equal-length strings; both are 64
         # lowercase hex chars so the lengths always match.
         if hmac.compare_digest(candidate_hash, entry.sha256_hex):
-            request.state.kid = entry.kid
-            return entry.kid
+            matched_kid = entry.kid
+            matched = True
+
+    if matched and matched_kid is not None:
+        request.state.kid = matched_kid
+        return matched_kid
 
     logger.warning("auth_invalid_key", path=request.url.path)
     raise HTTPException(

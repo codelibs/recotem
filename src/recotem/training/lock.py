@@ -174,16 +174,26 @@ def recipe_lock(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     if sys.platform == "win32":
-        acquired = _try_acquire_windows(lock_path)
-        if not acquired:
+        win_result = _try_acquire_windows(lock_path)
+        if win_result is None:
             if fail_on_busy:
                 raise LockContestedError(
                     f"Recipe lock at {lock_path} is held by another process."
                 )
             yield False
             return
-        # The sentinel file is left on disk intentionally — see module docstring.
-        yield True
+        # win_result is the open fd; keep it open across the yield so the
+        # msvcrt lock is held.  Close in finally to release the lock.
+        try:
+            yield True
+        finally:
+            import msvcrt  # noqa: PLC0415 (Windows only)
+
+            try:
+                msvcrt.locking(win_result, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            os.close(win_result)
         return
 
     # POSIX path via fcntl.flock
@@ -194,7 +204,35 @@ def recipe_lock(
         lock_op |= fcntl.LOCK_NB  # non-blocking
 
     _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY | _O_NOFOLLOW, 0o600)  # noqa: S103 – mode is 0o600 (owner-only); CodeQL false positive (py/world-readable-file)
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY | _O_NOFOLLOW, 0o600)  # noqa: S103 – mode is 0o600 (owner-only); CodeQL false positive (py/world-readable-file)
+    except OSError as _open_exc:
+        # ELOOP: O_NOFOLLOW detected a symlink at the lock path — tampered
+        # sentinel; refuse to acquire and emit a structured warning, then
+        # propagate the OSError.  The caller gets a clear signal that this is
+        # a security anomaly, not ordinary lock contention.
+        if _open_exc.errno == errno.ELOOP:
+            logger.warning(
+                "recipe_lock_unsafe_symlink",
+                lock_path=str(lock_path),
+                advice=(
+                    "Lock path is a symlink — potential symlink-swap attack. "
+                    "Remove the symlink and retry."
+                ),
+            )
+            raise
+        # EACCES / EPERM: lock directory or sentinel has wrong permissions.
+        # Treat as "lock not acquireable" — same semantics as contention.
+        if _open_exc.errno in (errno.EACCES, errno.EPERM):
+            if fail_on_busy:
+                raise LockContestedError(
+                    f"Recipe lock at {lock_path} is not accessible: {_open_exc}"
+                ) from _open_exc
+            yield False
+            return
+        # Any other OSError (ENOSPC, ENAMETOOLONG, EIO, …) is a genuine system
+        # problem — propagate so the caller can map to _EXIT_UNKNOWN.
+        raise
     try:
         try:
             if timeout > 0:
@@ -258,15 +296,36 @@ def recipe_lock(
         os.close(fd)
 
 
-def _try_acquire_windows(lock_path: Path) -> bool:
-    """Best-effort exclusive lock via exclusive file creation on Windows."""
+def _try_acquire_windows(lock_path: Path) -> int | None:
+    """Acquire a per-recipe lock on Windows using msvcrt.locking.
+
+    Opens (or creates) the sentinel file and calls ``msvcrt.LK_NBLCK`` on
+    the first byte to take an exclusive lock.  The sentinel file is
+    intentionally **never deleted** — see the module docstring for the
+    inode-rotation race rationale.
+
+    Returns the open fd (int) when the lock is acquired, or ``None`` when
+    another process holds it.  The caller must keep the fd open across its
+    critical section and close it (releasing the lock) in a ``finally``.
+
+    Note: ``msvcrt.locking`` is host-local and process-scoped.  It does not
+    coordinate writers across machines — use a scheduler-level mutex
+    (e.g. Windows Scheduled Task with ``–ExecutionTimeLimit``) for that.
+    """
+    import msvcrt  # noqa: PLC0415 (Windows only)
+
     try:
         fd = os.open(
             str(lock_path),
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            os.O_CREAT | os.O_WRONLY,
             0o600,  # noqa: S103 – mode is 0o600 (owner-only); CodeQL false positive (py/world-readable-file)
         )
+    except OSError:
+        return None
+    try:
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    except OSError:
+        # Another process holds the lock byte.
         os.close(fd)
-        return True
-    except FileExistsError:
-        return False
+        return None
+    return fd

@@ -10,7 +10,9 @@ Tests:
 from __future__ import annotations
 
 import multiprocessing
+import os
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -705,3 +707,182 @@ def test_system_exit_inside_lock_releases_flock_for_next_process(
         f"Process B must acquire the lock after process A's SystemExit released it; "
         f"got: {result!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Finding #1: Windows lock — msvcrt.locking approach (tested via monkeypatching)
+# ---------------------------------------------------------------------------
+
+
+def test_windows_lock_acquired_and_released(tmp_path: Path, monkeypatch) -> None:
+    """On a simulated Windows environment, the lock is acquired (yields True)
+    and the fd is closed (lock released) on context exit.
+
+    Uses monkeypatching so this test runs on POSIX CI without a real Windows
+    msvcrt module.
+    """
+    _closed: list[int] = []
+    sentinel_fd = 42
+
+    # Fake msvcrt module
+    unlocked_fds: list[int] = []
+    fake_msvcrt = types.SimpleNamespace(
+        LK_NBLCK=2,
+        LK_UNLCK=0,
+        locking=lambda fd, mode, nbytes: unlocked_fds.append(fd) if mode == 0 else None,
+    )
+
+    def _fake_os_close(fd):
+        _closed.append(fd)
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(os, "close", _fake_os_close)
+    # Inject fake msvcrt into sys.modules
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+
+    import recotem.training.lock as lock_mod
+
+    # Patch _try_acquire_windows to return the sentinel fd directly (simulating
+    # a successful msvcrt.LK_NBLCK acquisition without touching real file I/O).
+    monkeypatch.setattr(lock_mod, "_try_acquire_windows", lambda _path: sentinel_fd)
+
+    output_path = tmp_path / "win_model.recotem"
+    # Ensure parent dir exists (recipe_lock does this, but parent is tmp_path which exists).
+
+    with lock_mod.recipe_lock(output_path) as acquired:
+        assert acquired is True
+        # fd must be open during the context
+        assert sentinel_fd not in _closed
+
+    # After context exit, fd must be closed (lock released)
+    assert sentinel_fd in _closed
+
+
+def test_windows_lock_contention_fail_on_busy_false(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """On simulated Windows, when _try_acquire_windows returns None (contended),
+    recipe_lock yields False when fail_on_busy=False."""
+    import recotem.training.lock as lock_mod
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(lock_mod, "_try_acquire_windows", lambda _path: None)
+
+    output_path = tmp_path / "win_contest.recotem"
+    with lock_mod.recipe_lock(output_path, fail_on_busy=False) as acquired:
+        assert acquired is False
+
+
+def test_windows_lock_contention_fail_on_busy_true(tmp_path: Path, monkeypatch) -> None:
+    """On simulated Windows, when _try_acquire_windows returns None (contended),
+    recipe_lock raises LockContestedError when fail_on_busy=True."""
+    import recotem.training.lock as lock_mod
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(lock_mod, "_try_acquire_windows", lambda _path: None)
+
+    output_path = tmp_path / "win_fail_busy.recotem"
+    with pytest.raises(LockContestedError):
+        with lock_mod.recipe_lock(output_path, fail_on_busy=True):
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Finding #2: os.open failure mapping (EACCES → LockContestedError or yield False)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_osopen_eacces_fail_on_busy_true_raises_lock_contested(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When os.open raises EACCES (permission denied on lock dir/file),
+    recipe_lock must raise LockContestedError when fail_on_busy=True.
+    Must NOT propagate as raw OSError or map to _EXIT_UNKNOWN.
+    """
+    import errno as _errno
+
+    output_path = tmp_path / "eacces_model.recotem"
+
+    original_os_open = os.open
+
+    def _fake_os_open(path, flags, mode=0o600):
+        if "lock" in str(path):
+            raise PermissionError(_errno.EACCES, "Permission denied")
+        return original_os_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", _fake_os_open)
+
+    with pytest.raises(LockContestedError):
+        with recipe_lock(output_path, fail_on_busy=True):
+            pass
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_osopen_eacces_fail_on_busy_false_yields_false(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When os.open raises EACCES and fail_on_busy=False, recipe_lock yields False."""
+    import errno as _errno
+
+    output_path = tmp_path / "eacces_yieldsfalse.recotem"
+
+    original_os_open = os.open
+
+    def _fake_os_open(path, flags, mode=0o600):
+        if "lock" in str(path):
+            raise PermissionError(_errno.EACCES, "Permission denied")
+        return original_os_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", _fake_os_open)
+
+    with recipe_lock(output_path, fail_on_busy=False) as acquired:
+        assert acquired is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_osopen_enospc_propagates_as_oserror(tmp_path: Path, monkeypatch) -> None:
+    """When os.open raises ENOSPC (genuine system problem), recipe_lock must
+    propagate it as OSError (not silently convert to lock-contested or yield False)."""
+    import errno as _errno
+
+    output_path = tmp_path / "enospc_model.recotem"
+
+    original_os_open = os.open
+
+    def _fake_os_open(path, flags, mode=0o600):
+        if "lock" in str(path):
+            raise OSError(_errno.ENOSPC, "No space left on device")
+        return original_os_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", _fake_os_open)
+
+    with pytest.raises(OSError) as exc_info:
+        with recipe_lock(output_path):
+            pass
+
+    assert exc_info.value.errno == _errno.ENOSPC
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_osopen_eloop_emits_warning_and_propagates(tmp_path: Path) -> None:
+    """When os.open raises ELOOP (symlink at lock path), recipe_lock must emit
+    a structured recipe_lock_unsafe_symlink warning and propagate the OSError."""
+    import errno as _errno
+
+    import structlog.testing
+
+    output_path = tmp_path / "eloop_model.recotem"
+    lock_path = tmp_path / "eloop_model.recotem.lock"
+    target = tmp_path / "target.txt"
+    target.write_text("target")
+    lock_path.symlink_to(target)
+
+    with structlog.testing.capture_logs() as captured:
+        with pytest.raises(OSError) as exc_info:
+            with recipe_lock(output_path):
+                pass
+
+    assert exc_info.value.errno == _errno.ELOOP
+    warnings = [e for e in captured if e.get("event") == "recipe_lock_unsafe_symlink"]
+    assert warnings, "ELOOP on lock path must emit recipe_lock_unsafe_symlink warning"

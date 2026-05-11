@@ -12,7 +12,11 @@ from pathlib import Path
 import pytest
 
 from recotem.recipe.errors import RecipeError
-from recotem.recipe.loader import load_recipe, load_recipes_directory
+from recotem.recipe.loader import (
+    load_recipe,
+    load_recipes_directory,
+    load_recipes_directory_lenient,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1789,3 +1793,166 @@ def test_load_recipe_memory_error_propagates_unwrapped(
 
     with pytest.raises(MemoryError):
         load_recipe(p)
+
+
+# ---------------------------------------------------------------------------
+# Fix-1: no_expand_fields case-insensitive matching
+# ---------------------------------------------------------------------------
+
+
+def test_no_expand_fields_uppercase_declaration_blocks_expansion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plugin that declares no_expand_fields={'SQL'} (uppercase) must still
+    block env-var expansion in a YAML key 'sql:' (lowercase) and vice versa.
+
+    This exercises the case-normalisation fix in _expand_node: both the
+    combined_no_expand set and the YAML dict key are lowercased before
+    comparison, so mismatched case can no longer bypass the injection guard.
+    """
+    from unittest.mock import patch
+
+    from pydantic import BaseModel
+
+    sql_ref = "${RECOTEM_RECIPE_INJECT}"
+
+    class _UpperSqlConfig(BaseModel, extra="ignore"):
+        type: str = "test_upper_sql"
+        sql: str = ""
+
+    class _UpperSqlSource:
+        type_name: str = "test_upper_sql"
+        Config = _UpperSqlConfig
+        extras_required: list = []
+        # Uppercase declaration — the gap that existed before the fix.
+        no_expand_fields: frozenset = frozenset({"SQL"})
+
+        def __init__(self, config: _UpperSqlConfig) -> None:  # pragma: no cover
+            self.config = config
+
+        def fetch(self, ctx):  # pragma: no cover
+            raise NotImplementedError
+
+    monkeypatch.setenv("RECOTEM_RECIPE_INJECT", "INJECTED")
+
+    content = f"""\
+name: upper_no_expand
+source:
+  type: test_upper_sql
+  sql: "SELECT * FROM {sql_ref}"
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {tmp_path / "upper_no_expand.recotem"}
+"""
+    p = _write_recipe(tmp_path, content)
+
+    with patch(
+        "recotem.datasource.registry.get_source_class", return_value=_UpperSqlSource
+    ):
+        try:
+            recipe = load_recipe(p)
+            raw_sql = getattr(recipe.source, "sql", None)
+            if raw_sql is not None:
+                assert "INJECTED" not in raw_sql, (
+                    "uppercase no_expand_fields declaration must still block expansion; "
+                    f"found injected value in: {raw_sql!r}"
+                )
+                assert sql_ref in raw_sql, (
+                    f"literal reference must be preserved; got: {raw_sql!r}"
+                )
+        except RecipeError as exc:
+            # Schema/type errors are OK; expansion-related blacklist errors are not.
+            assert "blacklisted" not in str(exc), (
+                f"no_expand_fields (uppercase) must prevent blacklist firing; got: {exc}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Fix-5: load_recipes_directory_lenient — per-file error, no full abort
+# ---------------------------------------------------------------------------
+
+
+def test_load_recipes_directory_lenient_continues_after_bad_file(
+    tmp_path: Path,
+) -> None:
+    """load_recipes_directory_lenient returns all files; bad ones have exc, not None recipe."""
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    # Good recipe
+    good_content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="good_recipe",
+        output_path=str(tmp_path / "good.recotem"),
+    )
+    (recipes_dir / "a_good.yaml").write_text(good_content)
+
+    # Bad YAML (syntax error)
+    (recipes_dir / "b_bad.yaml").write_text("name: bad\n  broken: yaml: here:\n")
+
+    results = load_recipes_directory_lenient(recipes_dir)
+
+    assert len(results) == 2
+
+    # Results are sorted by filename: a_good, b_bad
+    good_path, good_recipe, good_err = results[0]
+    bad_path, bad_recipe, bad_err = results[1]
+
+    assert good_path.name == "a_good.yaml"
+    assert good_recipe is not None
+    assert good_err is None
+    assert good_recipe.name == "good_recipe"
+
+    assert bad_path.name == "b_bad.yaml"
+    assert bad_recipe is None
+    assert bad_err is not None
+
+
+def test_load_recipes_directory_lenient_duplicate_name_is_per_file_error(
+    tmp_path: Path,
+) -> None:
+    """Duplicate recipe names are reported as per-file errors, not a full abort."""
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    for i, fname in enumerate(["first.yaml", "second.yaml"]):
+        content = MINIMAL_RECIPE_TEMPLATE.format(
+            name="same_name",
+            output_path=str(tmp_path / f"model_{i}.recotem"),
+        )
+        (recipes_dir / fname).write_text(content)
+
+    results = load_recipes_directory_lenient(recipes_dir)
+    assert len(results) == 2
+
+    # First file succeeds; second fails with a duplicate error.
+    _, recipe0, err0 = results[0]
+    _, recipe1, err1 = results[1]
+
+    assert recipe0 is not None and err0 is None
+    assert recipe1 is None and err1 is not None
+    assert "Duplicate" in str(err1) or "duplicate" in str(err1)
+
+
+def test_load_recipes_directory_lenient_all_good(tmp_path: Path) -> None:
+    """When all files are valid, lenient loader returns the same as strict."""
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    names = ["alpha", "beta", "gamma"]
+    for name in names:
+        content = MINIMAL_RECIPE_TEMPLATE.format(
+            name=name,
+            output_path=str(tmp_path / f"{name}.recotem"),
+        )
+        (recipes_dir / f"{name}.yaml").write_text(content)
+
+    results = load_recipes_directory_lenient(recipes_dir)
+    assert len(results) == 3
+    assert all(recipe is not None and err is None for _, recipe, err in results)
+    loaded_names = {recipe.name for _, recipe, err in results if recipe}  # type: ignore[union-attr]
+    assert loaded_names == set(names)

@@ -514,6 +514,14 @@ class ArtifactWatcher(threading.Thread):
                 # sidecar pointer file so the watcher can skip the full
                 # artifact stat on the *resolved* target when neither the
                 # pointer file nor the sidecar have changed (P-4).
+                #
+                # Always record the most-recently seen marker so that on
+                # object stores with unstable ETags, a successful stat that
+                # compares equal is still acknowledged.  Without this, a
+                # watcher that receives a transiently different ETag on one
+                # poll and then returns to the original ETag on the next
+                # poll would re-trigger a full reload unnecessarily.
+                state.last_marker = marker
                 sidecar_changed = _check_sidecar_changed(state)
                 if not sidecar_changed:
                     continue
@@ -612,13 +620,12 @@ class ArtifactWatcher(threading.Thread):
             if marker is not None
             else _stat_marker(artifact_path, recipe_name=name)
         )
-        self._registry.replace(name, entry)
-        # Update the loaded marker through the registry lock so the mutation
-        # is serialised with respect to any concurrent readers.  The entry is
-        # registered first (replace) so update_loaded_marker will always find
-        # it; readers that already have a reference to entry see a consistent
-        # (loaded, error) pair regardless of whether the marker is yet set.
-        self._registry.update_loaded_marker(name, (new_marker, sha256))
+        # Use replace_with_marker to atomically insert the new entry AND set
+        # its _loaded_marker in a single lock acquisition.  A two-step
+        # replace() + update_loaded_marker() would allow readers iterating
+        # list() between the two ops to see a fresh recommender with a stale
+        # _loaded_marker (TOCTOU window).
+        self._registry.replace_with_marker(name, entry, (new_marker, sha256))
         state.last_sha256 = sha256
         state.last_marker = new_marker
         _metrics.set_model_loaded(name, True)

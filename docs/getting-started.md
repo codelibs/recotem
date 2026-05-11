@@ -21,7 +21,7 @@ recipe. From the repo root:
 docker run --rm ghcr.io/codelibs/recotem:latest keygen --type signing --kid dev
 # kid=dev
 # plaintext=<64-char hex>
-# hash=sha256:<64-char hex>
+# fingerprint=<8-char hex>  # matches /security.posture log; NOT for config
 # env_entry=RECOTEM_SIGNING_KEYS=dev:<plaintext>
 
 docker run --rm ghcr.io/codelibs/recotem:latest keygen --type api --kid dev

@@ -229,7 +229,13 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
                 timeout=watcher_join_timeout,
             )
         if banner_task is not None:
+            import asyncio
+
             banner_task.cancel()
+            try:
+                await banner_task
+            except asyncio.CancelledError:
+                pass
         logger.info(
             "serve_shutdown",
             drain_seconds=serve_config.drain_seconds,
@@ -272,11 +278,6 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         metadata_field_deny=serve_config.metadata_field_deny,
     )
     app.include_router(router)
-
-    if serve_config.insecure_no_auth:
-        _emit_insecure_banner(serve_config)
-    if serve_config.dev_allow_unsigned:
-        _emit_dev_unsigned_banner(serve_config)
 
     return app
 

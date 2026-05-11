@@ -479,3 +479,86 @@ def test_registry_entry_metadata_index_defaults_to_none() -> None:
     assert entry.metadata_index is None, (
         "metadata_index must default to None when not set"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: replace_with_marker — atomic entry + marker in one lock
+# ---------------------------------------------------------------------------
+
+
+def test_replace_with_marker_sets_entry_and_marker_atomically() -> None:
+    """replace_with_marker must set the entry AND its _loaded_marker in a
+    single lock acquisition, so readers can never see a fresh recommender
+    with a stale (None, '') _loaded_marker.
+    """
+    from unittest.mock import MagicMock
+
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+
+    reg = ModelRegistry()
+    old = _make_entry("r")
+    reg.replace("r", old)
+
+    new_entry = ModelEntry(
+        name="r",
+        recommender=MagicMock(name="new_recommender"),
+        header={"best_class": "TopPop"},
+        kid="active",
+    )
+    marker = ("etag-v2", "abc123" * 10)
+
+    reg.replace_with_marker("r", new_entry, marker)
+
+    result = reg.get("r")
+    assert result is new_entry, "replace_with_marker must insert the new entry"
+    assert result._loaded_marker == marker, (
+        f"replace_with_marker must set _loaded_marker atomically; "
+        f"got {result._loaded_marker!r}"
+    )
+
+
+def test_replace_with_marker_no_stale_marker_window() -> None:
+    """Readers iterating list() after replace_with_marker must always see
+    the new entry with the new marker — never the new entry with the old marker.
+    """
+    import threading
+
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+
+    reg = ModelRegistry()
+    initial_entry = _make_entry("r")
+    initial_entry._loaded_marker = ("v1", "sha1" * 16)
+    reg.replace("r", initial_entry)
+
+    stale_marker_observed: list[bool] = []
+
+    def _reader() -> None:
+        for _ in range(200):
+            entries = reg.list()
+            for e in entries:
+                # If _loaded_marker is still the default (None, ""), the
+                # replace and the marker assignment haven't happened atomically.
+                if e._loaded_marker == (None, ""):
+                    stale_marker_observed.append(True)
+
+    new_entry = ModelEntry(
+        name="r",
+        recommender=MagicMock(name="new"),
+        header={"best_class": "TopPop"},
+        kid="active2",
+    )
+    new_marker = ("v2", "sha2" * 16)
+
+    reader_thread = threading.Thread(target=_reader)
+    reader_thread.start()
+
+    # Perform the atomic replace while reader is running
+    for _ in range(50):
+        reg.replace_with_marker("r", new_entry, new_marker)
+
+    reader_thread.join(timeout=5.0)
+
+    assert not stale_marker_observed, (
+        "replace_with_marker must be atomic: no reader should see (None, '') "
+        "marker after the call — that would indicate a non-atomic two-step update"
+    )

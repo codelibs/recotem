@@ -652,3 +652,110 @@ def test_oversized_header_dummy_uses_max_len_not_min_len() -> None:
         f"got len={len(dummy)}: first 20 chars={dummy[:20]!r}..."
     )
     assert dummy == "\x00" * _API_KEY_MAX_LEN, "Dummy value must consist of null bytes"
+
+
+# ---------------------------------------------------------------------------
+# Timing equalisation: all three rejection branches use _API_KEY_MAX_LEN dummy
+# ---------------------------------------------------------------------------
+
+
+def test_all_rejection_branches_use_same_canonical_dummy_length() -> None:
+    """All three rejection branches (missing-header, oversized, short-key) must
+    call ``_hash_api_key`` with exactly ``_API_KEY_MAX_LEN`` null bytes.
+
+    This asserts that the timing oracle from unequal dummy lengths is closed:
+    previously the missing-header branch used ``_API_KEY_MIN_LEN`` (32) bytes
+    and the short-key branch used ``max(min_len, min(len, max_len))`` which
+    could also be as small as 32 bytes — creating a measurable latency
+    difference versus the ``_API_KEY_MAX_LEN`` (256) bytes used on the
+    oversized branch and the real hashing path.
+
+    Strategy: monkeypatch ``_hash_api_key`` with a recorder and assert that
+    the argument passed on each rejection branch has exactly ``_API_KEY_MAX_LEN``
+    characters of null bytes.
+    """
+    from unittest.mock import patch
+
+    import recotem.serving.auth as auth_module
+    from recotem.serving.auth import _API_KEY_MAX_LEN, _API_KEY_MIN_LEN, verify_api_key
+
+    entry = _make_entry("k1", "canonical_len_test_key_32_bytes!")
+
+    scenarios: dict[str, str | None] = {
+        "missing": None,
+        "short": "x" * (_API_KEY_MIN_LEN - 1),
+        "oversized": "Y" * (_API_KEY_MAX_LEN + 10),
+    }
+
+    canonical_dummy = "\x00" * _API_KEY_MAX_LEN
+
+    def _check_branch(branch_name: str, api_key: str | None) -> None:
+        request = _make_request(api_key)
+        called_with: list[str] = []
+        _real_hash = auth_module._hash_api_key
+
+        def _recording_hash(value: str) -> str:
+            called_with.append(value)
+            return _real_hash(value)
+
+        with patch.object(auth_module, "_hash_api_key", side_effect=_recording_hash):
+            with pytest.raises(HTTPException):
+                verify_api_key(request, [entry])
+
+        assert len(called_with) == 1, (
+            f"[{branch_name}] Expected exactly 1 _hash_api_key call, "
+            f"got {len(called_with)}"
+        )
+        assert called_with[0] == canonical_dummy, (
+            f"[{branch_name}] Expected dummy of {_API_KEY_MAX_LEN} null bytes, "
+            f"got len={len(called_with[0])}: {called_with[0][:20]!r}..."
+        )
+
+    for branch_name, api_key in scenarios.items():
+        _check_branch(branch_name, api_key)
+
+
+# ---------------------------------------------------------------------------
+# kid-loop full-scan: no early exit on match (prevents kid-ordering timing leak)
+# ---------------------------------------------------------------------------
+
+
+def test_kid_loop_compares_all_entries_even_after_first_match() -> None:
+    """The verify loop must not short-circuit on the first matching entry.
+
+    Early-exit (returning on first ``compare_digest`` match) leaks information
+    about kid ordering — requests that match the first configured key return
+    faster than requests matching the last key.  The fixed implementation folds
+    over ALL entries and only returns after the loop.
+
+    This test configures three entries, authenticates with the FIRST one, and
+    asserts that ``hmac.compare_digest`` is invoked exactly three times (once
+    per entry), proving the loop does not short-circuit.
+    """
+    import hmac as _hmac
+    from unittest.mock import patch
+
+    from recotem.serving.auth import verify_api_key
+
+    e1 = _make_entry("first", "key_number_one_padding_32_bytes!")
+    e2 = _make_entry("second", "key_number_two_padding_32_bytes!")
+    e3 = _make_entry("third", "key_number_three_32_bytes_exact!")
+
+    # Authenticate with the FIRST entry's plaintext — early-exit would stop here.
+    request = _make_request("key_number_one_padding_32_bytes!")
+
+    compare_calls: list[tuple[str, str]] = []
+    _real_compare = _hmac.compare_digest
+
+    def _recording_compare(a: str, b: str) -> bool:
+        compare_calls.append((a, b))
+        return _real_compare(a, b)
+
+    with patch.object(_hmac, "compare_digest", side_effect=_recording_compare):
+        kid = verify_api_key(request, [e1, e2, e3])
+
+    assert kid == "first"
+    assert len(compare_calls) == 3, (
+        f"Expected compare_digest called 3 times (once per entry, no early exit), "
+        f"got {len(compare_calls)} calls."
+    )

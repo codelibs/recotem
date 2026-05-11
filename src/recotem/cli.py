@@ -481,6 +481,41 @@ def inspect(
         fs, resolved_path = fsspec.core.url_to_fs(str(artifact))
         with fs.open(resolved_path, "rb") as fh:
             data = fh.read(read_cap + 1)
+    except ImportError as exc:
+        # A missing optional fsspec backend (gcsfs, s3fs, adlfs, …) raises
+        # ImportError when url_to_fs resolves the scheme.  Surface a targeted
+        # install hint so the operator can fix it without deciphering a stack trace.
+        # Note: when *artifact* is a Typer Path argument, Path() normalizes
+        # "gs://bucket/key" to "gs:/bucket/key" (collapses double-slash), so
+        # we must match on the leading "scheme:/" prefix, not "scheme://".
+        artifact_str = str(artifact)
+        _SCHEME_EXTRA: dict[str, str] = {
+            "gs": "gcs",
+            "gcs": "gcs",
+            "s3": "s3",
+            "s3a": "s3",
+            "az": "azure",
+            "abfs": "azure",
+            "abfss": "azure",
+        }
+        # Try both "scheme://" (original) and "scheme:/" (Path-normalized) forms.
+        extra = None
+        for prefix, extra_name in _SCHEME_EXTRA.items():
+            if artifact_str.lower().startswith(
+                f"{prefix}://"
+            ) or artifact_str.lower().startswith(f"{prefix}:/"):
+                extra = extra_name
+                break
+        if extra:
+            hint = f"pip install recotem[{extra}]"
+        else:
+            hint = "pip install the required fsspec backend for your storage scheme"
+        _exit(
+            _EXIT_ARTIFACT,
+            f"Cannot open artifact '{artifact}': missing optional dependency "
+            f"({type(exc).__name__}: {exc}). "
+            f"Hint: {hint}",
+        )
     except OSError as exc:
         _exit(_EXIT_ARTIFACT, f"Cannot read artifact '{artifact}': {exc}")
     except (MemoryError, RecursionError):

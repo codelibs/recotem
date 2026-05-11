@@ -55,6 +55,9 @@ case $EXIT in
   3) echo "train: DataSourceError (transient?)" >&2; exit $EXIT ;;
   4) echo "train: TrainingError (data or tuning issue)" >&2; exit $EXIT ;;
   5) echo "train: ArtifactError (check RECOTEM_SIGNING_KEYS)" >&2; exit $EXIT ;;
+  6) echo "train: lock contested — another process holds the lock; retry later" >&2; exit $EXIT ;;
+  7) echo "train: HTTP fetch error — network issue or sha256 mismatch; alert ops" >&2; exit $EXIT ;;
+  8) echo "train: config error — check RECOTEM_SIGNING_KEYS and env vars; alert ops, do not retry" >&2; exit $EXIT ;;
   *) echo "train: unexpected error (exit $EXIT)" >&2; exit $EXIT ;;
 esac
 ```

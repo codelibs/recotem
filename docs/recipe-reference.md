@@ -251,7 +251,7 @@ Local paths are resolved to absolute. If `RECOTEM_ARTIFACT_ROOT` is set,
 
 Syntax: `${RECOTEM_RECIPE_VAR}`. Only variables matching the prefix `RECOTEM_RECIPE_*` are expanded. Matching is case-insensitive (the *upper-cased* name is checked against the prefix and blacklist). Additional values can be injected without exporting to the shell environment using `recotem train --env-var KEY=VALUE` (repeatable). The `KEY` must still start with `RECOTEM_RECIPE_` and pass the blacklist check. Example: `recotem train recipe.yaml --env-var RECOTEM_RECIPE_DATE=20260501`.
 
-Blacklisted (never expanded regardless of prefix): `RECOTEM_SIGNING_KEYS`, `RECOTEM_API_KEYS`, and any name matching `*_SECRET*`, `*_PASSWORD*`, `*_TOKEN*`, `*_KEY*`, `AWS_*`, `GOOGLE_*`, `GCP_*`.
+Blacklisted (never expanded regardless of prefix): exact names `RECOTEM_SIGNING_KEYS` and `RECOTEM_API_KEYS`; names starting with `AWS_`, `GCP_`, `GOOGLE_`, or `AZURE_`; and any name containing the substrings `SECRET`, `PASSWORD`, `PASSWD`, `TOKEN`, `KEY`, `AUTH`, `BEARER`, `CRED`, or `PRIVATE` (all comparisons case-insensitive).
 
 The `*_KEY*` pattern is intentionally broad — any variable whose name contains `_KEY_` (e.g. `RECOTEM_RECIPE_PARTITION_KEY`) is rejected. Use a non-`_KEY*` name instead (e.g. `RECOTEM_RECIPE_PARTITION_COLUMN`).
 

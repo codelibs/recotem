@@ -251,10 +251,18 @@ explicitly deny-listed as a defence-in-depth trip-wire independent of
 the prefix allow-list:
 
 - `numpy.testing`, `numpy.distutils`, `numpy.f2py`, `numpy.ctypeslib`,
-  `numpy.lib`, `numpy.compat`
+  `numpy.lib`, `numpy.compat`, `numpy.random`, `numpy._core._exceptions`
 - `scipy.sparse.linalg`, `scipy.sparse.tests`, `scipy.sparse.csgraph`
 
-Submodules not on any prefix (e.g. `numpy.random`, `numpy.linalg`,
+`numpy.random` is denied defensively: RNG state objects are not needed in
+Recotem artifacts, and a future numpy release could introduce a
+reduce-callable in that module with side-effects. Any legitimate RNG class
+required by a future irspack version should be added by exact FQCN to the
+hand-enumerated allow-list rather than widening the deny-list.
+`numpy._core._exceptions` is denied to shrink the internal attack surface
+exposed through the broad `numpy._core.*` prefix allow-list.
+
+Submodules not on any prefix (e.g. `numpy.linalg`,
 `numpy.fft`, `numpy.polynomial`) are blocked implicitly — they are neither
 on the FQCN list nor the prefix allow-list, so they never reach the
 deny-list check.
@@ -297,21 +305,15 @@ Grant `s3:PutObject` only to the train role, not the serve role.
 
 ## Recipe env-var expansion blacklist
 
-Only variables matching `RECOTEM_RECIPE_*` are candidates for `${...}` expansion. A secondary blacklist blocks sensitive names even if they satisfy the prefix. Blacklisted patterns (case-insensitive):
+Only variables matching `RECOTEM_RECIPE_*` are candidates for `${...}` expansion. A secondary blacklist blocks sensitive names even if they satisfy the prefix. Rules are checked in order — first match wins:
 
-```
-RECOTEM_SIGNING_KEY
-RECOTEM_API_KEYS
-*_SECRET*
-*_PASSWORD*
-*_TOKEN*
-*_KEY*
-AWS_*
-GOOGLE_*
-GCP_*
-```
+| Rule | Patterns (case-insensitive) |
+|------|----------------------------|
+| Exact match | `RECOTEM_SIGNING_KEYS`, `RECOTEM_API_KEYS` |
+| Prefix match | `AWS_*`, `GCP_*`, `GOOGLE_*`, `AZURE_*` |
+| Substring match | `*SECRET*`, `*PASSWORD*`, `*PASSWD*`, `*TOKEN*`, `*KEY*`, `*AUTH*`, `*BEARER*`, `*CRED*`, `*PRIVATE*` |
 
-The `*_KEY*` pattern is intentionally broad. Any `RECOTEM_RECIPE_*` variable whose name contains `_KEY` — such as `RECOTEM_RECIPE_PARTITION_KEY` — is rejected. Use a name that avoids `_KEY*` (e.g. `RECOTEM_RECIPE_PARTITION_COLUMN`). A blacklisted reference raises `RecipeError` (exit 2) and the error message names the variable but never includes its value.
+The `*KEY*` substring is intentionally broad. Any `RECOTEM_RECIPE_*` variable whose name contains `KEY` — such as `RECOTEM_RECIPE_PARTITION_KEY` — is rejected. Use a name that avoids `KEY` (e.g. `RECOTEM_RECIPE_PARTITION_COLUMN`). A blacklisted reference raises `RecipeError` (exit 2) and the error message names the variable but never includes its value.
 
 **Operational hardening.** The blacklist is a _secondary_ defence that catches accidental name collisions. The _primary_ safety property is operational: **never store secrets in `RECOTEM_RECIPE_*` environment variables.** The `RECOTEM_RECIPE_` prefix should be reserved for non-sensitive configuration values (dataset names, date ranges, partition columns, feature flags). If a secret were placed under this prefix with a name that does not match any blacklisted pattern (e.g. `RECOTEM_RECIPE_DB_ENDPOINT`), the blacklist would not catch it. Treat the prefix as a namespace for recipe parameterisation, not as a secrets namespace.
 
@@ -384,10 +386,15 @@ cookie
 recotem_signing_key
 recotem_signing_keys
 recotem_api_keys
-*_secret*
-*_password*
-*_token*
-*_key*
+*secret*
+*password*
+*passwd*
+*token*
+*key*  (but NOT *keys* — plural avoids false-positives on list fields)
+*auth*
+*bearer*
+*cred*
+*private*
 aws_*
 gcp_*
 google_*

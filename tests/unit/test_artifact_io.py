@@ -544,6 +544,99 @@ def test_atomic_write_unlinks_tmp_on_systemexit(
 # ---------------------------------------------------------------------------
 
 
+def test_write_atomic_non_local_object_store_roundtrip() -> None:
+    """_write_atomic with is_local=False exercises the object-store path.
+
+    Uses fsspec's in-memory filesystem (memory://) so no real object store is
+    needed.  Verifies that:
+    1. Bytes written are readable back unchanged (round-trip).
+    2. The non-local code path (fs.open write) is exercised — no os.replace,
+       no .tmp file, no RECOTEM_ARTIFACT_ROOT containment check.
+    """
+    import fsspec
+
+    from recotem.artifact.io import _write_atomic
+
+    # Use a fresh in-memory filesystem for isolation between test runs.
+    mem_fs = fsspec.filesystem("memory")
+
+    dest = "/test_write_atomic_nonlocal/artifact.recotem"
+    data = b"non-local object-store artifact bytes for roundtrip"
+
+    # Exercise the is_local=False branch explicitly.
+    _write_atomic(mem_fs, dest, data, is_local=False)
+
+    # Read back and verify round-trip.
+    with mem_fs.open(dest, "rb") as fh:
+        read_back = fh.read()
+
+    assert read_back == data, (
+        f"Round-trip mismatch: written {len(data)} bytes, "
+        f"read back {len(read_back)} bytes"
+    )
+
+    # Clean up to avoid polluting the global memory namespace.
+    mem_fs.rm(dest)
+
+
+def test_write_atomic_non_local_pointer_file_roundtrip() -> None:
+    """write_artifact with a memory:// path exercises the is_local=False branch
+    end-to-end in append_sha mode, verifying the pointer-file pattern.
+
+    The pointer file must contain the sha-suffixed artifact name, and the
+    sha-suffixed artifact must be readable and HMAC-verifiable.
+    """
+    import fsspec
+
+    from recotem.artifact.io import write_artifact
+
+    mem_fs = fsspec.filesystem("memory")
+
+    # We need a KeyRing to call write_artifact.
+    kr = _make_keyring()
+
+    # Use memory:// URLs so fsspec routes through MemoryFileSystem (is_local=False).
+    dest_url = "memory:///nonlocal_ptr_test/model.recotem"
+
+    # write_artifact calls fsspec.core.url_to_fs internally, which will return
+    # a MemoryFileSystem for "memory://" — confirming is_local=False path.
+    final_url = write_artifact(
+        payload_obj={"k": "v"},
+        header_dict={"recipe_name": "nonlocal_ptr"},
+        key_ring=kr,
+        fs_path=dest_url,
+        versioning="append_sha",
+    )
+
+    # The sha-suffixed artifact must be readable via fsspec.
+    # Strip the "memory://" scheme prefix to get the raw path.
+    sha_path = (
+        final_url[len("memory://") :]
+        if final_url.startswith("memory://")
+        else final_url
+    )
+    if not sha_path.startswith("/"):
+        sha_path = "/" + sha_path
+    with mem_fs.open(sha_path, "rb") as fh:
+        artifact_bytes = fh.read()
+
+    assert len(artifact_bytes) > 0, "sha-suffixed artifact must be non-empty"
+
+    # The pointer file must exist and contain the sha-suffixed basename.
+    ptr_path = "/nonlocal_ptr_test/model.recotem"
+    with mem_fs.open(ptr_path, "rb") as fh:
+        ptr_content = fh.read().decode("utf-8").strip()
+
+    assert ptr_content.endswith(".recotem"), (
+        f"Pointer file must reference a .recotem artifact; got: {ptr_content!r}"
+    )
+    import re
+
+    assert re.match(r"^[A-Za-z0-9_.-]+\.recotem$", ptr_content), (
+        f"Pointer content must match pointer regex; got: {ptr_content!r}"
+    )
+
+
 def test_append_sha_sha_suffixed_written_before_pointer(tmp_path: Path) -> None:
     """In append_sha mode, the sha-suffixed artifact must be durably written
     before the pointer file is updated.

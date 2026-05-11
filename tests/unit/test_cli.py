@@ -1897,3 +1897,151 @@ def test_inspect_malformed_signing_keys_exits_nonzero(
     assert "malformed" in combined.lower() or "invalid" in combined.lower(), (
         f"Error output must mention malformed/invalid format; got {combined!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Finding #3: SystemExit misclassification — documented behavior verification
+# ---------------------------------------------------------------------------
+# The current code honors SystemExit(0) as success (Literal int 0 is the only
+# success sentinel per the module docstring).  SystemExit with non-int or
+# unknown codes maps to _EXIT_UNKNOWN.  These tests verify the documented
+# behavior is preserved and not accidentally changed.
+
+
+def test_train_systemexit_with_non_recotem_int_code_becomes_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SystemExit with an integer code that is not a documented _EXIT_* constant
+    (e.g. 42) must map to _EXIT_UNKNOWN (1), not be passed through to the shell.
+
+    This prevents a library call inside run_training from injecting an arbitrary
+    shell exit code.  Only the documented range (0, 2-8) is passed through.
+    _EXIT_UNKNOWN (1) is not in the pass-through set either — it becomes 1 via
+    the fallback, which is the same value, but the contract is that only the
+    documented constants are honored.
+    """
+    from unittest.mock import patch
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "se_arbitrary")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    def _raises_systemexit_42(*_a, **_kw):
+        raise SystemExit(42)
+
+    with patch(
+        "recotem.training.pipeline.run_training", side_effect=_raises_systemexit_42
+    ):
+        result = runner.invoke(app, ["train", str(yaml_path)])
+
+    # 42 is not a documented _EXIT_* constant; must become _EXIT_UNKNOWN (1).
+    assert result.exit_code == 1, (
+        f"SystemExit(42) must map to _EXIT_UNKNOWN (1); got {result.exit_code}"
+    )
+
+
+def test_train_systemexit_with_str_code_becomes_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SystemExit with a string code must map to _EXIT_UNKNOWN (1).
+
+    String codes fail the isinstance(code, int) check and fall through to the
+    _EXIT_UNKNOWN branch.
+    """
+    from unittest.mock import patch
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "se_str")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    def _raises_systemexit_str(*_a, **_kw):
+        raise SystemExit("error message")
+
+    with patch(
+        "recotem.training.pipeline.run_training", side_effect=_raises_systemexit_str
+    ):
+        result = runner.invoke(app, ["train", str(yaml_path)])
+
+    assert result.exit_code == 1, (
+        f"SystemExit('error message') must map to _EXIT_UNKNOWN (1); "
+        f"got {result.exit_code}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finding #4: inspect masks missing-extra ImportError
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_importerror_gcs_surfaces_install_hint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When fsspec.core.url_to_fs raises ImportError (missing gcsfs backend),
+    inspect must surface a 'pip install recotem[gcs]' hint, not a generic error.
+    """
+    from unittest.mock import patch
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    # Simulate a gs:// path so the scheme hint fires
+    artifact_gs = "gs://my-bucket/model.recotem"
+
+    with patch(
+        "fsspec.core.url_to_fs",
+        side_effect=ImportError("No module named 'gcsfs'"),
+    ):
+        result = runner.invoke(app, ["inspect", artifact_gs])
+
+    # Must exit non-zero (artifact error code 5)
+    assert result.exit_code == 5, (
+        f"ImportError from missing gcsfs must exit 5; got {result.exit_code}"
+    )
+    combined = result.stdout + (result.stderr or "")
+    assert "recotem[gcs]" in combined, (
+        f"Error message must contain 'recotem[gcs]' install hint; got: {combined!r}"
+    )
+
+
+def test_inspect_importerror_s3_surfaces_install_hint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When fsspec.core.url_to_fs raises ImportError for s3, inspect surfaces
+    a 'pip install recotem[s3]' hint."""
+    from unittest.mock import patch
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    artifact_s3 = "s3://my-bucket/model.recotem"
+
+    with patch(
+        "fsspec.core.url_to_fs",
+        side_effect=ImportError("No module named 's3fs'"),
+    ):
+        result = runner.invoke(app, ["inspect", artifact_s3])
+
+    assert result.exit_code == 5
+    combined = result.stdout + (result.stderr or "")
+    assert "recotem[s3]" in combined, (
+        f"Error message must contain 'recotem[s3]' install hint; got: {combined!r}"
+    )
+
+
+def test_inspect_importerror_unknown_scheme_surfaces_generic_hint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When fsspec.core.url_to_fs raises ImportError for an unknown scheme,
+    inspect surfaces a generic install hint (not a scheme-specific one)."""
+    from unittest.mock import patch
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    artifact_ftp = "ftp://host/model.recotem"
+
+    with patch(
+        "fsspec.core.url_to_fs",
+        side_effect=ImportError("No module named 'ftpfs'"),
+    ):
+        result = runner.invoke(app, ["inspect", artifact_ftp])
+
+    assert result.exit_code == 5
+    combined = result.stdout + (result.stderr or "")
+    # Generic hint must mention installing the backend
+    assert "install" in combined.lower(), (
+        f"Error message must contain install hint; got: {combined!r}"
+    )

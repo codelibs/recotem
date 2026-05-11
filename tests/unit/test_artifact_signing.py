@@ -1066,3 +1066,42 @@ def test_is_allowed_deny_takes_precedence_over_exact_allow_list_entry(
     unpickler = SafeUnpickler(io.BytesIO(b""))
     with pytest.raises(ArtifactError, match="not allowed"):
         unpickler.find_class(module, name)
+
+
+# ---------------------------------------------------------------------------
+# Key rotation step 4 — retired kid artifact rejected
+# ---------------------------------------------------------------------------
+
+
+def test_key_rotation_step4_retired_kid_artifact_rejected() -> None:
+    """Validate the four-step key rotation from docs/operations.md.
+
+    Step 1: ring = {A}       — sign artifact with kid=A
+    Step 2: ring = {B, A}    — old artifact still verifiable (A in ring)
+    Step 4: ring = {B, C}    — A retired; same artifact raises ArtifactError
+
+    This confirms that removing a kid from the ring causes verify_hmac to
+    raise with an "unknown kid" message, completing the rotation guarantee.
+    """
+    key_a_hex = "a0" * 32  # 64 hex chars = 32 bytes
+    key_b_hex = "b0" * 32
+    key_c_hex = "c0" * 32
+
+    # Step 1: sign with kid=A.
+    kr_a_only = KeyRing(f"A:{key_a_hex}")
+    kid = "A"
+    kid_bytes = kid.encode("utf-8")
+    header_bytes = b'{"recipe_name":"rotation_step4_test"}'
+    data_bytes = b"artifact_content_bytes"
+    key_a = kr_a_only.get(kid)
+    assert key_a is not None
+    digest_a = compute_hmac(key_a, kid_bytes, header_bytes, data_bytes)
+
+    # Step 2: ring = {B, A} — old artifact must still verify.
+    kr_b_a = KeyRing(f"B:{key_b_hex}", f"A:{key_a_hex}")
+    verify_hmac(kr_b_a, kid, kid_bytes, header_bytes, data_bytes, digest_a)
+
+    # Step 4: ring = {B, C} — kid=A is retired; artifact must be rejected.
+    kr_b_c = KeyRing(f"B:{key_b_hex}", f"C:{key_c_hex}")
+    with pytest.raises(ArtifactError, match="unknown kid"):
+        verify_hmac(kr_b_c, kid, kid_bytes, header_bytes, data_bytes, digest_a)

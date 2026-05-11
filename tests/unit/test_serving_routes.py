@@ -1321,3 +1321,70 @@ def test_predict_metadata_index_missing_item_returns_empty_fields() -> None:
     # No title or extra fields -- only item_id and score.
     assert "title" not in unknown, "Unknown item must not have metadata fields"
     assert "item_id" in unknown and "score" in unknown
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: unbind_contextvars must not wipe upstream middleware bindings
+# ---------------------------------------------------------------------------
+
+
+def test_predict_unbinds_only_handler_keys_not_upstream_context() -> None:
+    """After predict() returns, only the keys it bound (recipe, request_id, kid)
+    must be removed from the structlog context.  Upstream keys set by middleware
+    (e.g. trace_id) must remain intact.
+
+    Pre-fix: `clear_contextvars()` wiped the entire context including upstream
+    bindings.  Fix replaces it with `unbind_contextvars("recipe", "request_id",
+    "kid")` so only handler-owned keys are removed.
+    """
+    import structlog.contextvars
+
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+    from recotem.serving.routes import make_router
+
+    recommender = MagicMock()
+    recommender.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+
+    entry = ModelEntry(
+        name="ctx_recipe",
+        recommender=recommender,
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="active",
+    )
+    registry = ModelRegistry()
+    registry.replace("ctx_recipe", entry)
+
+    router = make_router(registry=registry, api_keys=[])
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    upstream_key_preserved: list[bool] = []
+
+    # Middleware that binds an upstream context key before the route handler runs
+    # and checks it is still present after the handler returns.
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+
+    class _UpstreamMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            structlog.contextvars.bind_contextvars(trace_id="upstream-trace-123")
+            response = await call_next(request)
+            # After the route handler finishes, trace_id must still be in context
+            ctx = structlog.contextvars.get_contextvars()
+            upstream_key_preserved.append("trace_id" in ctx)
+            structlog.contextvars.clear_contextvars()  # cleanup after ourselves
+            return response
+
+    app = FastAPI()
+    app.add_middleware(_UpstreamMiddleware)
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.post("/predict/ctx_recipe", json={"user_id": "user1"})
+    assert response.status_code == 200
+
+    assert upstream_key_preserved, "Middleware dispatch must have run"
+    assert upstream_key_preserved[0], (
+        "predict() must NOT call clear_contextvars() — it must only unbind its "
+        "own keys (recipe, request_id, kid), leaving upstream bindings intact"
+    )

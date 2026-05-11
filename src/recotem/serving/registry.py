@@ -161,6 +161,20 @@ class ModelRegistry:
         with self._lock:
             self._entries[name] = entry
 
+    def replace_with_marker(
+        self, name: str, entry: ModelEntry, marker: tuple[Any, str]
+    ) -> None:
+        """Atomically replace entry AND set its ``_loaded_marker`` in one lock.
+
+        Compared to calling ``replace()`` followed by ``update_loaded_marker()``,
+        this method holds the lock across both mutations so readers iterating
+        ``list()`` between the two ops can never observe a fresh recommender
+        with a stale ``_loaded_marker``.
+        """
+        with self._lock:
+            entry._loaded_marker = marker
+            self._entries[name] = entry
+
     def remove(self, name: str) -> None:
         """Remove the entry for *name*.  No-op if not present."""
         with self._lock:

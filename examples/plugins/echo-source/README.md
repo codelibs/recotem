@@ -20,8 +20,13 @@ as a starting scaffold for real plugins — never for production training.
   echo = "recotem_echo:EchoSource"
   ```
 
-  The key on the left of `=` is the discriminator value used in recipe
-  YAML (`source.type: echo`). The value is `<module>:<class>`.
+  The key on the left of `=` (`echo`) is a registry/log identifier only —
+  it appears in `datasource_plugin_registered` log events and error messages.
+  The discriminator value used in recipe YAML (`source.type:`) comes from
+  the loaded class's `type_name` class attribute (`EchoSource.type_name =
+  "echo"`). The entry-point key and `type_name` do not need to match, but
+  keeping them identical avoids confusion. The value on the right is
+  `<module>:<class>`.
 
 ## Install
 

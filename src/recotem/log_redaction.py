@@ -55,6 +55,29 @@ _REDACT_PREFIXES: tuple[str, ...] = (
 # Note on "key": the pattern uses a negative lookahead to avoid redacting the
 # plural "keys" (a common benign field name in structured logs for lists of
 # items) while still catching "apikey", "_key", "key_id", etc.
+#
+# The pattern intentionally has NO leading word-boundary (\b) anchor so that
+# it matches "key" as a substring in camelCase/snake_case/kebab-case identifiers
+# like "apikey", "api_key", "signing_key", "client_key", "x-api-key".
+# Adding \b would fix false positives on natural-language words (monkey, turkey)
+# but would miss all of the above critical cases because underscore and lowercase
+# letters adjacent to "key" do not form a word boundary.
+#
+# Instead, an explicit allowlist (_KEY_BENIGN_EXACT_NAMES) guards against
+# the natural-language false-positive words that could plausibly appear as log
+# field names (none have appeared in this codebase; the list exists for defence
+# in depth).
+_KEY_BENIGN_EXACT_NAMES: frozenset[str] = frozenset(
+    {
+        "monkey",
+        "turkey",
+        "donkey",
+        "hockey",
+        "jockey",
+        # Add other benign names here if a false-positive is found in practice.
+    }
+)
+
 _REDACT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"secret"),
     re.compile(r"password"),
@@ -73,13 +96,23 @@ _REDACT_PATTERNS: tuple[re.Pattern[str], ...] = (
 # Value-side high-entropy pattern scrubbing
 # ---------------------------------------------------------------------------
 
-# 64 consecutive hex chars (sha256 digest / 32-byte signing key as hex).
-_HEX64_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
+# 64+ consecutive hex chars (sha256 digest / 32-byte signing key as hex).
+# Use hex-char-class lookaround instead of \b: \b is a word-boundary that fires
+# between \w and \W, but hex chars are all \w, so \b would NOT block a run of
+# 128 hex chars from matching the first 64 (or any 64-char slice within it).
+# The lookaround approach (?<![0-9a-fA-F])…(?![0-9a-fA-F]) detects hex-digit
+# adjacency directly and matches the ENTIRE run of hex digits (length ≥ 64),
+# redacting any concatenated or URL-embedded key material as a unit.
+_HEX64_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64,}(?![0-9a-fA-F])")
 _REDACTED_HEX64 = "[REDACTED-HEX64]"
 
-# 43 consecutive base64url chars (api key / bearer token material).
+# 43+ consecutive base64url chars (api key / bearer token material).
 # The character class [A-Za-z0-9_-] is base64url alphabet; length 43 = ceil(256/6).
-_B64URL43_RE = re.compile(r"\b[A-Za-z0-9_-]{43}\b")
+# Same lookaround rationale as above — base64url chars include letters/digits/
+# underscore/hyphen, so \b would not reliably delimit a run of base64url chars
+# that is embedded inside a longer base64url string.  The lookaround on the
+# base64url char class itself ensures the ENTIRE adjacent run is captured.
+_B64URL43_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43,}(?![A-Za-z0-9_-])")
 _REDACTED_B64URL43 = "[REDACTED-B64URL43]"
 
 _REDACTED = "[REDACTED]"
@@ -90,12 +123,15 @@ def _should_redact(key: str) -> bool:
 
     Rules (checked in order):
     1. Exact match against ``_EXACT_KEYS`` (lowercased).
-    2. Lowercased name starts with any prefix in ``_REDACT_PREFIXES``.
-    3. Lowercased name matches any pattern in ``_REDACT_PATTERNS``.
+    2. Exact match against ``_KEY_BENIGN_EXACT_NAMES`` → NOT redacted (allowlist).
+    3. Lowercased name starts with any prefix in ``_REDACT_PREFIXES``.
+    4. Lowercased name matches any pattern in ``_REDACT_PATTERNS``.
     """
     k = key.lower()
     if k in _EXACT_KEYS:
         return True
+    if k in _KEY_BENIGN_EXACT_NAMES:
+        return False
     if any(k.startswith(p) for p in _REDACT_PREFIXES):
         return True
     return any(p.search(k) for p in _REDACT_PATTERNS)

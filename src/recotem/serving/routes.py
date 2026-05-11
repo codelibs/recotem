@@ -173,7 +173,10 @@ def make_router(
                     },
                 ) from None
             finally:
-                structlog.contextvars.clear_contextvars()
+                # Only unbind the keys this handler bound — do NOT call
+                # clear_contextvars() which would also wipe upstream bindings
+                # set by middleware (e.g. request-id, correlation-id).
+                structlog.contextvars.unbind_contextvars("recipe", "request_id", "kid")
 
             # Build item list, joining metadata if available.
             # Fast path: use the pre-flattened metadata_index (O(1) dict.get

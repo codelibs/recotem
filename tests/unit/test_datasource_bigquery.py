@@ -727,3 +727,123 @@ def test_storage_oom_propagates() -> None:
 
         with pytest.raises(MemoryError, match="out of memory"):
             source.fetch(_ctx())
+
+
+# ---------------------------------------------------------------------------
+# probe() — failure raises DataSourceError; success returns without error
+# ---------------------------------------------------------------------------
+
+
+def _make_probe_bq_modules():
+    """Return mocked BQ modules suitable for probe() tests."""
+    mock_api_error_cls = type("GoogleAPICallError", (Exception,), {})
+    mock_exceptions = MagicMock()
+    mock_exceptions.GoogleAPICallError = mock_api_error_cls
+    mock_api_core = MagicMock()
+    mock_api_core.exceptions = mock_exceptions
+
+    mock_client = MagicMock()
+    mock_bq = MagicMock()
+    mock_bq.Client.return_value = mock_client
+    mock_bq.QueryJobConfig.return_value = MagicMock()
+
+    return mock_bq, mock_exceptions, mock_api_core, mock_client, mock_api_error_cls
+
+
+def test_probe_client_creation_failure_raises_DataSourceError() -> None:
+    """probe() raises DataSourceError when BigQuery client creation fails.
+
+    Covers the case where ADC is missing or invalid credentials prevent
+    bigquery.Client() from instantiating.
+    """
+    mock_bq, mock_exceptions, mock_api_core, _, mock_api_error_cls = (
+        _make_probe_bq_modules()
+    )
+    mock_bq.Client.side_effect = Exception("DefaultCredentialsError: no credentials")
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError, match="[Ff]ailed|[Cc]redential"):
+            source.probe()
+
+
+def test_probe_dry_run_query_failure_raises_DataSourceError() -> None:
+    """probe() raises DataSourceError when the dry-run query fails.
+
+    Covers GoogleAPICallError from client.query() during the dry-run,
+    e.g. invalid SQL syntax or insufficient permissions.
+    """
+    mock_bq, mock_exceptions, mock_api_core, mock_client, mock_api_error_cls = (
+        _make_probe_bq_modules()
+    )
+    mock_client.query.side_effect = mock_api_error_cls("dry run failed: bad SQL")
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT bad_col FROM nonexistent")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError, match="[Dd]ry.run|[Ff]ailed"):
+            source.probe()
+
+
+def test_probe_success_returns_without_error() -> None:
+    """probe() returns None when the BigQuery client and dry-run query succeed.
+
+    Confirms the success path: no exception is raised when client creation and
+    the dry-run query both complete normally.
+    """
+    mock_bq, mock_exceptions, mock_api_core, mock_client, _ = _make_probe_bq_modules()
+    # client.query() returns a mock job (success)
+    mock_client.query.return_value = MagicMock()
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        # Must not raise
+        result = source.probe()
+        assert result is None

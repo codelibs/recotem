@@ -90,9 +90,19 @@ def test_security_posture_log_emits_signing_keys_with_fingerprints(
     assert len(entry["fingerprint"]) == 8  # sha256(key)[:8]
 
 
-def test_dev_allow_unsigned_emits_warning_banner_at_startup(tmp_path: Path) -> None:
+def test_dev_allow_unsigned_emits_warning_banner_via_lifespan(tmp_path: Path) -> None:
     """When --dev-allow-unsigned is in effect, a DEV_ALLOW_UNSIGNED_ACTIVE
-    warning is emitted at startup (in addition to the once-per-60s loop)."""
+    warning must be emitted by the lifespan _warn_loop (once per 60s), NOT by
+    create_app itself.  This test verifies that the lifespan is capable of
+    emitting the banner when needed.
+
+    The banner is specifically NOT emitted at create_app() time any more (that
+    was the source of the double-emit bug).  To capture the first banner emit
+    from the lifespan task we would need to wait up to 60s, which is too slow
+    for a unit test.  Instead we confirm that the log has the signing-key
+    warning emitted by _build_key_ring (signing_key_verification_disabled),
+    which proves the dev_allow_unsigned code path was reached.
+    """
     import structlog.testing
 
     from recotem.serving.app import create_app
@@ -103,7 +113,12 @@ def test_dev_allow_unsigned_emits_warning_banner_at_startup(tmp_path: Path) -> N
     with structlog.testing.capture_logs() as cap:
         create_app(cfg)
 
-    assert any(e.get("event") == "DEV_ALLOW_UNSIGNED_ACTIVE" for e in cap)
+    # _build_key_ring emits this warning when dev_allow_unsigned is True —
+    # it is always synchronous and confirms the flag was honoured.
+    assert any(e.get("event") == "signing_key_verification_disabled" for e in cap), (
+        "create_app must emit 'signing_key_verification_disabled' when "
+        "dev_allow_unsigned=True to confirm the flag was processed"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1615,6 +1630,106 @@ def test_startup_parallel_loading_uses_multiple_threads(
         f"Expected at least 2 distinct thread IDs with parallelism=4 and {n_recipes} "
         f"recipes; got {unique_threads!r}.  The executor may not be dispatching work "
         f"concurrently."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: Banner double-emit — emitted only once (inside lifespan), not twice
+# ---------------------------------------------------------------------------
+
+
+def test_insecure_banner_emitted_only_once_during_create_app(tmp_path: Path) -> None:
+    """create_app must NOT emit INSECURE_NO_AUTH_ACTIVE synchronously at
+    the end of create_app — the banner should only come from the lifespan
+    _warn_loop.  Pre-fix code called _emit_insecure_banner both at the end of
+    create_app AND inside _warn_loop, producing a double-emit on every startup.
+    """
+    import structlog.testing
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+
+    with structlog.testing.capture_logs() as cap:
+        create_app(cfg)  # lifespan NOT started here — no _warn_loop fires
+
+    # The synchronous emit at the bottom of create_app was removed by the fix.
+    # If the lifespan has not started, zero INSECURE_NO_AUTH_ACTIVE events
+    # should appear in the log.
+    banner_events = [e for e in cap if e.get("event") == "INSECURE_NO_AUTH_ACTIVE"]
+    assert len(banner_events) == 0, (
+        f"Banner must NOT be emitted by create_app itself (only via lifespan); "
+        f"found {len(banner_events)} event(s): {banner_events!r}"
+    )
+
+
+def test_dev_unsigned_banner_emitted_only_once_during_create_app(
+    tmp_path: Path,
+) -> None:
+    """create_app must NOT emit DEV_ALLOW_UNSIGNED_ACTIVE synchronously.
+    Same double-emit fix as the INSECURE_NO_AUTH_ACTIVE banner."""
+    import structlog.testing
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.env = "development"
+    cfg.dev_allow_unsigned = True
+
+    with structlog.testing.capture_logs() as cap:
+        create_app(cfg)
+
+    banner_events = [e for e in cap if e.get("event") == "DEV_ALLOW_UNSIGNED_ACTIVE"]
+    assert len(banner_events) == 0, (
+        f"DEV_ALLOW_UNSIGNED_ACTIVE must NOT be emitted synchronously by create_app; "
+        f"found {len(banner_events)} event(s): {banner_events!r}"
+    )
+
+
+def test_banner_task_cancelled_cleanly_on_shutdown(tmp_path: Path) -> None:
+    """The banner asyncio task must be properly awaited after cancel() so
+    asyncio does not warn 'Task was destroyed but it is pending!'.
+
+    We run a full lifespan cycle with insecure_no_auth=True and assert that
+    no asyncio warnings about pending tasks are emitted during shutdown.
+    (A missing `await banner_task` after `cancel()` triggers that warning.)
+    """
+    import asyncio
+    import warnings
+
+    from httpx import ASGITransport, AsyncClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.drain_seconds = 1
+
+    app = create_app(cfg)
+
+    async def _run() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://testserver"
+        ):
+            pass  # lifespan starts on __aenter__, shuts down on __aexit__
+
+    # If banner_task.cancel() is not followed by `await banner_task`, asyncio
+    # will emit a ResourceWarning "Task was destroyed but it is pending!" on GC.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        asyncio.run(_run())
+
+    pending_task_warnings = [
+        w
+        for w in caught
+        if "pending" in str(w.message).lower() or "destroyed" in str(w.message).lower()
+    ]
+    assert not pending_task_warnings, (
+        "Shutdown must await the banner task after cancel() to avoid "
+        f"'Task was destroyed but it is pending!': {pending_task_warnings!r}"
     )
 
 

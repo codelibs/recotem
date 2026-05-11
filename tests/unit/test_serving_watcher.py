@@ -1027,9 +1027,10 @@ def test_artifact_read_failed_log_emitted_on_unexpected_exception(
 
 
 def test_watcher_uses_registry_setter_for_loaded_marker(tmp_path: Path) -> None:
-    """After _load_recipe succeeds, the entry's _loaded_marker is set via
-    update_loaded_marker (not a direct attribute write), so the mutation goes
-    through the registry lock.
+    """After _load_recipe succeeds, the entry's _loaded_marker is set atomically
+    via replace_with_marker (which holds the lock for both the entry insert and
+    the marker assignment in one shot).  Pre-fix code used a two-step
+    replace() + update_loaded_marker() which exposed a stale-marker window.
     """
     from unittest.mock import patch
 
@@ -1072,21 +1073,23 @@ def test_watcher_uses_registry_setter_for_loaded_marker(tmp_path: Path) -> None:
         initial_states=initial_states,
     )
 
-    update_calls: list[tuple] = []
-    real_update = registry.update_loaded_marker
+    rwm_calls: list[tuple] = []
+    real_rwm = registry.replace_with_marker
 
-    def _spy(name, marker):
-        update_calls.append((name, marker))
-        return real_update(name, marker)
+    def _spy(name, entry, marker):
+        rwm_calls.append((name, marker))
+        return real_rwm(name, entry, marker)
 
-    with patch.object(registry, "update_loaded_marker", side_effect=_spy):
+    with patch.object(registry, "replace_with_marker", side_effect=_spy):
         watcher._load_recipe("marker_recipe", state, force=True)
 
-    # update_loaded_marker must have been called at least once for the recipe
-    matching = [c for c in update_calls if c[0] == "marker_recipe"]
+    # replace_with_marker must have been called at least once for the recipe
+    matching = [c for c in rwm_calls if c[0] == "marker_recipe"]
     assert matching, (
-        "watcher._load_recipe must call registry.update_loaded_marker after a "
-        "successful load; direct entry._loaded_marker assignment bypasses the lock"
+        "watcher._load_recipe must call registry.replace_with_marker after a "
+        "successful load; the two-step replace() + update_loaded_marker() path "
+        "was replaced with the atomic replace_with_marker() to close the "
+        "stale-marker window"
     )
     # Confirm the entry in the registry has the marker set
     entry = registry.get("marker_recipe")
@@ -2388,3 +2391,348 @@ def test_repeated_stat_error_same_class_demoted_to_debug(
     )
 
     watcher._executor.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: Sidecar-only path must update state.last_marker
+# ---------------------------------------------------------------------------
+
+
+def test_sidecar_only_path_updates_last_marker(tmp_path: Path) -> None:
+    """When marker == state.last_marker (fast path), state.last_marker must
+    be explicitly updated to the new marker value.
+
+    Pre-fix: the code did ``continue`` without reassigning state.last_marker.
+    On object stores with unstable ETags, the watcher would receive a stable
+    ETag on one tick and not acknowledge it, causing spurious reloads or
+    stale-marker windows on the next tick.
+
+    This test verifies that after a no-op sidecar check (sidecar unchanged),
+    state.last_marker is still updated to the current marker.
+    """
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "marker_stable", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_marker="etag-v1",
+        last_sha256="",
+    )
+
+    registry = ModelRegistry()
+    from recotem.serving.registry import ModelEntry
+
+    stub = ModelEntry(
+        name="marker_stable",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+        last_load_error=None,
+    )
+    registry.replace("marker_stable", stub)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states={"marker_stable": state},
+    )
+
+    import recotem.serving.watcher as watcher_module
+
+    def _same_marker(path: str, recipe_name: str = "<unknown>"):
+        return "etag-v1", None  # same as state.last_marker
+
+    with patch.object(
+        watcher_module, "_stat_marker_with_error", side_effect=_same_marker
+    ):
+        with patch.object(watcher_module, "_check_sidecar_changed", return_value=False):
+            watcher._poll_artifacts()
+
+    watcher._executor.shutdown(wait=False)
+
+    # state.last_marker must be updated even when sidecar didn't change
+    assert state.last_marker == "etag-v1", (
+        f"state.last_marker must be updated to the current marker even when "
+        f"marker == last_marker and sidecar unchanged; got {state.last_marker!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: Atomic replace_with_marker — no stale-marker window
+# ---------------------------------------------------------------------------
+
+
+def test_replace_with_marker_is_atomic_no_stale_window(tmp_path: Path) -> None:
+    """After a successful hot-swap, readers must never see a fresh recommender
+    paired with a stale (None, '') _loaded_marker.
+
+    Pre-fix: _load_recipe called registry.replace(entry) then
+    registry.update_loaded_marker(marker) as two separate lock acquisitions.
+    A reader iterating list() between those two ops would see the new
+    recommender with the old (unset) marker.
+
+    Fix: registry.replace_with_marker() sets both atomically in one lock.
+    """
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "atomic_recipe", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_marker=None,
+        last_sha256="",
+    )
+
+    registry = ModelRegistry()
+    from recotem.serving.registry import ModelEntry
+
+    stub = ModelEntry(
+        name="atomic_recipe",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+        last_load_error=None,
+    )
+    registry.replace("atomic_recipe", stub)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states={"atomic_recipe": state},
+    )
+
+    replace_with_marker_calls: list[tuple] = []
+    real_rwm = registry.replace_with_marker
+
+    def _spy_rwm(name, entry, marker):
+        replace_with_marker_calls.append((name, marker))
+        real_rwm(name, entry, marker)
+
+    with patch.object(registry, "replace_with_marker", side_effect=_spy_rwm):
+        watcher._load_recipe("atomic_recipe", state, force=True)
+
+    assert replace_with_marker_calls, (
+        "_load_recipe must call registry.replace_with_marker for atomic update"
+    )
+    name_called, marker_called = replace_with_marker_calls[0]
+    assert name_called == "atomic_recipe"
+
+    entry = registry.get("atomic_recipe")
+    assert entry is not None
+    loaded_marker = entry._loaded_marker
+    assert isinstance(loaded_marker, tuple) and len(loaded_marker) == 2, (
+        f"_loaded_marker must be a 2-tuple; got {loaded_marker!r}"
+    )
+    assert loaded_marker[1], "_loaded_marker sha256 part must be non-empty after load"
+
+
+# ---------------------------------------------------------------------------
+# Test 5: Hot-swap preserves stale on failure — real registry + real ModelEntry
+# ---------------------------------------------------------------------------
+
+
+def test_hot_swap_corrupt_artifact_preserves_stale_entry_real_registry(
+    tmp_path: Path,
+) -> None:
+    """When a hot-swap fails due to corrupt artifact bytes, the watcher must:
+    1. Keep the original recommender in the registry (not None, not raise).
+    2. Set last_load_error on the entry.
+    3. Increment the artifact_load_failures_total metric.
+
+    Uses a REAL ModelRegistry and a REAL ModelEntry (not MagicMock).
+    """
+    from unittest.mock import patch
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "stale_real", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+
+    original_recommender = MagicMock()
+    original_recommender.get_recommendation_for_known_user_id.return_value = [
+        ("item_x", 0.99)
+    ]
+
+    from recotem.serving.registry import ModelEntry
+
+    good_entry = ModelEntry(
+        name="stale_real",
+        recommender=original_recommender,
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="active",
+        loaded=True,
+        last_load_error=None,
+    )
+    good_entry.artifact_path = str(artifact_path)
+
+    registry = ModelRegistry()
+    registry.replace("stale_real", good_entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    initial_states = build_initial_states([recipe], {"stale_real": good_entry})
+    initial_states["stale_real"].last_sha256 = ""  # force reload
+
+    failure_count: list[int] = [0]
+    original_inc = _metrics.inc_artifact_load_failure
+
+    def _counting_inc(name: str) -> None:
+        if name == "stale_real":
+            failure_count[0] += 1
+        original_inc(name)
+
+    # Replace the artifact with corrupt content
+    artifact_path.write_bytes(b"THIS IS CORRUPT AND WILL FAIL VERIFICATION")
+
+    with patch.object(_metrics, "inc_artifact_load_failure", side_effect=_counting_inc):
+        watcher = ArtifactWatcher(
+            registry=registry,
+            recipes_dir=recipes_dir,
+            serve_config=cfg,
+            key_ring=kr,
+            initial_states=initial_states,
+        )
+        watcher.start()
+        try:
+            time.sleep(0.5)
+        finally:
+            watcher.stop()
+            watcher.join(timeout=2.0)
+
+    entry = registry.get("stale_real")
+    assert entry is not None, "Entry must remain in registry after corrupt hot-swap"
+    assert entry.recommender is original_recommender, (
+        "The original recommender must be preserved after a failed hot-swap"
+    )
+    assert entry.last_load_error is not None, (
+        "last_load_error must be set after a corrupt artifact hot-swap attempt"
+    )
+    assert failure_count[0] >= 1, (
+        "inc_artifact_load_failure must be called at least once"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 6: ETag-based change detection — exactly-one-read per hot-swap cycle
+# ---------------------------------------------------------------------------
+
+
+def test_etag_change_detection_reads_artifact_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """When an ETag change is detected, the watcher must read the artifact
+    bytes exactly once per hot-swap cycle (not twice — TOCTOU concern).
+    """
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "one_read_recipe", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_marker="v1",
+        last_sha256="",
+    )
+
+    registry = ModelRegistry()
+    from recotem.serving.registry import ModelEntry
+
+    stub = ModelEntry(
+        name="one_read_recipe",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+        last_load_error=None,
+    )
+    registry.replace("one_read_recipe", stub)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states={"one_read_recipe": state},
+    )
+
+    read_count: list[int] = [0]
+    import recotem.serving.watcher as watcher_module
+
+    real_read = watcher_module._read_artifact_bytes
+
+    def _counting_read(path: str, max_bytes: int) -> bytes:
+        read_count[0] += 1
+        return real_read(path, max_bytes)
+
+    def _etag_v2_stat(path: str, recipe_name: str = "<unknown>"):
+        return "v2", None
+
+    with patch.object(
+        watcher_module, "_stat_marker_with_error", side_effect=_etag_v2_stat
+    ):
+        with patch.object(
+            watcher_module, "_read_artifact_bytes", side_effect=_counting_read
+        ):
+            watcher._poll_artifacts()
+
+    watcher._executor.shutdown(wait=True)
+
+    assert read_count[0] == 1, (
+        f"Artifact bytes must be read exactly once per ETag-change hot-swap cycle; "
+        f"got {read_count[0]} read(s). Multiple reads indicate a TOCTOU issue."
+    )

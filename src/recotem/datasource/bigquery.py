@@ -9,19 +9,8 @@ import structlog
 from pydantic import BaseModel
 
 from recotem._metrics_bigquery import inc_bigquery_storage_fallback
+from recotem.config import is_truthy_env
 from recotem.datasource.base import DataSourceError, FetchContext
-
-# ---------------------------------------------------------------------------
-# Environment helpers
-# ---------------------------------------------------------------------------
-
-_TRUTHY_ENV_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
-
-
-def _truthy_env(name: str) -> bool:
-    """Return True iff the env var *name* is set to a truthy value."""
-    return os.environ.get(name, "").strip().lower() in _TRUTHY_ENV_VALUES
-
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -142,6 +131,8 @@ class BigQuerySource:
         cfg = self._config
         try:
             client = bigquery.Client(project=cfg.project)
+        except (MemoryError, RecursionError):
+            raise
         except Exception as exc:
             raise DataSourceError(
                 f"BigQuery client creation failed: {exc}. "
@@ -159,6 +150,8 @@ class BigQuerySource:
             client.query(cfg.query, job_config=job_config)
         except GoogleAPICallError as exc:
             raise DataSourceError(f"BigQuery dry-run failed: {exc}") from exc
+        except (MemoryError, RecursionError):
+            raise
         except Exception as exc:
             raise DataSourceError(
                 f"Unexpected error during BigQuery dry-run: {exc}"
@@ -190,6 +183,8 @@ class BigQuerySource:
 
         try:
             client = bigquery.Client(project=cfg.project)
+        except (MemoryError, RecursionError):
+            raise
         except Exception as exc:
             raise DataSourceError(
                 f"Failed to create BigQuery client: {exc}. "
@@ -198,15 +193,14 @@ class BigQuerySource:
 
         job_config = bigquery.QueryJobConfig()
         if cfg.query_parameters:
-            try:
-                job_config.query_parameters = self._build_query_parameters()
-            except DataSourceError:
-                raise
+            job_config.query_parameters = self._build_query_parameters()
 
         try:
             query_job = client.query(cfg.query, job_config=job_config)
         except GoogleAPICallError as exc:
             raise DataSourceError(f"BigQuery query submission failed: {exc}") from exc
+        except (MemoryError, RecursionError):
+            raise
         except Exception as exc:
             raise DataSourceError(
                 f"Unexpected error submitting BigQuery query: {exc}"
@@ -238,7 +232,7 @@ class BigQuerySource:
                 #
                 # Set RECOTEM_BQ_REQUIRE_STORAGE_API=1 to disable the fallback
                 # and surface this as a hard DataSourceError instead.
-                if _truthy_env("RECOTEM_BQ_REQUIRE_STORAGE_API"):
+                if is_truthy_env(os.environ.get("RECOTEM_BQ_REQUIRE_STORAGE_API")):
                     raise DataSourceError(
                         f"BigQuery Storage Read API failed and "
                         "RECOTEM_BQ_REQUIRE_STORAGE_API is set — no REST "
@@ -261,6 +255,8 @@ class BigQuerySource:
         except DataSourceError:
             # Re-raise DataSourceError from RECOTEM_BQ_REQUIRE_STORAGE_API path
             # without wrapping it again.
+            raise
+        except (MemoryError, RecursionError):
             raise
         except GoogleAPICallError as exc:
             raise DataSourceError(f"BigQuery query execution failed: {exc}") from exc

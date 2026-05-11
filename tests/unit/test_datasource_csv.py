@@ -485,3 +485,37 @@ def test_csv_sha256_cap_fires_even_when_stat_unavailable(
     source = CSVSource(cfg)
     with pytest.raises(DataSourceError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
         source.fetch(_ctx())
+
+
+# ---------------------------------------------------------------------------
+# N-9: M-8 — MemoryError propagates from CSVSource.fetch (not wrapped)
+# ---------------------------------------------------------------------------
+
+
+def test_csv_source_memory_error_propagates_unwrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MemoryError from pd.read_csv must propagate without being caught and
+    re-raised as DataSourceError.
+
+    This is an OOM-safety contract: silently catching MemoryError and
+    retrying every poll cycle drives the process to the OOM killer with no
+    observable symptom.  The error must escape so the caller's process-level
+    handler can react.
+    """
+    import pandas
+
+    csv_file = tmp_path / "data.csv"
+    csv_file.write_text("user_id,item_id\nu1,i1\n")
+
+    def _oom(*args, **kwargs):
+        raise MemoryError("out of memory")
+
+    # pandas is imported locally inside CSVSource.fetch, so we patch
+    # the top-level pandas module attribute directly.
+    monkeypatch.setattr(pandas, "read_csv", _oom)
+
+    cfg = CSVConfig(type="csv", path=str(csv_file))
+    source = CSVSource(cfg)
+    with pytest.raises(MemoryError):
+        source.fetch(_ctx())

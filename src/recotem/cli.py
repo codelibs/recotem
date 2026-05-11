@@ -450,6 +450,14 @@ def inspect(
     """
     _configure_logging_from_env()
 
+    # Gate dev-only fallback behind RECOTEM_ENV=development immediately so
+    # flag-pair validation fires before any I/O or parsing takes place.
+    # Previously this check was deferred until after file read + header parse,
+    # which meant a dev flag mis-use in a production environment was only
+    # caught after potentially expensive I/O.
+    if dev_allow_unsigned:
+        _check_dev_env("--dev-allow-unsigned")
+
     import fsspec
 
     from recotem.artifact.format import (
@@ -459,22 +467,25 @@ def inspect(
     from recotem.artifact.io import resolve_artifact_pointer
     from recotem.config import ServeConfig
 
-    # Honor RECOTEM_MAX_PAYLOAD_BYTES so inspect uses the same payload cap as
-    # the serving layer.  ServeConfig.from_env() reads only env vars — it does
-    # not require signing keys to be present (those are validated later in this
-    # function by the explicit RECOTEM_SIGNING_KEYS check below).
-    max_bytes = ServeConfig.from_env().max_payload_bytes
+    # Use max_artifact_bytes as the file read cap (matches the serving-watcher
+    # protocol) and max_payload_bytes as the payload-parse cap (matches the
+    # serve-side deserialization bound).  Previously both used max_payload_bytes,
+    # which could reject valid artifacts larger than 512 MiB at read time even
+    # though the artifact container itself is bounded by max_artifact_bytes.
+    cfg = ServeConfig.from_env()
+    read_cap = cfg.max_artifact_bytes
+    parse_cap = cfg.max_payload_bytes
     try:
         # Bounded read so a 100 GiB file cannot OOM the CLI before the cap
         # check fires; matches the serving-watcher protocol.
         fs, resolved_path = fsspec.core.url_to_fs(str(artifact))
         with fs.open(resolved_path, "rb") as fh:
-            data = fh.read(max_bytes + 1)
+            data = fh.read(read_cap + 1)
     except OSError as exc:
         _exit(_EXIT_ARTIFACT, f"Cannot read artifact '{artifact}': {exc}")
-    except MemoryError:
-        # Never collapse OOM into a "read failed" message — the operator
-        # needs to see the real cause to size the host correctly.
+    except (MemoryError, RecursionError):
+        # Never collapse OOM/recursion into a "read failed" message — the
+        # operator needs to see the real cause to size the host correctly.
         raise
     except Exception as exc:  # noqa: BLE001
         # fsspec backends raise SDK-specific exceptions that do not derive
@@ -489,23 +500,19 @@ def inspect(
     try:
         # Resolve pointer files written by the default ``append_sha`` versioning
         # mode so users can inspect via the recipe's output.path directly.
-        data, _resolved = resolve_artifact_pointer(data, resolved_path, fs, max_bytes)
+        data, _resolved = resolve_artifact_pointer(data, resolved_path, fs, read_cap)
 
-        if len(data) > max_bytes:
+        if len(data) > read_cap:
             raise ArtifactError(
-                f"artifact size {len(data)} exceeds cap {max_bytes}; refusing to load"
+                f"artifact size {len(data)} exceeds cap {read_cap}; refusing to load"
             )
 
-        hdr = parse_header_from_bytes(data, max_bytes)
+        hdr = parse_header_from_bytes(data, parse_cap)
+    except (MemoryError, RecursionError):
+        raise
     except Exception as exc:
-        _exit(_EXIT_ARTIFACT, f"Artifact parse failed: {exc}")
-
-    if dev_allow_unsigned:
-        # Gate dev-only fallback behind RECOTEM_ENV=development, mirroring
-        # train and serve.  Otherwise an operator who runs
-        # ``recotem inspect --dev-allow-unsigned`` against a production
-        # artifact would silently fall back to a deterministic public key.
-        _check_dev_env("--dev-allow-unsigned")
+        code = _map_exception_to_exit(exc)
+        _exit(code, f"Artifact parse failed: {exc}")
 
     signing_keys_raw = os.environ.get("RECOTEM_SIGNING_KEYS", "").strip()
     if not signing_keys_raw and dev_allow_unsigned:
@@ -526,8 +533,11 @@ def inspect(
                 hdr.hmac_digest,
             )
             typer.echo(f"HMAC: OK  (kid={hdr.kid!r})")
+        except (MemoryError, RecursionError):
+            raise
         except Exception as exc:
-            _exit(_EXIT_ARTIFACT, f"HMAC verification failed: {exc}")
+            code = _map_exception_to_exit(exc)
+            _exit(code, f"HMAC verification failed: {exc}")
     else:
         _exit(
             _EXIT_ARTIFACT,
@@ -540,8 +550,11 @@ def inspect(
 
     try:
         header_dict = json.loads(hdr.header_data.decode("utf-8"))
+    except (MemoryError, RecursionError):
+        raise
     except Exception as exc:
-        _exit(_EXIT_ARTIFACT, f"Header JSON parse failed: {exc}")
+        code = _map_exception_to_exit(exc)
+        _exit(code, f"Header JSON parse failed: {exc}")
 
     typer.echo(json.dumps(header_dict, indent=2))
 
@@ -638,7 +651,8 @@ def schema() -> None:
         schema_dict = schema_recipe.model_json_schema()
         typer.echo(json.dumps(schema_dict, indent=2))
     except Exception as exc:
-        _exit(_EXIT_UNKNOWN, f"Schema generation failed: {exc}")
+        code = _map_exception_to_exit(exc)
+        _exit(code, f"Schema generation failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -675,7 +689,7 @@ def keygen(
                        env_entry format: RECOTEM_API_KEYS=<kid>:sha256:<hex64>
     """
     if key_type not in ("signing", "api"):
-        _exit(_EXIT_UNKNOWN, f"--type must be 'signing' or 'api', got {key_type!r}.")
+        _exit(_EXIT_CONFIG, f"--type must be 'signing' or 'api', got {key_type!r}.")
 
     if kid is None:
         kid = str(uuid.uuid4())[:8]

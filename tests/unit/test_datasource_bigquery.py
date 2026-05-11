@@ -693,10 +693,12 @@ def test_bigquery_storage_fallback_increments_counter_on_missing_extra(
 
 
 def test_storage_oom_propagates() -> None:
-    """A MemoryError from the Storage Read API must propagate, not trigger fallback.
+    """A MemoryError from the Storage Read API must propagate directly, not be
+    wrapped in DataSourceError.
 
-    MemoryError is not an ImportError or GoogleAPICallError, so it must escape
-    the inner try/except and be re-raised as DataSourceError by the outer handler.
+    After M-8, MemoryError is let-propagate (re-raised) rather than being
+    caught and re-wrapped as DataSourceError.  This ensures the operator's host
+    sees a real OOM signal rather than a misleading DataSourceError.
     """
     mock_bq, mock_exceptions, mock_api_core, mock_client, mock_query_job, _ = (
         _make_mock_bq_modules()
@@ -723,5 +725,5 @@ def test_storage_oom_propagates() -> None:
         source = BigQuerySource.__new__(BigQuerySource)
         source._config = cfg
 
-        with pytest.raises(DataSourceError, match="[Ff]ailed|[Mm]emory"):
+        with pytest.raises(MemoryError, match="out of memory"):
             source.fetch(_ctx())

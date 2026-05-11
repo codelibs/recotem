@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 from unittest.mock import MagicMock
 
+import pytest as _pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -472,6 +473,117 @@ def test_predict_echoes_x_request_id_from_request() -> None:
 
 
 # ---------------------------------------------------------------------------
+# N-6: M-4 — X-Request-ID validation: invalid IDs replaced with UUID
+# ---------------------------------------------------------------------------
+
+
+def test_valid_x_request_id_echoed_unchanged() -> None:
+    """A valid X-Request-ID (alphanumeric + _- up to 64 chars) is echoed back.
+
+    M-4 added a regex guard so only safe IDs are echoed; this test verifies
+    that a valid ID passes the guard and is not replaced.
+    """
+    client, _ = _make_test_client()
+    valid_id = "abc-123_DEF"
+    response = client.post(
+        "/predict/test_recipe",
+        json={"user_id": "user1"},
+        headers={"X-Request-ID": valid_id},
+    )
+    assert response.status_code == 200
+    assert response.headers.get("X-Request-ID") == valid_id, (
+        "Valid X-Request-ID must be echoed unchanged"
+    )
+    assert response.json()["request_id"] == valid_id
+
+
+@_pytest.mark.parametrize(
+    "invalid_id",
+    [
+        "",  # empty string — fails 1-char minimum
+        "a" * 65,  # exceeds 64-char maximum
+        "<script>alert(1)</script>",  # contains angle brackets
+        "evil\x00byte",  # contains null byte
+        "space here",  # contains space
+    ],
+)
+def test_invalid_x_request_id_replaced_with_uuid(invalid_id: str) -> None:
+    """Invalid X-Request-ID values must be replaced with a server-generated UUID.
+
+    M-4 added regex validation ``^[A-Za-z0-9_-]{1,64}$`` so that control
+    characters, angle brackets, spaces, oversized IDs, and empty strings cannot
+    be injected into logs via the request ID header.  Any value that fails the
+    regex is silently replaced with a uuid4.
+    """
+    import re
+
+    client, _ = _make_test_client()
+    response = client.post(
+        "/predict/test_recipe",
+        json={"user_id": "user1"},
+        headers={"X-Request-ID": invalid_id},
+    )
+    assert response.status_code == 200
+    returned_id = response.headers.get("X-Request-ID", "")
+    # The server must NOT echo the invalid value back.
+    assert returned_id != invalid_id or not invalid_id, (
+        f"Invalid X-Request-ID {invalid_id!r} must not be echoed unchanged"
+    )
+    # The replacement must look like a UUID4 (hex + hyphens, 36 chars).
+    uuid_re = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    )
+    assert uuid_re.match(returned_id), (
+        f"Invalid X-Request-ID must be replaced with a uuid4; got {returned_id!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# N-12: OBS-4 — _lookup_metadata index pre-check (item not in index → {})
+# ---------------------------------------------------------------------------
+
+
+def test_lookup_metadata_missing_item_id_returns_empty_dict() -> None:
+    """_lookup_metadata returns an empty dict when item_id is not in the index.
+
+    OBS-4 added an ``item_id not in meta_df.index`` pre-check to short-circuit
+    before calling .loc[], which avoids an unnecessary KeyError and improves
+    performance.  This test verifies the short-circuit path returns {}.
+    """
+    import pandas as pd
+
+    from recotem.serving.routes import _lookup_metadata
+
+    df = pd.DataFrame({"item_id": ["i1", "i2"], "title": ["Alpha", "Beta"]}).set_index(
+        "item_id"
+    )
+
+    result = _lookup_metadata(df, "not_in_index", frozenset(), "test_recipe")
+    assert result == {}, (
+        "_lookup_metadata must return empty dict for missing item_id (pre-check)"
+    )
+
+
+def test_lookup_metadata_known_item_id_returns_fields() -> None:
+    """_lookup_metadata returns the row dict for a known item_id.
+
+    Complement to the missing-item test: after passing the pre-check, a known
+    item_id must produce the expected field dict.
+    """
+    import pandas as pd
+
+    from recotem.serving.routes import _lookup_metadata
+
+    df = pd.DataFrame(
+        {"item_id": ["i1"], "title": ["Alpha"], "genre": ["action"]}
+    ).set_index("item_id")
+
+    result = _lookup_metadata(df, "i1", frozenset(), "test_recipe")
+    assert result.get("title") == "Alpha"
+    assert result.get("genre") == "action"
+
+
+# ---------------------------------------------------------------------------
 # MAJOR-10: predict status label separation
 # ---------------------------------------------------------------------------
 
@@ -854,6 +966,11 @@ def test_lookup_metadata_swallows_attribute_error_increments_metric(
     .to_dict() returns a dict-of-lists rather than a flat dict — iterating it
     with (.items() → .lower()) raises AttributeError on the list values.
     We simulate this by using a mock that raises AttributeError on to_dict().
+
+    OBS-4: _lookup_metadata now performs an ``item_id not in meta_df.index``
+    pre-check before calling .loc[].  We therefore configure the mock's
+    ``__contains__`` to return True so the pre-check passes and the code
+    reaches the AttributeError path.
     """
     import structlog.testing
 
@@ -865,12 +982,12 @@ def test_lookup_metadata_swallows_attribute_error_increments_metric(
         def to_dict(self):
             raise AttributeError("simulated: non-unique index returned DataFrame")
 
-    class _BadDf:
-        def loc(self, item_id):  # noqa: B019
-            return _BadRow()
-
-    # Patch .loc as a property that returns _BadRow for any key
+    # Patch .loc as a property that returns _BadRow for any key.
+    # Also configure the index so __contains__ returns True — after OBS-4 the
+    # pre-check ``item_id not in meta_df.index`` would otherwise short-circuit
+    # and the AttributeError path would never be reached.
     bad_df = MagicMock()
+    bad_df.index.__contains__ = MagicMock(return_value=True)
     bad_df.loc.__getitem__ = MagicMock(return_value=_BadRow())
 
     metrics._ensure_initialized()

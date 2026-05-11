@@ -1442,3 +1442,231 @@ def test_startup_parallelism_clamped_to_valid_range(
     assert cfg_unset.startup_parallelism == 0, (
         f"Unset env var should leave sentinel 0; got {cfg_unset.startup_parallelism}"
     )
+
+
+# ---------------------------------------------------------------------------
+# N-1: C-1 — _try_load_artifact builds metadata_index for recipes with item_metadata
+# ---------------------------------------------------------------------------
+
+
+def test_try_load_artifact_builds_metadata_index_when_item_metadata_present(
+    tmp_path: Path,
+) -> None:
+    """_try_load_artifact must populate metadata_index as a non-empty dict
+    keyed by item_id when the recipe has an item_metadata block.
+
+    This covers the startup path: ModelEntry.metadata_index is used by
+    /predict to enrich recommendations with per-item fields.
+    """
+    import pickle  # noqa: S403
+
+    import pandas as pd
+
+    from recotem.artifact.signing import KeyRing
+    from recotem.config import ServeConfig
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving.app import _try_load_artifact
+    from tests.conftest import ACTIVE_KEY_HEX, build_raw_artifact
+
+    # Build a minimal valid artifact
+    artifact_path = tmp_path / "model.recotem"
+    payload = pickle.dumps({"key": "value"}, protocol=4)  # noqa: S301
+    artifact_path.write_bytes(
+        build_raw_artifact(
+            kid="active",
+            key_hex=ACTIVE_KEY_HEX,
+            header_dict={
+                "recipe_name": "meta_test",
+                "best_class": "TopPop",
+                "trained_at": "2026-01-01T00:00:00Z",
+            },
+            payload_bytes=payload,
+        )
+    )
+
+    # Build a small item_metadata CSV
+    metadata_csv = tmp_path / "items.csv"
+    pd.DataFrame(
+        {"item_id": ["i1", "i2", "i3"], "title": ["Alpha", "Beta", "Gamma"]}
+    ).to_csv(metadata_csv, index=False)
+
+    # Write a recipe YAML that references both
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    yaml_path = recipes_dir / "meta_test.yaml"
+    yaml_path.write_text(
+        f"""\
+name: meta_test
+source:
+  type: csv
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+item_metadata:
+  type: csv
+  path: {metadata_csv}
+  fields: [title]
+  on_field_missing: error
+output:
+  path: {artifact_path}
+"""
+    )
+
+    recipe = load_recipe(yaml_path)
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = f"active:{ACTIVE_KEY_HEX}"
+    cfg.max_artifact_bytes = 100 * 1024 * 1024
+    cfg.max_payload_bytes = 50 * 1024 * 1024
+    cfg.metadata_field_deny = []
+
+    key_ring = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    entry = _try_load_artifact(recipe, key_ring, cfg)
+
+    assert entry.loaded, (
+        f"_try_load_artifact must return loaded=True for a valid artifact + metadata; "
+        f"error={entry.last_load_error!r}"
+    )
+    assert entry.metadata_index is not None, (
+        "metadata_index must be populated (not None) when item_metadata is present"
+    )
+    assert isinstance(entry.metadata_index, dict), (
+        f"metadata_index must be a dict; got {type(entry.metadata_index)}"
+    )
+    assert len(entry.metadata_index) == 3, (
+        f"metadata_index must have one entry per item_id (3 expected); "
+        f"got {len(entry.metadata_index)}"
+    )
+    assert "i1" in entry.metadata_index, "item_id 'i1' must be a key in metadata_index"
+    assert entry.metadata_index["i1"].get("title") == "Alpha", (
+        f"metadata_index['i1']['title'] must be 'Alpha'; "
+        f"got {entry.metadata_index['i1']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# N-15: startup_parallelism — true parallel execution verified via thread IDs
+# ---------------------------------------------------------------------------
+
+
+def test_startup_parallel_loading_uses_multiple_threads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With RECOTEM_STARTUP_PARALLELISM=4 and 8 recipes, the startup executor
+    uses multiple OS threads — verified by recording threading.get_ident() in
+    each _try_load_artifact call.
+
+    This confirms that the ThreadPoolExecutor dispatches work concurrently
+    rather than running everything in the calling thread.
+    """
+    import threading
+    import time
+
+    from recotem.serving import app as app_module
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_data = _make_valid_artifact_bytes()
+
+    n_recipes = 8
+    for i in range(n_recipes):
+        artifact_path = tmp_path / f"model_{i}.recotem"
+        artifact_path.write_bytes(artifact_data)
+        _write_recipe_for_parallel_test(recipes_dir, f"recipe_p_{i}", artifact_path)
+
+    thread_ids: list[int] = []
+    real_try_load = app_module._try_load_artifact
+
+    def _spy_load(recipe, key_ring, serve_config):
+        thread_ids.append(threading.get_ident())
+        # Hold the worker briefly so the executor must spin up additional
+        # threads to drain the queue.  Without this, fast hardware can let a
+        # single worker consume all 8 tasks before a peer thread is even
+        # created, producing a false-negative on the parallelism assertion.
+        time.sleep(0.02)
+        return real_try_load(recipe, key_ring, serve_config)
+
+    monkeypatch.setattr(app_module, "_try_load_artifact", _spy_load)
+    monkeypatch.setenv("RECOTEM_STARTUP_PARALLELISM", "4")
+
+    from recotem.config import ServeConfig
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = "active:" + "aa" * 32
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1", "*"]
+    cfg.startup_parallelism = 4
+
+    app_module.create_app(cfg)
+
+    assert len(thread_ids) == n_recipes, (
+        f"Expected {n_recipes} load calls, got {len(thread_ids)}"
+    )
+    # With 4 workers and 8 tasks, multiple threads must be involved.
+    unique_threads = set(thread_ids)
+    assert len(unique_threads) >= 2, (
+        f"Expected at least 2 distinct thread IDs with parallelism=4 and {n_recipes} "
+        f"recipes; got {unique_threads!r}.  The executor may not be dispatching work "
+        f"concurrently."
+    )
+
+
+def test_startup_parallelism_one_uses_single_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With RECOTEM_STARTUP_PARALLELISM=1, all loads run in the same worker thread.
+
+    This is a regression guard: if max_workers=1, the executor serialises all
+    submissions into a single thread.  The single-thread case is also useful
+    for debugging (per CLAUDE.md: 'Set to 1 to force sequential loading').
+    """
+    import threading
+
+    from recotem.serving import app as app_module
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_data = _make_valid_artifact_bytes()
+
+    n_recipes = 4
+    for i in range(n_recipes):
+        artifact_path = tmp_path / f"model_seq_{i}.recotem"
+        artifact_path.write_bytes(artifact_data)
+        _write_recipe_for_parallel_test(recipes_dir, f"recipe_seq_{i}", artifact_path)
+
+    thread_ids: list[int] = []
+    real_try_load = app_module._try_load_artifact
+
+    def _spy_load(recipe, key_ring, serve_config):
+        thread_ids.append(threading.get_ident())
+        return real_try_load(recipe, key_ring, serve_config)
+
+    monkeypatch.setattr(app_module, "_try_load_artifact", _spy_load)
+
+    from recotem.config import ServeConfig
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = "active:" + "aa" * 32
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1", "*"]
+    cfg.startup_parallelism = 1
+
+    app_module.create_app(cfg)
+
+    assert len(thread_ids) == n_recipes, (
+        f"Expected {n_recipes} load calls, got {len(thread_ids)}"
+    )
+    # max_workers=1 → only one worker thread created by the executor.
+    assert len(set(thread_ids)) == 1, (
+        f"Expected exactly 1 unique thread ID with parallelism=1; "
+        f"got {set(thread_ids)!r}"
+    )

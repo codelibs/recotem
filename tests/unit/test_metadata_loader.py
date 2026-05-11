@@ -807,3 +807,35 @@ def test_load_metadata_handles_duplicate_item_ids(tmp_path: Path) -> None:
     assert index["dup_id"]["title"] == "First Title", (
         "build_metadata_index must reflect first-wins deduplication from loader"
     )
+
+
+# ---------------------------------------------------------------------------
+# N-9: M-8 — MemoryError propagates from load_item_metadata (not wrapped)
+# ---------------------------------------------------------------------------
+
+
+def test_load_item_metadata_memory_error_propagates_unwrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MemoryError from pd.read_csv inside load_item_metadata must propagate
+    without being silently wrapped in ValueError or another exception type.
+
+    This is an OOM-safety contract: a MemoryError during metadata loading must
+    escape so the caller (_try_load_artifact or _build_entry) can either
+    propagate it further or at least fail loudly rather than swallowing the error.
+    """
+    from recotem.metadata import loader as metadata_loader_mod
+
+    csv_file = tmp_path / "items.csv"
+    pd.DataFrame({"item_id": ["i1"], "title": ["A"]}).to_csv(csv_file, index=False)
+
+    def _oom(*args, **kwargs):
+        raise MemoryError("out of memory during CSV parse")
+
+    monkeypatch.setattr(metadata_loader_mod.pd, "read_csv", _oom)
+
+    with pytest.raises(MemoryError):
+        load_item_metadata(
+            _Config("csv", str(csv_file)),
+            fields=["title"],
+        )

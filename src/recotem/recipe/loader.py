@@ -437,6 +437,8 @@ def load_recipe(
         expanded = _expand_with_source_no_expand(raw_data, extra_allowed=extra_allowed)
     except RecipeError:
         raise
+    except (MemoryError, RecursionError):
+        raise
     except Exception as exc:
         raise RecipeError(
             f"Unexpected error during env-var expansion in '{p}': {exc}"
@@ -481,11 +483,15 @@ def load_recipe(
                 ) from exc
             except RecipeError:
                 raise
+            except (MemoryError, RecursionError):
+                raise
             except Exception as exc:
                 raise RecipeError(
                     f"Recipe '{p}' source failed validation: {exc}"
                 ) from exc
         except RecipeError:
+            raise
+        except (MemoryError, RecursionError):
             raise
         except Exception as exc:
             raise RecipeError(f"Recipe '{p}' source resolution failed: {exc}") from exc
@@ -501,6 +507,8 @@ def load_recipe(
         detail = _format_pydantic_errors(exc)
         raise RecipeError(f"Recipe '{p}' failed validation:\n{detail}") from exc
     except RecipeError:
+        raise
+    except (MemoryError, RecursionError):
         raise
     except Exception as exc:
         logger.error(

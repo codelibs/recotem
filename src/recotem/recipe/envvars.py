@@ -51,7 +51,7 @@ _BLACKLIST_PREFIXES: tuple[str, ...] = (
 
 # Exact names (uppercased) that are always blocked regardless of prefix.
 _BLACKLIST_EXACT: frozenset[str] = frozenset(
-    {"RECOTEM_SIGNING_KEY", "RECOTEM_API_KEYS"}
+    {"RECOTEM_SIGNING_KEYS", "RECOTEM_API_KEYS"}
 )
 
 
@@ -129,8 +129,3 @@ def expand_env_vars(
         )
 
     return _ENV_VAR_RE.sub(_replace, value)
-
-
-def has_env_var_references(value: str) -> bool:
-    """Return True if *value* contains any ``${...}`` references."""
-    return bool(_ENV_VAR_RE.search(value))

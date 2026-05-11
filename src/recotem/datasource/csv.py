@@ -182,6 +182,8 @@ class CSVSource:
                 read_kwargs["dtype"] = cfg.dtype
             try:
                 df = pd.read_csv(BytesIO(raw_bytes), **read_kwargs)
+            except (MemoryError, RecursionError):
+                raise
             except Exception as exc:
                 raise DataSourceError(
                     f"Failed to parse CSV from '{safe_path}': {exc}"
@@ -216,6 +218,8 @@ class CSVSource:
                 raise DataSourceError(
                     f"Permission denied reading CSV file: {safe_path}"
                 ) from exc
+            except (MemoryError, RecursionError):
+                raise
             except Exception as exc:
                 raise DataSourceError(
                     f"Failed to read CSV from '{safe_path}': {exc}"
@@ -238,6 +242,8 @@ class CSVSource:
                 read_kwargs["dtype"] = cfg.dtype
             try:
                 df: pd.DataFrame = pd.read_csv(BytesIO(raw_bytes), **read_kwargs)
+            except (MemoryError, RecursionError):
+                raise
             except Exception as exc:
                 raise DataSourceError(
                     f"Failed to parse CSV from '{safe_path}': {exc}"
@@ -260,6 +266,8 @@ class CSVSource:
                 raise DataSourceError(
                     f"Permission denied reading CSV file: {safe_path}"
                 ) from exc
+            except (MemoryError, RecursionError):
+                raise
             except Exception as exc:
                 raise DataSourceError(
                     f"Failed to read CSV from '{safe_path}': {exc}"
@@ -362,6 +370,8 @@ class ParquetSource:
             sha256_verified = True
             try:
                 df = pd.read_parquet(BytesIO(raw_bytes))
+            except (MemoryError, RecursionError):
+                raise
             except Exception as exc:
                 raise DataSourceError(
                     f"Failed to parse Parquet from '{safe_path}': {exc}"
@@ -392,6 +402,8 @@ class ParquetSource:
                 raise DataSourceError(
                     f"Permission denied reading Parquet file: {safe_path}"
                 ) from exc
+            except (MemoryError, RecursionError):
+                raise
             except Exception as exc:
                 raise DataSourceError(
                     f"Failed to read Parquet from '{safe_path}': {exc}"
@@ -405,6 +417,8 @@ class ParquetSource:
             sha256_verified = True
             try:
                 df: pd.DataFrame = pd.read_parquet(BytesIO(raw_bytes))
+            except (MemoryError, RecursionError):
+                raise
             except Exception as exc:
                 raise DataSourceError(
                     f"Failed to parse Parquet from '{safe_path}': {exc}"
@@ -420,6 +434,8 @@ class ParquetSource:
                 raise DataSourceError(
                     f"Permission denied reading Parquet file: {safe_path}"
                 ) from exc
+            except (MemoryError, RecursionError):
+                raise
             except Exception as exc:
                 raise DataSourceError(
                     f"Failed to read Parquet from '{safe_path}': {exc}"

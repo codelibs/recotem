@@ -310,17 +310,10 @@ def run_training(
         # For unexpected non-domain errors (KeyError, AttributeError, etc.),
         # emit code="internal_error" so operators can distinguish bugs from
         # expected failure modes when alerting on the code field.
-        from recotem.training.errors import (
-            MinDataViolation as _MinDataViolation,  # noqa: PLC0415
-        )
-        from recotem.training.errors import (
-            TrainingError as _TrainingError,  # noqa: PLC0415
-        )
-
         declared_code = getattr(exc, "code", None)
         if declared_code:
             error_code = declared_code
-        elif isinstance(exc, _TrainingError):
+        elif isinstance(exc, TrainingError):
             error_code = "training_error"
         else:
             error_code = "internal_error"
@@ -329,7 +322,7 @@ def run_training(
 
         # Build extra diagnostic fields for specific error types.
         extra: dict[str, Any] = {}
-        if isinstance(exc, _MinDataViolation):
+        if isinstance(exc, MinDataViolation):
             for attr in (
                 "n_rows",
                 "n_users",

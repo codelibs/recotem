@@ -1761,3 +1761,31 @@ def test_ftp_embedded_credentials_rejected(tmp_path: Path) -> None:
     p = _write_recipe(tmp_path, content)
     with pytest.raises(RecipeError):
         load_recipe(p)
+
+
+# ---------------------------------------------------------------------------
+# N-9: M-8 — MemoryError propagates from load_recipe (not wrapped in RecipeError)
+# ---------------------------------------------------------------------------
+
+
+def test_load_recipe_memory_error_propagates_unwrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MemoryError raised inside load_recipe must propagate as MemoryError,
+    not be silently converted to RecipeError.
+
+    This is an OOM-safety contract: if YAML parsing raises MemoryError, the
+    caller must see it directly so the process can respond (log, terminate,
+    alert) rather than treating it as a schema validation failure.
+    """
+    import yaml as _yaml
+
+    p = _minimal(tmp_path, name="oom_recipe")
+
+    def _oom(*args, **kwargs):
+        raise MemoryError("out of memory during YAML parse")
+
+    monkeypatch.setattr(_yaml, "safe_load", _oom)
+
+    with pytest.raises(MemoryError):
+        load_recipe(p)

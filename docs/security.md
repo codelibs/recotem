@@ -49,7 +49,7 @@ The internet-facing boundary is `recotem serve`. `recotem train` has no inbound 
 | Resource exhaustion via giant network fetch | `RECOTEM_MAX_DOWNLOAD_BYTES` (default 256 MiB) caps the raw I/O body during fetch; cap exceeded → `DataSourceError` mid-stream. Does NOT cap the decompressed DataFrame — see [Decompressed-size cap not enforced](#decompressed-size-cap-not-enforced-medium-5) |
 | Plaintext HTTP source on the public internet | Operator policy. `http://` is allowed (legitimate inside trusted networks) but operators MUST avoid plaintext on the public internet; sha256 mitigates content tampering for any reachable response |
 | Unrecognised plugin loading arbitrary code | Conflicting plugin `type_name` fails startup; installed plugins are treated as trusted code (pin versions) |
-| Unauthenticated external access | Default bind `127.0.0.1`; `--insecure-no-auth` gated by `RECOTEM_ENV=development`; `TrustedHostMiddleware` blocks unrecognized hosts |
+| Unauthenticated external access | Default bind `127.0.0.1`; `--insecure-no-auth` gated by `RECOTEM_ENV` in `{development, dev, test}`; `TrustedHostMiddleware` blocks unrecognized hosts |
 
 ## Decompressed-size cap not enforced (MEDIUM-5)
 
@@ -313,6 +313,8 @@ GCP_*
 
 The `*_KEY*` pattern is intentionally broad. Any `RECOTEM_RECIPE_*` variable whose name contains `_KEY` — such as `RECOTEM_RECIPE_PARTITION_KEY` — is rejected. Use a name that avoids `_KEY*` (e.g. `RECOTEM_RECIPE_PARTITION_COLUMN`). A blacklisted reference raises `RecipeError` (exit 2) and the error message names the variable but never includes its value.
 
+**Operational hardening.** The blacklist is a _secondary_ defence that catches accidental name collisions. The _primary_ safety property is operational: **never store secrets in `RECOTEM_RECIPE_*` environment variables.** The `RECOTEM_RECIPE_` prefix should be reserved for non-sensitive configuration values (dataset names, date ranges, partition columns, feature flags). If a secret were placed under this prefix with a name that does not match any blacklisted pattern (e.g. `RECOTEM_RECIPE_DB_ENDPOINT`), the blacklist would not catch it. Treat the prefix as a namespace for recipe parameterisation, not as a secrets namespace.
+
 ## Secrets handling
 
 **What must be kept secret:**
@@ -458,13 +460,43 @@ receive a 422 from FastAPI before reaching the recommender.
 
 ## Rate limiting and DoS
 
-Recotem itself does not implement request-rate limiting. Operators must front
-`recotem serve` with a reverse proxy (nginx `limit_req`, Caddy
-`rate_limit`, ALB / Cloud Armor) and apply per-IP / per-API-key quotas.
-`/predict` is CPU-bound; sustained request rates above the recommender's
-inference throughput will queue under uvicorn and cause request latency
-to climb before HTTP 429 would naturally back off — measure and cap at the
-proxy.
+Recotem itself does not implement request-rate limiting. Operators **must**
+front `recotem serve` with a reverse proxy (nginx `limit_req`, Caddy
+`rate_limit`, ALB / Cloud Armor) and apply per-IP or per-API-key quotas on
+`/predict/*`. This is not optional in production.
+
+**Why the proxy layer is responsible — scrypt amplification.** Every
+authentication attempt (valid or not) runs a scrypt key-derivation check
+(`hashlib.scrypt` with n=2, r=8, p=1, dklen=32) per stored API key. An
+unauthenticated attacker who can send requests at the network layer can
+therefore trigger CPU-bound scrypt work on every failed authentication, at a
+rate bounded only by the network rather than by the application. Recotem does
+not implement its own rate limiter; that is the proxy's responsibility.
+
+`/predict` is also CPU-bound for recommendation inference; sustained request
+rates above the recommender's inference throughput will queue under uvicorn
+and cause request latency to climb. Measure and cap at the proxy.
+
+**Recommended nginx configuration:**
+
+```nginx
+# Define a rate-limit zone keyed by IP address (adjust burst/rate as needed).
+limit_req_zone $binary_remote_addr zone=recotem_predict:10m rate=20r/s;
+
+server {
+    # ... TLS and upstream configuration ...
+
+    location /predict/ {
+        limit_req zone=recotem_predict burst=40 nodelay;
+        limit_req_status 429;
+        proxy_pass http://recotem_backend;
+    }
+}
+```
+
+For per-API-key limiting, key on the `$http_x_api_key` variable or use a WAF
+(AWS WAF, GCP Cloud Armor, Cloudflare) that can enforce quotas per header
+value.
 
 ## Signing-key entropy and storage
 
@@ -497,7 +529,7 @@ Recotem does not sandbox plugins. A malicious plugin can read env vars, includin
 
 ## Network exposure
 
-By default, `recotem serve` binds to `127.0.0.1`. When `RECOTEM_API_KEYS` is empty the bind is **forced** to `127.0.0.1` regardless of `RECOTEM_HOST` — the only way to bind to another interface is to either configure `RECOTEM_API_KEYS` or pass `--insecure-no-auth` (which is itself gated on `RECOTEM_ENV`). To expose externally:
+By default, `recotem serve` binds to `127.0.0.1`. When `RECOTEM_API_KEYS` is empty the bind is **forced** to `127.0.0.1` regardless of `RECOTEM_HOST` — the only way to bind to another interface is to either configure `RECOTEM_API_KEYS` or pass `--insecure-no-auth` (which is itself gated on `RECOTEM_ENV` in `{development, dev, test}`). To expose externally:
 
 1. Configure `RECOTEM_API_KEYS` (otherwise the bind is forced to `127.0.0.1`).
 2. Set `RECOTEM_HOST=0.0.0.0`.

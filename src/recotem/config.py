@@ -488,6 +488,18 @@ def get_http_timeout_seconds() -> int:
 _TRUTHY_ENV_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
 
+def is_truthy_env(value: str | None) -> bool:
+    """Return True iff *value* is a truthy env-var string.
+
+    Accepts the same set of truthy values recognised across all Recotem env
+    variables: ``"1"``, ``"true"``, ``"yes"``, ``"on"`` (case-insensitive).
+    ``None`` and the empty string are treated as falsy.
+    """
+    if value is None:
+        return False
+    return value.strip().lower() in _TRUTHY_ENV_VALUES
+
+
 def get_http_allow_private() -> bool:
     """Return True if HTTP fetches to private/loopback/link-local IPs are allowed.
 
@@ -498,8 +510,7 @@ def get_http_allow_private() -> bool:
     mirrors) opt in explicitly; production deployments leave it off so a
     malicious recipe cannot hit cloud-metadata services or sibling pods.
     """
-    raw = os.environ.get("RECOTEM_HTTP_ALLOW_PRIVATE", "").strip().lower()
-    return raw in _TRUTHY_ENV_VALUES
+    return is_truthy_env(os.environ.get("RECOTEM_HTTP_ALLOW_PRIVATE"))
 
 
 def get_lock_dir() -> str:

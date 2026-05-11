@@ -25,7 +25,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import structlog
 from fastapi import FastAPI
@@ -48,9 +48,6 @@ from recotem.serving.watcher import (
     stat_marker,
 )
 from recotem.version import __version__
-
-if TYPE_CHECKING:
-    pass
 
 logger = structlog.get_logger(__name__)
 
@@ -429,6 +426,8 @@ def _try_load_artifact(
     except ArtifactError as exc:
         logger.warning("initial_artifact_read_failed", name=recipe.name, error=str(exc))
         return _failed_entry(recipe, f"read failed: {exc}")
+    except (MemoryError, RecursionError):
+        raise
     except Exception as exc:
         logger.warning("initial_artifact_read_error", name=recipe.name, error=str(exc))
         return _failed_entry(recipe, f"read error: {exc}")
@@ -500,9 +499,18 @@ def _try_load_artifact(
         return _failed_entry(recipe, f"deserialize failed: {exc}")
 
     metadata_df = None
+    metadata_index = None
     if recipe.item_metadata is not None:
         try:
             metadata_df = load_metadata(recipe, recipe.name)
+            from recotem.metadata.loader import build_metadata_index  # noqa: PLC0415
+
+            deny_set: frozenset[str] = frozenset(
+                s.lower() for s in (serve_config.metadata_field_deny or [])
+            )
+            metadata_index = build_metadata_index(metadata_df, deny_set)
+        except (MemoryError, RecursionError):
+            raise
         except Exception as exc:
             logger.warning(
                 "initial_artifact_metadata_failed",
@@ -518,6 +526,7 @@ def _try_load_artifact(
         header=header_dict,
         kid=hdr.kid,
         metadata_df=metadata_df,
+        metadata_index=metadata_index,
         last_load_error=None,
         artifact_path=artifact_path,
         _loaded_marker=(marker, sha256),

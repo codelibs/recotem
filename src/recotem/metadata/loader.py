@@ -311,6 +311,8 @@ def _read_file(file_type: str, path: str, *, sha256: str | None = None) -> pd.Da
 
             with fsspec.open(path, "rb") as fh:
                 data = fh.read(cap + 1)
+        except (MemoryError, RecursionError):
+            raise
         except Exception as exc:
             raise ValueError(
                 f"failed to read metadata file {safe_path!r}: {exc}"
@@ -331,6 +333,8 @@ def _read_file(file_type: str, path: str, *, sha256: str | None = None) -> pd.Da
     if file_type == "parquet":
         try:
             return pd.read_parquet(path)
+        except (MemoryError, RecursionError):
+            raise
         except Exception as exc:
             raise ValueError(
                 f"failed to read parquet file {safe_path!r}: {exc}"
@@ -340,6 +344,8 @@ def _read_file(file_type: str, path: str, *, sha256: str | None = None) -> pd.Da
         # instead of silently converting them to NaN.  Genuine nulls (empty
         # cells) are detected via the empty-string check in load_item_metadata.
         return pd.read_csv(path, dtype=str, keep_default_na=False)
+    except (MemoryError, RecursionError):
+        raise
     except Exception as exc:
         raise ValueError(f"failed to read csv file {safe_path!r}: {exc}") from exc
 
@@ -349,6 +355,8 @@ def _parse_bytes(file_type: str, data: bytes, safe_path: str) -> pd.DataFrame:
     if file_type == "parquet":
         try:
             return pd.read_parquet(BytesIO(data))
+        except (MemoryError, RecursionError):
+            raise
         except Exception as exc:
             raise ValueError(
                 f"failed to parse parquet file {safe_path!r}: {exc}"
@@ -356,5 +364,7 @@ def _parse_bytes(file_type: str, data: bytes, safe_path: str) -> pd.DataFrame:
     try:
         # keep_default_na=False: see comment in _read_file above.
         return pd.read_csv(BytesIO(data), dtype=str, keep_default_na=False)
+    except (MemoryError, RecursionError):
+        raise
     except Exception as exc:
         raise ValueError(f"failed to parse csv file {safe_path!r}: {exc}") from exc

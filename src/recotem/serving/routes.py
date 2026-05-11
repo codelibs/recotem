@@ -9,6 +9,7 @@ Routes:
 """
 
 import math
+import re
 import time
 import uuid
 from typing import Annotated, Any
@@ -23,6 +24,13 @@ from recotem.serving.auth import verify_api_key
 from recotem.serving.registry import ModelRegistry
 
 logger = structlog.get_logger(__name__)
+
+# Allowed characters for an echoed X-Request-ID header value (M-4).
+# Accepts up to 64 characters of [A-Za-z0-9_-] (UUID-ish identifiers).
+# Any header value that does not match is replaced with a fresh UUID4 so
+# ANSI escape sequences, log-injection payloads, or oversized strings are
+# never echoed back to the client or embedded in structured log fields.
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +128,8 @@ def make_router(
         - ``unavailable``   — recipe not loaded or unhealthy (HTTP 503)
         - ``error``         — any other unexpected exception
         """
-        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        raw_rid = request.headers.get("x-request-id", "")
+        request_id = raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
         response.headers["X-Request-ID"] = request_id
         start = time.monotonic()
         status = "error"
@@ -307,9 +316,20 @@ def _lookup_metadata(
     ``recotem_metadata_lookup_errors_total`` so operators can detect
     metadata misconfiguration without silencing it completely.
     """
+    if item_id not in meta_df.index:
+        return {}
     try:
         row = meta_df.loc[item_id]
     except KeyError:
+        # Reaching here means item_id passed the index check above but
+        # loc[] still raised — possible with a MultiIndex or corrupt index
+        # state.  Log at DEBUG (not WARNING) as it is not a misconfiguration
+        # but an unexpected structural inconsistency worth investigating.
+        logger.debug(
+            "metadata_lookup_unexpected_keyerror",
+            recipe=recipe_name,
+            item_id=str(item_id),
+        )
         return {}
     try:
         out: dict[str, Any] = {}

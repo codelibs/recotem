@@ -39,6 +39,7 @@ from typing import Any
 
 import structlog
 
+from recotem._log_safe import format_kid_for_log
 from recotem.artifact.format import ArtifactError
 
 logger = structlog.get_logger(__name__)
@@ -339,7 +340,7 @@ def verify_hmac(
     """
     key = key_ring.get(kid)
     if key is None:
-        logger.warning("artifact_kid_unknown", kid=kid)
+        logger.warning("artifact_kid_unknown", kid=format_kid_for_log(kid))
         raise ArtifactError(
             f"artifact signed with unknown kid {kid!r}; "
             "check RECOTEM_SIGNING_KEYS configuration"
@@ -347,7 +348,7 @@ def verify_hmac(
 
     expected = compute_hmac(key, kid_bytes, header_json, payload)
     if not hmac.compare_digest(stored_digest, expected):
-        logger.warning("artifact_hmac_mismatch", kid=kid)
+        logger.warning("artifact_hmac_mismatch", kid=format_kid_for_log(kid))
         raise ArtifactError(
             f"HMAC verification failed for kid {kid!r}; "
             "artifact may have been tampered with"
@@ -384,11 +385,16 @@ def unpickle_payload(payload_bytes: bytes) -> Any:
     such as ``recotem inspect`` can read and verify the artifact without
     triggering deserialization.
 
-    Raises ``ArtifactError`` on any disallowed class or pickle decoding error.
+    Raises ``ArtifactError`` on any disallowed class or deserialization error.
+    ``MemoryError`` and ``RecursionError`` are re-raised unwrapped so OOM /
+    stack-exhaustion is not swallowed as ``ArtifactError`` in the watcher loop
+    (M-8).
     """
     try:
         return SafeUnpickler(io.BytesIO(payload_bytes)).load()
     except ArtifactError:
         raise
+    except (MemoryError, RecursionError):
+        raise  # OOM/stack-exhaustion must not be swallowed into ArtifactError
     except Exception as exc:
-        raise ArtifactError(f"pickle deserialization failed: {exc}") from exc
+        raise ArtifactError(f"deserialization failed: {exc}") from exc

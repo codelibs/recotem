@@ -305,7 +305,8 @@ Each model replica holds every loaded model in RAM. Plan accordingly.
 
 | Factor | Impact |
 |--------|--------|
-| `RECOTEM_MAX_ARTIFACT_BYTES` | Hard cap per artifact (default 2 GiB). Reduce this if you have many small models. |
+| `RECOTEM_MAX_ARTIFACT_BYTES` | Hard cap per artifact file (default 2 GiB). Reduce this if you have many small models. |
+| `RECOTEM_MAX_PAYLOAD_BYTES` | Cap on the deserialised payload per artifact (default 512 MiB, post-HMAC-verify). Must be ≤ `RECOTEM_MAX_ARTIFACT_BYTES`; if not, `recotem serve` fails at startup with `ConfigError` (exit 8). Reduces the memory spike from deserialization relative to the raw file size. |
 | Number of recipes | Each recipe loads one model. 10 recipes × 500 MiB = 5 GiB baseline. |
 | Number of replicas | Each replica is independent. 2 replicas = 2× memory. |
 | Item metadata | DataFrame in-memory per recipe. Size ≈ rows × columns × 8 bytes. |
@@ -484,7 +485,7 @@ Causes and fixes:
 | `signature mismatch` | Artifact signed with a key not in `RECOTEM_SIGNING_KEYS` | Add the signing kid used at train time |
 | `unknown kid: prod-old` | The kid in the artifact is not in the server's key list | Add that kid or retrain with a known kid |
 | `magic bytes mismatch` | Corrupt or truncated artifact | Retrain |
-| `payload exceeds max bytes` | Artifact larger than `RECOTEM_MAX_ARTIFACT_BYTES` | Increase the limit or reduce model size |
+| `payload exceeds max bytes` | Payload exceeds `RECOTEM_MAX_PAYLOAD_BYTES` (512 MiB default) or artifact exceeds `RECOTEM_MAX_ARTIFACT_BYTES` (2 GiB default) | Increase the relevant cap or reduce model size. Note: `RECOTEM_MAX_PAYLOAD_BYTES` must remain ≤ `RECOTEM_MAX_ARTIFACT_BYTES`. |
 | `header JSON too large` | Malformed artifact | Retrain |
 
 ### `recotem train` exits 3 (DataSourceError)

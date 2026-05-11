@@ -1924,23 +1924,26 @@ def test_recipes_dir_scan_failure_counter_label_is_error_class_name(
 
 
 def test_extract_kid_safe_truncates_long_kid_in_log(tmp_path: Path) -> None:
-    """_extract_kid_safe must truncate any kid longer than _KID_LOG_MAX_LEN
-    characters and append '...<truncated>' so log aggregators are not flooded.
+    """_format_kid_for_log must truncate any kid longer than _KID_LOG_MAX_LEN
+    characters and append '...' so log aggregators are not flooded.
 
-    We build a synthetic artifact whose kid field is artificially long by
-    exploiting the _format_kid_for_log helper directly (since MAX_KID_LEN
-    is only 32, we can't embed an actual >64-char kid in a real artifact).
+    After OBS-3 the format changed: truncation suffix is '...' (not the old
+    '...<truncated>'), and non-safe chars are rendered as \\xHH escapes rather
+    than '?' replacements.  This test verifies the new contract.
+
+    We call the helper directly (since MAX_KID_LEN is only 32, we can't
+    embed an actual >64-char kid in a real artifact).
     """
     from recotem.serving.watcher import _KID_LOG_MAX_LEN, _format_kid_for_log
 
     long_kid = "a" * (_KID_LOG_MAX_LEN + 10)
     result = _format_kid_for_log(long_kid)
 
-    assert len(result) <= _KID_LOG_MAX_LEN + len("...<truncated>"), (
+    assert len(result) <= _KID_LOG_MAX_LEN + len("..."), (
         "Formatted kid must not exceed _KID_LOG_MAX_LEN + truncation suffix"
     )
-    assert result.endswith("...<truncated>"), (
-        f"Long kid must be suffixed with '...<truncated>'; got {result!r}"
+    assert result.endswith("..."), (
+        f"Long kid must be suffixed with '...'; got {result!r}"
     )
     assert result.startswith("a" * _KID_LOG_MAX_LEN), (
         "First _KID_LOG_MAX_LEN chars must be preserved before the suffix"
@@ -1948,8 +1951,13 @@ def test_extract_kid_safe_truncates_long_kid_in_log(tmp_path: Path) -> None:
 
 
 def test_extract_kid_safe_strips_non_printable_chars(tmp_path: Path) -> None:
-    """_format_kid_for_log must replace non-printable bytes with '?' to prevent
-    terminal escape-sequence injection in log output.
+    """_format_kid_for_log must replace non-safe bytes with \\xHH escapes to
+    prevent terminal escape-sequence injection in log output.
+
+    After OBS-3 the sanitisation changed from '?' replacement to \\xHH hex
+    escapes, which are more informative (the original byte is recoverable) and
+    still prevent ANSI injection.  Brackets '[' and ']' in the ANSI sequence are
+    outside the safe-char set and also get escaped.
     """
     from recotem.serving.watcher import _format_kid_for_log
 
@@ -1957,11 +1965,18 @@ def test_extract_kid_safe_strips_non_printable_chars(tmp_path: Path) -> None:
     evil_kid = "hello\x1b[31mred\x00\tworld"
     result = _format_kid_for_log(evil_kid)
 
-    assert "\x1b" not in result, "ESC character must be replaced with '?'"
-    assert "\x00" not in result, "Null byte must be replaced with '?'"
-    assert "\t" not in result, "Tab must be replaced with '?'"
-    assert "?" in result, "Non-printable characters must become '?'"
-    # Printable chars must be preserved
+    # Raw control characters must not appear in the output
+    assert "\x1b" not in result, "Raw ESC byte must not appear in output"
+    assert "\x00" not in result, "Raw null byte must not appear in output"
+    assert "\t" not in result, "Raw tab must not appear in output"
+
+    # After OBS-3 the non-safe chars are rendered as \\xHH escapes (literal
+    # backslash-x-HH in the returned string), NOT as '?' replacements.
+    assert r"\x1b" in result, "ESC must appear as \\x1b escape in output"
+    assert r"\x00" in result, "Null must appear as \\x00 escape in output"
+    assert r"\x09" in result, "Tab must appear as \\x09 escape in output"
+
+    # Printable chars in the safe set must be preserved
     assert "hello" in result
     assert "world" in result
 
@@ -2067,3 +2082,309 @@ def test_no_sidecar_falls_back_to_full_stat_compare(tmp_path: Path) -> None:
         "_check_sidecar_changed must return False when no sidecar file exists; "
         "caller must use full-stat comparison as fallback"
     )
+
+
+# ---------------------------------------------------------------------------
+# N-3: M-1 — _scan_recipes_dir inserts stub without calling _load_recipe
+# ---------------------------------------------------------------------------
+
+
+def test_scan_recipes_dir_new_yaml_does_not_call_load_recipe_synchronously(
+    tmp_path: Path,
+) -> None:
+    """When a new YAML is discovered by _scan_recipes_dir, _load_recipe must
+    NOT be called synchronously (M-1 contract: blocking I/O stalls the watcher
+    loop).  Instead a stub entry with loaded=False is inserted so the next
+    _poll_artifacts tick picks up the new recipe via the marker-change path.
+    """
+    from unittest.mock import MagicMock
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+
+    # Replace _load_recipe with a MagicMock spy BEFORE writing the YAML
+    watcher._load_recipe = MagicMock(name="_load_recipe")  # type: ignore[method-assign]
+
+    # Now add a new YAML to the empty recipes dir
+    artifact_path = tmp_path / "new_model.recotem"
+    artifact_path.write_bytes(b"placeholder")
+    _write_recipe_yaml(recipes_dir, "new_recipe_n3", artifact_path)
+
+    # Call _scan_recipes_dir — this should discover the new YAML
+    watcher._scan_recipes_dir()
+
+    # _load_recipe must NOT have been called (M-1: async load via poll tick)
+    assert watcher._load_recipe.call_count == 0, (
+        f"_load_recipe must NOT be called synchronously during _scan_recipes_dir "
+        f"(M-1 contract); call_count={watcher._load_recipe.call_count}"
+    )
+
+    # A stub entry must have been inserted so /health can show it
+    entry = registry.get("new_recipe_n3")
+    assert entry is not None, (
+        "A stub entry must be inserted in the registry when a new YAML is discovered"
+    )
+    assert not entry.loaded, (
+        "The stub entry must have loaded=False (it has not been loaded yet)"
+    )
+
+    watcher._executor.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# N-7: M-5 — _scan_recipes_dir iterdir failure increments _inc_scan_failure
+# ---------------------------------------------------------------------------
+
+
+def test_scan_recipes_dir_iterdir_failure_increments_scan_failure_counter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When _scan_recipes_dir's Path.iterdir() raises PermissionError,
+    the recotem_recipes_dir_scan_failures_total counter must be incremented
+    with error_class='dir_iter_PermissionError'.
+
+    The watcher should log a structured warning and return without crashing.
+    """
+    from pathlib import Path as _Path
+    from unittest.mock import MagicMock, patch
+
+    import structlog.testing
+
+    from recotem.serving.watcher import ArtifactWatcher
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+
+    # Replace _recipes_dir with a MagicMock whose iterdir raises PermissionError.
+    # PosixPath.iterdir is a C-level slot (read-only), so we can't patch it via
+    # patch.object.  Instead we substitute the entire _recipes_dir attribute.
+    mock_dir = MagicMock(spec=_Path)
+    mock_dir.iterdir.side_effect = PermissionError("denied")
+    watcher._recipes_dir = mock_dir
+
+    scan_failure_calls: list[str] = []
+    from recotem._metrics_watcher import inc_recipes_dir_scan_failure
+
+    def _spy(error_class: str) -> None:
+        scan_failure_calls.append(error_class)
+        inc_recipes_dir_scan_failure(error_class)
+
+    with structlog.testing.capture_logs() as cap:
+        with patch("recotem.serving.watcher._inc_scan_failure", side_effect=_spy):
+            watcher._scan_recipes_dir()
+
+    watcher._executor.shutdown(wait=False)
+
+    # Scan failure counter must have been incremented with dir_iter_* label
+    dir_iter_calls = [c for c in scan_failure_calls if c.startswith("dir_iter_")]
+    assert dir_iter_calls, (
+        f"_inc_scan_failure must be called with 'dir_iter_*' label on iterdir failure; "
+        f"got calls: {scan_failure_calls!r}"
+    )
+
+    # The warning log event must also be emitted
+    scan_error_events = [e for e in cap if e.get("event") == "recipes_dir_scan_error"]
+    assert scan_error_events, (
+        "recipes_dir_scan_error warning must be emitted when iterdir fails"
+    )
+    assert scan_error_events[0].get("error_class") == "PermissionError", (
+        f"error_class field must be 'PermissionError'; got {scan_error_events[0]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# N-8: M-6 — parse error on rescan does not evict the loaded model
+# ---------------------------------------------------------------------------
+
+
+def test_scan_recipes_dir_yaml_corrupt_on_rescan_keeps_loaded_entry(
+    tmp_path: Path,
+) -> None:
+    """When a previously-loaded recipe's YAML becomes unparseable on rescan,
+    the existing registry entry must NOT be evicted.
+
+    The recipe must remain visible in the registry (found_names includes it)
+    and last_load_error is updated, but the model keeps serving (M-2 contract).
+    This variant also exercises M-6: recipe.name from YAML may differ from
+    file stem; once the path→name mapping is established, a later parse error
+    is matched by that mapping, not the stem.
+    """
+    from unittest.mock import patch
+
+    import recotem.recipe.loader as _loader_mod
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    # Write a recipe whose name matches the stem (simplest case for M-6 path)
+    yaml_path = _write_recipe_yaml(recipes_dir, "n8_recipe", artifact_path)
+
+    registry = ModelRegistry()
+    good_entry = _make_entry("n8_recipe")
+    good_entry.artifact_path = str(artifact_path)
+    good_entry.last_load_error = None
+    registry.replace("n8_recipe", good_entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    initial_states = build_initial_states([recipe], {"n8_recipe": good_entry})
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+    # Populate the yaml_path → name mapping (normally done via build_initial_states
+    # or a previous successful scan)
+    watcher._yaml_path_to_name[yaml_path] = "n8_recipe"
+
+    # Now simulate a parse error on the YAML (corrupt content, but file still exists)
+    with patch.object(
+        _loader_mod,
+        "load_recipe",
+        side_effect=ValueError("YAML syntax error: invalid"),
+    ):
+        watcher._scan_recipes_dir()
+
+    watcher._executor.shutdown(wait=False)
+
+    # The entry must still be in the registry (not evicted)
+    entry = registry.get("n8_recipe")
+    assert entry is not None, (
+        "Registry entry must NOT be evicted when YAML becomes unparseable on rescan"
+    )
+
+    # last_load_error should be set so /health surfaces the parse failure
+    assert entry.last_load_error is not None, (
+        "last_load_error must be updated when YAML parse fails on rescan"
+    )
+    assert (
+        "parse error" in entry.last_load_error.lower()
+        or "yaml" in entry.last_load_error.lower()
+    ), (
+        f"last_load_error should mention the parse failure; got {entry.last_load_error!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# N-10: OBS-1 — repeated stat errors with same error_class demoted to DEBUG
+# ---------------------------------------------------------------------------
+
+
+def test_repeated_stat_error_same_class_demoted_to_debug(
+    tmp_path: Path,
+) -> None:
+    """The first occurrence of a stat error emits WARNING; subsequent occurrences
+    with the same error_class are demoted to DEBUG (logged as
+    'artifact_stat_failed_repeated') to prevent log aggregation flooding during
+    sustained outages (OBS-1).
+
+    Strategy:
+    1. Build a watcher with one recipe whose artifact is a path that can be
+       monkeypatched to always return an error_class.
+    2. Call _poll_artifacts() twice with a mock _stat_marker_with_error that
+       always returns (None, 'OSError').
+    3. After the first call, _last_stat_error_class is 'OSError'; the WARNING
+       has already been emitted inside _stat_marker_with_error itself.
+    4. On the second call, the code path checks
+       state._last_stat_error_class == stat_error_class and emits a DEBUG
+       event 'artifact_stat_failed_repeated' instead of another WARNING.
+    """
+    from unittest.mock import patch
+
+    import structlog.testing
+
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "obs1_recipe", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    state = _RecipeWatchState(recipe=recipe, artifact_path=str(artifact_path))
+
+    registry = ModelRegistry()
+    stub_entry = _make_entry("obs1_recipe")
+    stub_entry.last_load_error = None
+    registry.replace("obs1_recipe", stub_entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states={"obs1_recipe": state},
+    )
+
+    # _stat_marker_with_error is called inside the executor's _check function.
+    # Patch it to always return (None, "OSError").
+    with patch(
+        "recotem.serving.watcher._stat_marker_with_error",
+        return_value=(None, "OSError"),
+    ):
+        # First poll: _last_stat_error_class is None → different from "OSError"
+        # → state._last_stat_error_class is updated to "OSError"
+        # The warning is emitted in _stat_marker_with_error itself (already patched
+        # to not emit it).  We just verify the state transition and second-call
+        # behaviour.
+        with structlog.testing.capture_logs() as cap_first:
+            watcher._poll_artifacts()
+
+        # After first poll the state must record the error class
+        assert state._last_stat_error_class == "OSError", (
+            f"After first stat error, _last_stat_error_class must be 'OSError'; "
+            f"got {state._last_stat_error_class!r}"
+        )
+
+        # Second poll: same error class → must emit 'artifact_stat_failed_repeated'
+        with structlog.testing.capture_logs() as cap_second:
+            watcher._poll_artifacts()
+
+    repeated_events = [
+        e for e in cap_second if e.get("event") == "artifact_stat_failed_repeated"
+    ]
+    assert repeated_events, (
+        "Second consecutive stat error with same error_class must emit "
+        "'artifact_stat_failed_repeated' (DEBUG) event to prevent log flooding; "
+        f"events captured: {[e.get('event') for e in cap_second]!r}"
+    )
+
+    watcher._executor.shutdown(wait=False)

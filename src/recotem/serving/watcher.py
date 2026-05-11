@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 import fsspec
 import structlog
 
+from recotem._log_safe import format_kid_for_log as _format_kid_for_log
 from recotem._metrics_watcher import inc_recipes_dir_scan_failure as _inc_scan_failure
 from recotem.artifact.format import ArtifactError
 from recotem.serving import metrics as _metrics
@@ -167,6 +168,10 @@ class _RecipeWatchState:
     #: Last-known contents of the ``.sha256`` sidecar pointer file.
     #: ``None`` means we have not yet read the sidecar (or it does not exist).
     last_sidecar_contents: str | None = None
+    #: Most recent stat-error class name, or ``None`` when the last stat
+    #: succeeded.  Used by OBS-1 to demote repeated identical errors from
+    #: WARNING to DEBUG so log aggregation is not flooded during an outage.
+    _last_stat_error_class: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +224,15 @@ class ArtifactWatcher(threading.Thread):
             max_workers=_MAX_CONCURRENT_STATS,
             thread_name_prefix="artifact-stat",
         )
+        # Maps each recipe YAML path to the recipe.name parsed from it.
+        # recipe.name is authoritative and may differ from the file stem when
+        # the YAML declares an explicit ``name:`` field.  Initialized empty;
+        # populated by _scan_recipes_dir as YAML files are successfully parsed
+        # (including pre-existing recipes from initial_states on the first
+        # post-startup scan tick).  Until the first successful parse for a
+        # given path, the parse-error fallback in _scan_recipes_dir falls back
+        # to yaml_file.stem as a best-effort recipe name.
+        self._yaml_path_to_name: dict[Path, str] = {}
 
     def stop(self) -> None:
         """Signal the watcher thread to exit on its next poll tick.
@@ -248,6 +262,8 @@ class ArtifactWatcher(threading.Thread):
                     self._poll_artifacts()
                     # Successful poll — reset consecutive-error counter.
                     self._consecutive_errors = 0
+                except (MemoryError, RecursionError):
+                    raise  # Daemon thread dying is preferable to silent OOM loops
                 except Exception:
                     self._consecutive_errors += 1
                     _metrics.inc_watcher_unhandled_error()
@@ -291,8 +307,16 @@ class ArtifactWatcher(threading.Thread):
                 for f in self._recipes_dir.iterdir()
                 if f.is_file() and f.suffix == ".yaml"
             )
+        except (MemoryError, RecursionError):
+            raise
         except Exception as exc:
-            logger.warning("recipes_dir_scan_error", error=str(exc))
+            logger.warning(
+                "recipes_dir_scan_error",
+                error=str(exc),
+                error_class=type(exc).__name__,
+            )
+            # Surface to ops via the neutral scan-failure counter.
+            _inc_scan_failure(f"dir_iter_{type(exc).__name__}")
             return
 
         current_names = set(self._states.keys())
@@ -310,23 +334,30 @@ class ArtifactWatcher(threading.Thread):
                 # a transient parse error must NOT evict the currently-loaded
                 # model (M-2).
                 #
-                # Strategy: recipe names conventionally match the YAML file
-                # stem (e.g. "news.yaml" → recipe name "news").  Use the stem
-                # as the candidate name and cross-check against current_names.
+                # Strategy: use _yaml_path_to_name to look up the recipe name
+                # that was previously parsed from this exact file (M-6).
+                # Falling back to yaml_file.stem is retained for YAML files
+                # that have never been successfully parsed (first-ever load
+                # error), where the stem is the only available candidate.
                 error_class = type(exc).__name__
-                yaml_stem = yaml_file.stem
-                if yaml_stem in current_names:
+                existing_name = self._yaml_path_to_name.get(yaml_file)
+                if existing_name is None:
+                    # Never successfully parsed before; use stem as fallback.
+                    existing_name = (
+                        yaml_file.stem if yaml_file.stem in current_names else None
+                    )
+                if existing_name is not None and existing_name in current_names:
                     # Keep the entry in found_names → it won't be deleted.
-                    found_names.add(yaml_stem)
+                    found_names.add(existing_name)
                     self._registry.set_load_error(
-                        yaml_stem,
+                        existing_name,
                         f"recipe YAML parse error on rescan: {exc}",
                     )
-                    _metrics.inc_recipe_rescan_error(yaml_stem)
+                    _metrics.inc_recipe_rescan_error(existing_name)
                     logger.warning(
                         "recipe_rescan_load_error",
                         file=yaml_file.name,
-                        recipe=yaml_stem,
+                        recipe=existing_name,
                         error=str(exc),
                     )
                 else:
@@ -345,11 +376,19 @@ class ArtifactWatcher(threading.Thread):
 
             found_names.add(recipe.name)
 
+            # Always keep the path→name map current so that a later parse
+            # failure on this file uses the authoritative name rather than
+            # the file stem (M-6).  This is a cheap dict update on each scan.
+            self._yaml_path_to_name[yaml_file] = recipe.name
+
             if recipe.name not in self._states:
                 logger.info("recipe_discovered", name=recipe.name)
                 artifact_path = recipe.output.path
                 state = _RecipeWatchState(recipe=recipe, artifact_path=artifact_path)
                 self._states[recipe.name] = state
+                # Track the yaml_path → recipe.name mapping so future rescan
+                # error handling is not forced to rely on file stem (M-6).
+                self._yaml_path_to_name[yaml_file] = recipe.name
                 # Insert a stub entry BEFORE attempting the load so that if
                 # the load fails, _record_load_failure → set_load_error finds
                 # a registered entry and the failure is visible in /health.
@@ -364,13 +403,25 @@ class ArtifactWatcher(threading.Thread):
                     loaded=False,
                 )
                 self._registry.replace(recipe.name, stub)
-                self._load_recipe(recipe.name, state, force=True)
+                # Do NOT call _load_recipe here (M-1): loading is a blocking
+                # network I/O + deserialization operation that stalls the
+                # watcher loop for slow object-store artifacts.  The stub has
+                # last_marker=None so the next _poll_artifacts tick detects
+                # marker-change and loads via the normal bounded-thread-pool
+                # path.
+                # next poll tick picks up new recipes via the marker-change
+                # path (was synchronous; deadlock-prone for slow
+                # object-store loads)
 
         for gone in current_names - found_names:
             logger.info("recipe_removed", name=gone)
             self._registry.remove(gone)
             _metrics.set_model_loaded(gone, False)
             del self._states[gone]
+            # Clean up the yaml_path → name mapping for removed recipes (M-6).
+            stale_paths = [p for p, n in self._yaml_path_to_name.items() if n == gone]
+            for p in stale_paths:
+                del self._yaml_path_to_name[p]
 
         if found_names != current_names:
             _metrics.set_active_recipes(
@@ -425,16 +476,37 @@ class ArtifactWatcher(threading.Thread):
                 # failure (M-9): when stat_error_class is set, the error
                 # message includes the class name so /health can surface
                 # "stat failed: ClientError(403)" vs "artifact missing".
+                #
+                # OBS-1: the first occurrence of a given error class emits
+                # WARNING; subsequent identical errors are demoted to DEBUG
+                # to avoid flooding log aggregation during sustained outages.
                 entry = self._registry.get(name)
                 if stat_error_class is not None:
                     error_msg = f"stat failed: {stat_error_class}"
+                    if state._last_stat_error_class == stat_error_class:
+                        logger.debug(
+                            "artifact_stat_failed_repeated",
+                            recipe=name,
+                            error_class=stat_error_class,
+                        )
+                    else:
+                        # First occurrence (or changed error class) — already
+                        # logged at WARNING inside _stat_marker_with_error;
+                        # update state so the next occurrence is demoted.
+                        state._last_stat_error_class = stat_error_class
                 else:
+                    # stat_error_class is None → file genuinely missing.
+                    # Reset the error-class tracker (file was accessible before).
+                    state._last_stat_error_class = None
                     error_msg = "artifact missing or unreadable"
                     if entry is not None and entry.last_load_error is None:
                         logger.warning("artifact_disappeared", name=name)
                 self._registry.set_load_error(name, error_msg)
                 _metrics.inc_artifact_load_failure(name)
                 continue
+
+            # Successful stat — clear the error-class tracker (OBS-1).
+            state._last_stat_error_class = None
 
             if marker == state.last_marker:
                 # Fast path: pointer/mtime unchanged.  For append_sha
@@ -645,47 +717,12 @@ class ArtifactWatcher(threading.Thread):
 # Utility helpers
 # ---------------------------------------------------------------------------
 
-#: Maximum number of ASCII characters shown for a kid in log messages.
-#: Prevents a malicious artifact from flooding log aggregation (S-4).
+# _format_kid_for_log is imported from recotem._log_safe at the top of this
+# module (OBS-3) so that both artifact/signing.py and serving/watcher.py use
+# the same sanitisation logic without either sub-package importing the other.
+# The _KID_LOG_MAX_LEN constant is kept here as a local alias for any tests
+# or internal code that reference it directly.
 _KID_LOG_MAX_LEN: int = 64
-
-
-def _format_kid_for_log(raw: bytes | str) -> str:
-    """Sanitize a raw kid value for safe inclusion in structured log fields.
-
-    Applies two defences (S-4):
-
-    1. **Length cap** — truncates to ``_KID_LOG_MAX_LEN`` characters and
-       appends ``...<truncated>`` so the log line stays bounded regardless
-       of what a malicious file embeds in the kid field.
-    2. **Non-printable scrub** — replaces any character whose ``isprintable()``
-       check fails with ``?`` to prevent terminal escape-sequence injection.
-
-    Parameters
-    ----------
-    raw:
-        The kid value extracted from the artifact header, either as ``bytes``
-        (will be decoded with ``errors="replace"``) or as a plain ``str``.
-
-    Returns
-    -------
-    str
-        A safe, human-readable representation of the kid, suitable for
-        structured log fields.
-    """
-    if isinstance(raw, (bytes, bytearray)):
-        kid_str = raw.decode("utf-8", errors="replace")
-    else:
-        kid_str = str(raw)
-
-    # Replace non-printable characters with '?' (blocks terminal escape injection)
-    kid_str = "".join(c if c.isprintable() else "?" for c in kid_str)
-
-    # Cap length to prevent log aggregation DoS
-    if len(kid_str) > _KID_LOG_MAX_LEN:
-        kid_str = kid_str[:_KID_LOG_MAX_LEN] + "...<truncated>"
-
-    return kid_str
 
 
 def _extract_kid_safe(data: bytes) -> str:
@@ -699,7 +736,7 @@ def _extract_kid_safe(data: bytes) -> str:
 
     The returned string is already sanitized via ``_format_kid_for_log``
     so it is safe to embed in structured log fields without further processing
-    (length-capped, non-printables replaced with ``?``).
+    (length-capped, non-printables rendered as ``\\xHH`` escapes).
     """
     from recotem.artifact.format import FIXED_PREFIX_SIZE, MAX_KID_LEN
 

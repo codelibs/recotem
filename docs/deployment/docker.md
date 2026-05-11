@@ -97,7 +97,7 @@ RECOTEM_API_KEYS=client-a:sha256:dd0eeff...,client-b:sha256:1122334...
 docker compose --env-file .env up -d serve
 ```
 
-**RECOTEM_HOST must be 0.0.0.0 inside Docker.** The default `127.0.0.1` only binds loopback and is unreachable from outside the container. Note also that when `RECOTEM_API_KEYS` is empty, the server forces `127.0.0.1` regardless of `RECOTEM_HOST` — pass `--insecure-no-auth` with `RECOTEM_ENV` in `{development,dev,test}` to override (development only).
+**RECOTEM_HOST must be 0.0.0.0 inside Docker.** The default `127.0.0.1` only binds loopback and is unreachable from outside the container. Note also that when `RECOTEM_API_KEYS` is empty, the server forces `127.0.0.1` regardless of `RECOTEM_HOST` — pass `--insecure-no-auth` with `RECOTEM_ENV` in `{development, dev, test}` to override (development environments only).
 
 **Volume permissions (UID 1000).** The image runs as `appuser` (UID/GID 1000). Bind-mounted host directories that the container writes to (e.g. `./artifacts/`) must be writable by UID 1000:
 
@@ -149,12 +149,13 @@ docker run --rm \
 | `RECOTEM_LOG_FORMAT` | no | `auto`* | `json` recommended in containers |
 | `RECOTEM_ALLOWED_HOSTS` | no | `127.0.0.1,localhost` | Comma-separated. Whitespace-only or empty input falls back to default. |
 | `RECOTEM_ALLOWED_ORIGINS` | no | `""` (deny) | Comma-separated CORS origins |
-| `RECOTEM_MAX_ARTIFACT_BYTES` | no | `2147483648` (2 GiB) | Per-artifact size cap |
+| `RECOTEM_MAX_ARTIFACT_BYTES` | no | `2147483648` (2 GiB) | Per-artifact size cap (includes header + payload) |
+| `RECOTEM_MAX_PAYLOAD_BYTES` | no | `536870912` (512 MiB) | Per-payload cap for serve-side deserialization (post-HMAC-verify). Clamped 1 MiB–16 GiB. Must be ≤ `RECOTEM_MAX_ARTIFACT_BYTES`; misconfiguration raises a `ConfigError` (exit 8) at startup. |
 | `RECOTEM_MAX_DOWNLOAD_BYTES` | no | `268435456` (256 MiB) | Cap on source-path body for HTTP/HTTPS, local, and object-store reads (clamped 1 MiB–16 GiB) |
 | `RECOTEM_HTTP_TIMEOUT_SECONDS` | no | `30` | Connect/read timeout for HTTP/HTTPS source fetch (clamped 1–600) |
 | `RECOTEM_HTTP_ALLOW_PRIVATE` | no | `""` (blocked) | Set to `1`/`true`/`yes`/`on` to allow fetches to RFC1918/loopback/link-local destinations. Leave unset in production to block SSRF against cloud-metadata services. |
-| `RECOTEM_DRAIN_SECONDS` | no | `30` | SIGTERM grace window |
-| `RECOTEM_ENV` | no | `""` | Set to `development` to unlock `--insecure-no-auth` and `--dev-allow-unsigned` |
+| `RECOTEM_DRAIN_SECONDS` | no | `30` | SIGTERM grace window (clamped 1–300) |
+| `RECOTEM_ENV` | no | `""` | `--insecure-no-auth` permitted when set to `development`, `dev`, or `test`; `--dev-allow-unsigned` permitted only when set to `development`. |
 | `RECOTEM_ARTIFACT_ROOT` | no | `""` | If set, local `output.path` must resolve under this directory (symlink-escape guard) |
 | `RECOTEM_LOCK_DIR` | no | `""` | Override directory for per-recipe training lock files. Needed when `output.path` is a remote URI (lock files must be host-local). Falls back to a temp dir under the system temp directory. |
 | `RECOTEM_METADATA_FIELD_DENY` | no | `""` | Comma-separated column names stripped from `/predict` responses after the metadata join |

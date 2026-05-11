@@ -36,6 +36,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from recotem.config import is_truthy_env
+
 try:
     from prometheus_client import Counter, Gauge, Histogram
 
@@ -56,11 +58,6 @@ _METADATA_LOOKUP_ERRORS: Any = None
 _RECIPE_RESCAN_ERRORS: Any = None
 
 
-def _truthy_env(name: str) -> bool:
-    val = os.environ.get(name, "").strip().lower()
-    return val in {"1", "true", "yes", "on"}
-
-
 def metrics_enabled() -> bool:
     """Return True iff ``/metrics`` should be exposed.
 
@@ -69,7 +66,9 @@ def metrics_enabled() -> bool:
     metrics a deliberate operator opt-in rather than implicit-on whenever
     the optional dependency happens to be installed.
     """
-    return _PROMETHEUS_AVAILABLE and _truthy_env("RECOTEM_METRICS_ENABLED")
+    return _PROMETHEUS_AVAILABLE and is_truthy_env(
+        os.environ.get("RECOTEM_METRICS_ENABLED")
+    )
 
 
 def _ensure_initialized() -> None:

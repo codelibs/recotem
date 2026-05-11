@@ -500,3 +500,41 @@ def test_unique_api_kids_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RECOTEM_API_KEYS", f"k1:sha256:{hash1},k2:sha256:{hash2}")
     cfg = ServeConfig.from_env()
     assert len(cfg.api_keys) == 2
+
+
+# ---------------------------------------------------------------------------
+# N-13: MIN-2 — is_truthy_env public function
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("1", True),
+        ("true", True),
+        ("yes", True),
+        ("on", True),
+        ("TRUE", True),
+        ("Yes", True),
+        ("On", True),
+        ("0", False),
+        ("false", False),
+        ("no", False),
+        ("off", False),
+        ("", False),
+        (None, False),
+        ("anything", False),
+        ("2", False),
+        ("enabled", False),
+    ],
+)
+def test_is_truthy_env(value: str | None, expected: bool) -> None:
+    """is_truthy_env recognises exactly the truthy set {1, true, yes, on}
+    (case-insensitive) and treats everything else — including None and the
+    empty string — as falsy.
+    """
+    from recotem.config import is_truthy_env
+
+    assert is_truthy_env(value) is expected, (
+        f"is_truthy_env({value!r}) expected {expected}"
+    )

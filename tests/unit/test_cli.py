@@ -259,12 +259,13 @@ def test_inspect_exit5_on_unknown_kid(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_inspect_caps_oversized_read(tmp_path: Path, monkeypatch) -> None:
-    """inspect refuses files exceeding the payload cap without pulling them
+    """inspect refuses files exceeding the read cap without pulling them
     fully into memory.
 
-    The cap is driven by RECOTEM_MAX_PAYLOAD_BYTES (read via ServeConfig).
-    ServeConfig clamps the value to [1 MiB, 16 GiB], so we set the env var to
-    the minimum (1 MiB) and write a file larger than 1 MiB so the cap fires.
+    After C-2 the file-read cap is driven by RECOTEM_MAX_ARTIFACT_BYTES (not
+    RECOTEM_MAX_PAYLOAD_BYTES).  ServeConfig clamps the value to
+    [1 MiB, 16 GiB], so we set the env var to the minimum (1 MiB) and write a
+    file larger than 1 MiB so the cap fires.
     Guards the fix that swapped the CLI's unbounded ``Path.read_bytes()``
     for a bounded ``fh.read(max_bytes + 1)``.
     """
@@ -273,9 +274,13 @@ def test_inspect_caps_oversized_read(tmp_path: Path, monkeypatch) -> None:
     one_mib_plus_one = 1 * 1024 * 1024 + 1
     artifact_path.write_bytes(b"A" * one_mib_plus_one)
 
-    # Set the env var to the minimum allowed (1 MiB = 1048576).
+    # Set RECOTEM_MAX_ARTIFACT_BYTES to the minimum allowed (1 MiB = 1048576).
+    # This is the file-read cap after C-2 (max_payload_bytes is the parse cap).
     # ServeConfig clamps below-minimum values up to 1 MiB, so this is the
-    # smallest cap we can reliably test.
+    # smallest read cap we can reliably test.
+    monkeypatch.setenv("RECOTEM_MAX_ARTIFACT_BYTES", str(1 * 1024 * 1024))
+    # Also set RECOTEM_MAX_PAYLOAD_BYTES <= RECOTEM_MAX_ARTIFACT_BYTES so the
+    # payload <= artifact invariant is satisfied (ConfigError otherwise).
     monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", str(1 * 1024 * 1024))
     monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
     result = runner.invoke(app, ["inspect", str(artifact_path)])
@@ -1802,4 +1807,93 @@ def test_inspect_maps_fsspec_backend_exception_to_exit5(
     combined = result.output + (result.stderr if result.stderr else "")
     assert "_FakeBackendError" in combined or "Cannot open" in combined, (
         f"Error must surface the underlying exception class; got {combined!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# N-4: M-2 — keygen --type bogus exits 8; schema failure maps via
+#            _map_exception_to_exit
+# ---------------------------------------------------------------------------
+
+
+def test_keygen_bogus_type_exits_8() -> None:
+    """recotem keygen --type bogus must exit 8 (_EXIT_CONFIG).
+
+    After M-2 the unknown --type guard calls _exit(_EXIT_CONFIG, ...) so the
+    exit code is the documented config-error code 8 (not just non-zero).
+    """
+    result = runner.invoke(app, ["keygen", "--type", "bogus"])
+    assert result.exit_code == 8, (
+        f"keygen --type bogus must exit 8 (_EXIT_CONFIG); got {result.exit_code}"
+    )
+    combined = result.stdout + (result.stderr or "")
+    assert "bogus" in combined, (
+        f"Error message must mention the invalid type; got {combined!r}"
+    )
+
+
+def test_schema_failure_uses_map_exception_to_exit(monkeypatch) -> None:
+    """recotem schema failure routes through _map_exception_to_exit.
+
+    When build_source_config_union() raises a RecipeError, the schema command
+    must exit 2 (_EXIT_RECIPE) — not exit 1 (unhandled) — so scripts that
+    probe schema availability can distinguish a broken plugin registry from an
+    unrelated crash.
+    """
+    from unittest.mock import patch
+
+    from recotem.recipe.errors import RecipeError
+
+    with patch(
+        "recotem.datasource.registry.build_source_config_union",
+        side_effect=RecipeError("simulated registry failure"),
+    ):
+        result = runner.invoke(app, ["schema"])
+
+    assert result.exit_code == 2, (
+        f"schema failure with RecipeError must exit 2; got {result.exit_code}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# N-5: M-3 — inspect exit code for malformed RECOTEM_SIGNING_KEYS
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_malformed_signing_keys_exits_nonzero(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """inspect must exit non-zero and surface a clear error when
+    RECOTEM_SIGNING_KEYS has an invalid format (no colon separator).
+
+    With M-3, the except block inside inspect uses _map_exception_to_exit so
+    that different exception types produce distinct, documented exit codes.
+    A malformed KeyRing raises ArtifactError which maps to exit 5.
+    """
+    from tests.conftest import build_raw_artifact
+
+    data = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={"recipe_name": "malformed_key_test", "best_score": 0.5},
+        payload_bytes=b"payload",
+    )
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(data)
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", "invalid format")  # no colon
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+
+    # Must be non-zero (not silently succeed on an unverified artifact).
+    assert result.exit_code != 0, (
+        "inspect must exit non-zero for malformed RECOTEM_SIGNING_KEYS"
+    )
+    # ArtifactError from KeyRing → exit 5 via _map_exception_to_exit.
+    assert result.exit_code == 5, (
+        f"Malformed RECOTEM_SIGNING_KEYS causes ArtifactError → exit 5 via "
+        f"_map_exception_to_exit; got {result.exit_code}"
+    )
+    combined = result.stdout + (result.stderr or "")
+    assert "malformed" in combined.lower() or "invalid" in combined.lower(), (
+        f"Error output must mention malformed/invalid format; got {combined!r}"
     )

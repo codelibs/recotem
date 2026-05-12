@@ -1105,3 +1105,101 @@ def test_key_rotation_step4_retired_kid_artifact_rejected() -> None:
     kr_b_c = KeyRing(f"B:{key_b_hex}", f"C:{key_c_hex}")
     with pytest.raises(ArtifactError, match="unknown kid"):
         verify_hmac(kr_b_c, kid, kid_bytes, header_bytes, data_bytes, digest_a)
+
+
+# ---------------------------------------------------------------------------
+# Round-15 C2: ImportError during unpickle is surfaced separately
+# ---------------------------------------------------------------------------
+
+
+def test_unpickle_payload_import_error_surfaced_as_module_missing() -> None:
+    """When the safe unpickler raises ImportError the wrapped ArtifactError
+    must mention that a required module is unavailable.  Distinguishes
+    "FQCN allow-list module not installed" from the generic
+    ``deserialization failed`` message that previously covered both.
+    """
+    from unittest.mock import patch
+
+    with patch(
+        "recotem.artifact.signing.SafeUnpickler.load",
+        side_effect=ImportError("no module named 'fake_recommender'"),
+    ):
+        with pytest.raises(ArtifactError) as exc_info:
+            unpickle_payload(b"unused")
+
+    msg = str(exc_info.value)
+    assert "required module unavailable" in msg, (
+        f"ImportError branch must surface 'required module unavailable'; got: {msg!r}"
+    )
+    assert "fake_recommender" in msg, (
+        f"Original missing-module name must be preserved in the error; got: {msg!r}"
+    )
+    assert isinstance(exc_info.value.__cause__, ImportError)
+
+
+def test_unpickle_payload_generic_exception_still_wrapped() -> None:
+    """Non-ImportError, non-allowlist exceptions still get the generic
+    ``deserialization failed`` wrapping so the fall-through clause behaviour
+    is unchanged for unexpected failures.
+    """
+    from unittest.mock import patch
+
+    with patch(
+        "recotem.artifact.signing.SafeUnpickler.load",
+        side_effect=RuntimeError("boom"),
+    ):
+        with pytest.raises(ArtifactError, match="deserialization failed"):
+            unpickle_payload(b"unused")
+
+
+# ---------------------------------------------------------------------------
+# Round-15 MJ19: KeyRing rejects a kid that looks like raw hex key material
+# ---------------------------------------------------------------------------
+
+
+def test_keyring_rejects_hex_shaped_kid() -> None:
+    """A kid that is 32+ hex chars strongly suggests the operator pasted the
+    32-byte signing-key hex into the kid slot by mistake.  KeyRing must
+    refuse to construct so the bytes never reach a log line via ``kid=...``
+    (the redaction processor only scrubs hex64-shaped values in unrelated
+    string fields; structured ``kid`` values pass through as-is).
+    """
+    bad_kid = "a" * 32  # 32 hex chars
+    entry = f"{bad_kid}:{'b' * 64}"  # syntactically valid suffix
+
+    with pytest.raises(ArtifactError, match="looks like raw hex key material"):
+        KeyRing(entry)
+
+
+def test_keyring_rejects_long_hex_kid_uppercase() -> None:
+    """Foot-gun guard is case-insensitive — uppercase hex kids are also rejected."""
+    bad_kid = "ABCDEF0123456789" * 4  # 64 uppercase hex chars
+    entry = f"{bad_kid}:{'b' * 64}"
+
+    with pytest.raises(ArtifactError, match="looks like raw hex key material"):
+        KeyRing(entry)
+
+
+def test_keyring_accepts_short_hex_only_kid() -> None:
+    """A short label (< 32 chars) that happens to use only hex characters
+    is still a legitimate kid (e.g. 'abcdef01') and must NOT be rejected.
+    """
+    kr = KeyRing(f"abcdef01:{'a' * 64}")
+    assert kr.active_kid == "abcdef01"
+
+
+def test_keyring_accepts_normal_human_label() -> None:
+    """Common labels like 'prod-2026-rotation' contain non-hex characters
+    and must be accepted regardless of length.
+    """
+    kr = KeyRing(f"prod-2026-rotation-event:{'a' * 64}")
+    assert kr.active_kid == "prod-2026-rotation-event"
+
+
+def test_keyring_accepts_32_char_kid_with_one_non_hex_char() -> None:
+    """A 32-char kid with at least one non-hex character is NOT mistaken for
+    raw key material and is accepted.  Guards against false positives.
+    """
+    kid = "z" + "a" * 31  # 32 chars; 'z' is not hex
+    kr = KeyRing(f"{kid}:{'a' * 64}")
+    assert kr.active_kid == kid

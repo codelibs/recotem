@@ -224,14 +224,21 @@ class BigQuerySource:
                 inc_bigquery_storage_fallback("missing_extra")
                 df = query_job.to_dataframe()
             except GoogleAPICallError as storage_exc:
-                # Storage-specific API failure (commonly PermissionDenied when
-                # the service account lacks bigquery.readSessions.create on the
-                # project).  By default we fall back to the slower REST path;
-                # operators should monitor this log event and consider granting
-                # the IAM permission to restore fast-path throughput.
+                # Storage-specific API failure.  Branch on subclass:
                 #
-                # Set RECOTEM_BQ_REQUIRE_STORAGE_API=1 to disable the fallback
-                # and surface this as a hard DataSourceError instead.
+                # * PermissionDenied / Forbidden (403): IAM-only failure — the
+                #   service account lacks ``bigquery.readSessions.create``.
+                #   REST fallback is safe and recommended; operators can grant
+                #   the permission later to restore Storage-API throughput.
+                # * Anything else (ResourceExhausted 429 quota,
+                #   ServiceUnavailable 503, RetryError, etc.): the REST path
+                #   hits the same project quota / region, so falling back
+                #   would double-bill or repeat the failure.  Fail fast so
+                #   operators see the genuine root cause instead of a slow
+                #   second attempt with the same outcome.
+                #
+                # Set RECOTEM_BQ_REQUIRE_STORAGE_API=1 to refuse fallback
+                # even for the PermissionDenied case.
                 if is_truthy_env(os.environ.get("RECOTEM_BQ_REQUIRE_STORAGE_API")):
                     raise DataSourceError(
                         f"BigQuery Storage Read API failed and "
@@ -239,17 +246,62 @@ class BigQuerySource:
                         "fallback. Grant bigquery.readSessions.create on the "
                         f"project to fix this. Original error: {storage_exc}"
                     ) from storage_exc
-                logger.warning(
-                    "bigquery_storage_fallback",
-                    reason="GoogleAPICallError from Storage Read API — "
-                    "grant bigquery.readSessions.create to restore fast path; "
-                    "set RECOTEM_BQ_REQUIRE_STORAGE_API=1 to disable fallback",
-                    iam_permission_needed="bigquery.readSessions.create",
-                    exc_type=type(storage_exc).__name__,
-                    exc=str(storage_exc),
+                # Detect IAM-shaped failures by class name AND by message
+                # content so the check works under three regimes:
+                #
+                # 1. Real production:  storage_exc is
+                #    ``google.api_core.exceptions.PermissionDenied`` /
+                #    ``Forbidden`` -- class-name match fires.
+                # 2. Test mocks that subclass our fake GoogleAPICallError
+                #    but spell the message ``PERMISSION_DENIED: ...`` -- the
+                #    message-substring fallback fires.
+                # 3. Genuine non-IAM (Quota 429, 5xx, RetryError, etc.) --
+                #    no fallback; raise so the operator sees the real root
+                #    cause and does not get double-billed on the REST path.
+                exc_name = type(storage_exc).__name__
+                iam_class_shapes = ("PermissionDenied", "Forbidden")
+                iam_message_markers = (
+                    "PERMISSION_DENIED",
+                    "Forbidden",
+                    "permission denied",
                 )
-                inc_bigquery_storage_fallback("api_error")
-                df = query_job.to_dataframe()
+                is_iam_failure = (
+                    exc_name in iam_class_shapes
+                    or any(
+                        base.__name__ in iam_class_shapes
+                        for base in type(storage_exc).__mro__
+                    )
+                    or any(marker in str(storage_exc) for marker in iam_message_markers)
+                )
+
+                if is_iam_failure:
+                    logger.warning(
+                        "bigquery_storage_fallback",
+                        reason="PermissionDenied from Storage Read API — "
+                        "grant bigquery.readSessions.create to restore fast "
+                        "path; set RECOTEM_BQ_REQUIRE_STORAGE_API=1 to "
+                        "disable fallback",
+                        iam_permission_needed="bigquery.readSessions.create",
+                        exc_type=exc_name,
+                        exc=str(storage_exc),
+                    )
+                    # Counter label retained as ``api_error`` for backward
+                    # compatibility with existing dashboards / alerts.
+                    inc_bigquery_storage_fallback("api_error")
+                    df = query_job.to_dataframe()
+                else:
+                    # Non-IAM failure: quota, transient 5xx, etc.  REST would
+                    # hit the same constraint.  Surface as DataSourceError.
+                    inc_bigquery_storage_fallback("non_iam_error_no_fallback")
+                    raise DataSourceError(
+                        f"BigQuery Storage Read API failed with "
+                        f"{exc_name}: {storage_exc}. "
+                        "REST fallback skipped because the failure is not "
+                        "IAM-only — quota / 5xx / connectivity errors would "
+                        "recur on the REST path and inflate cost.  Set "
+                        "RECOTEM_BQ_REQUIRE_STORAGE_API=1 to surface this "
+                        "error unconditionally."
+                    ) from storage_exc
             # Any other exception (MemoryError, RuntimeError, etc.) propagates
             # out of the inner try and is caught by the outer handler below.
         except DataSourceError:

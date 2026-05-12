@@ -847,3 +847,158 @@ def test_probe_success_returns_without_error() -> None:
         # Must not raise
         result = source.probe()
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Round-15 C3: Storage API fallback only triggers on IAM-shaped failures
+# ---------------------------------------------------------------------------
+
+
+def test_storage_fallback_non_iam_error_raises_no_fallback(monkeypatch) -> None:
+    """When the Storage Read API raises a non-IAM GoogleAPICallError
+    (e.g. ``ResourceExhausted`` quota / 5xx / connectivity), the fallback
+    must NOT trigger — the REST path would hit the same backend
+    constraint and either double-bill or replay the failure.
+
+    Surfacing the failure as ``DataSourceError`` lets operators see the
+    true root cause instead of a slow second attempt with the same outcome.
+    """
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    # Non-IAM error: quota exhausted.  Class name does not match
+    # PermissionDenied / Forbidden, and the message does not contain any
+    # of the IAM markers — so the new code must NOT fall back.
+    quota_cls = type("ResourceExhausted", (mock_api_error_cls,), {})
+    mock_query_job.to_dataframe.side_effect = quota_cls(
+        "Quota exceeded for quota metric 'Queries per minute'"
+    )
+
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError, match="REST fallback skipped"):
+            source.fetch(_ctx())
+
+
+def test_storage_fallback_iam_classname_match(monkeypatch) -> None:
+    """A class literally named ``PermissionDenied`` triggers the fallback
+    even if the message text does not mention permissions.
+    """
+    import pandas as pd
+    import structlog.testing
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    perm_cls = type("PermissionDenied", (mock_api_error_cls,), {})
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    def _to_dataframe_side_effect(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise perm_cls("the service account is denied (no marker words)")
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_side_effect
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with structlog.testing.capture_logs() as cap_logs:
+            result = source.fetch(_ctx())
+
+    events = [e.get("event") for e in cap_logs]
+    assert "bigquery_storage_fallback" in events, (
+        "Class-name match (PermissionDenied) must trigger the fallback path."
+    )
+    assert len(result) == 1
+
+
+def test_storage_fallback_non_iam_increments_no_fallback_counter(monkeypatch) -> None:
+    """The non-IAM no-fallback path increments the new
+    ``non_iam_error_no_fallback`` label rather than ``api_error``.
+    """
+    from unittest.mock import MagicMock, patch
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    quota_cls = type("ResourceExhausted", (mock_api_error_cls,), {})
+    mock_query_job.to_dataframe.side_effect = quota_cls("Quota exceeded")
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    inc_spy = MagicMock()
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        import recotem.datasource.bigquery as bq_module
+
+        with patch.object(bq_module, "inc_bigquery_storage_fallback", inc_spy):
+            cfg = bq_module.BigQueryConfig(type="bigquery", query="SELECT 1")
+            source = bq_module.BigQuerySource.__new__(bq_module.BigQuerySource)
+            source._config = cfg
+            with pytest.raises(DataSourceError):
+                source.fetch(_ctx())
+
+    inc_spy.assert_called_once_with("non_iam_error_no_fallback")

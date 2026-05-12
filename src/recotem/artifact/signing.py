@@ -269,6 +269,21 @@ class KeyRing:
                 )
             if kid in self._keys:
                 raise ArtifactError(f"duplicate kid {kid!r} in KeyRing entries")
+            # Foot-gun guard: kids are expected to be short human labels
+            # (e.g. ``prod-2026``, ``dev``).  A kid that looks like raw
+            # key material — 32 or more hex chars — strongly suggests the
+            # operator pasted the signing key bytes into the kid field by
+            # mistake.  Refuse to construct rather than risk leaking key
+            # material via the kid log field (the redaction rule only
+            # scrubs hex64-shaped values that appear in unrelated string
+            # fields; structured ``kid=...`` fields pass through as-is).
+            if len(kid) >= 32 and all(c in "0123456789abcdefABCDEF" for c in kid):
+                raise ArtifactError(
+                    f"KeyRing entry has a kid {kid[:8]}... that looks like "
+                    "raw hex key material (>=32 hex chars).  Use a short "
+                    "human label (e.g. 'prod-2026') for the kid; the "
+                    "secret bytes belong AFTER the colon."
+                )
             self._keys[kid] = key_bytes
             self._order.append(kid)
 
@@ -396,5 +411,21 @@ def unpickle_payload(payload_bytes: bytes) -> Any:
         raise
     except (MemoryError, RecursionError):
         raise  # OOM/stack-exhaustion must not be swallowed into ArtifactError
+    except ImportError as exc:
+        # An allow-listed FQCN referenced a module that is not installed in
+        # this environment (e.g. an irspack recommender pinned to a version
+        # that the serving process does not have).  This is operationally
+        # distinct from a disallowed FQCN (RCE backstop) -- operators must
+        # install the missing dependency rather than edit the allow-list.
+        logger.warning(
+            "safe_unpickle_module_missing",
+            error_class=type(exc).__name__,
+            error=str(exc),
+        )
+        raise ArtifactError(
+            f"required module unavailable during deserialization: {exc}. "
+            "Install the matching recotem extras / irspack version on the "
+            "serving host."
+        ) from exc
     except Exception as exc:
         raise ArtifactError(f"deserialization failed: {exc}") from exc

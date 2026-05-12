@@ -3585,3 +3585,205 @@ def test_no_redundant_load_on_first_tick_when_sidecar_prepopulated(
         f"_load_recipe must NOT be called on first tick when sidecar is pre-populated "
         f"and unchanged; got calls: {load_recipe_calls!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round-15 MJ10: stale Path keys evicted on each scan (ConfigMap rotation)
+# ---------------------------------------------------------------------------
+
+
+def test_scan_evicts_stale_yaml_path_keys(tmp_path: Path) -> None:
+    """Simulate the ConfigMap symlink-swap rotation that produces a new
+    ``Path`` for the same recipe on each tick.  Stale entries in
+    ``_yaml_mtime_cache`` and ``_yaml_path_to_name`` must be evicted when
+    their Path no longer appears in the current scan, otherwise the dicts
+    grow unbounded over the lifetime of the process.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path_v1 = _write_recipe_yaml(recipes_dir, "rotating", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe_v1 = load_recipe(yaml_path_v1)
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    initial_states = build_initial_states([recipe_v1], {})
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+
+    try:
+        # Prime the caches with the v1 path.
+        watcher._scan_recipes_dir()
+        assert yaml_path_v1 in watcher._yaml_mtime_cache or any(
+            p == yaml_path_v1 for p in watcher._yaml_path_to_name
+        ), "First tick must populate at least one of the path caches."
+
+        # Simulate kustomize/kubectl rollout: same recipe.name, different file
+        # path.  ``_write_recipe_yaml`` uses the recipe name as the filename,
+        # so we rename the new file to a different on-disk basename to mimic
+        # ConfigMap's ``..2026_05_12_data`` symlink-swap pattern.
+        yaml_path_v1.unlink()
+        yaml_path_v2_temp = _write_recipe_yaml(recipes_dir, "rotating", artifact_path)
+        yaml_path_v2 = recipes_dir / "rotating-new-revision.yaml"
+        yaml_path_v2_temp.rename(yaml_path_v2)
+        assert yaml_path_v2 != yaml_path_v1, "Test setup must use a different path."
+
+        watcher._scan_recipes_dir()
+
+        # v1 path must no longer be present in either cache.
+        assert yaml_path_v1 not in watcher._yaml_mtime_cache, (
+            f"Stale Path key must be evicted from _yaml_mtime_cache after scan; "
+            f"still present: keys={list(watcher._yaml_mtime_cache.keys())!r}"
+        )
+        assert yaml_path_v1 not in watcher._yaml_path_to_name, (
+            f"Stale Path key must be evicted from _yaml_path_to_name after scan; "
+            f"still present: keys={list(watcher._yaml_path_to_name.keys())!r}"
+        )
+        # The recipe itself must remain known to the watcher under its name
+        # (the recipe did not change — only its on-disk path did).
+        assert "rotating" in watcher._states, (
+            f"Recipe identity must survive a path rename; _states={list(watcher._states.keys())}"
+        )
+    finally:
+        watcher._executor.shutdown(wait=False)
+
+
+def test_scan_path_cache_does_not_leak_over_repeated_rotations(tmp_path: Path) -> None:
+    """Repeated symlink-swap rotations over many ticks must not let
+    ``_yaml_mtime_cache`` accumulate stale Path entries.  Without the
+    path-based eviction step the cache grew by one entry per rotation.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "loop_recipe", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    initial_states = build_initial_states([recipe], {})
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states=initial_states,
+    )
+
+    try:
+        watcher._scan_recipes_dir()
+
+        # Rotate the file 5 times — each rotation renames the file so the
+        # Path object changes while the recipe.name stays.  Each rotation
+        # should evict the previous path key, keeping the cache bounded.
+        for i in range(5):
+            yaml_path.unlink()
+            new_temp = _write_recipe_yaml(recipes_dir, "loop_recipe", artifact_path)
+            yaml_path = recipes_dir / f"loop_recipe_revision_{i:03d}.yaml"
+            new_temp.rename(yaml_path)
+            watcher._scan_recipes_dir()
+
+        # After 5 rotations + the initial scan, both caches must be bounded
+        # by the current set of yaml files (= 1).
+        assert len(watcher._yaml_mtime_cache) <= 1, (
+            f"_yaml_mtime_cache leaked across rotations; "
+            f"size={len(watcher._yaml_mtime_cache)}, keys={list(watcher._yaml_mtime_cache.keys())!r}"
+        )
+        assert len(watcher._yaml_path_to_name) <= 1, (
+            f"_yaml_path_to_name leaked across rotations; "
+            f"size={len(watcher._yaml_path_to_name)}"
+        )
+    finally:
+        watcher._executor.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# Round-15 L9: _mark_error warns when no entry is registered
+# ---------------------------------------------------------------------------
+
+
+def test_mark_error_logs_warning_when_no_entry(tmp_path: Path) -> None:
+    """If ``_mark_error`` is called for a recipe that has no registry entry
+    (a should-be-unreachable state in normal operation), the watcher logs
+    a structured warning so future refactors that re-introduce the
+    ordering bug surface the failure rather than silently losing it.
+    """
+    import structlog.testing
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    registry = ModelRegistry()  # intentionally empty
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states={},
+    )
+
+    try:
+        with structlog.testing.capture_logs() as cap_logs:
+            watcher._mark_error("not_registered", "some load failure")
+    finally:
+        watcher._executor.shutdown(wait=False)
+
+    events = [e for e in cap_logs if e.get("event") == "set_load_error_no_entry"]
+    assert events, (
+        f"Expected 'set_load_error_no_entry' warning when recipe is not in "
+        f"the registry; got events: {[e.get('event') for e in cap_logs]}"
+    )
+    assert events[0]["name"] == "not_registered"
+    assert events[0]["error"] == "some load failure"
+
+
+def test_mark_error_no_warning_when_entry_exists(tmp_path: Path) -> None:
+    """Regression guard: with a registered entry, the warning must NOT fire."""
+    import structlog.testing
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    registry = ModelRegistry()
+    registry.replace("registered", _make_entry("registered"))
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states={},
+    )
+
+    try:
+        with structlog.testing.capture_logs() as cap_logs:
+            watcher._mark_error("registered", "ok-load-error")
+    finally:
+        watcher._executor.shutdown(wait=False)
+
+    events = [e for e in cap_logs if e.get("event") == "set_load_error_no_entry"]
+    assert not events, (
+        f"set_load_error_no_entry must NOT fire when entry is registered; "
+        f"got events: {events!r}"
+    )

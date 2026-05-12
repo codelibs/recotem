@@ -1444,3 +1444,257 @@ def test_train_final_maps_value_error_to_training_error() -> None:
                 class_name="RejectingRec",
                 best_params={"n_components": 64},
             )
+
+
+# ---------------------------------------------------------------------------
+# Round-15 MJ7: train_done event includes recipe_hash and data_stats fields
+# ---------------------------------------------------------------------------
+
+
+def test_train_done_event_includes_recipe_hash_and_data_stats(
+    tmp_path: Path, movielens_small_df: pd.DataFrame
+) -> None:
+    """The canonical ``train_done`` event must include recipe_hash plus the
+    data-stats fields (n_rows, n_users, n_items).  SIEM rules need these
+    so an artifact can be correlated to "which recipe version produced
+    it" and "what training-set size" without joining against the artifact
+    header.
+    """
+    import structlog.testing
+
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+    from recotem.training.pipeline import run_training
+
+    csv_file = tmp_path / "ml_for_log_test.csv"
+    movielens_small_df[["user_id", "item_id"]].to_csv(csv_file, index=False)
+
+    recipe = Recipe(
+        name="train_done_log_test",
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        training=TrainingConfig(
+            algorithms=["TopPop"],
+            n_trials=1,
+            split=SplitConfig(scheme="random", heldout_ratio=0.1, seed=42),
+        ),
+        output=OutputConfig(path=str(tmp_path / "train_done_log_test.recotem")),
+    )
+
+    kr = _make_key_ring()
+
+    def _mock_write(payload_obj, header_dict, key_ring, fs_path, *, versioning):
+        return fs_path
+
+    with structlog.testing.capture_logs() as cap:
+        result = run_training(
+            recipe, key_ring=kr, signing_key="active", write_artifact_fn=_mock_write
+        )
+
+    assert result is not None
+
+    done_events = [e for e in cap if e.get("event") == "train_done"]
+    assert done_events, (
+        f"Expected exactly one 'train_done' event; got events: "
+        f"{[e.get('event') for e in cap]}"
+    )
+    done = done_events[0]
+
+    required_fields = ("recipe_hash", "n_rows", "n_users", "n_items")
+    for field_name in required_fields:
+        assert field_name in done, (
+            f"train_done must include {field_name!r}; got keys: {sorted(done.keys())!r}"
+        )
+
+    # Plausibility checks
+    assert isinstance(done["recipe_hash"], str)
+    assert len(done["recipe_hash"]) > 0
+    assert isinstance(done["n_rows"], int) and done["n_rows"] > 0
+    assert isinstance(done["n_users"], int) and done["n_users"] > 0
+    assert isinstance(done["n_items"], int) and done["n_items"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Round-15 MJ7: train_error surfaces partial metrics when populated
+# ---------------------------------------------------------------------------
+
+
+def test_train_error_event_includes_partial_metrics_when_available(
+    tmp_path: Path,
+) -> None:
+    """When the inner pipeline writes ``recipe_hash`` / ``n_rows`` /
+    ``n_users`` / ``n_items`` into the shared metrics holder before a
+    failure, the outer ``run_training`` ``except`` clause must surface
+    those fields in the ``train_error`` event.
+    """
+    import structlog.testing
+
+    from recotem.training.errors import TrainingError
+    from recotem.training.pipeline import run_training
+
+    recipe = _make_recipe(tmp_path)
+    kr = _make_key_ring()
+
+    def _failing_inner(*args, metrics_holder=None, **kwargs):
+        # Simulate the inner pipeline having computed the metrics before the
+        # failure (this is what the production code does — recipe_hash is
+        # filled in step 1 and data_stats after step 3).
+        if metrics_holder is not None:
+            metrics_holder["recipe_hash"] = "deadbeef" * 8  # 64-char fingerprint
+            metrics_holder["n_rows"] = 12345
+            metrics_holder["n_users"] = 678
+            metrics_holder["n_items"] = 90
+        raise TrainingError("simulated failure", code="custom_failure")
+
+    with structlog.testing.capture_logs() as cap:
+        with patch(
+            "recotem.training.pipeline._run_training_locked",
+            side_effect=_failing_inner,
+        ):
+            with pytest.raises(TrainingError):
+                run_training(
+                    recipe,
+                    key_ring=kr,
+                    signing_key="active",
+                    no_lock=True,
+                    quiet=True,
+                )
+
+    err_events = [e for e in cap if e.get("event") == "train_error"]
+    assert err_events, (
+        f"Expected 'train_error' event; got events: {[e.get('event') for e in cap]}"
+    )
+    err = err_events[0]
+
+    assert err["recipe_hash"] == "deadbeef" * 8
+    assert err["n_rows"] == 12345
+    assert err["n_users"] == 678
+    assert err["n_items"] == 90
+    assert err["code"] == "custom_failure"
+
+
+# ---------------------------------------------------------------------------
+# Round-15 MJ17: internal_error path uses logger.exception for stacktrace
+# ---------------------------------------------------------------------------
+
+
+def test_train_error_internal_error_attaches_exc_info(
+    tmp_path: Path,
+) -> None:
+    """Non-domain (internal_error) failures must be logged with
+    ``exc_info=True`` so structlog attaches the stacktrace.  Sentry /
+    DataDog integrations rely on the stacktrace being present in the
+    structured event for grouping and root-cause analysis.
+
+    The event still goes through ``logger.error`` (same method used for
+    domain errors) so spy-based tests that scan ``spy.error.call_args_list``
+    continue to find it.
+    """
+    from recotem.training import pipeline as pipeline_mod
+
+    spy_logger = MagicMock()
+    original_logger = pipeline_mod.logger
+    pipeline_mod.logger = spy_logger
+
+    try:
+        recipe = _make_recipe(tmp_path)
+        kr = _make_key_ring()
+
+        def _failing_inner(*args, metrics_holder=None, **kwargs):
+            # KeyError is NOT a TrainingError subclass → "internal_error" code.
+            raise KeyError("unexpected_internal_bug")
+
+        with patch(
+            "recotem.training.pipeline._run_training_locked",
+            side_effect=_failing_inner,
+        ):
+            with pytest.raises(KeyError):
+                run_training_under_test = pipeline_mod.run_training
+                run_training_under_test(
+                    recipe,
+                    key_ring=kr,
+                    signing_key="active",
+                    no_lock=True,
+                    quiet=True,
+                )
+
+        train_error_calls = [
+            call
+            for call in spy_logger.error.call_args_list
+            if call.args and call.args[0] == "train_error"
+        ]
+        assert train_error_calls, "train_error must be emitted via logger.error"
+        kwargs = train_error_calls[0].kwargs
+        assert kwargs.get("code") == "internal_error"
+        assert kwargs.get("exc_info") is True, (
+            f"internal_error path must set exc_info=True so the stacktrace "
+            f"is attached to the structured event; got kwargs: {kwargs!r}"
+        )
+    finally:
+        pipeline_mod.logger = original_logger
+
+
+def test_train_error_domain_error_does_not_attach_exc_info(
+    tmp_path: Path,
+) -> None:
+    """For declared TrainingError subclasses the user-facing message is in
+    the ``error`` field; the stacktrace is redundant noise.  Verify the
+    domain-error path omits ``exc_info`` (or sets it falsy) so the
+    structured event stays compact.
+    """
+    from recotem.training import pipeline as pipeline_mod
+    from recotem.training.errors import MinDataViolation
+
+    spy_logger = MagicMock()
+    original_logger = pipeline_mod.logger
+    pipeline_mod.logger = spy_logger
+
+    try:
+        recipe = _make_recipe(tmp_path)
+        kr = _make_key_ring()
+
+        def _failing_inner(*args, metrics_holder=None, **kwargs):
+            raise MinDataViolation(
+                "not enough rows",
+                n_rows=1,
+                n_users=1,
+                n_items=1,
+                min_rows=1000,
+                min_users=100,
+                min_items=100,
+            )
+
+        with patch(
+            "recotem.training.pipeline._run_training_locked",
+            side_effect=_failing_inner,
+        ):
+            with pytest.raises(MinDataViolation):
+                pipeline_mod.run_training(
+                    recipe,
+                    key_ring=kr,
+                    signing_key="active",
+                    no_lock=True,
+                    quiet=True,
+                )
+
+        train_error_calls = [
+            call
+            for call in spy_logger.error.call_args_list
+            if call.args and call.args[0] == "train_error"
+        ]
+        assert train_error_calls
+        kwargs = train_error_calls[0].kwargs
+        assert kwargs.get("code") == "min_data_violation"
+        # Domain errors do not need the stacktrace attached.
+        assert not kwargs.get("exc_info"), (
+            f"Domain-error path must NOT set exc_info=True (kept compact); "
+            f"got kwargs: {kwargs!r}"
+        )
+    finally:
+        pipeline_mod.logger = original_logger

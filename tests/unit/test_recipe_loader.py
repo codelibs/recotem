@@ -2178,3 +2178,92 @@ def test_datasource_error_from_plugin_discovery_re_raised_as_recipe_error(
         or "failed" in str(exc_info.value).lower()
     ), f"RecipeError message must mention the failure; got: {exc_info.value!r}"
     assert exc_info.value.category == "schema"
+
+
+# ---------------------------------------------------------------------------
+# Round-15 MD2: cloud-provider env-var prefix blacklist extended
+# ---------------------------------------------------------------------------
+
+
+def test_env_var_expansion_oci_blacklisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Oracle Cloud env vars (OCI_*) must be blacklisted for recipe expansion.
+
+    Without the prefix entry these would slip through the substring
+    blacklist (e.g. ``OCI_TENANCY_OCID`` has no KEY / TOKEN / CRED token).
+    """
+    monkeypatch.setenv("OCI_TENANCY_OCID", "ocid1.tenancy.oc1..xxxx")
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="oci_bl",
+        output_path=str(tmp_path / "oci_bl.recotem"),
+    )
+    content = content.replace("user_id", "${OCI_TENANCY_OCID}")
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="blacklisted"):
+        load_recipe(p)
+
+
+def test_env_var_expansion_aliyun_blacklisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Alibaba Cloud env vars (ALIYUN_*) must be blacklisted."""
+    monkeypatch.setenv("ALIYUN_REGION_ID", "cn-hongkong")
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="aliyun_bl",
+        output_path=str(tmp_path / "aliyun_bl.recotem"),
+    )
+    content = content.replace("user_id", "${ALIYUN_REGION_ID}")
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="blacklisted"):
+        load_recipe(p)
+
+
+def test_env_var_expansion_digitalocean_blacklisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DigitalOcean env vars (DIGITALOCEAN_*) must be blacklisted.
+
+    Names like ``DIGITALOCEAN_ACCESS_TOKEN`` already match the TOKEN
+    substring, but ``DIGITALOCEAN_REGION`` does not — the new prefix
+    catches that case too.
+    """
+    monkeypatch.setenv("DIGITALOCEAN_REGION", "nyc3")
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="do_bl",
+        output_path=str(tmp_path / "do_bl.recotem"),
+    )
+    content = content.replace("user_id", "${DIGITALOCEAN_REGION}")
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="blacklisted"):
+        load_recipe(p)
+
+
+def test_env_var_expansion_hcloud_blacklisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hetzner Cloud env vars (HCLOUD_*) must be blacklisted."""
+    monkeypatch.setenv("HCLOUD_LOCATION", "fsn1")
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="hcloud_bl",
+        output_path=str(tmp_path / "hcloud_bl.recotem"),
+    )
+    content = content.replace("user_id", "${HCLOUD_LOCATION}")
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="blacklisted"):
+        load_recipe(p)
+
+
+def test_env_var_expansion_ibm_blacklisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """IBM Cloud env vars (IBM_*) must be blacklisted."""
+    monkeypatch.setenv("IBM_CLOUD_REGION", "us-south")
+    content = MINIMAL_RECIPE_TEMPLATE.format(
+        name="ibm_bl",
+        output_path=str(tmp_path / "ibm_bl.recotem"),
+    )
+    content = content.replace("user_id", "${IBM_CLOUD_REGION}")
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="blacklisted"):
+        load_recipe(p)

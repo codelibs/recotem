@@ -47,8 +47,12 @@ logger = structlog.get_logger(__name__)
 OnFieldMissing = Literal["error", "null"]
 
 
-class MetadataError(Exception):
+class MetadataError(ValueError):
     """Raised when item metadata cannot be loaded or parsed.
+
+    Inherits from :class:`ValueError` so callers that catch ``ValueError``
+    (legacy compatibility) keep working while new callers can branch on
+    :attr:`cause` to distinguish failure origins.
 
     Attributes
     ----------
@@ -368,19 +372,22 @@ def _read_file(
         except (MemoryError, RecursionError):
             raise
         except Exception as exc:
-            raise ValueError(
-                f"failed to read metadata file {safe_path!r}: {exc}"
+            raise MetadataError(
+                f"failed to read metadata file {safe_path!r}: {exc}",
+                cause="io",
             ) from exc
         if len(data) > cap:
-            raise ValueError(
+            raise MetadataError(
                 f"item metadata file '{safe_path}' exceeds RECOTEM_MAX_DOWNLOAD_BYTES "
-                f"({cap}) — increase the cap or split the file."
+                f"({cap}) — increase the cap or split the file.",
+                cause="io",
             )
         try:
             verify_sha256(data, sha256)
         except HttpFetchError as exc:
-            raise ValueError(
-                f"metadata sha256 verification failed for {safe_path!r}: {exc}"
+            raise MetadataError(
+                f"metadata sha256 verification failed for {safe_path!r}: {exc}",
+                cause="http_fetch",
             ) from exc
         return _parse_bytes(file_type, data, safe_path)
 
@@ -390,8 +397,9 @@ def _read_file(
         except (MemoryError, RecursionError):
             raise
         except Exception as exc:
-            raise ValueError(
-                f"failed to read parquet file {safe_path!r}: {exc}"
+            raise MetadataError(
+                f"failed to read parquet file {safe_path!r}: {exc}",
+                cause="io",
             ) from exc
     try:
         # keep_default_na=False preserves literal "nan" strings as item ids
@@ -401,7 +409,10 @@ def _read_file(
     except (MemoryError, RecursionError):
         raise
     except Exception as exc:
-        raise ValueError(f"failed to read csv file {safe_path!r}: {exc}") from exc
+        raise MetadataError(
+            f"failed to read csv file {safe_path!r}: {exc}",
+            cause="io",
+        ) from exc
 
 
 def _parse_bytes(file_type: str, data: bytes, safe_path: str) -> pd.DataFrame:
@@ -412,8 +423,9 @@ def _parse_bytes(file_type: str, data: bytes, safe_path: str) -> pd.DataFrame:
         except (MemoryError, RecursionError):
             raise
         except Exception as exc:
-            raise ValueError(
-                f"failed to parse parquet file {safe_path!r}: {exc}"
+            raise MetadataError(
+                f"failed to parse parquet file {safe_path!r}: {exc}",
+                cause="parse",
             ) from exc
     try:
         # keep_default_na=False: see comment in _read_file above.
@@ -421,4 +433,7 @@ def _parse_bytes(file_type: str, data: bytes, safe_path: str) -> pd.DataFrame:
     except (MemoryError, RecursionError):
         raise
     except Exception as exc:
-        raise ValueError(f"failed to parse csv file {safe_path!r}: {exc}") from exc
+        raise MetadataError(
+            f"failed to parse csv file {safe_path!r}: {exc}",
+            cause="parse",
+        ) from exc

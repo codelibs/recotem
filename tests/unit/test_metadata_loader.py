@@ -1062,3 +1062,51 @@ def test_recipe_name_none_passes_no_log_context(monkeypatch) -> None:
     assert not ctx, (
         f"log_context must be None/empty when recipe_name is None; got {ctx!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round-15 MJ12: local file IO failures raise MetadataError(cause="io")
+# ---------------------------------------------------------------------------
+
+
+def test_local_csv_read_failure_raises_metadata_error_io_cause(
+    tmp_path: Path,
+) -> None:
+    """A corrupt local CSV file must raise MetadataError(cause="io"|"parse")
+    rather than a plain ValueError, so callers can branch on the failure
+    origin without parsing the error message.
+    """
+    from recotem.metadata.loader import MetadataError, load_item_metadata
+
+    # Write garbage that pandas.read_csv can read but produces unusable rows;
+    # then point load_item_metadata at a nonexistent file to force the
+    # underlying read to raise.  The exact subclass of the underlying
+    # exception is pandas-version-specific so we assert MetadataError.
+    bogus = tmp_path / "does_not_exist.csv"
+
+    with pytest.raises(MetadataError) as exc_info:
+        load_item_metadata(_Config("csv", str(bogus)), fields=["title"])
+
+    # MetadataError must inherit from ValueError for legacy compatibility
+    assert isinstance(exc_info.value, ValueError), (
+        "MetadataError must subclass ValueError so legacy callers that catch "
+        "ValueError keep working."
+    )
+    # Cause must be set to one of the documented origins.
+    assert exc_info.value.cause in {"io", "parse"}, (
+        f"Expected cause in {{'io','parse'}}; got {exc_info.value.cause!r}"
+    )
+
+
+def test_metadata_error_inherits_from_value_error() -> None:
+    """Regression: explicit isinstance check to lock in the inheritance.
+
+    A future refactor that drops the ValueError base class would break
+    every existing ``except ValueError`` site that consumed metadata
+    errors, including ``recotem inspect`` and several integration tests.
+    """
+    from recotem.metadata.loader import MetadataError
+
+    err = MetadataError("some message", cause="parse")
+    assert isinstance(err, ValueError)
+    assert err.cause == "parse"

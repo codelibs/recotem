@@ -250,13 +250,20 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
     # Fold over ALL entries — never short-circuit so the number of configured
     # kids cannot be inferred from response latency.  hmac.compare_digest
     # is constant-time; the OR accumulation preserves that property.
+    #
+    # Retain only the FIRST matching kid for audit attribution.  Today the
+    # ConfigError at startup rejects duplicate sha256 hashes so at most one
+    # entry can ever match, but if that invariant is ever relaxed (e.g. to
+    # support shared keys with distinct labels) the first-match policy
+    # avoids misattributing access logs to the last duplicate.
     matched_kid: str | None = None
     matched = False
     for entry in api_keys:
         # hmac.compare_digest operates on equal-length strings; both are 64
         # lowercase hex chars so the lengths always match.
         if hmac.compare_digest(candidate_hash, entry.sha256_hex):
-            matched_kid = entry.kid
+            if matched_kid is None:
+                matched_kid = entry.kid
             matched = True
 
     if matched and matched_kid is not None:

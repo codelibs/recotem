@@ -874,3 +874,52 @@ def test_kid_loop_compares_all_entries_even_after_first_match() -> None:
         f"Expected compare_digest called 3 times (once per entry, no early exit), "
         f"got {len(compare_calls)} calls."
     )
+
+
+# ---------------------------------------------------------------------------
+# Round-15 MJ9: matched_kid retains FIRST match if duplicates ever appear
+# ---------------------------------------------------------------------------
+
+
+def test_matched_kid_retains_first_match_when_duplicates_present() -> None:
+    """Today ``ConfigError`` rejects duplicate sha256 hashes at startup so
+    only one entry can ever match.  If that invariant is ever relaxed
+    (e.g. to support shared keys with distinct labels), the first-match
+    policy avoids misattributing access logs to the last duplicate.
+
+    Simulate the duplicate-hash scenario by constructing two ApiKeyEntry
+    instances with the SAME plaintext but DIFFERENT kids, and verify the
+    first kid (in list order) is the one assigned to ``request.state.kid``.
+    """
+    from recotem.serving.auth import verify_api_key
+
+    plaintext = "shared_secret_key_padding_32_bytes!"
+    e1 = _make_entry("first-team", plaintext)
+    e2 = _make_entry("second-team", plaintext)  # same hash, different kid
+    e3 = _make_entry("third-team", plaintext)  # same hash, different kid
+
+    request = _make_request(plaintext)
+    kid = verify_api_key(request, [e1, e2, e3])
+
+    assert kid == "first-team", (
+        "When multiple entries hash to the same value, the FIRST entry's kid "
+        f"must be retained (got {kid!r}).  Last-match attribution would break "
+        "audit traceability if the duplicate-kid ConfigError invariant is "
+        "ever relaxed."
+    )
+    # And the request state should also be set to the first kid.
+    assert request.state.kid == "first-team"
+
+
+def test_matched_kid_single_match_unchanged() -> None:
+    """Regression guard: single-match behaviour must be unchanged."""
+    from recotem.serving.auth import verify_api_key
+
+    e1 = _make_entry("alpha", "alpha_key_padding_32_bytes_long!1")
+    e2 = _make_entry("beta", "beta_key_padding_32_bytes_long!!2")
+
+    request = _make_request("beta_key_padding_32_bytes_long!!2")
+    kid = verify_api_key(request, [e1, e2])
+
+    assert kid == "beta"
+    assert request.state.kid == "beta"

@@ -487,6 +487,29 @@ class ArtifactWatcher(threading.Thread):
                 # same path is fully re-parsed (W-7).
                 self._yaml_mtime_cache.pop(p, None)
 
+        # Path-based eviction: drop any cached entry whose Path was not seen
+        # in this scan.  Without this step the mtime cache leaks slowly when
+        # ConfigMap projections rotate via symlink swap (``..data`` →
+        # ``..2026_05_xxx_data``) — each rescan produces a fresh Path object
+        # for the same recipe, the recipe.name stays in ``found_names`` so
+        # the ``gone`` branch above never fires, and old keys accumulate
+        # indefinitely.  Eviction here is bounded by current_yaml_files set
+        # membership so it does not regress the M-6 invariant that
+        # ``_yaml_path_to_name`` outlives a transient parse error on a
+        # still-present file (those paths are in ``current_yaml_files``).
+        current_yaml_files = set(yaml_files)
+        stale_path_keys = [
+            p for p in self._yaml_path_to_name if p not in current_yaml_files
+        ]
+        for p in stale_path_keys:
+            self._yaml_path_to_name.pop(p, None)
+            self._yaml_mtime_cache.pop(p, None)
+        stale_mtime_keys = [
+            p for p in self._yaml_mtime_cache if p not in current_yaml_files
+        ]
+        for p in stale_mtime_keys:
+            self._yaml_mtime_cache.pop(p, None)
+
         if found_names != current_names:
             _metrics.set_active_recipes(self._registry.loaded_count())
 
@@ -843,8 +866,20 @@ class ArtifactWatcher(threading.Thread):
         Goes through ``ModelRegistry.set_load_error`` so the mutation is
         serialised under the registry's lock — readers calling
         ``health_snapshot()`` see a consistent (loaded, error) pair.
+
+        ``set_load_error`` returns False when no entry is registered under
+        *name*.  This should be unreachable in normal operation because the
+        watcher inserts a stub entry before any load attempt, but log it as
+        a warning when it does happen so we can detect ordering bugs in
+        future refactors (rather than silently losing the failure signal).
         """
-        self._registry.set_load_error(name, error)
+        ok = self._registry.set_load_error(name, error)
+        if not ok:
+            logger.warning(
+                "set_load_error_no_entry",
+                name=name,
+                error=error,
+            )
 
     def _record_load_failure(self, name: str, error: str) -> None:
         """Mark the entry's load error and increment the failure metrics."""

@@ -165,6 +165,14 @@ def run_training(
     # in the train_error event even when the failure happens inside the lock.
     _resolved_kid: str | None = signing_key  # may stay None if key_ring fails
 
+    # Shared metrics holder.  ``_run_training_locked`` writes
+    # ``recipe_hash`` / ``n_rows`` / ``n_users`` / ``n_items`` here as soon
+    # as they are known so the outer ``except`` can surface them in
+    # ``train_error`` even when the failure happens mid-pipeline (SIEM
+    # rules can correlate a partial-failure event to the recipe version
+    # that produced it without joining against the artifact header).
+    _train_metrics: dict[str, Any] = {}
+
     try:
         # Resolve KeyRing if the caller didn't pass one.
         if key_ring is None:
@@ -198,6 +206,7 @@ def run_training(
                 quiet=quiet,
                 verbose=verbose,
                 run_id=run_id,
+                metrics_holder=_train_metrics,
             )
         from recotem.training.lock import recipe_lock  # noqa: PLC0415
 
@@ -217,6 +226,7 @@ def run_training(
                 quiet=quiet,
                 verbose=verbose,
                 run_id=run_id,
+                metrics_holder=_train_metrics,
             )
     except Exception as exc:
         # Canonical end-of-train marker for failure path.  Library callers
@@ -257,6 +267,21 @@ def run_training(
         if _resolved_kid is not None:
             extra["kid"] = _resolved_kid
 
+        # Include any partial metrics gathered before the failure.  The keys
+        # are populated incrementally by ``_run_training_locked`` so a failure
+        # in (say) the search step still yields recipe_hash / n_rows for
+        # downstream alerting.
+        for metric_key in ("recipe_hash", "n_rows", "n_users", "n_items"):
+            if metric_key in _train_metrics:
+                extra.setdefault(metric_key, _train_metrics[metric_key])
+
+        # For unexpected non-domain errors attach the stacktrace via
+        # ``exc_info=True`` so Sentry / DataDog can group on the underlying
+        # exception type.  For declared domain errors the user-facing
+        # message in the ``error`` field is sufficient — the stacktrace
+        # would be noise.  Using ``logger.error(exc_info=...)`` keeps the
+        # event on the same logger method so structured-log captures and
+        # spy_logger.error.call_args_list-style tests continue to find it.
         logger.error(
             "train_error",
             name=recipe.name,
@@ -265,6 +290,7 @@ def run_training(
             code=error_code,
             exit_code=exit_code,
             trained_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            exc_info=(error_code == "internal_error"),
             **extra,
         )
         raise
@@ -279,8 +305,15 @@ def _run_training_locked(
     quiet: bool,
     verbose: bool,
     run_id: str,
+    metrics_holder: dict[str, Any] | None = None,
 ) -> TrainResult:
-    """Inner pipeline body — runs while the per-recipe lock is held."""
+    """Inner pipeline body — runs while the per-recipe lock is held.
+
+    ``metrics_holder`` is an optional mutable dict that the function fills
+    in as soon as values become available (``recipe_hash`` after step 1,
+    ``n_rows`` / ``n_users`` / ``n_items`` after step 3).  Used by the
+    outer ``run_training`` to surface partial context in ``train_error``.
+    """
     bound_logger = logger.bind(recipe=recipe.name, run_id=run_id)
     bound_logger.info("training_started")
 
@@ -294,6 +327,8 @@ def _run_training_locked(
     #    We do this before any data fetch so the hash reflects config only.
     # ------------------------------------------------------------------
     recipe_hash = _compute_recipe_hash(recipe)
+    if metrics_holder is not None:
+        metrics_holder["recipe_hash"] = recipe_hash
 
     # ------------------------------------------------------------------
     # 2. Fetch data via DataSource.
@@ -328,6 +363,11 @@ def _run_training_locked(
         "drop_count": drop_count,
         "dedup_policy": dedup_policy,
     }
+
+    if metrics_holder is not None:
+        metrics_holder["n_rows"] = n_rows
+        metrics_holder["n_users"] = n_users
+        metrics_holder["n_items"] = n_items
 
     # ------------------------------------------------------------------
     # 4. Split.
@@ -446,8 +486,12 @@ def _run_training_locked(
 
     # Canonical end-of-train marker.
     # Schema: name, run_id, exit_code, artifact, best_class, best_score,
-    # trials, n_orphaned, trained_at, kid.  Use the unbound logger so the
-    # event keys do not duplicate bound context fields.
+    # trials, n_orphaned, trained_at, kid, recipe_hash, n_rows, n_users,
+    # n_items.  recipe_hash + data_stats fields are included so SIEM rules
+    # can correlate "which recipe version produced this artifact" and "how
+    # large was the training set" without joining against the artifact
+    # header.  All non-sensitive.  Use the unbound logger so the event
+    # keys do not duplicate bound context fields.
     logger.info(
         "train_done",
         name=recipe.name,
@@ -460,6 +504,10 @@ def _run_training_locked(
         n_orphaned=search_result.orphaned_count,
         trained_at=trained_at,
         kid=signing_key,
+        recipe_hash=recipe_hash,
+        n_rows=n_rows,
+        n_users=n_users,
+        n_items=n_items,
     )
 
     return TrainResult(

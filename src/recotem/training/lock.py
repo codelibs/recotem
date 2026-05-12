@@ -191,8 +191,18 @@ def recipe_lock(
 
             try:
                 msvcrt.locking(win_result, msvcrt.LK_UNLCK, 1)
-            except OSError:
-                pass
+            except OSError as _unlock_exc:
+                # Unlocking can fail (e.g. ENOTLOCK if the fd was already
+                # released by a foreign process, or if the file disappeared).
+                # Always log the failure so operators investigating a stuck
+                # train can correlate "next train blocked" with the unlock
+                # error rather than chase a phantom contention bug.
+                logger.warning(
+                    "recipe_lock_windows_unlock_failed",
+                    lock_path=str(lock_path),
+                    errno=_unlock_exc.errno,
+                    error=str(_unlock_exc),
+                )
             os.close(win_result)
         return
 

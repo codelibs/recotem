@@ -115,6 +115,29 @@ def check_size_cap(path: str, cap: int, *, label: str = "file") -> None:
             # exit code reflects the true cause (OOM let-propagate policy).
             raise
         except Exception as exc:
+            # Treat credential / auth-shaped backend errors as "skip silently".
+            # botocore.exceptions.NoCredentialsError, PartialCredentialsError,
+            # NoRegionError, ClientError(403), and equivalents from gcsfs /
+            # adlfs are semantically the same as PermissionError but live
+            # outside the stdlib hierarchy.  Detect by class-name shape so we
+            # don't have to import the optional cloud SDKs just to widen the
+            # except clause.  The real read will surface a clearer, fully-
+            # contextualised error to the operator a few lines later.
+            exc_name = type(exc).__name__
+            credential_shapes = (
+                "NoCredentialsError",
+                "PartialCredentialsError",
+                "NoRegionError",
+                "DefaultCredentialsError",
+                "RefreshError",
+                "InvalidConfigError",
+                "ProfileNotFound",
+                "EndpointConnectionError",
+            )
+            if exc_name in credential_shapes or any(
+                marker in exc_name for marker in ("Credential", "Auth")
+            ):
+                return
             # Any other backend error (connectivity, config, fsspec bugs)
             # indicates a problem the caller must handle.  Log a structured
             # event so operators can diagnose the failure without reading
@@ -123,11 +146,10 @@ def check_size_cap(path: str, cap: int, *, label: str = "file") -> None:
             logger.warning(
                 "size_cap_probe_failed",
                 path=safe_path,
-                error_class=type(exc).__name__,
+                error_class=exc_name,
             )
             raise SizeCapProbeError(
-                f"Object-store size probe for {safe_path!r} failed "
-                f"({type(exc).__name__}): {exc}"
+                f"Object-store size probe for {safe_path!r} failed ({exc_name}): {exc}"
             ) from exc
 
     if size is not None and size > cap:

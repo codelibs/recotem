@@ -42,11 +42,24 @@ _BLACKLIST_SUBSTRINGS: tuple[str, ...] = (
 
 # Prefix-based blacklist: names whose uppercased form starts with any of these
 # are blocked unconditionally (cloud credential env vars).
+# Extended beyond the major three providers because operators running
+# Recotem on Alibaba Cloud / Oracle Cloud / IBM Cloud / DigitalOcean /
+# Hetzner Cloud routinely export credentials with these prefixes — the
+# substring-based ``_BLACKLIST_SUBSTRINGS`` already catches ``*_TOKEN`` /
+# ``*_KEY`` etc., but plain identifiers (e.g. ``OCI_TENANCY_OCID``) would
+# otherwise slip through.
 _BLACKLIST_PREFIXES: tuple[str, ...] = (
     "AWS_",
     "GCP_",
     "GOOGLE_",
     "AZURE_",
+    "ALIYUN_",
+    "ALICLOUD_",
+    "OCI_",
+    "IBM_",
+    "DO_",
+    "HCLOUD_",
+    "DIGITALOCEAN_",
 )
 
 # Exact names (uppercased) that are always blocked regardless of prefix.

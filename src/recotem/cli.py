@@ -104,6 +104,17 @@ def train(
             help="Exit non-zero if the recipe lock is held instead of skipping.",
         ),
     ] = False,
+    lock_timeout: Annotated[
+        float,
+        typer.Option(
+            "--lock-timeout",
+            help=(
+                "Seconds to wait for the per-recipe lock before failing. "
+                "0.0 = non-blocking immediate failure (default). "
+                "-1 = wait indefinitely."
+            ),
+        ),
+    ] = 0.0,
     quiet: Annotated[
         bool, typer.Option("--quiet", "-q", help="Suppress per-trial output.")
     ] = False,
@@ -196,6 +207,7 @@ def train(
             run_id=run_id,
             no_lock=no_lock,
             fail_on_busy=fail_on_busy,
+            lock_timeout=lock_timeout,
             quiet=quiet,
             verbose=verbose,
             dev_allow_unsigned=dev_allow_unsigned,

@@ -145,7 +145,31 @@ def make_router(
             # loaded and only flags ``last_load_error`` (see watcher._mark_error
             # — "stale-but-loaded keeps serving").  Surfacing that as 503 here
             # would defeat the hot-swap availability contract.
-            if entry is None or not entry.loaded or entry.recommender is None:
+            if entry is None:
+                reason = "no_entry"
+                logger.warning(
+                    "recipe_unavailable",
+                    name=name,
+                    reason=reason,
+                    request_id=request_id,
+                )
+                status = "unavailable"
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "detail": f"Recipe '{name}' is not loaded or unhealthy",
+                        "code": "recipe_unavailable",
+                    },
+                )
+            if not entry.loaded or entry.recommender is None:
+                reason = "not_loaded" if not entry.loaded else "recommender_none"
+                logger.warning(
+                    "recipe_unavailable",
+                    name=name,
+                    reason=reason,
+                    last_load_error=entry.last_load_error,
+                    request_id=request_id,
+                )
                 status = "unavailable"
                 raise HTTPException(
                     status_code=503,
@@ -234,6 +258,19 @@ def make_router(
                 content=content,
                 headers={"X-Request-ID": request_id},
             )
+        except HTTPException:
+            raise
+        except (MemoryError, RecursionError):
+            raise
+        except Exception as exc:
+            logger.exception(
+                "predict_handler_unexpected_error",
+                name=name,
+                request_id=request_id,
+                kid=kid,
+                error_class=type(exc).__name__,
+            )
+            raise
         finally:
             _metrics.record_predict(name, status, time.monotonic() - start)
 
@@ -291,7 +328,7 @@ def make_router(
 
     if _metrics.metrics_enabled():
 
-        @router.get("/metrics", summary="Prometheus metrics", include_in_schema=True)
+        @router.get("/metrics", summary="Prometheus metrics", include_in_schema=False)
         def metrics() -> Any:
             """Expose Prometheus metrics.
 
@@ -339,14 +376,17 @@ def _lookup_metadata(
         row = meta_df.loc[item_id]
     except KeyError:
         # Reaching here means item_id passed the index check above but
-        # loc[] still raised — possible with a MultiIndex or corrupt index
-        # state.  Log at DEBUG (not WARNING) as it is not a misconfiguration
-        # but an unexpected structural inconsistency worth investigating.
-        logger.debug(
+        # loc[] still raised — possible with a non-unique index returning a
+        # DataFrame instead of a Series, or a corrupt index state.
+        # Log at WARNING so operators can detect metadata misconfiguration;
+        # also increment the metric so this class of error is observable in
+        # dashboards alongside other metadata lookup failures.
+        logger.warning(
             "metadata_lookup_unexpected_keyerror",
             recipe=recipe_name,
             item_id=str(item_id),
         )
+        _metrics.inc_metadata_lookup_error(recipe_name)
         return {}
     try:
         out: dict[str, Any] = {}

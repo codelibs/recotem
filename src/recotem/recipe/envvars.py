@@ -132,9 +132,15 @@ def expand_env_vars(
         # Check explicit overrides first, then os.environ.
         env_source: dict[str, str] = os.environ  # type: ignore[assignment]
         if extra_allowed and name in extra_allowed:
-            return extra_allowed[name]
+            value = extra_allowed[name]
+            if value == "":
+                logger.warning("recipe_env_var_empty", name=name)
+            return value
         if name in env_source:
-            return env_source[name]
+            value = env_source[name]
+            if value == "":
+                logger.warning("recipe_env_var_empty", name=name)
+            return value
 
         raise RecipeError(
             f"Environment variable '${{{name}}}' is referenced in the recipe "

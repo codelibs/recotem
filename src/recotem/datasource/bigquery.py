@@ -265,14 +265,35 @@ class BigQuerySource:
                     "Forbidden",
                     "permission denied",
                 )
-                is_iam_failure = (
-                    exc_name in iam_class_shapes
-                    or any(
-                        base.__name__ in iam_class_shapes
-                        for base in type(storage_exc).__mro__
-                    )
-                    or any(marker in str(storage_exc) for marker in iam_message_markers)
+
+                # Determine IAM detection path for observability — checked in
+                # priority order so the most reliable signal wins:
+                # 1. HTTP status code (most objective, avoids string parsing).
+                # 2. Exception class name exact match.
+                # 3. MRO inheritance chain.
+                # 4. Message-string marker substring (weakest — keep as last
+                #    resort for test mocks that cannot subclass the real exception).
+                _http_code = getattr(storage_exc, "code", None) or getattr(
+                    getattr(storage_exc, "response", None), "status_code", None
                 )
+                if _http_code == 403:
+                    is_iam_failure = True
+                    iam_detected_via = "http_403"
+                elif exc_name in iam_class_shapes:
+                    is_iam_failure = True
+                    iam_detected_via = "class"
+                elif any(
+                    base.__name__ in iam_class_shapes
+                    for base in type(storage_exc).__mro__
+                ):
+                    is_iam_failure = True
+                    iam_detected_via = "mro"
+                elif any(marker in str(storage_exc) for marker in iam_message_markers):
+                    is_iam_failure = True
+                    iam_detected_via = "message"
+                else:
+                    is_iam_failure = False
+                    iam_detected_via = None
 
                 if is_iam_failure:
                     logger.warning(
@@ -282,6 +303,7 @@ class BigQuerySource:
                         "path; set RECOTEM_BQ_REQUIRE_STORAGE_API=1 to "
                         "disable fallback",
                         iam_permission_needed="bigquery.readSessions.create",
+                        iam_detected_via=iam_detected_via,
                         exc_type=exc_name,
                         exc=str(storage_exc),
                     )

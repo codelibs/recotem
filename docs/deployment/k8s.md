@@ -225,7 +225,8 @@ spec:
     app.kubernetes.io/name: recotem
     app.kubernetes.io/component: serve
   ports:
-    - port: 80
+    - name: http
+      port: 8080
       targetPort: 8080
   type: ClusterIP
 ```

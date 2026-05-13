@@ -307,9 +307,16 @@ class Recipe(BaseModel, extra="forbid"):
                 )
             return self
 
-        # Non-pydantic, non-dict source (e.g. test mock, legacy object) —
-        # skip validation and rely on the datasource pipeline to surface errors.
-        return self
+        # Non-pydantic, non-dict source: reject immediately so library callers
+        # get a clear ValidationError rather than a cryptic runtime error deep
+        # inside the training pipeline.  Test code that needs to pass a mock
+        # must use a pydantic BaseModel (e.g. a MagicMock(spec=CSVConfig)) or
+        # a valid dict with a recognised 'type' key.
+        raise ValueError(
+            "source must be a dict with a 'type' key or a registered "
+            "DataSource Config subclass (pydantic BaseModel).  "
+            f"Got {type(src).__name__!r} which is neither."
+        )
 
     @model_validator(mode="after")
     def _validate_time_split(self) -> Recipe:

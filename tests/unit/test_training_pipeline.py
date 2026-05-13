@@ -635,8 +635,10 @@ def test_run_training_lock_contended_returns_none_default(tmp_path: Path) -> Non
     kr = _make_key_ring()
 
     # Simulate a contended lock by yielding False from recipe_lock.
+    # Accept **kwargs so that callers forwarding additional arguments (e.g.
+    # timeout=0.0 added by LEAK-2) do not break this mock.
     @contextlib.contextmanager
-    def _contended_lock(path, *, fail_on_busy=False):
+    def _contended_lock(path, *, fail_on_busy=False, **kwargs):
         yield False
 
     # recipe_lock is imported lazily from recotem.training.lock; patch it there.
@@ -663,8 +665,10 @@ def test_run_training_lock_contended_raises_when_fail_on_busy(tmp_path: Path) ->
     kr = _make_key_ring()
 
     # Simulate the lock module raising LockContestedError when fail_on_busy=True.
+    # Accept **kwargs so that callers forwarding additional arguments (e.g.
+    # timeout=0.0 added by LEAK-2) do not break this mock.
     @contextlib.contextmanager
-    def _contended_fail_on_busy(path, *, fail_on_busy=False):
+    def _contended_fail_on_busy(path, *, fail_on_busy=False, **kwargs):
         if fail_on_busy:
             raise LockContestedError(f"lock held at {path}")
         yield False

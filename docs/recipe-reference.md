@@ -239,10 +239,10 @@ block.
 > with a memory limit to contain the impact. See
 > [security.md — Decompressed-size cap not enforced](security.md#decompressed-size-cap-not-enforced-medium-5).
 
-`output.path` is a strict subset of the input allow-list: schemes `http://`,
-`https://`, `ftp://`, `ftps://`, and `memory://` are additionally rejected
-(write not supported). Acceptable output schemes: bare local path, `file://`,
-`s3://`, `gs://`, `az://`, `abfs://`, `abfss://`.
+`output.path` is restricted to the following schemes: bare local path (no prefix),
+`file://`, `s3://`, `gs://`, `az://`, `abfs://`, `abfss://`. All other schemes
+(including `http://`, `https://`, `ftp://`, `ftps://`, and `memory://`) are
+rejected because write is not supported for those destinations.
 
 Embedded credentials (`s3://AKIA...:secret@bucket/`) are rejected at recipe
 load on every path field.
@@ -259,9 +259,11 @@ Syntax: `${RECOTEM_RECIPE_VAR}`. Only variables matching the prefix `RECOTEM_REC
 
 Blacklisted (never expanded regardless of prefix): exact names `RECOTEM_SIGNING_KEYS` and `RECOTEM_API_KEYS`; names starting with `AWS_`, `GCP_`, `GOOGLE_`, or `AZURE_`; and any name containing the substrings `SECRET`, `PASSWORD`, `PASSWD`, `TOKEN`, `KEY`, `AUTH`, `BEARER`, `CRED`, or `PRIVATE` (all comparisons case-insensitive).
 
-The `*_KEY*` pattern is intentionally broad — any variable whose name contains `_KEY_` (e.g. `RECOTEM_RECIPE_PARTITION_KEY`) is rejected. Use a non-`_KEY*` name instead (e.g. `RECOTEM_RECIPE_PARTITION_COLUMN`).
+The `*KEY*` substring match is intentionally broad — any variable whose uppercased name contains the substring `KEY` (no underscore boundary) is rejected. This includes `RECOTEM_RECIPE_PARTITION_KEY`, `RECOTEM_RECIPE_APIKEY`, and `RECOTEM_RECIPE_KEYBOARD`. Use a name that does not contain `KEY` (e.g. `RECOTEM_RECIPE_PARTITION_COLUMN`).
 
 Expansion is **never** performed inside any key named `query` or `query_parameters` at any nesting level (not just under `source`). All other strings — including `source.path`, `output.path`, and `item_metadata.path` — are expanded.
+
+> **Prefix vs. blacklist interaction.** The `RECOTEM_RECIPE_` prefix check is applied to the full variable name. Only the *tail* portion (after `RECOTEM_RECIPE_`) is not subject to any additional prefix check — only the blacklist substring rules apply. For example, `RECOTEM_RECIPE_GCP_PROJECT` satisfies the prefix check; it is **not** blocked by the `GCP_*` blacklist-prefix rule because that rule matches only names whose uppercased form starts with `GCP_` (e.g. `GCP_SOMETHING`). The variable `RECOTEM_RECIPE_GCP_PROJECT` starts with `RECOTEM_RECIPE_`, not `GCP_`. The `examples/ga4-bigquery/` recipe uses this pattern legitimately. However, it **would** be blocked if its name contained `KEY`, `TOKEN`, `SECRET`, or any other blacklisted substring (case-insensitive).
 
 Expansion is single-pass and runs once at YAML load time. There is no escape syntax (a literal `${...}` in the YAML cannot be preserved unless the variable name fails the prefix check, which raises an error), no default-value syntax (`${VAR:-default}` is not supported and would attempt to expand the literal name `VAR:-default`), and substituted values are not re-scanned for further `${...}` references.
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import structlog.testing
 
+from recotem.training.errors import SearchError
 from recotem.training.progress import ProgressReporter
 
 # ---------------------------------------------------------------------------
@@ -344,3 +345,82 @@ def test_progress_reporter_emits_one_event_per_trial() -> None:
     )
     # Verify trial numbers are in order.
     assert [e["trial"] for e in trial_events] == list(range(n))
+
+
+# ---------------------------------------------------------------------------
+# sil m-7: tuning_aborted on error exit; tuning_complete only on success
+# ---------------------------------------------------------------------------
+
+
+def test_progress_reporter_error_exit_emits_tuning_aborted() -> None:
+    """When __exit__ is called with an exception, 'tuning_aborted' must be emitted
+    instead of 'tuning_complete'."""
+    reporter = _make_reporter(n_trials=3)
+    with structlog.testing.capture_logs() as cap:
+        try:
+            with reporter as rep:
+                rep.on_trial_done(0, "TopPop", 0.4, {})
+                raise RuntimeError("search failed")
+        except RuntimeError:
+            pass
+
+    complete_events = [e for e in cap if e.get("event") == "tuning_complete"]
+    aborted_events = [e for e in cap if e.get("event") == "tuning_aborted"]
+
+    assert not complete_events, (
+        f"'tuning_complete' must NOT be emitted on error exit; got {complete_events!r}"
+    )
+    assert len(aborted_events) == 1, (
+        f"Expected exactly 1 'tuning_aborted' event; got {aborted_events!r}"
+    )
+
+
+def test_progress_reporter_error_exit_aborted_has_recipe_run_id() -> None:
+    """tuning_aborted must carry recipe and run_id for correlation."""
+    reporter = _make_reporter(n_trials=2, recipe_name="news_recs", run_id="err-run-1")
+    with structlog.testing.capture_logs() as cap:
+        try:
+            with reporter:
+                raise ValueError("unexpected")
+        except ValueError:
+            pass
+
+    aborted = next(e for e in cap if e.get("event") == "tuning_aborted")
+    assert aborted["recipe"] == "news_recs"
+    assert aborted["run_id"] == "err-run-1"
+    assert aborted["best_score"] is None
+
+
+def test_progress_reporter_error_exit_aborted_has_trials_done() -> None:
+    """tuning_aborted.trials_done must equal the number of completed trials."""
+    reporter = _make_reporter(n_trials=5)
+    with structlog.testing.capture_logs() as cap:
+        try:
+            with reporter as rep:
+                rep.on_trial_done(0, "TopPop", 0.1, {})
+                rep.on_trial_done(1, "IALS", 0.3, {})
+                raise SearchError("no budget")
+        except Exception:
+            pass
+
+    aborted = next(e for e in cap if e.get("event") == "tuning_aborted")
+    assert aborted["trials_done"] == 2, (
+        f"Expected trials_done=2; got {aborted['trials_done']!r}"
+    )
+
+
+def test_progress_reporter_success_exit_emits_tuning_complete_not_aborted() -> None:
+    """Normal (no-exception) exit must emit 'tuning_complete' and NOT 'tuning_aborted'."""
+    with structlog.testing.capture_logs() as cap:
+        with _make_reporter(n_trials=1) as rep:
+            rep.on_trial_done(0, "TopPop", 0.5, {})
+
+    complete_events = [e for e in cap if e.get("event") == "tuning_complete"]
+    aborted_events = [e for e in cap if e.get("event") == "tuning_aborted"]
+
+    assert len(complete_events) == 1, (
+        f"Expected exactly 1 'tuning_complete' on success; got {complete_events!r}"
+    )
+    assert not aborted_events, (
+        f"'tuning_aborted' must NOT appear on success exit; got {aborted_events!r}"
+    )

@@ -113,6 +113,7 @@ def run_training(
     run_id: str | None = None,
     no_lock: bool = False,
     fail_on_busy: bool = False,
+    lock_timeout: float = 0.0,
     dev_allow_unsigned: bool = False,
 ) -> TrainResult | None:
     """Orchestrate the full training pipeline for *recipe*.
@@ -142,6 +143,12 @@ def run_training(
     fail_on_busy:
         Raise ``LockContestedError`` when the lock is held instead of
         gracefully returning ``None``.  Ignored when ``no_lock=True``.
+    lock_timeout:
+        Seconds to wait for the per-recipe lock before failing.  ``0.0``
+        (default) = non-blocking immediate failure.  ``-1`` = wait
+        indefinitely.  Positive values poll until the deadline, then raise
+        ``LockTimeoutError`` (a subclass of ``LockContestedError``).
+        Ignored when ``no_lock=True``.
     dev_allow_unsigned:
         Build artifacts using an in-memory dev signing key when no signing
         key is configured.  Spec-mandated guardrails are enforced by the
@@ -210,7 +217,11 @@ def run_training(
             )
         from recotem.training.lock import recipe_lock  # noqa: PLC0415
 
-        with recipe_lock(recipe.output.path, fail_on_busy=fail_on_busy) as acquired:
+        with recipe_lock(
+            recipe.output.path,
+            fail_on_busy=fail_on_busy,
+            timeout=lock_timeout,
+        ) as acquired:
             if not acquired:
                 logger.info(
                     "recipe_lock_contended_skipping",

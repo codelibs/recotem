@@ -864,6 +864,96 @@ def test_osopen_enospc_propagates_as_oserror(tmp_path: Path, monkeypatch) -> Non
     assert exc_info.value.errno == _errno.ENOSPC
 
 
+# ---------------------------------------------------------------------------
+# LEAK-2: lock_timeout propagation through recipe_lock
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_lock_timeout_zero_nonblocking_immediate_failure(tmp_path: Path) -> None:
+    """timeout=0.0 (default) must cause immediate failure with LockContestedError
+    when the lock is held — no waiting.
+    """
+    import fcntl
+    import os
+
+    output_path = tmp_path / "timeout_zero.recotem"
+    lock_path = Path(str(output_path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _hold_lock(lock_path_str: str, ready_event, release_event) -> None:
+        fd = os.open(lock_path_str, os.O_CREAT | os.O_WRONLY, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ready_event.set()
+        release_event.wait(timeout=5.0)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Event()
+    release = ctx.Event()
+
+    p = ctx.Process(target=_hold_lock, args=(str(lock_path), ready, release))
+    p.start()
+    ready.wait(timeout=3.0)
+
+    try:
+        with pytest.raises(LockContestedError) as exc_info:
+            with recipe_lock(output_path, timeout=0.0, fail_on_busy=True):
+                pass
+        # Must be immediate failure, not a LockTimeoutError
+        assert type(exc_info.value) is LockContestedError
+        assert not isinstance(exc_info.value, LockTimeoutError)
+    finally:
+        release.set()
+        p.join(timeout=3.0)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_lock_timeout_positive_waits_then_raises_timeout_error(tmp_path: Path) -> None:
+    """timeout=0.5 must wait approximately that long before raising LockTimeoutError."""
+    import fcntl
+    import os
+    import time
+
+    output_path = tmp_path / "timeout_pos.recotem"
+    lock_path = Path(str(output_path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _hold_lock(lock_path_str: str, ready_event, release_event) -> None:
+        fd = os.open(lock_path_str, os.O_CREAT | os.O_WRONLY, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ready_event.set()
+        release_event.wait(timeout=5.0)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Event()
+    release = ctx.Event()
+
+    p = ctx.Process(target=_hold_lock, args=(str(lock_path), ready, release))
+    p.start()
+    ready.wait(timeout=3.0)
+
+    start = time.monotonic()
+    try:
+        with pytest.raises(LockTimeoutError) as exc_info:
+            with recipe_lock(output_path, timeout=0.5, fail_on_busy=True):
+                pass
+        elapsed = time.monotonic() - start
+        # Must have waited at least ~0.5s before giving up.
+        assert elapsed >= 0.4, (
+            f"timeout=0.5 must wait at least 0.4s; elapsed={elapsed:.3f}s"
+        )
+        assert exc_info.value.waited_seconds == pytest.approx(0.5, abs=0.15), (
+            f"waited_seconds should be ~0.5; got {exc_info.value.waited_seconds:.3f}"
+        )
+    finally:
+        release.set()
+        p.join(timeout=3.0)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
 def test_osopen_eloop_emits_warning_and_propagates(tmp_path: Path) -> None:
     """When os.open raises ELOOP (symlink at lock path), recipe_lock must emit

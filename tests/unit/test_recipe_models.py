@@ -406,3 +406,94 @@ def test_recipe_source_dict_with_known_type_passes() -> None:
     # source dict has type="csv" which is a known registered type → must pass
     recipe = Recipe.model_validate(d)
     assert isinstance(recipe.source, dict) or hasattr(recipe.source, "type")
+
+
+# ---------------------------------------------------------------------------
+# MF-4: non-dict, non-BaseModel sources must raise ValidationError
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_source_int_raises_validation_error() -> None:
+    """Recipe(source=42) must raise ValidationError.
+
+    Integers are neither dicts nor pydantic BaseModels; the _validate_source
+    model_validator must close this silent-pass path.
+    """
+    from recotem.recipe.models import OutputConfig, SchemaConfig, TrainingConfig
+
+    with pytest.raises(ValidationError):
+        Recipe(
+            name="test",
+            source=42,
+            schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+            training=TrainingConfig(algorithms=["TopPop"], n_trials=1),
+            output=OutputConfig(path="/tmp/out.recotem"),
+        )
+
+
+def test_recipe_source_plain_object_raises_validation_error() -> None:
+    """Recipe(source=object()) must raise ValidationError.
+
+    A plain Python object is not a registered DataSource Config; the validator
+    must reject it with a clear error rather than silently passing.
+    """
+    from recotem.recipe.models import OutputConfig, SchemaConfig, TrainingConfig
+
+    with pytest.raises(ValidationError):
+        Recipe(
+            name="test",
+            source=object(),
+            schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+            training=TrainingConfig(algorithms=["TopPop"], n_trials=1),
+            output=OutputConfig(path="/tmp/out.recotem"),
+        )
+
+
+def test_recipe_source_string_raises_validation_error() -> None:
+    """Recipe(source='csv') must raise ValidationError.
+
+    A bare string is not a valid source; callers must pass a dict with 'type'
+    or a typed Config instance.
+    """
+    from recotem.recipe.models import OutputConfig, SchemaConfig, TrainingConfig
+
+    with pytest.raises(ValidationError):
+        Recipe(
+            name="test",
+            source="csv",
+            schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+            training=TrainingConfig(algorithms=["TopPop"], n_trials=1),
+            output=OutputConfig(path="/tmp/out.recotem"),
+        )
+
+
+def test_recipe_source_csvconfig_instance_passes() -> None:
+    """Recipe(source=CSVConfig(...)) must construct successfully.
+
+    Explicit typed Config subclass must pass _validate_source.
+    """
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import OutputConfig, SchemaConfig, TrainingConfig
+
+    recipe = Recipe(
+        name="test",
+        source=CSVConfig(type="csv", path="/tmp/data.csv"),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        training=TrainingConfig(algorithms=["TopPop"], n_trials=1),
+        output=OutputConfig(path="/tmp/out.recotem"),
+    )
+    assert recipe.source.type == "csv"
+
+
+def test_recipe_source_dict_with_known_csv_type_passes_mf4() -> None:
+    """Recipe(source={'type': 'csv', ...}) must construct successfully (dict path)."""
+    from recotem.recipe.models import OutputConfig, SchemaConfig, TrainingConfig
+
+    recipe = Recipe(
+        name="test",
+        source={"type": "csv", "path": "/tmp/data.csv"},
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        training=TrainingConfig(algorithms=["TopPop"], n_trials=1),
+        output=OutputConfig(path="/tmp/out.recotem"),
+    )
+    assert isinstance(recipe.source, dict)

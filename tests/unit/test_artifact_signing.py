@@ -90,6 +90,70 @@ def test_key_ring_fingerprint_unknown_kid_returns_none() -> None:
 
 
 # ---------------------------------------------------------------------------
+# sec/arch: KeyRing construction audit log
+# ---------------------------------------------------------------------------
+
+
+def test_keyring_built_emits_signing_keyring_built_event() -> None:
+    """Normal KeyRing construction must emit 'signing_keyring_built' at INFO."""
+    import structlog.testing
+
+    with structlog.testing.capture_logs() as cap:
+        kr = KeyRing(f"active:{ACTIVE_KEY_HEX}", f"old:{OLD_KEY_HEX}")
+
+    built_events = [e for e in cap if e.get("event") == "signing_keyring_built"]
+    assert built_events, (
+        "Expected 'signing_keyring_built' INFO event; "
+        f"got events: {[e.get('event') for e in cap]}"
+    )
+    ev = built_events[0]
+    assert ev["n_keys"] == 2, f"Expected n_keys=2; got {ev['n_keys']!r}"
+    # active_kid is logged via format_kid_for_log — value is safe to assert.
+    assert "active_kid" in ev
+    # fingerprints list must be present and contain an entry for each kid.
+    assert "fingerprints" in ev
+    fps = ev["fingerprints"]
+    assert len(fps) == 2, f"Expected 2 fingerprints; got {fps!r}"
+    # Each fingerprint entry must have kid and fingerprint keys.
+    for entry in fps:
+        assert "kid" in entry, f"Missing 'kid' in fingerprint entry {entry!r}"
+        assert "fingerprint" in entry, (
+            f"Missing 'fingerprint' in fingerprint entry {entry!r}"
+        )
+
+
+def test_keyring_built_fingerprint_matches_keyring_method() -> None:
+    """The fingerprint in the log must match KeyRing.fingerprint(kid)."""
+    import structlog.testing
+
+    with structlog.testing.capture_logs() as cap:
+        kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    ev = next(e for e in cap if e.get("event") == "signing_keyring_built")
+    logged_fp = ev["fingerprints"][0]["fingerprint"]
+    assert logged_fp == kr.fingerprint("active"), (
+        "Logged fingerprint must match KeyRing.fingerprint()"
+    )
+
+
+def test_keyring_duplicate_kid_emits_signing_keyring_invalid_warning() -> None:
+    """Duplicate kid must emit 'signing_keyring_invalid' WARN before ArtifactError."""
+    import structlog.testing
+
+    with structlog.testing.capture_logs() as cap:
+        with pytest.raises(ArtifactError, match="duplicate"):
+            KeyRing(f"active:{ACTIVE_KEY_HEX}", f"active:{OLD_KEY_HEX}")
+
+    warn_events = [e for e in cap if e.get("event") == "signing_keyring_invalid"]
+    assert warn_events, (
+        "Expected 'signing_keyring_invalid' warning before ArtifactError for duplicate kid; "
+        f"got events: {[e.get('event') for e in cap]}"
+    )
+    assert warn_events[0]["reason"] == "duplicate_kid"
+    assert warn_events[0]["log_level"] == "warning"
+
+
+# ---------------------------------------------------------------------------
 # Sign + verify roundtrip
 # ---------------------------------------------------------------------------
 
@@ -1203,3 +1267,104 @@ def test_keyring_accepts_32_char_kid_with_one_non_hex_char() -> None:
     kid = "z" + "a" * 31  # 32 chars; 'z' is not hex
     kr = KeyRing(f"{kid}:{'a' * 64}")
     assert kr.active_kid == kid
+
+
+# ---------------------------------------------------------------------------
+# CRIT-4: unpickle_payload exception narrowing
+# ---------------------------------------------------------------------------
+
+
+def test_unpickle_payload_attribute_error_reraises_not_artifact_error() -> None:
+    """AttributeError during unpickling must NOT be wrapped in ArtifactError.
+
+    AttributeError indicates a dependency version mismatch (e.g. an attribute
+    was renamed in a library update).  The full traceback is preserved by
+    re-raising so operators can diagnose the dep incompatibility directly,
+    rather than seeing an opaque 'deserialization failed' message.
+    """
+    from unittest.mock import patch
+
+    with patch(
+        "recotem.artifact.signing.SafeUnpickler.load",
+        side_effect=AttributeError("'MyRec' object has no attribute 'foo'"),
+    ):
+        with pytest.raises(AttributeError, match="foo"):
+            unpickle_payload(b"unused")
+
+
+def test_unpickle_payload_type_error_reraises_not_artifact_error() -> None:
+    """TypeError during unpickling must NOT be wrapped in ArtifactError.
+
+    TypeError typically indicates a constructor signature mismatch between the
+    pickled state and the installed library version.  Re-raise so operators
+    can identify the dep incompatibility.
+    """
+    from unittest.mock import patch
+
+    with patch(
+        "recotem.artifact.signing.SafeUnpickler.load",
+        side_effect=TypeError("__init__() got unexpected keyword argument 'n_factors'"),
+    ):
+        with pytest.raises(TypeError, match="n_factors"):
+            unpickle_payload(b"unused")
+
+
+def test_unpickle_payload_unpickling_error_wrapped_as_artifact_error() -> None:
+    """pickle.UnpicklingError (true binary corruption) must become ArtifactError.
+
+    UnpicklingError signals that the bytes are structurally malformed -- not a
+    code-level incompatibility.  Surface as ArtifactError with 'deserialization
+    failed' so the serving layer can emit a user-visible 'artifact damaged' event.
+    """
+    import pickle
+    from unittest.mock import patch
+
+    with patch(
+        "recotem.artifact.signing.SafeUnpickler.load",
+        side_effect=pickle.UnpicklingError("invalid load key"),
+    ):
+        with pytest.raises(ArtifactError, match="deserialization failed"):
+            unpickle_payload(b"unused")
+
+
+def test_unpickle_payload_eof_error_wrapped_as_artifact_error() -> None:
+    """EOFError (truncated stream) must become ArtifactError.
+
+    Truncated payloads should surface as a user-visible artifact error,
+    not as an unhandled EOFError that may confuse downstream error handlers.
+    """
+    from unittest.mock import patch
+
+    with patch(
+        "recotem.artifact.signing.SafeUnpickler.load",
+        side_effect=EOFError("ran out of input"),
+    ):
+        with pytest.raises(ArtifactError, match="deserialization failed"):
+            unpickle_payload(b"unused")
+
+
+def test_unpickle_payload_attribute_error_emits_safe_unpickle_internal_error_log() -> (
+    None
+):
+    """AttributeError must trigger a 'safe_unpickle_internal_error' log event
+    (structlog exception-level, which includes traceback) before re-raising.
+    """
+    from unittest.mock import patch
+
+    import structlog.testing
+
+    with patch(
+        "recotem.artifact.signing.SafeUnpickler.load",
+        side_effect=AttributeError("missing_attr"),
+    ):
+        with structlog.testing.capture_logs() as captured:
+            with pytest.raises(AttributeError):
+                unpickle_payload(b"unused")
+
+    error_events = [
+        e for e in captured if e.get("event") == "safe_unpickle_internal_error"
+    ]
+    assert error_events, (
+        "AttributeError must emit 'safe_unpickle_internal_error' log event"
+    )
+    assert error_events[0].get("error_class") == "AttributeError"

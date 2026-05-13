@@ -385,8 +385,14 @@ def test_train_exit3_when_fetch_raises_DataSourceError(
     TrainingError(code='datasource_error') which the CLI mapped to exit 4.
     The fix changed the wrapping to DataSourceError, which the CLI maps to exit 3.
     This test exercises the full CLI→pipeline→exit-code path for datasource failures.
+
+    Note: The patch target is recotem.training.pipeline._fetch_data (not
+    get_source_class) so that the patch fires *after* load_recipe, which calls
+    get_source_class internally during YAML loading and relies on getting a real
+    typed Config back from source_cls.Config.model_validate().  Patching
+    _fetch_data avoids MF-4's new ValueError for non-pydantic source objects.
     """
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
     from recotem.datasource.base import DataSourceError
 
@@ -397,13 +403,9 @@ def test_train_exit3_when_fetch_raises_DataSourceError(
     # missing file — anything the datasource pipeline converts to DataSourceError).
     boom = DataSourceError("simulated network timeout")
 
-    mock_source = MagicMock()
-    mock_source.fetch.side_effect = boom
-    mock_source_cls = MagicMock(return_value=mock_source)
-
     with patch(
-        "recotem.datasource.registry.get_source_class",
-        return_value=mock_source_cls,
+        "recotem.training.pipeline._fetch_data",
+        side_effect=boom,
     ):
         result = runner.invoke(app, ["train", str(yaml_path)])
 
@@ -2348,3 +2350,64 @@ def test_inspect_dev_allow_unsigned_warns_when_keys_set(
         f"is set and --dev-allow-unsigned is passed; captured warning calls: "
         f"{warning_calls}"
     )
+
+
+# ---------------------------------------------------------------------------
+# LEAK-2: --lock-timeout propagates to run_training
+# ---------------------------------------------------------------------------
+
+
+def test_train_lock_timeout_delivered_to_run_training(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """--lock-timeout <value> must be forwarded as lock_timeout kwarg to run_training.
+
+    Uses monkeypatching to capture the keyword arguments that run_training
+    receives, without executing the full training pipeline.
+    """
+    from unittest.mock import patch
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "lock_timeout_test")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    captured_kwargs: dict = {}
+
+    def _spy_run_training(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return None  # simulate graceful skip (lock contended)
+
+    with patch("recotem.training.pipeline.run_training", side_effect=_spy_run_training):
+        result = runner.invoke(
+            app,
+            ["train", str(yaml_path), "--lock-timeout", "5.0"],
+        )
+
+    # The CLI itself may exit 0 (pipeline returned None = lock skipped)
+    # or non-zero; what matters is the kwarg was forwarded.
+    assert "lock_timeout" in captured_kwargs, (
+        f"run_training must receive lock_timeout kwarg; "
+        f"got kwargs: {list(captured_kwargs.keys())}"
+    )
+    assert captured_kwargs["lock_timeout"] == pytest.approx(5.0), (
+        f"lock_timeout must be 5.0, got {captured_kwargs['lock_timeout']!r}"
+    )
+
+
+def test_train_lock_timeout_default_is_zero(tmp_path: Path, monkeypatch) -> None:
+    """When --lock-timeout is not passed, run_training receives lock_timeout=0.0."""
+    from unittest.mock import patch
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, "lock_timeout_default")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    captured_kwargs: dict = {}
+
+    def _spy_run_training(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return None
+
+    with patch("recotem.training.pipeline.run_training", side_effect=_spy_run_training):
+        runner.invoke(app, ["train", str(yaml_path)])
+
+    assert "lock_timeout" in captured_kwargs
+    assert captured_kwargs["lock_timeout"] == pytest.approx(0.0)

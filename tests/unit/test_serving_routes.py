@@ -1568,3 +1568,156 @@ def test_predict_response_wire_format_matches_predict_response_schema() -> None:
         f"reference: {ref_json}\n"
         f"route:     {route_json}"
     )
+
+
+# ---------------------------------------------------------------------------
+# CRIT-2: _lookup_metadata — unexpected KeyError → warning + metric
+# ---------------------------------------------------------------------------
+
+
+def test_lookup_metadata_keyerror_on_loc_emits_warning_and_increments_metric() -> None:
+    """CRIT-2: When item_id passes the index check but .loc[] raises KeyError
+    (non-unique index / corrupt state), a WARNING must be emitted and the
+    metadata_lookup_errors metric must be incremented.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import pandas as pd
+    import structlog.testing
+
+    from recotem.serving import metrics as _metrics
+    from recotem.serving.routes import _lookup_metadata
+
+    # Build a DataFrame whose .loc[] raises KeyError even for a present key.
+    # We simulate this with a mock .loc that raises KeyError.
+    df = pd.DataFrame(
+        {"title": ["A", "B"]},
+        index=pd.Index(["i1", "i1"]),  # duplicate index → .loc raises MultipleValues
+    )
+
+    # pandas .loc on a non-unique index with a scalar key returns a DataFrame,
+    # which then has .to_dict() behaving unexpectedly — but we also want to test
+    # the pure KeyError branch, so we monkeypatch loc directly.
+    class _BrokenLocAccessor:
+        def __getitem__(self, key):
+            raise KeyError(key)
+
+    df_mock = MagicMock()
+    df_mock.index = df.index
+    df_mock.loc = _BrokenLocAccessor()
+    # item_id is 'i1' which IS in the duplicate index
+    df_mock.index.__contains__ = lambda self, item: True
+
+    inc_calls: list[str] = []
+    original_inc = _metrics.inc_metadata_lookup_error
+
+    def _counting_inc(name: str) -> None:
+        inc_calls.append(name)
+        original_inc(name)
+
+    with structlog.testing.capture_logs() as cap:
+        with patch.object(
+            _metrics, "inc_metadata_lookup_error", side_effect=_counting_inc
+        ):
+            result = _lookup_metadata(df_mock, "i1", frozenset(), "my_recipe")
+
+    assert result == {}, "_lookup_metadata must return {} on KeyError"
+
+    warn_events = [
+        e
+        for e in cap
+        if e.get("event") == "metadata_lookup_unexpected_keyerror"
+        and e.get("log_level") == "warning"
+    ]
+    assert warn_events, (
+        "metadata_lookup_unexpected_keyerror must be logged at WARNING; "
+        f"got events: {[e for e in cap if 'metadata' in e.get('event', '')]!r}"
+    )
+    assert warn_events[0].get("recipe") == "my_recipe"
+
+    assert "my_recipe" in inc_calls, (
+        "inc_metadata_lookup_error must be called for the unexpected KeyError path"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CRIT-3: predict handler — unexpected exception logging
+# ---------------------------------------------------------------------------
+
+
+def test_predict_handler_logs_exception_on_unexpected_error() -> None:
+    """CRIT-3: When get_recommendation_for_known_user_id raises an unexpected
+    exception (not KeyError), predict_handler_unexpected_error must be logged
+    and the response must be 500.
+    """
+    import structlog.testing
+
+    recommender = MagicMock()
+    recommender.get_recommendation_for_known_user_id.side_effect = ValueError(
+        "unexpected internal error"
+    )
+
+    entry = ModelEntry(
+        name="err_recipe",
+        recommender=recommender,
+        header={"best_class": "TopPop"},
+        kid="active",
+    )
+    registry = ModelRegistry()
+    registry.replace("err_recipe", entry)
+
+    router = make_router(registry=registry, api_keys=[])
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    with structlog.testing.capture_logs() as cap:
+        resp = client.post("/predict/err_recipe", json={"user_id": "u1", "cutoff": 5})
+
+    assert resp.status_code == 500, (
+        f"Unexpected ValueError must yield 500; got {resp.status_code}"
+    )
+
+    exc_events = [
+        e for e in cap if e.get("event") == "predict_handler_unexpected_error"
+    ]
+    assert exc_events, (
+        "predict_handler_unexpected_error must be logged when recommender raises unexpectedly"
+    )
+    assert exc_events[0].get("error_class") == "ValueError"
+    assert exc_events[0].get("name") == "err_recipe"
+
+
+def test_predict_503_no_entry_logs_reason_no_entry() -> None:
+    """CRIT-3: When the recipe does not exist, recipe_unavailable with
+    reason='no_entry' must be logged before returning 503.
+    """
+    import structlog.testing
+
+    registry = ModelRegistry()  # empty
+
+    router = make_router(registry=registry, api_keys=[])
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    with structlog.testing.capture_logs() as cap:
+        resp = client.post("/predict/no_such", json={"user_id": "u1", "cutoff": 5})
+
+    assert resp.status_code == 503
+
+    events = [
+        e
+        for e in cap
+        if e.get("event") == "recipe_unavailable" and e.get("reason") == "no_entry"
+    ]
+    assert events, (
+        "recipe_unavailable with reason='no_entry' must be logged when entry is missing; "
+        f"got: {[e for e in cap if 'recipe_unavailable' in str(e)]!r}"
+    )

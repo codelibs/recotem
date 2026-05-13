@@ -49,10 +49,14 @@ This multi-kid pattern enables zero-downtime rotation:
    Confirm all recipes loaded successfully:
 
    ```bash
-   curl http://localhost:8080/health | jq '.recipes | to_entries[] | select(.value.loaded == false)'
+   # -f / --fail returns exit 22 on 4xx/5xx, which would mask a 503.
+   # Use -w to capture the status code instead.
+   HTTP_STATUS=$(curl -s -o /tmp/health.json -w "%{http_code}" http://localhost:8080/health)
+   echo "HTTP $HTTP_STATUS"
+   jq '.recipes | to_entries[] | select(.value.loaded == false)' /tmp/health.json
    ```
 
-   Empty output means all recipes loaded successfully under the new key.
+   Empty output from the `jq` command means all recipes loaded successfully under the new key.
 
 ### Key fingerprint
 
@@ -172,6 +176,7 @@ rm ./artifacts/my_recipe.abc12345.recotem
 |------|---------|-------------|
 | `--no-lock` | `false` | Skip per-recipe POSIX file lock acquisition. Only safe when you guarantee no concurrent writers through another mechanism (e.g. scheduler-level mutex). |
 | `--fail-on-busy` | `false` | Exit 6 (`LockContestedError`) immediately if the recipe lock is held, instead of the default behaviour (exit 0, log `recipe_lock_contended_skipping`). Use this in orchestrators that treat non-zero as "retry elsewhere". |
+| `--lock-timeout <seconds>` | `0.0` | Seconds to wait for the per-recipe lock before failing. `0.0` = non-blocking immediate failure (default). `-1` = wait indefinitely. Has no effect when `--no-lock` is set. |
 | `-q` / `--quiet` | `false` | Suppress per-trial output from Optuna. Reduces log volume during large search budgets. |
 | `-v` / `--verbose` | `false` | Dump per-trial hyperparameter values to the log. Useful for debugging search behaviour; avoid in production (can produce large log volumes). |
 | `--run-id <id>` | random 12-hex | Stable run identifier. Reuse the same value across invocations to resume a persistent Optuna study (requires `training.storage_path` set in the recipe). Pattern: `[A-Za-z0-9_.-]{1,64}`. If omitted, a fresh random id is generated each run. |
@@ -245,7 +250,7 @@ as the basis for SLO and alerting rules.
 | `search_done` | tuning | `best_class`, `best_score`, `n_completed` |
 | `training_final_model` / `final_model_trained` | refit | `recommender` |
 | `artifact_written` | persist | `versioning`, `artifact`, `pointer` (append_sha), `kid` |
-| `train_done` | end | `name`, `run_id`, `exit_code`, `artifact`, `best_class`, `best_score`, `trials`, `n_orphaned`, `trained_at`, `kid` |
+| `train_done` | end | `name`, `run_id`, `exit_code`, `artifact`, `best_class`, `best_score`, `trials`, `n_orphaned`, `trained_at`, `kid`, `recipe_hash`, `n_rows`, `n_users`, `n_items` |
 | `train_error` | failure | `error`, `code` (`internal_error` for non-domain exceptions), `recipe`, `run_id`, `exit_code`, `trained_at`; additionally `n_rows`, `n_users`, `n_items`, `min_rows`, `min_users`, `min_items` when `code=min_data_violation` |
 | `recipe_lock_contended_skipping` | start | `recipe`, `run_id` (default `--fail-on-busy=False` exits 0) |
 | `csv_source_redirect`, `csv_source_size_exceeded` | datasource | `path`, `status`, `cap` |
@@ -355,6 +360,41 @@ RAM per pod ≈ (avg_artifact_size_GiB × n_recipes) + (avg_metadata_size_GiB ×
 For large models (IALS with many components, large item sets), use `recotem inspect` to read `data_stats` and `best_params` from the header before committing to a host size.
 
 `recotem serve` is sized for ≤ 100 recipes per process. Beyond that, shard recipes across multiple `serve` processes (separate `--recipes` directories, separate ports, load-balance at the proxy layer).
+
+---
+
+## Environment variable reference
+
+Full list of environment variables recognised by Recotem. Variables marked `serve` apply only to `recotem serve`; those marked `train` apply only to `recotem train`; those with no marking apply to both.
+
+| Variable | Default | Scope | Description |
+|---|---|---|---|
+| `RECOTEM_SIGNING_KEYS` | (required) | train + serve | `kid:hex64,kid2:hex64` — HMAC sign/verify keys (64 hex = 32 bytes). Multi-entry enables zero-downtime rotation; `train` always signs with the **first** entry. |
+| `RECOTEM_API_KEYS` | (empty) | serve | `kid:sha256:hex64,...` — API key allow-list. Empty forces 127.0.0.1 bind. |
+| `RECOTEM_HOST` | 127.0.0.1 | serve | uvicorn bind host. Must be `0.0.0.0` inside Docker/Kubernetes when `RECOTEM_API_KEYS` is set. Forced to `127.0.0.1` when no API keys are configured (a `host_forced_to_loopback` warning is emitted). |
+| `RECOTEM_PORT` | 8080 | serve | uvicorn bind port. |
+| `RECOTEM_WATCH_INTERVAL` | 5 | serve | Artifact watcher poll interval in seconds (clamped 1–30). |
+| `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | serve | Per-artifact size cap (clamped [1 MiB, 16 GiB]). |
+| `RECOTEM_MAX_PAYLOAD_BYTES` | 512 MiB | serve | Per-payload cap post-HMAC-verify (clamped [1 MiB, 16 GiB]). Must be ≤ `RECOTEM_MAX_ARTIFACT_BYTES`. |
+| `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | train | Raw I/O bytes cap for HTTP/HTTPS, local, and object-store source reads (clamped [1 MiB, 16 GiB]). Does **not** cap the decompressed DataFrame. |
+| `RECOTEM_HTTP_TIMEOUT_SECONDS` | 30 | train | Connect/read timeout for HTTP/HTTPS source fetch (clamped [1, 600]). |
+| `RECOTEM_HTTP_ALLOW_PRIVATE` | (unset) | train | Truthy (`1`/`true`/`yes`/`on`) allows HTTP fetches to private/loopback/link-local destinations. Leave unset in production to block SSRF against cloud-metadata services. |
+| `RECOTEM_ALLOWED_HOSTS` | 127.0.0.1,localhost | serve | `TrustedHostMiddleware` allow-list (comma-separated). Whitespace-only input falls back to default. |
+| `RECOTEM_ALLOWED_ORIGINS` | (empty) | serve | CORS allow-list (comma-separated). Empty = deny. |
+| `RECOTEM_ENV` | (empty) | serve | Deployment environment tag. `--insecure-no-auth` is permitted only when set to `development`, `dev`, or `test`; `--dev-allow-unsigned` only when set to `development`. When set to `production`, `prod`, or `staging`, the `/docs`, `/redoc`, and `/openapi.json` endpoints are disabled. |
+| `RECOTEM_DRAIN_SECONDS` | 30 | serve | SIGTERM graceful drain window (clamped [1, 300]). Set `terminationGracePeriodSeconds` ≥ this + 5 in Kubernetes. |
+| `RECOTEM_LOG_FORMAT` | auto | train + serve | `auto` / `json` / `console`. |
+| `RECOTEM_METADATA_FIELD_DENY` | (empty) | serve | Comma-separated columns stripped from `/predict` responses after the metadata join. |
+| `RECOTEM_METRICS_ENABLED` | (unset) | serve | Truthy enables the Prometheus `/metrics` endpoint. Requires `recotem[metrics]` extra. |
+| `RECOTEM_ARTIFACT_ROOT` | (empty) | train | Local `output.path` must lie under this directory (symlink escapes rejected). |
+| `RECOTEM_LOCK_DIR` | (empty) | train | Override directory for per-recipe training lock files. Needed when `output.path` is a remote URI (`s3://`, `gs://`, …); falls back to `<tempdir>/recotem-locks/`. |
+| `RECOTEM_STARTUP_PARALLELISM` | (auto) | serve | Threads used to load artifacts at startup (clamped [1, 32]). Default: `min(len(recipes), 8)`. Setting to `0` clamps to 1 with a warning. |
+| `RECOTEM_BQ_REQUIRE_STORAGE_API` | (unset) | train | Truthy raises `DataSourceError` instead of falling back to the REST path when the BigQuery Storage Read API fails. |
+| `RECOTEM_RECIPE_*` | — | train | Allow-listed prefix for `${...}` recipe env-var expansion. See [recipe-reference.md](recipe-reference.md#environment-variable-expansion). |
+
+> **Note on `signing_key_status` in logs.** The `security.posture` log line emitted at every `recotem serve` startup includes a `signing_key_status` field: `configured` (keys present), `dev_allow_unsigned` (no keys, dev-unsigned mode), or `missing` (keys absent; startup will fail). Use this in SIEM rules to alert on misconfigured deployments.
+
+See [ADR 0001](adr/0001-artifact-format-versioning.md) for the artifact format version strategy and compatibility rules.
 
 ---
 

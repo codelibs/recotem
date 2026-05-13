@@ -326,3 +326,108 @@ def test_train_append_sha_then_serve_resolves_pointer(tmp_path: Path) -> None:
     assert resolved.startswith(b"RECOTEM\x00"), (
         "_read_artifact_bytes must resolve the pointer to raw artifact bytes"
     )
+
+
+# ---------------------------------------------------------------------------
+# MF-1: lenient loader — broken YAML does not abort serve; others still serve
+# ---------------------------------------------------------------------------
+
+
+def _write_minimal_recipe_yaml(recipes_dir, name, artifact_path):
+    content = (
+        f"name: {name}\n"
+        "source:\n"
+        "  type: csv\n"
+        "  path: /tmp/data.csv\n"
+        "schema:\n"
+        "  user_column: user_id\n"
+        "  item_column: item_id\n"
+        "training:\n"
+        "  algorithms: [TopPop]\n"
+        "  n_trials: 1\n"
+        f"output:\n"
+        f"  path: {artifact_path}\n"
+    )
+    yaml_path = recipes_dir / f"{name}.yaml"
+    yaml_path.write_text(content)
+    return yaml_path
+
+
+def test_broken_yaml_does_not_abort_serve_other_recipes_still_serve(
+    tmp_path,
+) -> None:
+    """MF-1: When one recipe YAML is unparseable, serve must still start.
+
+    Expected:
+    - The broken-YAML recipe appears in /health with loaded=false and error.
+    - The good recipe (missing artifact at startup) also appears as a stub.
+    - Both stubs must be visible; serve must not raise at create_app() time.
+    """
+
+    from fastapi.testclient import TestClient
+
+    from recotem.config import ServeConfig
+    from recotem.serving.app import create_app
+    from tests.conftest import ACTIVE_KEY_HEX
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    # --- Good recipe pointing at a missing artifact (will appear as stub) ---
+    missing_artifact = tmp_path / "does-not-exist.recotem"
+    _write_minimal_recipe_yaml(recipes_dir, "good_recipe", missing_artifact)
+
+    # --- Broken recipe (invalid YAML syntax) ---
+    broken_yaml = recipes_dir / "broken_recipe.yaml"
+    broken_yaml.write_text("name: broken\nthis is: [invalid yaml: {{{")
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = f"active:{ACTIVE_KEY_HEX}"
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1", "*"]
+
+    # Must NOT raise — lenient loader absorbs the broken YAML
+    app = create_app(cfg)
+    client = TestClient(app)
+
+    # /health must be 503 because both recipes are degraded
+    health_resp = client.get("/health")
+    assert health_resp.status_code == 503
+    body = health_resp.json()
+    assert body["status"] == "degraded"
+
+    # Broken recipe must appear with loaded=false and error info.
+    assert "broken_recipe" in body["recipes"], (
+        f"broken_recipe must appear in /health; got: {list(body['recipes'].keys())}"
+    )
+    broken_entry = body["recipes"]["broken_recipe"]
+    assert broken_entry["loaded"] is False, (
+        f"broken YAML recipe must have loaded=false; got {broken_entry!r}"
+    )
+    assert broken_entry.get("error"), (
+        "broken YAML recipe must have an error string in /health"
+    )
+    assert "YAML parse failed" in (broken_entry.get("error") or ""), (
+        f"error must mention YAML parse failed; got {broken_entry.get('error')!r}"
+    )
+
+    # Good recipe must also appear (as missing-artifact stub)
+    assert "good_recipe" in body["recipes"], (
+        "good_recipe must appear in /health even when artifact is missing"
+    )
+
+    # /predict for the broken recipe must return 503
+    predict_broken = client.post(
+        "/predict/broken_recipe", json={"user_id": "u1", "cutoff": 5}
+    )
+    assert predict_broken.status_code == 503, (
+        f"broken recipe /predict must return 503; got {predict_broken.status_code}"
+    )
+
+    # /predict for the good (missing artifact) recipe must also return 503
+    predict_good = client.post(
+        "/predict/good_recipe", json={"user_id": "u1", "cutoff": 5}
+    )
+    assert predict_good.status_code == 503

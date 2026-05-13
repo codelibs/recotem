@@ -313,7 +313,9 @@ Only variables matching `RECOTEM_RECIPE_*` are candidates for `${...}` expansion
 | Prefix match | `AWS_*`, `GCP_*`, `GOOGLE_*`, `AZURE_*` |
 | Substring match | `*SECRET*`, `*PASSWORD*`, `*PASSWD*`, `*TOKEN*`, `*KEY*`, `*AUTH*`, `*BEARER*`, `*CRED*`, `*PRIVATE*` |
 
-The `*KEY*` substring is intentionally broad. Any `RECOTEM_RECIPE_*` variable whose name contains `KEY` — such as `RECOTEM_RECIPE_PARTITION_KEY` — is rejected. Use a name that avoids `KEY` (e.g. `RECOTEM_RECIPE_PARTITION_COLUMN`). A blacklisted reference raises `RecipeError` (exit 2) and the error message names the variable but never includes its value.
+The `*KEY*` substring is intentionally broad. Any `RECOTEM_RECIPE_*` variable whose uppercased name contains the substring `KEY` (no underscore boundary required) is rejected — this includes `RECOTEM_RECIPE_PARTITION_KEY`, `RECOTEM_RECIPE_APIKEY`, and `RECOTEM_RECIPE_KEYBOARD`. Use a name that does not contain `KEY` (e.g. `RECOTEM_RECIPE_PARTITION_COLUMN`). A blacklisted reference raises `RecipeError` (exit 2) and the error message names the variable but never includes its value.
+
+> **`RECOTEM_RECIPE_GCP_PROJECT` is allowed.** The `GCP_*` prefix blacklist matches only names that *start* with `GCP_` — it does not match `RECOTEM_RECIPE_GCP_PROJECT`, which starts with `RECOTEM_RECIPE_`. The `examples/ga4-bigquery/` recipe uses this variable to pass a GCP project ID. The variable is safe because `GCP_PROJECT` contains none of the blocked substrings (`KEY`, `SECRET`, `TOKEN`, etc.). Be careful not to accidentally include a blacklisted substring in the tail portion of a `RECOTEM_RECIPE_*` variable name.
 
 **Operational hardening.** The blacklist is a _secondary_ defence that catches accidental name collisions. The _primary_ safety property is operational: **never store secrets in `RECOTEM_RECIPE_*` environment variables.** The `RECOTEM_RECIPE_` prefix should be reserved for non-sensitive configuration values (dataset names, date ranges, partition columns, feature flags). If a secret were placed under this prefix with a name that does not match any blacklisted pattern (e.g. `RECOTEM_RECIPE_DB_ENDPOINT`), the blacklist would not catch it. Treat the prefix as a namespace for recipe parameterisation, not as a secrets namespace.
 
@@ -417,6 +419,8 @@ If a value is replaced with `[REDACTED]` in a log line you are debugging, the fi
   "auth_enabled": true,
   "bind_host": "0.0.0.0",
   "signing_keys": [{"kid": "prod-2026-q3", "fingerprint": "ddeeff00"}],
+  "signing_kids": ["prod-2026-q3"],
+  "signing_key_status": "configured",
   "env": "production",
   "allowed_hosts": ["api.example.com"],
   "allowed_origins": ["https://app.example.com"],
@@ -426,12 +430,24 @@ If a value is replaced with `[REDACTED]` in a log line you are debugging, the fi
 
 Ship this line to your SIEM. Alert on `auth_enabled: false` or `unsafe_mode: true` in non-development environments.
 
+The `signing_key_status` field takes one of three values:
+
+| Value | Meaning |
+|-------|---------|
+| `configured` | Signing keys are present and the KeyRing was built successfully. |
+| `dev_allow_unsigned` | Running in dev-unsigned mode; no keys are required or loaded. |
+| `missing` | No signing keys configured and `--dev-allow-unsigned` not set. Startup will fail immediately after this log line. |
+
+Alert on `signing_key_status: missing` — this event is always immediately followed by a startup failure, but the log line fires unconditionally so SIEM rules that require it still trigger.
+
 Two unsafe flags exist and are gated by `RECOTEM_ENV`:
 
 | Flag | Requirement | Effect |
 |------|-------------|--------|
 | `--insecure-no-auth` | `RECOTEM_ENV` in `development`, `dev`, `test` | Disables API key check; also disables the no-auth → `127.0.0.1` forced bind so `RECOTEM_HOST` is honoured (e.g. for dev containers); repeating warn banner every 60 s |
 | `--dev-allow-unsigned` | `RECOTEM_ENV=development` AND `--i-understand-this-loads-arbitrary-code` | Skips HMAC verify; never use outside controlled testing |
+
+> **OpenAPI schema in production.** When `RECOTEM_ENV` is set to `production`, `prod`, or `staging`, the `/docs`, `/redoc`, and `/openapi.json` endpoints are disabled at app construction time. Requests to those paths return 404. Development and test environments keep the endpoints enabled for developer ergonomics.
 
 Both flags are rejected at startup in any environment not matching the requirement, with an explicit error message.
 

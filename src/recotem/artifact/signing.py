@@ -268,6 +268,11 @@ class KeyRing:
                     f"32 bytes, got {len(key_bytes)}"
                 )
             if kid in self._keys:
+                logger.warning(
+                    "signing_keyring_invalid",
+                    reason="duplicate_kid",
+                    kid=format_kid_for_log(kid),
+                )
                 raise ArtifactError(f"duplicate kid {kid!r} in KeyRing entries")
             # Foot-gun guard: kids are expected to be short human labels
             # (e.g. ``prod-2026``, ``dev``).  A kid that looks like raw
@@ -278,6 +283,11 @@ class KeyRing:
             # scrubs hex64-shaped values that appear in unrelated string
             # fields; structured ``kid=...`` fields pass through as-is).
             if len(kid) >= 32 and all(c in "0123456789abcdefABCDEF" for c in kid):
+                logger.warning(
+                    "signing_keyring_invalid",
+                    reason="kid_looks_like_hex_key_material",
+                    kid=kid[:8] + "...",
+                )
                 raise ArtifactError(
                     f"KeyRing entry has a kid {kid[:8]}... that looks like "
                     "raw hex key material (>=32 hex chars).  Use a short "
@@ -286,6 +296,18 @@ class KeyRing:
                 )
             self._keys[kid] = key_bytes
             self._order.append(kid)
+
+        # Emit audit log so operators can confirm which keys are loaded at
+        # startup without exposing any key material (only fingerprint prefix).
+        logger.info(
+            "signing_keyring_built",
+            n_keys=len(self._order),
+            active_kid=format_kid_for_log(self._order[0]),
+            fingerprints=[
+                {"kid": format_kid_for_log(k), "fingerprint": self.fingerprint(k)}
+                for k in self._order
+            ],
+        )
 
     @property
     def active_kid(self) -> str:
@@ -427,5 +449,23 @@ def unpickle_payload(payload_bytes: bytes) -> Any:
             "Install the matching recotem extras / irspack version on the "
             "serving host."
         ) from exc
+    except (AttributeError, TypeError) as exc:
+        # Programming error / dependency version mismatch -- the full stack
+        # trace is required for diagnosis.  Log at exception level (includes
+        # traceback) and re-raise the original exception so the caller can
+        # distinguish "dep incompatibility" (AttributeError/TypeError) from
+        # "corrupt bytes" (ArtifactError).
+        logger.exception(
+            "safe_unpickle_internal_error",
+            error_class=type(exc).__name__,
+        )
+        raise
+    except (pickle.UnpicklingError, EOFError, ValueError) as exc:
+        # True binary corruption or truncated stream -- map to ArtifactError so
+        # the caller can surface a user-visible "artifact damaged" message.
+        raise ArtifactError(f"deserialization failed: {exc}") from exc
     except Exception as exc:
+        # Catch-all for unexpected exception types (e.g. RuntimeError from a
+        # third-party codec).  Map to ArtifactError to prevent an unhandled
+        # exception from leaking internal details.
         raise ArtifactError(f"deserialization failed: {exc}") from exc

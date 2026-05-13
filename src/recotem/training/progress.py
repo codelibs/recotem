@@ -80,10 +80,15 @@ class ProgressReporter:
             self._start_rich()
         return self
 
-    def __exit__(self, *_: object) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        tb: object,
+    ) -> None:
         if self._use_rich and self._progress is not None:
             self._progress.__exit__(None, None, None)
-        self._emit_summary()
+        self._emit_summary(success=exc_type is None)
 
     # ------------------------------------------------------------------
     # Trial callback
@@ -165,15 +170,24 @@ class ProgressReporter:
         )
         self._progress.__enter__()
 
-    def _emit_summary(self) -> None:
-        logger.info(
-            "tuning_complete",
-            recipe=self._recipe_name,
-            run_id=self._run_id,
-            n_completed=self._completed,
-            best_score=self._best_score,
-            best_algorithm=self._best_algorithm,
-        )
+    def _emit_summary(self, *, success: bool = True) -> None:
+        if success:
+            logger.info(
+                "tuning_complete",
+                recipe=self._recipe_name,
+                run_id=self._run_id,
+                n_completed=self._completed,
+                best_score=self._best_score,
+                best_algorithm=self._best_algorithm,
+            )
+        else:
+            logger.warning(
+                "tuning_aborted",
+                recipe=self._recipe_name,
+                run_id=self._run_id,
+                trials_done=self._completed,
+                best_score=None,
+            )
 
 
 def _rich_available() -> bool:

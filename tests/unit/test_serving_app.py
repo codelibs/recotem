@@ -1785,3 +1785,177 @@ def test_startup_parallelism_one_uses_single_thread(
         f"Expected exactly 1 unique thread ID with parallelism=1; "
         f"got {set(thread_ids)!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# MF-3: OpenAPI production gate
+# ---------------------------------------------------------------------------
+
+
+def _minimal_prod_config(tmp_path: Path) -> ServeConfig:
+    """Build a minimal ServeConfig suitable for production-like environments."""
+    import hashlib
+
+    from recotem.config import ApiKeyEntry
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir(exist_ok=True)
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = "active:" + "aa" * 32
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.insecure_no_auth = False
+    cfg.dev_allow_unsigned = False
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1", "*"]
+    # API key required in non-dev environments
+    sha256_hex = hashlib.scrypt(
+        b"test_api_key",
+        salt=b"recotem.api-key.v1",
+        n=2,
+        r=8,
+        p=1,
+        dklen=32,
+    ).hex()
+    cfg.api_keys = [ApiKeyEntry(kid="k1", sha256_hex=sha256_hex)]
+    return cfg
+
+
+def test_docs_endpoint_disabled_in_production(tmp_path: Path) -> None:
+    """MF-3: /docs must return 404 in production/prod/staging environments."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    for env in ("production", "prod", "staging"):
+        cfg = _minimal_prod_config(tmp_path)
+        cfg.env = env
+        app = create_app(cfg)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/docs")
+        assert resp.status_code == 404, (
+            f"RECOTEM_ENV={env}: /docs must return 404; got {resp.status_code}"
+        )
+        resp = client.get("/openapi.json")
+        assert resp.status_code == 404, (
+            f"RECOTEM_ENV={env}: /openapi.json must return 404; got {resp.status_code}"
+        )
+
+
+def test_docs_endpoint_enabled_in_development(tmp_path: Path) -> None:
+    """MF-3: /docs and /openapi.json must be accessible in development."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.env = "development"
+    app = create_app(cfg)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/openapi.json")
+    assert resp.status_code == 200, (
+        f"RECOTEM_ENV=development: /openapi.json must return 200; got {resp.status_code}"
+    )
+
+
+def test_metrics_endpoint_not_in_openapi_schema(tmp_path: Path) -> None:
+    """MF-3: /metrics must have include_in_schema=False and not appear in /openapi.json."""
+
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.env = "development"
+    app = create_app(cfg)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/openapi.json")
+    assert resp.status_code == 200
+    schema = resp.json()
+    paths = schema.get("paths", {})
+    assert "/metrics" not in paths, (
+        "/metrics must not appear in the OpenAPI schema (include_in_schema=False)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MF-5: signing key missing still emits security.posture
+# ---------------------------------------------------------------------------
+
+
+def test_security_posture_emitted_even_when_signing_key_missing(
+    tmp_path: Path,
+) -> None:
+    """MF-5: create_app must emit security.posture with signing_key_status='missing'
+    before raising ConfigError when RECOTEM_SIGNING_KEYS is unset."""
+    import structlog.testing
+
+    from recotem.config import ConfigError, ServeConfig
+    from recotem.serving.app import create_app
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = ""  # no keys
+    cfg.dev_allow_unsigned = False
+    cfg.recipes_dir = str(tmp_path)
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.allowed_hosts = ["*"]
+
+    with structlog.testing.capture_logs() as cap:
+        with pytest.raises(ConfigError):
+            create_app(cfg)
+
+    posture_events = [e for e in cap if e.get("event") == "security.posture"]
+    assert posture_events, (
+        "security.posture must be emitted even when signing keys are missing"
+    )
+    assert posture_events[0].get("signing_key_status") == "missing", (
+        f"signing_key_status must be 'missing'; got {posture_events[0]!r}"
+    )
+
+
+def test_security_posture_signing_key_status_configured(tmp_path: Path) -> None:
+    """MF-5: security.posture must include signing_key_status='configured' when keys set."""
+    import structlog.testing
+
+    from recotem.artifact.signing import KeyRing
+    from recotem.config import ServeConfig
+    from recotem.serving.app import _emit_security_posture
+
+    cfg = ServeConfig()
+    cfg.env = "development"
+    cfg.insecure_no_auth = False
+    cfg.dev_allow_unsigned = False
+    cfg.host = "127.0.0.1"
+    cfg.allowed_hosts = ["*"]
+    cfg.allowed_origins = []
+
+    kr = KeyRing("test:" + "aa" * 32)
+    with structlog.testing.capture_logs() as cap:
+        _emit_security_posture(cfg, kr)
+
+    posture = next(e for e in cap if e.get("event") == "security.posture")
+    assert posture["signing_key_status"] == "configured"
+
+
+def test_security_posture_signing_key_status_dev_allow_unsigned(
+    tmp_path: Path,
+) -> None:
+    """MF-5: security.posture must include signing_key_status='dev_allow_unsigned'
+    when dev_allow_unsigned is active."""
+    import structlog.testing
+
+    from recotem.config import ServeConfig
+    from recotem.serving.app import _emit_security_posture
+
+    cfg = ServeConfig()
+    cfg.env = "development"
+    cfg.insecure_no_auth = False
+    cfg.dev_allow_unsigned = True
+    cfg.host = "127.0.0.1"
+    cfg.allowed_hosts = ["*"]
+    cfg.allowed_origins = []
+
+    with structlog.testing.capture_logs() as cap:
+        _emit_security_posture(cfg, None)
+
+    posture = next(e for e in cap if e.get("event") == "security.posture")
+    assert posture["signing_key_status"] == "dev_allow_unsigned"

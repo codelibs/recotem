@@ -498,3 +498,60 @@ def test_redact_processor_is_first_in_chain() -> None:
         f"got {first!r}.  Redaction MUST be first so no sensitive "
         "value can reach a renderer before being stripped."
     )
+
+
+# ---------------------------------------------------------------------------
+# sil m-5: safety net — internal redaction failure must not drop the event
+# ---------------------------------------------------------------------------
+
+
+def test_redact_internal_failure_returns_redaction_failed_event() -> None:
+    """If the redaction logic itself raises, the event must not be silently
+    dropped.  A safe fallback dict with event='[redaction_failed]' must be
+    returned so the log chain can continue."""
+    from unittest.mock import patch
+
+    boom = ValueError("unexpected redaction error")
+    with patch(
+        "recotem.log_redaction._do_redact",
+        side_effect=boom,
+    ):
+        result = _invoke({"event": "something_sensitive", "user": "alice"})
+
+    assert result["event"] == "[redaction_failed]", (
+        f"Expected event='[redaction_failed]'; got {result['event']!r}"
+    )
+    assert "redaction_error_class" in result, (
+        "Fallback result must include 'redaction_error_class'"
+    )
+    assert result["redaction_error_class"] == "ValueError"
+
+
+def test_redact_internal_failure_preserves_original_event_prefix() -> None:
+    """original_event in the fallback must carry the first 64 chars of the
+    original event string so operators can identify which log line failed."""
+    from unittest.mock import patch
+
+    long_event = "a" * 128
+    with patch("recotem.log_redaction._do_redact", side_effect=RuntimeError("boom")):
+        result = _invoke({"event": long_event})
+
+    assert result["original_event"] == "a" * 64, (
+        "original_event must be truncated to 64 chars"
+    )
+
+
+def test_redact_internal_failure_does_not_raise() -> None:
+    """redact_sensitive_keys must never raise — even if _do_redact raises."""
+    from unittest.mock import patch
+
+    from recotem.log_redaction import redact_sensitive_keys
+
+    with patch(
+        "recotem.log_redaction._do_redact",
+        side_effect=Exception("any error"),
+    ):
+        # Must not raise.
+        result = redact_sensitive_keys(None, "info", {"event": "test"})  # type: ignore[arg-type]
+
+    assert isinstance(result, dict), "Result must always be a dict"

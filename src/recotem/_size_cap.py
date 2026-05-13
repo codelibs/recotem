@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 import structlog
 
-from recotem._http_fetch import NETWORK_SCHEMES
+from recotem._http_fetch import NETWORK_SCHEMES, redact_url_userinfo
 
 logger = structlog.get_logger(__name__)
 
@@ -137,6 +137,12 @@ def check_size_cap(path: str, cap: int, *, label: str = "file") -> None:
             if exc_name in credential_shapes or any(
                 marker in exc_name for marker in ("Credential", "Auth")
             ):
+                safe_path = redact_url_userinfo(path)
+                logger.info(
+                    "size_cap_probe_skipped_credential",
+                    path=safe_path,
+                    exc_class=exc_name,
+                )
                 return
             # Any other backend error (connectivity, config, fsspec bugs)
             # indicates a problem the caller must handle.  Log a structured

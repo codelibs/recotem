@@ -227,6 +227,9 @@ class ArtifactWatcher(threading.Thread):
         self._states: dict[str, _RecipeWatchState] = dict(initial_states or {})
         self._consecutive_errors: int = 0
         self._unhealthy_threshold: int = unhealthy_threshold
+        # Per-recipe counter for consecutive post-HMAC deserialization failures.
+        # Reset to 0 on success; triggers a distinct log event at threshold.
+        self._post_hmac_failure_streak: dict[str, int] = {}
         self._executor: ThreadPoolExecutor = ThreadPoolExecutor(
             max_workers=_MAX_CONCURRENT_STATS,
             thread_name_prefix="artifact-stat",
@@ -288,7 +291,14 @@ class ArtifactWatcher(threading.Thread):
                 try:
                     self._scan_recipes_dir()
                     self._poll_artifacts()
-                    # Successful poll — reset consecutive-error counter.
+                    # Successful poll — reset consecutive-error counter and clear
+                    # any "watcher unhealthy" errors that were set by
+                    # _mark_all_unhealthy.  Entries whose last_load_error was set
+                    # for other reasons (e.g. real artifact load failure) must NOT
+                    # be cleared here — only the sentinel value written by
+                    # _mark_all_unhealthy is eligible for auto-recovery.
+                    if self._consecutive_errors >= self._unhealthy_threshold:
+                        self._clear_watcher_unhealthy_errors()
                     self._consecutive_errors = 0
                 except (MemoryError, RecursionError):
                     raise  # Daemon thread dying is preferable to silent OOM loops
@@ -326,6 +336,37 @@ class ArtifactWatcher(threading.Thread):
         )
         for name in list(self._states.keys()):
             self._registry.set_load_error(name, "watcher unhealthy")
+
+    _WATCHER_UNHEALTHY_SENTINEL = "watcher unhealthy"
+
+    def _clear_watcher_unhealthy_errors(self) -> None:
+        """Clear watcher-set unhealthy errors on entries that are still loaded.
+
+        Called when the poll loop recovers after a streak of consecutive errors
+        that caused _mark_all_unhealthy() to run.  Only the sentinel error
+        string ("watcher unhealthy") written by that method is eligible for
+        auto-recovery.  Entries whose last_load_error was set for other
+        reasons (e.g. real artifact load or HMAC failure) are not touched so
+        operators see the original failure reason rather than a stale sentinel.
+
+        Entries with loaded=False are also left alone — a truly failed load
+        requires a new successful artifact load to recover, not a watcher-loop
+        health event.
+        """
+        logger.info(
+            "artifact_watcher_recovery",
+            message="watcher recovered; clearing watcher_unhealthy errors on loaded entries",
+        )
+        for name in list(self._states.keys()):
+            entry = self._registry.get(name)
+            if entry is None:
+                continue
+            # Only clear the specific sentinel value; leave genuine load errors.
+            if (
+                entry.loaded
+                and entry.last_load_error == self._WATCHER_UNHEALTHY_SENTINEL
+            ):
+                self._registry.set_load_error(name, None)
 
     # ------------------------------------------------------------------
     # Directory rescan
@@ -747,13 +788,35 @@ class ArtifactWatcher(threading.Thread):
                     reason=kid_reason,
                     kid=kid_log,
                 )
+            # Distinguish post-HMAC deserialization failures from other
+            # ArtifactErrors by message prefix.  This prefix is set by
+            # unpickle_payload in artifact/signing.py.
+            _err_str = str(exc)
+            if _err_str.startswith("deserialization failed:"):
+                streak = self._post_hmac_failure_streak.get(name, 0) + 1
+                self._post_hmac_failure_streak[name] = streak
+                logger.error(
+                    "artifact_post_hmac_deserialize_failed",
+                    name=name,
+                    error=_err_str,
+                )
+                if streak >= 3:
+                    logger.error(
+                        "artifact_repeated_post_hmac_failure",
+                        name=name,
+                        count=streak,
+                    )
+            else:
+                # Non-deserialization ArtifactError — reset streak (different
+                # failure class; the deserialization path is not involved).
+                self._post_hmac_failure_streak.pop(name, None)
             logger.error(
                 "artifact_load_failed",
                 name=name,
                 kid=kid_log,
-                error=str(exc),
+                error=_err_str,
             )
-            self._record_load_failure(name, str(exc))
+            self._record_load_failure(name, _err_str)
             return
         except (MemoryError, RecursionError):
             # Never swallow OOM / stack-exhaustion in a long-running thread:
@@ -784,6 +847,8 @@ class ArtifactWatcher(threading.Thread):
         self._registry.replace_with_marker(name, entry, (new_marker, sha256))
         state.last_sha256 = sha256
         state.last_marker = new_marker
+        # Reset post-HMAC deserialization failure streak on successful load.
+        self._post_hmac_failure_streak.pop(name, None)
         _metrics.set_model_loaded(name, True)
         _metrics.record_swap(name, ok=True)
         _metrics.set_active_recipes(self._registry.loaded_count())
@@ -989,8 +1054,27 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
 
     try:
         sidecar_contents = sidecar_path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as exc:
         # Can't read the sidecar — be conservative and let the full stat run.
+        # Distinguish ENOENT (sidecar was deleted between exists() and read_text)
+        # from other OS errors (permission denied, I/O error) so operators can
+        # diagnose misconfigured file permissions without reading raw tracebacks.
+        import errno  # noqa: PLC0415
+
+        if exc.errno == errno.ENOENT:
+            logger.debug(
+                "sidecar_read_failed",
+                path=str(sidecar_path),
+                error_class=type(exc).__name__,
+                reason="ENOENT",
+            )
+        else:
+            logger.warning(
+                "sidecar_read_failed",
+                path=str(sidecar_path),
+                error_class=type(exc).__name__,
+                errno=exc.errno,
+            )
         return False
 
     if sidecar_contents == state.last_sidecar_contents:

@@ -959,6 +959,164 @@ def test_storage_fallback_iam_classname_match(monkeypatch) -> None:
     assert len(result) == 1
 
 
+# ---------------------------------------------------------------------------
+# CRIT-5: iam_detected_via field in bigquery_storage_fallback log
+# ---------------------------------------------------------------------------
+
+
+def _make_bq_env(mock_bq, mock_exceptions, mock_api_core):
+    """Context manager helper that patches sys.modules and reloads bigquery module."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx_mgr():
+        with patch.dict(
+            sys.modules,
+            {
+                "google.cloud.bigquery": mock_bq,
+                "db_dtypes": MagicMock(),
+                "google.api_core.exceptions": mock_exceptions,
+                "google.api_core": mock_api_core,
+            },
+        ):
+            if "recotem.datasource.bigquery" in sys.modules:
+                del sys.modules["recotem.datasource.bigquery"]
+            import recotem.datasource.bigquery as bq_mod
+
+            yield bq_mod
+
+    return _ctx_mgr()
+
+
+def _make_iam_test_source(mock_bq, mock_exceptions, mock_api_core, exc_factory):
+    """Set up fetch() so Storage API raises exc_factory() and REST succeeds."""
+    import pandas as pd
+
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+    mock_query_job = mock_bq.Client.return_value.query.return_value
+
+    def _to_dataframe(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise exc_factory()
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe
+    return mock_query_job
+
+
+def test_storage_fallback_iam_detected_via_http_403(monkeypatch) -> None:
+    """When the storage exception has an HTTP 403 code, iam_detected_via='http_403'."""
+    import structlog.testing
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    # Exception with .code == 403 but non-IAM class name.
+    class _Http403Error(mock_api_error_cls):
+        code = 403
+
+    _make_iam_test_source(
+        mock_bq, mock_exceptions, mock_api_core, lambda: _Http403Error("forbidden")
+    )
+
+    with _make_bq_env(mock_bq, mock_exceptions, mock_api_core) as bq_mod:
+        cfg = bq_mod.BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = bq_mod.BigQuerySource.__new__(bq_mod.BigQuerySource)
+        source._config = cfg
+        with structlog.testing.capture_logs() as cap:
+            source.fetch(_ctx())
+
+    fallback_events = [e for e in cap if e.get("event") == "bigquery_storage_fallback"]
+    assert fallback_events, "Expected bigquery_storage_fallback event"
+    assert fallback_events[0]["iam_detected_via"] == "http_403", (
+        f"Expected iam_detected_via='http_403'; got {fallback_events[0]!r}"
+    )
+
+
+def test_storage_fallback_iam_detected_via_class_name(monkeypatch) -> None:
+    """When the storage exception class name is 'PermissionDenied', iam_detected_via='class'."""
+    import structlog.testing
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    # Class named PermissionDenied but no .code attribute.
+    PermissionDenied = type("PermissionDenied", (mock_api_error_cls,), {})
+
+    _make_iam_test_source(
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        lambda: PermissionDenied("permission denied"),
+    )
+
+    with _make_bq_env(mock_bq, mock_exceptions, mock_api_core) as bq_mod:
+        cfg = bq_mod.BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = bq_mod.BigQuerySource.__new__(bq_mod.BigQuerySource)
+        source._config = cfg
+        with structlog.testing.capture_logs() as cap:
+            source.fetch(_ctx())
+
+    fallback_events = [e for e in cap if e.get("event") == "bigquery_storage_fallback"]
+    assert fallback_events, "Expected bigquery_storage_fallback event"
+    assert fallback_events[0]["iam_detected_via"] == "class", (
+        f"Expected iam_detected_via='class'; got {fallback_events[0]!r}"
+    )
+
+
+def test_storage_fallback_iam_detected_via_message_marker(monkeypatch) -> None:
+    """When the exception message contains 'PERMISSION_DENIED', iam_detected_via='message'."""
+    import structlog.testing
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    # Non-IAM class name, no HTTP code, but message has the marker.
+    class _StorageApiError(mock_api_error_cls):
+        pass
+
+    _make_iam_test_source(
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        lambda: _StorageApiError("PERMISSION_DENIED: caller lacks permission"),
+    )
+
+    with _make_bq_env(mock_bq, mock_exceptions, mock_api_core) as bq_mod:
+        cfg = bq_mod.BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = bq_mod.BigQuerySource.__new__(bq_mod.BigQuerySource)
+        source._config = cfg
+        with structlog.testing.capture_logs() as cap:
+            source.fetch(_ctx())
+
+    fallback_events = [e for e in cap if e.get("event") == "bigquery_storage_fallback"]
+    assert fallback_events, "Expected bigquery_storage_fallback event"
+    assert fallback_events[0]["iam_detected_via"] == "message", (
+        f"Expected iam_detected_via='message'; got {fallback_events[0]!r}"
+    )
+
+
 def test_storage_fallback_non_iam_increments_no_fallback_counter(monkeypatch) -> None:
     """The non-IAM no-fallback path increments the new
     ``non_iam_error_no_fallback`` label rather than ``api_error``.

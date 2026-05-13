@@ -35,7 +35,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from recotem.artifact.format import ArtifactError, parse_header_from_bytes
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
 from recotem.config import ConfigError, ServeConfig
-from recotem.recipe.loader import load_recipes_directory
+from recotem.recipe.loader import load_recipes_directory_lenient
 from recotem.serving import metrics as _metrics
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from recotem.serving.routes import make_router
@@ -84,10 +84,21 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     serve_config.apply_auth_posture()
 
     # 3. Build KeyRing (or None for dev-unsigned path).
-    key_ring: KeyRing | None = _build_key_ring(serve_config)
+    # Always emit security.posture even when key-ring construction fails so
+    # SIEM rules that look for the posture event still fire and operators see
+    # the "missing" status in the log before the ConfigError propagates.
+    _key_ring_build_exc: Exception | None = None
+    key_ring: KeyRing | None = None
+    try:
+        key_ring = _build_key_ring(serve_config)
+    except Exception as _exc:
+        _key_ring_build_exc = _exc
 
-    # 4. Emit security.posture log line.
+    # 4. Emit security.posture log line (always, even on key-ring failure).
     _emit_security_posture(serve_config, key_ring)
+
+    if _key_ring_build_exc is not None:
+        raise _key_ring_build_exc
 
     # 5. Load recipes directory.
     recipes_dir_str: str = serve_config.recipes_dir
@@ -97,7 +108,50 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         )
     recipes_dir = Path(recipes_dir_str).resolve()
 
-    recipes = load_recipes_directory(recipes_dir)
+    # Use lenient loader so a single broken YAML does not abort serve startup.
+    # Failed files are inserted as stubs (loaded=False) so /health surfaces them.
+    lenient_results = load_recipes_directory_lenient(recipes_dir)
+
+    # Separate successfully-parsed recipes from YAML-parse failures.
+    recipes = []
+    yaml_failed_stubs: list[ModelEntry] = []
+    _yaml_names_seen: dict[str, str] = {}  # name → filename for duplicate tracking
+
+    for yaml_path, recipe, exc in lenient_results:
+        if recipe is None:
+            # YAML parse failed — insert stub keyed by file stem so /health
+            # surfaces the problem.  File stem is the only available identifier
+            # (recipe.name is unknown).
+            stem = yaml_path.stem
+            # Guard against duplicate stems in edge cases (two files whose stems
+            # collide after the recipe name cannot be read).
+            stub_name = stem
+            _suffix = 0
+            while stub_name in _yaml_names_seen:
+                _suffix += 1
+                stub_name = f"{stem}_{_suffix}"
+            _yaml_names_seen[stub_name] = yaml_path.name
+            logger.warning(
+                "recipe_yaml_parse_failed_at_startup",
+                file=yaml_path.name,
+                name=stub_name,
+                error=str(exc),
+            )
+            yaml_failed_stubs.append(
+                ModelEntry(
+                    name=stub_name,
+                    recommender=None,
+                    header={},
+                    kid="",
+                    metadata_df=None,
+                    last_load_error=f"YAML parse failed: {exc}",
+                    artifact_path="",
+                    loaded=False,
+                )
+            )
+        else:
+            _yaml_names_seen[recipe.name] = yaml_path.name
+            recipes.append(recipe)
 
     # 6. Build registry and attempt initial artifact loads.
     #
@@ -105,7 +159,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # On successful load we insert a fully populated ModelEntry; on failure
     # we still insert a stub (loaded=False, last_load_error=<reason>) so
     # /health returns degraded and operators can see which recipes are not
-    # serving.  /predict checks `loaded` and returns 503 for stubs.
+    # serving.  /predict checks  and returns 503 for stubs.
     #
     # Loads are parallelised via a ThreadPoolExecutor so startup time is
     # bounded by the slowest single artifact rather than the sum of all
@@ -113,6 +167,12 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # RECOTEM_STARTUP_PARALLELISM (clamped [1, 32]; default min(N, 8)).
     registry = ModelRegistry()
     loaded_entries: dict[str, ModelEntry] = {}
+
+    # Register YAML-parse-failed stubs first so they appear in /health.
+    for stub in yaml_failed_stubs:
+        registry.replace(stub.name, stub)
+        _metrics.inc_artifact_load_failure(stub.name)
+        _metrics.set_model_loaded(stub.name, False)
 
     n_recipes = len(recipes)
     if serve_config.startup_parallelism <= 0:
@@ -123,13 +183,14 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
 
     _startup_t0 = time.perf_counter()
 
+    n_yaml_failed = len(yaml_failed_stubs)
     if n_recipes == 0:
         # Nothing to load; emit the summary immediately.
         logger.info(
             "startup_artifact_load_complete",
-            total_recipes=0,
+            total_recipes=n_yaml_failed,
             succeeded=0,
-            failed=0,
+            failed=n_yaml_failed,
             wall_seconds=0.0,
             max_workers=max_workers,
         )
@@ -171,11 +232,12 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
                     )
 
         _wall_seconds = time.perf_counter() - _startup_t0
+        _total = n_recipes + n_yaml_failed
         logger.info(
             "startup_artifact_load_complete",
-            total_recipes=n_recipes,
+            total_recipes=_total,
             succeeded=len(loaded_entries),
-            failed=n_recipes - len(loaded_entries),
+            failed=_total - len(loaded_entries),
             wall_seconds=round(_wall_seconds, 3),
             max_workers=max_workers,
         )
@@ -242,12 +304,22 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         )
 
     # 8. Build app.
+    # Disable OpenAPI UI in production/staging environments so that the API
+    # schema is not publicly discoverable.  Development and test environments
+    # keep it enabled for developer ergonomics.
+    _prod_envs = {"production", "prod", "staging"}
+    _is_prod = (serve_config.env or "").lower() in _prod_envs
+    _docs_url = None if _is_prod else "/docs"
+    _redoc_url = None if _is_prod else "/redoc"
+    _openapi_url = None if _is_prod else "/openapi.json"
+
     app = FastAPI(
         title="Recotem Inference API",
         version=__version__,
         lifespan=lifespan,
-        docs_url="/docs",
-        openapi_url="/openapi.json",
+        docs_url=_docs_url,
+        redoc_url=_redoc_url,
+        openapi_url=_openapi_url,
     )
 
     # 9. Middlewares.
@@ -320,15 +392,27 @@ def _emit_security_posture(serve_config: ServeConfig, key_ring: KeyRing | None) 
     Operators can confirm prod ≠ staging without ever logging key material.
     The legacy ``signing_kids`` field is preserved for SIEM rules built
     against the earlier schema.
+
+    The signing_key_status field reflects:
+    - "configured"          — keys are present and the KeyRing was built.
+    - "dev_allow_unsigned"  — dev-unsigned mode, no keys required.
+    - "missing"             — keys absent and dev-unsigned not set; startup
+                                    will fail after this log line.
     """
     if key_ring is not None:
         kids = key_ring.kids()
         signing_keys = [
             {"kid": kid, "fingerprint": key_ring.fingerprint(kid)} for kid in kids
         ]
+        signing_key_status = "configured"
+    elif serve_config.dev_allow_unsigned:
+        kids = []
+        signing_keys = []
+        signing_key_status = "dev_allow_unsigned"
     else:
         kids = []
         signing_keys = []
+        signing_key_status = "missing"
 
     logger.info(
         "security.posture",
@@ -338,6 +422,7 @@ def _emit_security_posture(serve_config: ServeConfig, key_ring: KeyRing | None) 
         bind_host=serve_config.host,
         signing_keys=signing_keys,
         signing_kids=kids,
+        signing_key_status=signing_key_status,
         env=serve_config.env,
         allowed_hosts=serve_config.allowed_hosts,
         allowed_origins=serve_config.allowed_origins,

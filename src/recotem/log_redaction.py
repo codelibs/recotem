@@ -191,6 +191,19 @@ def _redact_value(value: Any) -> Any:
     return value
 
 
+def _do_redact(
+    event_dict: structlog.types.EventDict,
+) -> structlog.types.EventDict:
+    """Core redaction logic extracted for safety-net wrapping."""
+    result: structlog.types.EventDict = {}
+    for key, value in event_dict.items():
+        if _should_redact(str(key)):
+            result[key] = _REDACTED
+        else:
+            result[key] = _redact_value(value)
+    return result
+
+
 def redact_sensitive_keys(
     logger: structlog.types.WrappedLogger,  # noqa: ARG001
     method_name: str,  # noqa: ARG001
@@ -202,11 +215,17 @@ def redact_sensitive_keys(
     *values* of sensitive keys with ``"[REDACTED]"``.
 
     This processor is designed to be the **first** in the chain.
+
+    If the redaction logic itself raises an unexpected exception (e.g. due to
+    a pathological event dict), the event is not silently dropped.  Instead a
+    safe fallback dict is returned so the log chain can continue and operators
+    can diagnose the failure.
     """
-    result: structlog.types.EventDict = {}
-    for key, value in event_dict.items():
-        if _should_redact(str(key)):
-            result[key] = _REDACTED
-        else:
-            result[key] = _redact_value(value)
-    return result
+    try:
+        return _do_redact(event_dict)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "event": "[redaction_failed]",
+            "original_event": str(event_dict.get("event", ""))[:64],
+            "redaction_error_class": type(exc).__name__,
+        }

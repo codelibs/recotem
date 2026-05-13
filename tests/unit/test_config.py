@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from recotem.config import (
+    ApiKeyEntry,
     ConfigError,
     ServeConfig,
     get_http_allow_private,
@@ -537,4 +538,72 @@ def test_is_truthy_env(value: str | None, expected: bool) -> None:
 
     assert is_truthy_env(value) is expected, (
         f"is_truthy_env({value!r}) expected {expected}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MF-6: apply_auth_posture emits host_forced_to_loopback warning
+# ---------------------------------------------------------------------------
+
+
+def test_apply_auth_posture_forces_loopback_and_warns_when_host_is_not_loopback() -> (
+    None
+):
+    """apply_auth_posture with host='0.0.0.0', no api_keys, no insecure flag
+    must:
+      1. Force host to '127.0.0.1'.
+      2. Emit a structured 'host_forced_to_loopback' warning.
+    """
+    import structlog.testing
+
+    cfg = ServeConfig()
+    cfg.host = "0.0.0.0"
+    cfg.api_keys = []
+    cfg.insecure_no_auth = False
+
+    with structlog.testing.capture_logs() as captured:
+        cfg.apply_auth_posture()
+
+    assert cfg.host == "127.0.0.1", (
+        f"host must be forced to 127.0.0.1, got {cfg.host!r}"
+    )
+    warn_events = [e for e in captured if e.get("event") == "host_forced_to_loopback"]
+    assert warn_events, (
+        "apply_auth_posture must emit 'host_forced_to_loopback' when "
+        "forcing non-loopback host to 127.0.0.1"
+    )
+    assert warn_events[0].get("log_level") == "warning"
+    assert warn_events[0].get("requested_host") == "0.0.0.0"
+
+
+def test_apply_auth_posture_does_not_warn_when_already_loopback() -> None:
+    """apply_auth_posture with host='127.0.0.1' (already loopback) must NOT
+    emit a warning — no change is being forced.
+    """
+    import structlog.testing
+
+    cfg = ServeConfig()
+    cfg.host = "127.0.0.1"
+    cfg.api_keys = []
+    cfg.insecure_no_auth = False
+
+    with structlog.testing.capture_logs() as captured:
+        cfg.apply_auth_posture()
+
+    assert cfg.host == "127.0.0.1"
+    warn_events = [e for e in captured if e.get("event") == "host_forced_to_loopback"]
+    assert not warn_events, (
+        "apply_auth_posture must NOT warn when host is already 127.0.0.1"
+    )
+
+
+def test_apply_auth_posture_does_not_force_when_api_keys_set() -> None:
+    """When api_keys are configured, apply_auth_posture must not override the host."""
+    cfg = ServeConfig()
+    cfg.host = "0.0.0.0"
+    cfg.api_keys = [ApiKeyEntry(kid="k1", sha256_hex="a" * 64)]
+    cfg.insecure_no_auth = False
+    cfg.apply_auth_posture()
+    assert cfg.host == "0.0.0.0", (
+        "apply_auth_posture must not force loopback when api_keys are configured"
     )

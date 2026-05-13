@@ -395,6 +395,16 @@ class ServeConfig:
         Must be called after both ``from_env()`` and CLI flag injection.
         """
         if not self.api_keys and not self.insecure_no_auth:
+            if self.host != "127.0.0.1":
+                _logger.warning(
+                    "host_forced_to_loopback",
+                    requested_host=self.host,
+                    reason="no_api_keys_and_no_insecure_flag",
+                    hint=(
+                        "Set RECOTEM_API_KEYS or pass --insecure-no-auth "
+                        "(development only)."
+                    ),
+                )
             self.host = "127.0.0.1"
 
     def validate_insecure_flags(self) -> None:

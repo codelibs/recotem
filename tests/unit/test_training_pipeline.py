@@ -1451,6 +1451,7 @@ def test_train_final_maps_value_error_to_training_error() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_train_done_event_includes_recipe_hash_and_data_stats(
     tmp_path: Path, movielens_small_df: pd.DataFrame
 ) -> None:

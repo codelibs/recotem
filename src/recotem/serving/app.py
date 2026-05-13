@@ -28,9 +28,11 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
 
 from recotem.artifact.format import ArtifactError, parse_header_from_bytes
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
@@ -115,6 +117,8 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # Separate successfully-parsed recipes from YAML-parse failures.
     recipes = []
     yaml_failed_stubs: list[ModelEntry] = []
+    # Maps stub_name → yaml_path for preseed_yaml_path calls after watcher init.
+    yaml_failed_stub_paths: dict[str, Path] = {}
     _yaml_names_seen: dict[str, str] = {}  # name → filename for duplicate tracking
 
     for yaml_path, recipe, exc in lenient_results:
@@ -131,6 +135,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
                 _suffix += 1
                 stub_name = f"{stem}_{_suffix}"
             _yaml_names_seen[stub_name] = yaml_path.name
+            yaml_failed_stub_paths[stub_name] = yaml_path
             logger.warning(
                 "recipe_yaml_parse_failed_at_startup",
                 file=yaml_path.name,
@@ -259,6 +264,10 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             key_ring=key_ring,
             initial_states=initial_states,
         )
+        # Pre-seed the watcher's _yaml_path_to_name with startup-failed stubs
+        # so that the first rescan can look up the stub_name by yaml_path (I-9).
+        for _stub_name, _stub_yaml_path in yaml_failed_stub_paths.items():
+            watcher.preseed_yaml_path(_stub_yaml_path, _stub_name)
         watcher.start()
 
         banner_task = None
@@ -304,14 +313,14 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         )
 
     # 8. Build app.
-    # Disable OpenAPI UI in production/staging environments so that the API
-    # schema is not publicly discoverable.  Development and test environments
-    # keep it enabled for developer ergonomics.
-    _prod_envs = {"production", "prod", "staging"}
-    _is_prod = (serve_config.env or "").lower() in _prod_envs
-    _docs_url = None if _is_prod else "/docs"
-    _redoc_url = None if _is_prod else "/redoc"
-    _openapi_url = None if _is_prod else "/openapi.json"
+    # Fail-secure: OpenAPI UI is disabled unless the environment is explicitly
+    # set to a known development value.  An unset (production) environment must
+    # never expose /docs to avoid accidental schema disclosure.
+    _dev_envs = {"development", "dev", "test"}
+    _is_dev = (serve_config.env or "").lower() in _dev_envs
+    _docs_url = "/docs" if _is_dev else None
+    _redoc_url = "/redoc" if _is_dev else None
+    _openapi_url = "/openapi.json" if _is_dev else None
 
     app = FastAPI(
         title="Recotem Inference API",
@@ -322,7 +331,25 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         openapi_url=_openapi_url,
     )
 
-    # 9. Middlewares.
+    # 9. Structured exception handler for unhandled non-HTTP exceptions.
+    # FastAPI's default 500 response is a plain text "Internal Server Error"
+    # string which leaks no details.  We register our own handler to ensure
+    # the response is JSON-formatted with a stable structure that clients can
+    # parse, while still NOT leaking stack traces.  HTTPException is
+    # intentionally excluded so FastAPI's own handler keeps it.
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        if isinstance(exc, HTTPException):
+            # Let FastAPI's built-in HTTPException handler deal with it.
+            raise exc
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "internal error", "code": "internal_error"},
+        )
+
+    # 10. Middlewares.
     # allowed_hosts is always non-empty after ServeConfig.from_env() because
     # _split_csv_env falls back to _DEFAULT_ALLOWED_HOSTS on empty/unset input.
     app.add_middleware(
@@ -339,7 +366,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             allow_headers=["*"],
         )
 
-    # 10. Routes.
+    # 11. Routes.
     # ``--insecure-no-auth`` must short-circuit the X-API-Key check even when
     # ``RECOTEM_API_KEYS`` is still set in the environment, otherwise the flag
     # is documented but silently ineffective.

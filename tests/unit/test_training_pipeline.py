@@ -1703,3 +1703,145 @@ def test_train_error_domain_error_does_not_attach_exc_info(
         )
     finally:
         pipeline_mod.logger = original_logger
+
+
+# ---------------------------------------------------------------------------
+# I-12: missing discriminator 'type' field raises RecipeError (exit 2)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_data_no_type_raises_recipe_error(tmp_path: Path) -> None:
+    """When the source config has no 'type' discriminator, _fetch_data must
+    raise RecipeError (maps to exit 2), not TrainingError (exit 4).
+
+    I-12 fix: the old code raised TrainingError(code='datasource_error');
+    the fix changes this to RecipeError(category='schema') so the CLI
+    maps it correctly to exit 2.
+    """
+    from recotem.recipe.errors import RecipeError
+    from recotem.training.pipeline import _fetch_data
+
+    recipe = _make_recipe(tmp_path)
+
+    # Bypass pydantic validation by using object.__setattr__ so we can inject
+    # a source config object that has no 'type' attribute at all.
+    class _NoTypeConfig:
+        pass
+
+    original_source = recipe.source
+    try:
+        object.__setattr__(recipe, "source", _NoTypeConfig())
+        with pytest.raises(RecipeError) as exc_info:
+            _fetch_data(recipe, run_id="i12-test")
+    finally:
+        object.__setattr__(recipe, "source", original_source)
+
+    assert exc_info.value.category == "schema", (
+        f"RecipeError for missing 'type' must have category='schema', "
+        f"got {exc_info.value.category!r}"
+    )
+
+
+def test_fetch_data_no_type_maps_to_exit_2() -> None:
+    """RecipeError from missing discriminator must map to exit code 2 (not 4).
+
+    This confirms the I-12 fix integrates with the exit-code mapper.
+    """
+    from recotem._exit_codes import _map_exception_to_exit
+    from recotem.recipe.errors import RecipeError
+
+    err = RecipeError(
+        "Recipe source has no discriminator 'type' field.", category="schema"
+    )
+    exit_code = _map_exception_to_exit(err)
+    assert exit_code == 2, f"RecipeError must map to exit 2; got {exit_code}"
+
+
+def test_fetch_data_unexpected_exception_logs_datasource_unexpected_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected exception from the datasource path must log
+    'datasource_unexpected_error' and then raise DataSourceError.
+    """
+    import structlog.testing
+
+    from recotem.datasource.base import DataSourceError
+    from recotem.training.pipeline import _fetch_data
+
+    recipe = _make_recipe(tmp_path)
+
+    boom = RuntimeError("unexpected network error")
+    mock_source = MagicMock()
+    mock_source.fetch.side_effect = boom
+    mock_source_cls = MagicMock(return_value=mock_source)
+
+    with patch(
+        "recotem.datasource.registry.get_source_class",
+        return_value=mock_source_cls,
+    ):
+        with structlog.testing.capture_logs() as cap:
+            with pytest.raises(DataSourceError):
+                _fetch_data(recipe, run_id="i12-log-test")
+
+    error_events = [e for e in cap if e.get("event") == "datasource_unexpected_error"]
+    assert error_events, (
+        f"datasource_unexpected_error must be emitted for unexpected exceptions; "
+        f"events: {[e.get('event') for e in cap]}"
+    )
+    assert error_events[0].get("exc_class") == "RuntimeError"
+
+
+# ---------------------------------------------------------------------------
+# I-13: MemoryError during time_column parsing propagates unwrapped
+# ---------------------------------------------------------------------------
+
+
+def test_cleanse_memory_error_in_time_column_parse_propagates_unwrapped(
+    tmp_path: Path,
+) -> None:
+    """MemoryError during pd.to_datetime (time_column parse) must propagate
+    unwrapped — not be caught and re-raised as TrainingError.
+
+    I-13 fix: added `except (MemoryError, RecursionError): raise` before the
+    generic `except Exception` in _cleanse.
+    """
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+    from recotem.training.pipeline import _cleanse
+
+    csv_file = tmp_path / "ts_data.csv"
+    csv_file.write_text("user_id,item_id,ts\nu1,i1,1234567890\n")
+
+    recipe = Recipe(
+        name="ts_recipe",
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(
+            user_column="user_id",
+            item_column="item_id",
+            time_column="ts",
+            time_unit="s",
+        ),
+        training=TrainingConfig(
+            algorithms=["TopPop"],
+            n_trials=1,
+            split=SplitConfig(scheme="random", heldout_ratio=0.1, seed=42),
+        ),
+        output=OutputConfig(path=str(tmp_path / "ts_recipe.recotem")),
+    )
+
+    df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"], "ts": [1234567890]})
+    df["user_id"] = df["user_id"].astype(object)
+    df["item_id"] = df["item_id"].astype(object)
+
+    def _oom(*args, **kwargs):
+        raise MemoryError("out of memory during time parse")
+
+    with patch("recotem.training.pipeline.pd.to_datetime", side_effect=_oom):
+        with pytest.raises(MemoryError):
+            _cleanse(df, recipe)

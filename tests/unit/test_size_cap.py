@@ -215,22 +215,65 @@ def test_object_store_credential_error_emits_info_log() -> None:
     assert info_events[0]["exc_class"] == "NoCredentialsError"
 
 
-def test_object_store_auth_shaped_error_emits_info_log() -> None:
-    """Any class whose name contains 'Auth' must trigger the INFO log."""
-    import structlog.testing
+def test_object_store_auth_shaped_error_raises_size_cap_probe_error() -> None:
+    """After C-1: partial-name matching ('Auth' in exc_name) is removed.
 
+    'AuthTokenError' is NOT in the explicit credential_shapes allow-list,
+    so it must raise SizeCapProbeError rather than being silently swallowed.
+    This prevents 's3:HeadObject deny + s3:GetObject allow' OOM bypass.
+    """
     AuthTokenError = type("AuthTokenError", (Exception,), {})
     fs = MagicMock()
     fs.info.side_effect = AuthTokenError("auth token expired")
 
     with patch("fsspec.core.url_to_fs", return_value=(fs, "/bucket/key")):
-        with structlog.testing.capture_logs() as cap:
+        with pytest.raises(SizeCapProbeError):
             check_size_cap("s3://bucket/key.csv", cap=100, label="CSV")
 
-    info_events = [
-        e for e in cap if e.get("event") == "size_cap_probe_skipped_credential"
-    ]
-    assert info_events, "Expected INFO log for Auth-shaped exception"
+
+# ---------------------------------------------------------------------------
+# C-1: credential-skip uses exact class-name match only (no partial-match)
+# ---------------------------------------------------------------------------
+
+
+def test_credential_skip_exact_match_only_no_partial_match() -> None:
+    """After C-1 fix, only exact class-name matches in credential_shapes are
+    silently skipped. Partial matches like 'Author' or 'Authorize' must NOT
+    be silently swallowed — they should raise SizeCapProbeError.
+    """
+    AuthorizeError = type("AuthorizeError", (Exception,), {})
+    AuthorError = type("AuthorError", (Exception,), {})
+
+    for exc_cls in (AuthorizeError, AuthorError):
+        fs = MagicMock()
+        fs.info.side_effect = exc_cls("some auth-like error")
+        with patch("fsspec.core.url_to_fs", return_value=(fs, "/bucket/key")):
+            with pytest.raises(SizeCapProbeError, match=exc_cls.__name__):
+                check_size_cap("s3://bucket/key.csv", cap=100, label="CSV")
+
+
+def test_credential_skip_still_works_for_exact_credential_shapes() -> None:
+    """Exact credential_shapes names must still be silently skipped after C-1.
+
+    The fix narrows the match from 'any name containing Credential/Auth' to
+    exact names in the allow-list.  The known names must still work.
+    """
+    for exact_name in (
+        "NoCredentialsError",
+        "PartialCredentialsError",
+        "NoRegionError",
+        "DefaultCredentialsError",
+        "RefreshError",
+        "InvalidConfigError",
+        "ProfileNotFound",
+        "EndpointConnectionError",
+    ):
+        exc_cls = type(exact_name, (Exception,), {})
+        fs = MagicMock()
+        fs.info.side_effect = exc_cls("credential failure")
+        with patch("fsspec.core.url_to_fs", return_value=(fs, "/bucket/key")):
+            # Must NOT raise — exact match is silently skipped.
+            check_size_cap("s3://bucket/key.csv", cap=100, label="CSV")
 
 
 def test_object_store_credential_error_redacts_http_userinfo_in_path() -> None:

@@ -28,6 +28,7 @@ from irspack import __version__ as irspack_version
 from irspack.utils import df_to_sparse
 
 from recotem._exit_codes import _map_exception_to_exit  # shared with cli.py
+from recotem.recipe.errors import RecipeError
 from recotem.recipe.models import Recipe
 from recotem.training._compat import IDMappedRecommender
 from recotem.training.algorithms import get_recommender_cls, resolve_algorithm_name
@@ -614,9 +615,9 @@ def _fetch_data(recipe: Recipe, run_id: str) -> pd.DataFrame:
         source_config.get("type") if isinstance(source_config, dict) else None
     )
     if not type_name:
-        raise TrainingError(
+        raise RecipeError(
             "Recipe source has no discriminator 'type' field.",
-            code="datasource_error",
+            category="schema",
         )
 
     try:
@@ -628,10 +629,19 @@ def _fetch_data(recipe: Recipe, run_id: str) -> pd.DataFrame:
         raise
     except TrainingError:
         raise
+    except RecipeError:
+        raise
     except Exception as exc:
         # Unexpected exceptions from the datasource path map to DataSourceError
         # (exit 3), not TrainingError (exit 4), per the documented exit-code
         # contract in docs/operations.md.
+        logger.error(
+            "datasource_unexpected_error",
+            recipe=recipe.name,
+            run_id=run_id,
+            exc_class=type(exc).__name__,
+            error=str(exc),
+        )
         raise DataSourceError(f"Data fetch failed: {exc}") from exc
 
     return df
@@ -690,6 +700,8 @@ def _cleanse(
             else:
                 df[time_col] = pd.to_datetime(df[time_col], utc=True)
         except TrainingError:
+            raise
+        except (MemoryError, RecursionError):
             raise
         except Exception as exc:
             raise TrainingError(

@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any
 
+import structlog
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Name validation
@@ -274,9 +277,16 @@ class Recipe(BaseModel, extra="forbid"):
             types = get_source_types()
             known_types_set: set[str] = {cls.type_name for cls in types.values()}  # type: ignore[union-attr]
             known_config_classes = tuple(cls.Config for cls in types.values())  # type: ignore[union-attr]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             # Registry unavailable (import failure, broken plugin, etc.) —
-            # let the datasource path surface the error at training time.
+            # emit a structured warning so operators can diagnose broken plugins
+            # without a traceback, then let the datasource path surface the error
+            # at training time.
+            logger.warning(
+                "source_registry_unavailable_during_validation",
+                error_class=type(exc).__name__,
+                error=str(exc),
+            )
             return self
 
         if isinstance(src, dict):

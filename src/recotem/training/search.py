@@ -196,6 +196,32 @@ def run_search(
     ZeroScoreError
         If all completed trials scored 0.0.
     """
+    # Guard against SQLite + parallelism>1 which causes DB corruption.
+    # SQLite's WAL mode cannot be safely used across threads within a single
+    # process when multiple threads simultaneously call ``study.optimize``.
+    # Detect SQLite (bare path → sqlite:///, explicit sqlite:// prefix, or any
+    # non-Postgres/MySQL URL-shaped path) and downgrade parallelism to 1.
+    # In-memory storage (storage_path=None or "") is not affected.
+    if storage_path and parallelism > 1:
+        _sp = storage_path.strip()
+        _is_pg_mysql = bool(re.match(r"^(postgresql|postgres|mysql)\b", _sp))
+        _is_sqlite = not _is_pg_mysql  # everything else is SQLite or file-based
+        if _is_sqlite:
+            logger.warning(
+                "env_var_clamped",
+                var="parallelism",
+                original=parallelism,
+                clamped=1,
+                reason=(
+                    "SQLite Optuna storage does not support multi-threaded access; "
+                    "parallelism downgraded to 1 to prevent study DB corruption. "
+                    "Use a PostgreSQL URL for parallelism > 1."
+                ),
+                recipe=recipe_name,
+                run_id=run_id,
+            )
+            parallelism = 1
+
     # Resolve all aliases up front so we can report canonical names.
     class_names: list[str] = [resolve_algorithm_name(a) for a in algorithms]
 
@@ -337,6 +363,15 @@ def run_search(
                         # failure that hints at per-trial timeout.
                         raise
                     except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "trial_learn_failed",
+                            recipe=recipe_name,
+                            run_id=run_id,
+                            trial=trial.number,
+                            class_name=class_name,
+                            error_class=type(exc).__name__,
+                            error=str(exc),
+                        )
                         exc_holder.append(exc)
                 finally:
                     with _orphan_lock:

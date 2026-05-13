@@ -96,6 +96,8 @@ def _read_artifact_bytes(path: str, max_bytes: int) -> bytes:
         return resolved_data
     except ArtifactError:
         raise
+    except (MemoryError, RecursionError):
+        raise
     except Exception as exc:
         raise ArtifactError(f"cannot read artifact '{path}': {exc}") from exc
 
@@ -248,6 +250,28 @@ class ArtifactWatcher(threading.Thread):
         # has not changed since the last successful parse (W-7).
         self._yaml_mtime_cache: dict[Path, tuple[float, Any]] = {}
 
+    # ------------------------------------------------------------------
+    # Public setup helpers (called by app.py before watcher.start())
+    # ------------------------------------------------------------------
+
+    def preseed_yaml_path(self, yaml_path: Path, stub_name: str) -> None:
+        """Pre-register a yaml_path → stub_name mapping before the watcher starts.
+
+        Called by app.py for each YAML-parse-failed stub so that:
+        1. The first rescan can look up the stub_name for this file.
+        2. The rescan error-handler finds the name in current_names and calls
+           set_load_error on the stub entry rather than silently discarding the
+           failure.
+
+        Parameters
+        ----------
+        yaml_path:
+            Absolute Path to the recipe YAML file that failed to parse at startup.
+        stub_name:
+            The stub name chosen by app.py (usually yaml_path.stem, de-duped).
+        """
+        self._yaml_path_to_name[yaml_path] = stub_name
+
     def stop(self) -> None:
         """Signal the watcher thread to exit and cancel any pending futures.
 
@@ -362,15 +386,73 @@ class ArtifactWatcher(threading.Thread):
             if entry is None:
                 continue
             # Only clear the specific sentinel value; leave genuine load errors.
-            if (
-                entry.loaded
-                and entry.last_load_error == self._WATCHER_UNHEALTHY_SENTINEL
-            ):
+            # Note: do NOT gate on entry.loaded — a stub (loaded=False) that
+            # had the watcher-unhealthy sentinel written should also be cleared
+            # so /health recovers accurately after the watcher recovers.
+            if entry.last_load_error == self._WATCHER_UNHEALTHY_SENTINEL:
                 self._registry.set_load_error(name, None)
 
     # ------------------------------------------------------------------
     # Directory rescan
     # ------------------------------------------------------------------
+
+    def _register_yaml_failure_stub(self, yaml_file: Path, error: Exception) -> None:
+        """Register a stub ModelEntry for a brand-new YAML file that failed to parse.
+
+        Called from _scan_recipes_dir when a YAML file has never been seen before
+        (not in _yaml_path_to_name) and its parse fails.  Inserts a stub entry
+        with loaded=False so /health surfaces the broken YAML, mirrors the startup
+        behaviour in app.py.
+
+        After registration the stub_name is tracked in _states (with a sentinel
+        artifact_path) and _yaml_path_to_name so that:
+        - The next scan knows the name for this yaml_file.
+        - If the file is later fixed, the stub is evicted via the normal gone/found
+          path in _scan_recipes_dir.
+
+        Parameters
+        ----------
+        yaml_file:
+            The YAML file that failed to parse.
+        error:
+            The exception raised by load_recipe().
+        """
+        stub_name = yaml_file.stem
+        # De-duplicate against existing names — use a suffix if needed.
+        _suffix = 0
+        base = stub_name
+        while stub_name in self._states or self._registry.get(stub_name) is not None:
+            _suffix += 1
+            stub_name = f"{base}_{_suffix}"
+
+        error_msg = f"YAML parse failed: {error}"
+        stub = ModelEntry(
+            name=stub_name,
+            recommender=None,
+            header={},
+            kid="",
+            metadata_df=None,
+            last_load_error=error_msg,
+            artifact_path="",
+            loaded=False,
+        )
+        self._registry.replace(stub_name, stub)
+        _metrics.inc_artifact_load_failure(stub_name)
+        _metrics.set_model_loaded(stub_name, False)
+
+        # Create a minimal _RecipeWatchState using a sentinel recipe object.
+        # We use an empty artifact_path; _poll_artifacts will stat it and get
+        # FileNotFoundError, which keeps last_load_error set via set_load_error.
+        stub_state = _RecipeWatchState(recipe=None, artifact_path="")
+        self._states[stub_name] = stub_state
+        self._yaml_path_to_name[yaml_file] = stub_name
+
+        logger.warning(
+            "recipe_yaml_parse_failed_on_rescan_new_file",
+            file=yaml_file.name,
+            name=stub_name,
+            error=str(error),
+        )
 
     def _scan_recipes_dir(self) -> None:
         """Detect added/removed YAML files and update the registry."""
@@ -463,6 +545,13 @@ class ArtifactWatcher(threading.Thread):
                         error=str(exc),
                     )
                 else:
+                    # Brand-new YAML that has never been parsed.  Register a
+                    # stub entry so /health surfaces the broken YAML immediately,
+                    # matching the startup behaviour (I-9).
+                    self._register_yaml_failure_stub(yaml_file, exc)
+                    stub_name = self._yaml_path_to_name.get(yaml_file)
+                    if stub_name is not None:
+                        found_names.add(stub_name)
                     logger.warning(
                         "recipe_rescan_load_error",
                         file=yaml_file.name,
@@ -514,6 +603,20 @@ class ArtifactWatcher(threading.Thread):
                 # next poll tick picks up new recipes via the marker-change
                 # path (was synchronous; deadlock-prone for slow
                 # object-store loads)
+            else:
+                # Recipe was already known.  If it was previously a YAML-failure
+                # stub (artifact_path=""), update the state now that the YAML
+                # parsed successfully so _poll_artifacts uses the correct path.
+                existing_state = self._states[recipe.name]
+                if not existing_state.artifact_path and recipe.output.path:
+                    logger.info(
+                        "recipe_yaml_failure_recovered",
+                        name=recipe.name,
+                    )
+                    existing_state.artifact_path = recipe.output.path
+                    existing_state.recipe = recipe
+                    # Reset last_marker so the next tick triggers a fresh load.
+                    existing_state.last_marker = None
 
         for gone in current_names - found_names:
             logger.info("recipe_removed", name=gone)
@@ -1068,6 +1171,9 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
                 error_class=type(exc).__name__,
                 reason="ENOENT",
             )
+            # ENOENT: sidecar deleted between exists() and read_text — treat as
+            # absent (no change signal); let the full-stat path decide.
+            return False
         else:
             logger.warning(
                 "sidecar_read_failed",
@@ -1075,7 +1181,10 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
                 error_class=type(exc).__name__,
                 errno=exc.errno,
             )
-        return False
+            # Non-ENOENT OSError (e.g. PermissionError, I/O error): trigger a
+            # reload so that if the main artifact read also fails, _record_load_failure
+            # surfaces the problem in /health (I-10).
+            return True
 
     if sidecar_contents == state.last_sidecar_contents:
         # Sidecar unchanged — the artifact itself has not changed.

@@ -33,7 +33,7 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
 
 Required IAM role on the BigQuery dataset: `roles/bigquery.dataViewer` + `roles/bigquery.jobUser` on the project.
 
-For the Storage Read API (used for large result sets): `roles/bigquery.readSessionUser`. This role is **optional** — the fetch path tries `create_bqstorage_client=True` first and silently falls back to the standard REST API on any failure (slower for large results but functionally complete).
+For the Storage Read API (used for large result sets): `roles/bigquery.readSessionUser`. This role is **optional** — the fetch path tries `create_bqstorage_client=True` first. Storage Read API failures map to fallback **only for IAM-shape failures** (PermissionDenied / Forbidden / 403); quota errors, 5xx backend failures, and other non-permission errors raise `DataSourceError` so REST fallback does not double-bill. Set `RECOTEM_BQ_REQUIRE_STORAGE_API=1` to disable the IAM-fallback path entirely (requires `bigquery.readSessions.create` permission).
 
 Recommended minimum set for a service account used by Recotem:
 
@@ -138,6 +138,21 @@ schema:
 | Extra not installed | 3 | `DataSourceError: BigQuery source requires 'recotem[bigquery]'` |
 
 All BigQuery exceptions are wrapped in `DataSourceError` and produce exit 3. The full BigQuery error message is included in the stderr JSON line.
+
+## Storage Read API fallback policy
+
+Recotem tries the BigQuery Storage Read API (`create_bqstorage_client=True`) first for efficiency with large result sets. The fallback to the standard REST API is **selective**, not unconditional:
+
+- **IAM-shape failures** (PermissionDenied / Forbidden / HTTP 403): the Storage Read API is silently skipped and the REST path is used instead. This covers the common case where `roles/bigquery.readSessionUser` is not granted.
+- **All other failures** (quota exceeded, 5xx backend errors, network timeouts, etc.): `DataSourceError` is raised immediately without attempting the REST fallback. This prevents a quota-exceeded Storage Read API call from silently double-billing by retrying over REST.
+
+To enforce Storage Read API usage and disable the IAM-fallback path entirely, set:
+
+```bash
+export RECOTEM_BQ_REQUIRE_STORAGE_API=1
+```
+
+When this variable is truthy (`1`, `true`, `yes`, `on`), any Storage Read API failure raises `DataSourceError` instead of falling back to REST. Use this setting when the service account is expected to hold `bigquery.readSessions.create` and you want hard enforcement.
 
 ## Notes
 

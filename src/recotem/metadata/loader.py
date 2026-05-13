@@ -39,7 +39,7 @@ from recotem._http_fetch import (
     redact_url_userinfo,
     verify_sha256,
 )
-from recotem._size_cap import SizeCapExceededError, check_size_cap
+from recotem._size_cap import SizeCapExceededError, SizeCapProbeError, check_size_cap
 from recotem.config import get_http_timeout_seconds, get_max_download_bytes
 
 logger = structlog.get_logger(__name__)
@@ -360,7 +360,9 @@ def _read_file(
     try:
         check_size_cap(path, cap=get_max_download_bytes(), label=file_type.upper())
     except SizeCapExceededError as exc:
-        raise ValueError(str(exc)) from exc
+        raise MetadataError(str(exc), cause="io") from exc
+    except SizeCapProbeError as exc:
+        raise MetadataError(f"size probe failed: {exc}", cause="io") from exc
 
     if sha256 is not None:
         cap = get_max_download_bytes()
@@ -391,28 +393,30 @@ def _read_file(
             ) from exc
         return _parse_bytes(file_type, data, safe_path)
 
-    if file_type == "parquet":
-        try:
-            return pd.read_parquet(path)
-        except (MemoryError, RecursionError):
-            raise
-        except Exception as exc:
-            raise MetadataError(
-                f"failed to read parquet file {safe_path!r}: {exc}",
-                cause="io",
-            ) from exc
+    # Non-sha256 non-network path: read fully into memory via fh.read(cap+1) so
+    # the byte cap is enforced as a second line of defence after check_size_cap.
+    # This prevents OOM when the stat-based probe is unavailable (e.g. s3://
+    # with HeadObject denied but GetObject permitted).
+    cap = get_max_download_bytes()
     try:
-        # keep_default_na=False preserves literal "nan" strings as item ids
-        # instead of silently converting them to NaN.  Genuine nulls (empty
-        # cells) are detected via the empty-string check in load_item_metadata.
-        return pd.read_csv(path, dtype=str, keep_default_na=False)
+        import fsspec  # noqa: PLC0415
+
+        with fsspec.open(path, "rb") as fh:
+            raw_bytes = fh.read(cap + 1)
     except (MemoryError, RecursionError):
         raise
     except Exception as exc:
         raise MetadataError(
-            f"failed to read csv file {safe_path!r}: {exc}",
+            f"failed to read {file_type} file {safe_path!r}: {exc}",
             cause="io",
         ) from exc
+    if len(raw_bytes) > cap:
+        raise MetadataError(
+            f"item metadata file '{safe_path}' exceeds RECOTEM_MAX_DOWNLOAD_BYTES "
+            f"({cap}) — increase the cap or split the file.",
+            cause="io",
+        )
+    return _parse_bytes(file_type, raw_bytes, safe_path)
 
 
 def _parse_bytes(file_type: str, data: bytes, safe_path: str) -> pd.DataFrame:

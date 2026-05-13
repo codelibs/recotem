@@ -184,6 +184,68 @@ def test_split_producing_empty_test_set_raises_TrainingError() -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# I-14: MemoryError from irspack split propagates unwrapped
+# ---------------------------------------------------------------------------
+
+
+def test_split_memory_error_propagates_unwrapped() -> None:
+    """MemoryError from the irspack split function must propagate unwrapped.
+
+    I-14 fix: added `except (MemoryError, RecursionError): raise` before the
+    generic `except Exception` in split_interactions, so OOM conditions are
+    not silently wrapped in SplitError.
+    """
+    from unittest.mock import patch
+
+    from recotem.training.split import split_interactions
+
+    df = _synth_df()
+    config = SplitConfig(scheme="random", heldout_ratio=0.2, seed=42)
+
+    def _oom(*args, **kwargs):
+        raise MemoryError("out of memory during split")
+
+    with patch(
+        "recotem.training.split.split_dataframe_partial_user_holdout",
+        side_effect=_oom,
+    ):
+        with pytest.raises(MemoryError):
+            split_interactions(
+                df,
+                user_column="user_id",
+                item_column="item_id",
+                time_column=None,
+                split_config=config,
+            )
+
+
+def test_split_recursion_error_propagates_unwrapped() -> None:
+    """RecursionError from the irspack split function must propagate unwrapped."""
+    from unittest.mock import patch
+
+    from recotem.training.split import split_interactions
+
+    df = _synth_df()
+    config = SplitConfig(scheme="random", heldout_ratio=0.2, seed=42)
+
+    def _recursion(*args, **kwargs):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    with patch(
+        "recotem.training.split.split_dataframe_partial_user_holdout",
+        side_effect=_recursion,
+    ):
+        with pytest.raises(RecursionError):
+            split_interactions(
+                df,
+                user_column="user_id",
+                item_column="item_id",
+                time_column=None,
+                split_config=config,
+            )
+
+
 def test_time_global_and_time_user_produce_different_splits() -> None:
     """The two time schemes must NOT produce the same split."""
     df = _synth_df(n_users=20, n_items_per_user=10)

@@ -591,7 +591,3 @@ def fetch_http_bytes(
             # cause (host RAM sizing) remains hidden.  Let it propagate so
             # the process exit code reflects the underlying failure.
             raise
-        except Exception as exc:  # pragma: no cover - defensive
-            raise HttpFetchError(
-                f"Unexpected {type(exc).__name__} fetching {safe_url}: {exc}"
-            ) from exc

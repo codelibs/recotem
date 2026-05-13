@@ -223,13 +223,21 @@ def make_router(
             item_dicts: list[dict[str, Any]] = []
             meta_index = entry.metadata_index
             meta_df = entry.metadata_df if meta_index is None else None
+            _meta_failures = 0  # I-11: count per-request metadata lookup failures
 
             for item_id, score in raw_results:
                 fields: dict[str, Any] = {}
                 if meta_index is not None:
                     fields.update(meta_index.get(item_id, {}))
                 elif meta_df is not None:
+                    # Track how many items returned an empty dict due to a
+                    # non-KeyError failure in _lookup_metadata (I-11).
+                    _before_size = len(fields)
                     row = _lookup_metadata(meta_df, item_id, _deny_set, name)
+                    if not row and item_id in meta_df.index:
+                        # item_id was in the index but lookup returned empty —
+                        # indicates an internal lookup failure (not a missing key).
+                        _meta_failures += 1
                     fields.update(row)
                 # Overwrite after metadata join: trusted recommender values
                 # must not be shadowed by metadata columns with the same name.
@@ -251,12 +259,18 @@ def make_router(
             }
 
             status = "ok"
+            # Build response headers: always include X-Request-ID; add the
+            # X-Recotem-Metadata-Degraded sentinel when any metadata lookup
+            # failed during this request (I-11).
+            resp_headers: dict[str, str] = {"X-Request-ID": request_id}
+            if _meta_failures > 0:
+                resp_headers["X-Recotem-Metadata-Degraded"] = "1"
             # Include X-Request-ID directly in JSONResponse headers so it is
             # present regardless of how FastAPI merges background response
             # headers into returned Response subclasses.
             return JSONResponse(
                 content=content,
-                headers={"X-Request-ID": request_id},
+                headers=resp_headers,
             )
         except HTTPException:
             raise
@@ -278,14 +292,16 @@ def make_router(
     # GET /health
     # ------------------------------------------------------------------
 
-    @router.get("/health", summary="Per-recipe health status")
+    @router.get("/health", summary="Overall health status (probe-safe)")
     def health(response: Response) -> dict[str, Any]:
-        """Return per-recipe health.  Overall status is ``degraded`` if any
-        recipe is unloaded or carries a load error.
+        """Return aggregate health suitable for k8s readiness/liveness probes.
 
-        Every recipe found in the recipes directory at startup appears here,
-        regardless of whether its artifact loaded — startup-failed recipes
-        are inserted as stubs with ``loaded=false`` and an ``error`` string.
+        Returns only ``{status, total, loaded}`` — no per-recipe detail or
+        sensitive key identifiers are included so this endpoint can be called
+        without authentication.
+
+        Use ``GET /health/details`` (authenticated) to obtain per-recipe
+        breakdowns including ``kid``, ``trained_at``, and ``best_class``.
 
         HTTP status mirrors ``status``:
 
@@ -295,6 +311,53 @@ def make_router(
           consider the status code, so returning 200 for a degraded process
           would let Pods be marked ``Ready`` while every prediction returns
           503 — defeating the rolling-upgrade safety net.
+        """
+        snapshot = registry.health_snapshot()
+        total = len(snapshot)
+        loaded_count = sum(
+            1
+            for entry_health in snapshot.values()
+            if entry_health.get("loaded", False) and not entry_health.get("error")
+        )
+        overall = (
+            "ok"
+            if (loaded_count == total and total > 0 or total == 0 and loaded_count == 0)
+            else "degraded"
+        )
+        # Recheck: if any entry is degraded, mark overall degraded.
+        for entry_health in snapshot.values():
+            if not entry_health.get("loaded", True) or entry_health.get("error"):
+                overall = "degraded"
+                break
+        if overall == "degraded":
+            response.status_code = 503
+        return {"status": overall, "total": total, "loaded": loaded_count}
+
+    # ------------------------------------------------------------------
+    # GET /health/details
+    # ------------------------------------------------------------------
+
+    @router.get("/health/details", summary="Per-recipe health detail (authenticated)")
+    def health_details(
+        response: Response,
+        kid: str = Depends(_require_auth),
+    ) -> dict[str, Any]:
+        """Return per-recipe health detail including ``kid``, ``trained_at``,
+        ``best_class``, and load errors.
+
+        Requires authentication (``X-API-Key``) because the per-recipe detail
+        includes artifact key identifiers (``kid``) which should not be publicly
+        discoverable.  Use ``GET /health`` for unauthenticated probe-safe status.
+
+        Every recipe found in the recipes directory at startup appears here,
+        regardless of whether its artifact loaded — startup-failed recipes
+        are inserted as stubs with ``loaded=false`` and an ``error`` string.
+
+        HTTP status mirrors the aggregate status:
+
+        - ``200 OK``         when every recipe is loaded and free of errors.
+        - ``503 Service Unavailable`` when any recipe is unloaded or carries
+          a ``last_load_error``.
         """
         snapshot = registry.health_snapshot()
         overall = "ok"

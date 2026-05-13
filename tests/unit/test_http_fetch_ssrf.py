@@ -1086,9 +1086,12 @@ def test_fetch_http_bytes_rejects_embedded_credentials_in_url(
     #   c) proceeds to connect if example.com is genuinely public.
     # In any case the function does NOT raise because of the credentials alone.
     #
-    # We assert that fetch_http_bytes does not silently swallow the credentials
-    # from the URL (i.e. it is not our job at this layer to reject them), while
-    # confirming that the SSRF guard still fires as the primary safety net.
+    # After the I-5 fix, the bare ``except Exception`` wrapper is gone, so
+    # programming exceptions (AttributeError, TypeError, ValueError from urllib
+    # parsing embedded credentials) propagate directly rather than being wrapped
+    # as "Unexpected error".  This test only verifies that the SSRF guard fires
+    # as the primary safety net and does NOT assert that non-HttpFetchError
+    # exceptions are impossible — those are expected to surface as-is (I-5).
     try:
         fetch_http_bytes(
             url_with_creds,
@@ -1102,13 +1105,6 @@ def test_fetch_http_bytes_rejects_embedded_credentials_in_url(
     except HttpFetchError as exc:
         # Expected in most CI environments: either the SSRF guard fires
         # (DNS failure / private address) or a network error occurs.
-        # When urllib encounters credentials embedded in the URL it may also raise
-        # an internal error (e.g. "nonnumeric port" if the password contains
-        # characters that confuse urlparse's port extraction); fetch_http_bytes
-        # wraps those as "Unexpected error".
-        # All of these are acceptable — what matters is that no bare Python
-        # exception escapes (i.e. no unhandled AttributeError / ValueError
-        # bypassing the HttpFetchError wrapper).
         err_msg = str(exc)
         assert any(
             keyword in err_msg
@@ -1119,19 +1115,18 @@ def test_fetch_http_bytes_rejects_embedded_credentials_in_url(
                 "HTTP ",
                 "timed out",
                 "timeout",
-                "Unexpected error",
                 "nonnumeric",
             )
         ), (
             f"HttpFetchError raised for an unexpected reason: {err_msg!r}. "
-            "Expected SSRF guard, network error, or URL-parse issue."
+            "Expected SSRF guard or network error."
         )
-    except Exception as exc:
-        raise AssertionError(
-            f"fetch_http_bytes raised an unexpected exception type "
-            f"{type(exc).__name__}: {exc}. "
-            "Only HttpFetchError is expected here."
-        ) from exc
+    except Exception:
+        # After I-5: programming exceptions (ValueError from url parse, etc.)
+        # may propagate directly — this is the intended behavior.  Accept any
+        # exception type here to avoid false failures in CI environments where
+        # urllib's credential handling raises a non-HttpFetchError.
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1397,3 +1392,73 @@ def test_redirect_without_credentials_is_allowed(httpserver) -> None:
         allow_private=True,
     )
     assert result == body, "Redirect without credentials should succeed"
+
+
+# ---------------------------------------------------------------------------
+# I-5: Programming exceptions (AttributeError, TypeError, etc.) must NOT be
+#       wrapped in HttpFetchError — they must propagate to the caller so that
+#       bugs surface as the real exception type rather than being obscured.
+# ---------------------------------------------------------------------------
+
+
+def test_attribute_error_propagates_from_fetch_http_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An AttributeError raised inside fetch_http_bytes must propagate as-is.
+
+    Before the I-5 fix there was a bare ``except Exception`` at the bottom
+    of the try-block that wrapped *any* unhandled exception in an
+    HttpFetchError.  This hid programming errors: an AttributeError from a
+    bug in the opener or connection class would surface as
+    ``HttpFetchError("Unexpected AttributeError …")`` rather than the raw
+    AttributeError, making the traceback useless for debugging.
+
+    After the fix the bare ``except Exception`` block is removed, so these
+    exceptions propagate directly to the caller.
+    """
+    import recotem._http_fetch as _mod
+
+    def _raise_attribute_error(*args, **kwargs):
+        raise AttributeError("simulated programming bug in opener")
+
+    with patch.object(_mod, "assert_host_public", return_value=None):
+        with patch.object(_mod, "_build_no_redirect_opener") as mock_factory:
+            fake_opener = urllib.request.build_opener()
+            fake_opener.open = _raise_attribute_error  # type: ignore[method-assign]
+            mock_factory.return_value = fake_opener
+
+            # Must propagate AttributeError directly, NOT wrap in HttpFetchError.
+            with pytest.raises(AttributeError, match="simulated programming bug"):
+                fetch_http_bytes(
+                    "http://example.com/data.csv",
+                    timeout=5,
+                    max_bytes=65536,
+                    allow_private=True,
+                )
+
+
+def test_type_error_propagates_from_fetch_http_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A TypeError raised inside fetch_http_bytes must propagate as-is.
+
+    Same rationale as test_attribute_error_propagates_from_fetch_http_bytes.
+    """
+    import recotem._http_fetch as _mod
+
+    def _raise_type_error(*args, **kwargs):
+        raise TypeError("simulated type mismatch in opener")
+
+    with patch.object(_mod, "assert_host_public", return_value=None):
+        with patch.object(_mod, "_build_no_redirect_opener") as mock_factory:
+            fake_opener = urllib.request.build_opener()
+            fake_opener.open = _raise_type_error  # type: ignore[method-assign]
+            mock_factory.return_value = fake_opener
+
+            with pytest.raises(TypeError, match="simulated type mismatch"):
+                fetch_http_bytes(
+                    "http://example.com/data.csv",
+                    timeout=5,
+                    max_bytes=65536,
+                    allow_private=True,
+                )

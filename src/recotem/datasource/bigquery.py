@@ -215,6 +215,17 @@ class BigQuerySource:
                 df = query_job.to_dataframe(create_bqstorage_client=True)
             except ImportError as storage_exc:
                 # google-cloud-bigquery-storage extra is not installed.
+                # When RECOTEM_BQ_REQUIRE_STORAGE_API is set, refuse to fall
+                # back — the operator has explicitly opted into strict mode and
+                # needs to know the extra is missing so they can install it.
+                if is_truthy_env(os.environ.get("RECOTEM_BQ_REQUIRE_STORAGE_API")):
+                    raise DataSourceError(
+                        "RECOTEM_BQ_REQUIRE_STORAGE_API=1 but "
+                        "google-cloud-bigquery-storage extras are not installed. "
+                        "Install them with: pip install recotem[bigquery] "
+                        "(includes google-cloud-bigquery-storage). "
+                        f"Original error: {storage_exc}"
+                    ) from storage_exc
                 logger.warning(
                     "bigquery_storage_fallback",
                     reason="ImportError — google-cloud-bigquery-storage not installed",

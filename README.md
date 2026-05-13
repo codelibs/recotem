@@ -74,7 +74,7 @@ recotem train examples/quickstart/recipe.yaml
 recotem serve --recipes examples/quickstart/ &
 
 # Wait for the server to become ready before sending traffic.
-until curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health/ | grep -q "200"; do sleep 1; done
+until curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health | grep -q "200"; do sleep 1; done
 
 # 3. Predict
 curl -X POST http://localhost:8080/predict/top_picks \

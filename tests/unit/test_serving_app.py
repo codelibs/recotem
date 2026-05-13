@@ -477,7 +477,11 @@ output:
 
 def test_failed_initial_load_inserts_stub_with_loaded_false(tmp_path: Path) -> None:
     """A recipe whose artifact is missing at startup must still appear in
-    /health as loaded=false with an error string, not silently dropped."""
+    /health/details as loaded=false with an error string, not silently dropped.
+
+    /health (probe-safe) only shows aggregate counts; per-recipe detail
+    requires authentication via /health/details (I-3).
+    """
     from fastapi.testclient import TestClient
 
     from recotem.serving.app import create_app
@@ -489,17 +493,20 @@ def test_failed_initial_load_inserts_stub_with_loaded_false(tmp_path: Path) -> N
 
     app = create_app(cfg)
     client = TestClient(app)
+    # /health (probe-safe) must return 503 when degraded
     response = client.get("/health")
-    # /health now returns 503 when degraded so K8s readiness probes mark
-    # the Pod NotReady — see routes.health() and B-2 fix.
     assert response.status_code == 503
     body = response.json()
-
     assert body["status"] == "degraded", (
         f"a missing artifact at startup must surface as degraded; got {body}"
     )
-    assert "missing_recipe" in body["recipes"]
-    entry = body["recipes"]["missing_recipe"]
+
+    # /health/details carries the per-recipe info (auth passed via insecure_no_auth)
+    response_details = client.get("/health/details")
+    assert response_details.status_code == 503
+    details = response_details.json()
+    assert "missing_recipe" in details["recipes"]
+    entry = details["recipes"]["missing_recipe"]
     assert entry["loaded"] is False
     assert "error" in entry and entry["error"], (
         "stub entry must carry the failure reason"
@@ -589,9 +596,14 @@ output:
     # status degraded, which now surfaces as HTTP 503.
     assert response.status_code == 503
     body = response.json()
+    assert body["status"] == "degraded"
 
-    assert "with_bad_metadata" in body["recipes"]
-    entry = body["recipes"]["with_bad_metadata"]
+    # Per-recipe detail only available via /health/details (I-3).
+    response_details = client.get("/health/details")
+    assert response_details.status_code == 503
+    details = response_details.json()
+    assert "with_bad_metadata" in details["recipes"]
+    entry = details["recipes"]["with_bad_metadata"]
     assert entry["loaded"] is False, (
         f"expected metadata error to mark recipe not-loaded; got {entry}"
     )
@@ -937,15 +949,19 @@ def test_corrupt_header_json_returns_failed_entry_not_crash(tmp_path: Path) -> N
     client = TestClient(app)
     response = client.get("/health")
     # Same B-2 contract: a stub recipe (loaded=False) makes overall
-    # status degraded → HTTP 503.  The recipe must still appear in the
-    # body so operators can see the failure reason.
+    # status degraded → HTTP 503.
     assert response.status_code == 503
     body = response.json()
+    assert body["status"] == "degraded"
 
-    assert "corrupt_header" in body["recipes"], (
-        "Recipe with corrupt header JSON must appear in /health"
+    # Per-recipe detail only available via /health/details (I-3).
+    response_details = client.get("/health/details")
+    assert response_details.status_code == 503
+    details = response_details.json()
+    assert "corrupt_header" in details["recipes"], (
+        "Recipe with corrupt header JSON must appear in /health/details"
     )
-    entry = body["recipes"]["corrupt_header"]
+    entry = details["recipes"]["corrupt_header"]
     assert entry["loaded"] is False, (
         f"corrupt header JSON must cause loaded=False; got {entry!r}"
     )
@@ -1363,15 +1379,26 @@ def test_startup_one_failed_load_does_not_block_others(
     app = create_app(cfg)
     with TestClient(app) as client:
         response = client.get("/health")
+        # /health/details shows per-recipe breakdown (I-3); auth skipped (insecure_no_auth)
+        response_details = client.get("/health/details")
 
+    # /health aggregate
     body = response.json()
-    assert "recipe_ok" in body["recipes"], "recipe_ok must appear in /health"
-    assert "recipe_bad" in body["recipes"], "recipe_bad must appear in /health"
-    assert body["recipes"]["recipe_ok"]["loaded"] is True, (
-        f"recipe_ok should be loaded=True; got {body['recipes']['recipe_ok']}"
+    assert body["status"] == "degraded", (
+        f"must be degraded when any recipe failed; got {body}"
     )
-    assert body["recipes"]["recipe_bad"]["loaded"] is False, (
-        f"recipe_bad should be loaded=False; got {body['recipes']['recipe_bad']}"
+
+    # /health/details per-recipe breakdown
+    details = response_details.json()
+    assert "recipe_ok" in details["recipes"], "recipe_ok must appear in /health/details"
+    assert "recipe_bad" in details["recipes"], (
+        "recipe_bad must appear in /health/details"
+    )
+    assert details["recipes"]["recipe_ok"]["loaded"] is True, (
+        f"recipe_ok should be loaded=True; got {details['recipes']['recipe_ok']}"
+    )
+    assert details["recipes"]["recipe_bad"]["loaded"] is False, (
+        f"recipe_bad should be loaded=False; got {details['recipes']['recipe_bad']}"
     )
 
 
@@ -1959,3 +1986,265 @@ def test_security_posture_signing_key_status_dev_allow_unsigned(
 
     posture = next(e for e in cap if e.get("event") == "security.posture")
     assert posture["signing_key_status"] == "dev_allow_unsigned"
+
+
+# ---------------------------------------------------------------------------
+# I-1: Structured exception handler for unhandled non-HTTP exceptions
+# ---------------------------------------------------------------------------
+
+
+def test_unhandled_exception_returns_structured_json_500(tmp_path: Path) -> None:
+    """I-1: An unexpected Exception from a route handler must return HTTP 500
+    with body {detail: 'internal error', code: 'internal_error'} rather than
+    a plain-text FastAPI default or an unhandled traceback.
+    """
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+
+    # Inject a route that raises an unhandled RuntimeError.
+    @app.get("/explode")
+    async def explode():
+        raise RuntimeError("unexpected internal failure")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/explode")
+
+    assert response.status_code == 500, (
+        f"Unhandled exception must yield HTTP 500; got {response.status_code}"
+    )
+    data = response.json()
+    assert data.get("detail") == "internal error", (
+        f"Expected detail='internal error'; got {data!r}"
+    )
+    assert data.get("code") == "internal_error", (
+        f"Expected code='internal_error'; got {data!r}"
+    )
+
+
+def test_http_exception_still_handled_by_fastapi_default(tmp_path: Path) -> None:
+    """I-1: HTTPException must NOT be swallowed by the custom handler —
+    FastAPI's default HTTPException handler must still fire so that 404, 401,
+    etc. are returned with the standard JSON body.
+    """
+    from fastapi import HTTPException
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+
+    @app.get("/notfound")
+    async def not_found():
+        raise HTTPException(status_code=404, detail="thing not found")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/notfound")
+
+    assert response.status_code == 404, (
+        f"HTTPException(404) must still return 404, not 500; got {response.status_code}"
+    )
+    # FastAPI returns {"detail": "thing not found"} by default.
+    assert response.json().get("detail") == "thing not found"
+
+
+# ---------------------------------------------------------------------------
+# I-3: /health probe-safe (no per-recipe detail), /health/details (auth)
+# ---------------------------------------------------------------------------
+
+
+def test_health_returns_only_aggregate_counts(tmp_path: Path) -> None:
+    """I-3: /health must return only {status, total, loaded} — no per-recipe
+    breakdowns, kid, trained_at, or best_class.  Those fields are moved to the
+    authenticated /health/details endpoint.
+    """
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "status" in body
+    assert "total" in body
+    assert "loaded" in body
+    # Must NOT contain per-recipe detail.
+    assert "recipes" not in body, (
+        "/health must not expose per-recipe detail (moved to /health/details)"
+    )
+
+
+def test_health_details_requires_auth_when_keys_configured(tmp_path: Path) -> None:
+    """I-3: /health/details must return 401 when API keys are configured and
+    no X-API-Key is provided.
+    """
+    import hashlib
+
+    from fastapi.testclient import TestClient
+
+    from recotem.config import ApiKeyEntry, ServeConfig
+    from recotem.serving.app import create_app
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = "active:" + "aa" * 32
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.env = "development"
+    cfg.insecure_no_auth = False
+    sha256_hex = hashlib.scrypt(
+        b"test_api_key_32_bytes_exactly!!!",
+        salt=b"recotem.api-key.v1",
+        n=2,
+        r=8,
+        p=1,
+        dklen=32,
+    ).hex()
+    cfg.api_keys = [ApiKeyEntry(kid="k1", sha256_hex=sha256_hex)]
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1"]
+
+    app = create_app(cfg)
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/health/details")
+    assert response.status_code == 401, (
+        f"/health/details must return 401 when auth is configured; got {response.status_code}"
+    )
+
+
+def test_health_details_returns_per_recipe_data_when_auth_passes(
+    tmp_path: Path,
+) -> None:
+    """I-3: /health/details (authenticated via insecure_no_auth) returns
+    per-recipe breakdown including kid and error fields.
+    """
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    recipes_dir = Path(cfg.recipes_dir)  # type: ignore[arg-type]
+    missing_artifact = tmp_path / "missing.recotem"
+    _write_recipe_yaml(recipes_dir, "detail_recipe", missing_artifact)
+
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.get("/health/details")
+
+    # Degraded because artifact is missing.
+    assert response.status_code == 503
+    body = response.json()
+    assert "recipes" in body, "/health/details must include per-recipe breakdown"
+    assert "detail_recipe" in body["recipes"]
+    entry = body["recipes"]["detail_recipe"]
+    assert entry["loaded"] is False
+
+
+# ---------------------------------------------------------------------------
+# I-4: fail-secure /docs — env unset must disable docs
+# ---------------------------------------------------------------------------
+
+
+def test_docs_disabled_when_env_unset(tmp_path: Path) -> None:
+    """I-4: When RECOTEM_ENV is unset (empty string / None), /docs must return
+    404.  This is the fail-secure default: production containers that do not
+    set RECOTEM_ENV must not expose the OpenAPI UI by accident.
+    """
+    import hashlib
+
+    from fastapi.testclient import TestClient
+
+    from recotem.config import ApiKeyEntry, ServeConfig
+    from recotem.serving.app import create_app
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = "active:" + "aa" * 32
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.env = ""  # explicitly unset / empty — must default to production-safe
+    cfg.insecure_no_auth = False  # do NOT use insecure flag (forbidden with empty env)
+    sha256_hex = hashlib.scrypt(
+        b"test_api_key_32_bytes_exactly!!!",
+        salt=b"recotem.api-key.v1",
+        n=2,
+        r=8,
+        p=1,
+        dklen=32,
+    ).hex()
+    cfg.api_keys = [ApiKeyEntry(kid="k1", sha256_hex=sha256_hex)]
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1", "*"]
+
+    app = create_app(cfg)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp = client.get("/docs")
+    assert resp.status_code == 404, (
+        "RECOTEM_ENV unset: /docs must return 404 (fail-secure); "
+        f"got {resp.status_code}"
+    )
+    resp2 = client.get("/openapi.json")
+    assert resp2.status_code == 404, (
+        "RECOTEM_ENV unset: /openapi.json must return 404 (fail-secure); "
+        f"got {resp2.status_code}"
+    )
+
+
+def test_docs_enabled_when_env_is_dev(tmp_path: Path) -> None:
+    """I-4: RECOTEM_ENV=dev must enable /docs (short alias for development)."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.env = "dev"
+    app = create_app(cfg)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp = client.get("/openapi.json")
+    assert resp.status_code == 200, (
+        f"RECOTEM_ENV=dev: /openapi.json must return 200; got {resp.status_code}"
+    )
+
+
+def test_docs_disabled_when_env_is_staging(tmp_path: Path) -> None:
+    """I-4: RECOTEM_ENV=staging must disable /docs (not a dev environment)."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.env = "staging"
+    cfg.insecure_no_auth = (
+        True  # staging allows insecure_no_auth? No — staging validation forbids it.
+    )
+    # Use production-safe config: need api_keys.
+    import hashlib
+
+    from recotem.config import ApiKeyEntry
+
+    sha256_hex = hashlib.scrypt(
+        b"test_api_key_32_bytes_exactly!!!",
+        salt=b"recotem.api-key.v1",
+        n=2,
+        r=8,
+        p=1,
+        dklen=32,
+    ).hex()
+    cfg.api_keys = [ApiKeyEntry(kid="k1", sha256_hex=sha256_hex)]
+    cfg.insecure_no_auth = False
+
+    app = create_app(cfg)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp = client.get("/docs")
+    assert resp.status_code == 404, (
+        f"RECOTEM_ENV=staging: /docs must return 404; got {resp.status_code}"
+    )

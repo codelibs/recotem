@@ -289,7 +289,7 @@ def read_artifact(
     max_bytes:
         Total file size cap (including header).  Files larger than this are
         rejected *after* reading (the full read is the single-call guarantee).
-        Default 2 GiB.
+        Default 512 MiB.
 
     Returns
     -------

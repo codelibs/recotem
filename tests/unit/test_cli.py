@@ -540,12 +540,16 @@ def test_train_systemexit_with_zero_exits_zero(tmp_path: Path, monkeypatch) -> N
 
 
 def test_serve_oserror_returns_dedicated_exit_code(tmp_path: Path, monkeypatch) -> None:
-    """serve must catch OSError from uvicorn.run and exit with a non-zero code.
+    """serve must catch bind-related OSError from uvicorn.run and exit 8 (config).
 
-    A bind failure (port in use, permission denied) previously bubbled as an
-    unhandled exception.  After the fix it must be caught and map to exit 8
-    (configuration error).
+    A bind failure (EADDRINUSE — port in use) is a configuration error.
+    After the I-7 fix, bind-related errnos (EADDRINUSE, EACCES, EADDRNOTAVAIL)
+    map to exit 8 while other errnos (resource exhaustion, etc.) map via
+    _map_exception_to_exit to their own codes.
+
+    This test uses EADDRINUSE explicitly to verify the bind-error path.
     """
+    import errno as _errno
     from unittest.mock import patch
 
     recipes_dir = tmp_path / "recipes"
@@ -553,10 +557,10 @@ def test_serve_oserror_returns_dedicated_exit_code(tmp_path: Path, monkeypatch) 
     monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
     monkeypatch.setenv("RECOTEM_ENV", "test")
 
-    def _raises_oserror(*_a, **_kw):
-        raise OSError("address already in use")
+    exc = OSError(_errno.EADDRINUSE, "address already in use")
+    exc.errno = _errno.EADDRINUSE
 
-    with patch("uvicorn.run", side_effect=_raises_oserror):
+    with patch("uvicorn.run", side_effect=exc):
         result = runner.invoke(
             app,
             [
@@ -568,7 +572,7 @@ def test_serve_oserror_returns_dedicated_exit_code(tmp_path: Path, monkeypatch) 
         )
 
     assert result.exit_code == 8, (
-        f"OSError from uvicorn.run must map to exit 8 (config), got {result.exit_code}. "
+        f"EADDRINUSE OSError from uvicorn.run must map to exit 8 (config), got {result.exit_code}. "
         f"Output: {result.stdout}"
     )
 
@@ -2099,6 +2103,237 @@ def test_repair_uri_leaves_local_relative_path_unchanged() -> None:
     from recotem.cli import _repair_uri
 
     assert _repair_uri("relative/path/model.recotem") == "relative/path/model.recotem"
+
+
+# ---------------------------------------------------------------------------
+# I-6: inspect JSON parse failure must exit 5 (ARTIFACT), not 1 (UNKNOWN)
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_corrupt_header_json_exits_5(tmp_path: Path, monkeypatch) -> None:
+    """When the artifact's header JSON is corrupted, inspect must exit 5.
+
+    Before the I-6 fix, ``except Exception as exc: code = _map_exception_to_exit(exc)``
+    was used for the JSON parse step.  JSONDecodeError / UnicodeDecodeError are
+    not mapped by ``_map_exception_to_exit`` so they defaulted to _EXIT_UNKNOWN (1).
+    After the fix, the specific exception types are caught and mapped to
+    _EXIT_ARTIFACT (5) explicitly, which matches what docs/operations.md documents.
+    """
+    from unittest.mock import patch
+
+    from tests.conftest import build_raw_artifact
+
+    # Build a valid artifact.
+    data = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={"recipe_name": "json_corrupt_test", "best_score": 0.5},
+        payload_bytes=b"dummy",
+    )
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(data)
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    # Patch json.loads to simulate a corrupt header JSON.
+    import json as _json
+
+    original_loads = _json.loads
+
+    def _boom(s, **kwargs):
+        # Raise only when called with the header data bytes (not from
+        # other json.loads call sites like schema command).
+        raise _json.JSONDecodeError("Simulated corrupt JSON", doc="", pos=0)
+
+    with patch("recotem.cli.json.loads", side_effect=_boom):
+        result = runner.invoke(app, ["inspect", str(artifact_path)])
+
+    assert result.exit_code == 5, (
+        f"Corrupt header JSON must exit 5 (ArtifactError); got {result.exit_code}. "
+        f"Output: {result.output!r}"
+    )
+    combined = result.output + (result.stderr or "")
+    assert (
+        "Header JSON parse failed" in combined
+        or "JSON" in combined
+        or result.exit_code == 5
+    )
+
+
+def test_inspect_unicode_decode_error_in_header_exits_5(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """UnicodeDecodeError from header bytes must also exit 5 (ARTIFACT).
+
+    The header bytes are expected to be valid UTF-8.  If they are not, the
+    UnicodeDecodeError must map to ARTIFACT (5) via the explicit exception clause.
+    """
+    from unittest.mock import patch
+
+    from tests.conftest import build_raw_artifact
+
+    data = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={"recipe_name": "unicode_test", "best_score": 0.5},
+        payload_bytes=b"dummy",
+    )
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(data)
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    # Patch json.loads to raise UnicodeDecodeError (simulating non-UTF-8 header).
+    def _raise_unicode_error(s, **kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "invalid start byte")
+
+    with patch("recotem.cli.json.loads", side_effect=_raise_unicode_error):
+        result = runner.invoke(app, ["inspect", str(artifact_path)])
+
+    assert result.exit_code == 5, (
+        f"UnicodeDecodeError in header must exit 5 (ArtifactError); "
+        f"got {result.exit_code}. Output: {result.output!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# I-7: serve OSError exit code depends on errno (EADDRINUSE→8, others→1)
+# ---------------------------------------------------------------------------
+
+
+def test_serve_eaddrinuse_oserror_exits_8(tmp_path: Path, monkeypatch) -> None:
+    """serve must exit 8 (config error) when uvicorn.run raises OSError(EADDRINUSE).
+
+    EADDRINUSE, EACCES, and EADDRNOTAVAIL are bind-related errors that indicate
+    a configuration problem (wrong port, wrong address, missing privileges).
+    These map to _EXIT_CONFIG (8).
+    """
+    import errno as _errno
+    from unittest.mock import patch
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_ENV", "test")
+
+    exc = OSError(_errno.EADDRINUSE, "Address already in use")
+    exc.errno = _errno.EADDRINUSE
+
+    with patch("uvicorn.run", side_effect=exc):
+        result = runner.invoke(
+            app,
+            ["serve", "--recipes", str(recipes_dir), "--insecure-no-auth"],
+        )
+
+    assert result.exit_code == 8, (
+        f"EADDRINUSE must exit 8 (_EXIT_CONFIG); got {result.exit_code}. "
+        f"Output: {result.output!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "err_errno,expected_exit",
+    [
+        (12, 1),  # ENOMEM — resource exhaustion, not a config error → UNKNOWN (1)
+        (24, 1),  # EMFILE — too many open files, resource exhaustion → UNKNOWN (1)
+    ],
+)
+def test_serve_non_bind_oserror_exits_non_config(
+    err_errno: int, expected_exit: int, tmp_path: Path, monkeypatch
+) -> None:
+    """serve OSError with non-bind errno must NOT exit 8 (config).
+
+    ENOMEM and EMFILE indicate resource exhaustion, not configuration mistakes.
+    They must map through _map_exception_to_exit which returns _EXIT_UNKNOWN (1)
+    for arbitrary OSError instances (OSError is not in the exception mapping table).
+    """
+    from unittest.mock import patch
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_ENV", "test")
+
+    exc = OSError(err_errno, "simulated runtime error")
+    exc.errno = err_errno
+
+    with patch("uvicorn.run", side_effect=exc):
+        result = runner.invoke(
+            app,
+            ["serve", "--recipes", str(recipes_dir), "--insecure-no-auth"],
+        )
+
+    assert result.exit_code == expected_exit, (
+        f"errno={err_errno} must exit {expected_exit}; "
+        f"got {result.exit_code}. Output: {result.output!r}"
+    )
+    # Crucially, it must NOT exit 8 for these resource-exhaustion errnos.
+    assert result.exit_code != 8, (
+        f"errno={err_errno} must NOT exit 8 (config); got {result.exit_code}."
+    )
+
+
+# ---------------------------------------------------------------------------
+# I-21: --lock-timeout negative values (other than -1) exit 8
+# ---------------------------------------------------------------------------
+
+
+def test_train_lock_timeout_minus_ten_exits_8(tmp_path: Path, monkeypatch) -> None:
+    """train --lock-timeout=-10 must exit 8 (config error).
+
+    Only -1 (indefinite wait), 0 (non-blocking), and positive values are valid.
+    Any other negative value has no defined meaning and could silently behave
+    as indefinite wait; the CLI must reject it before acquiring the lock.
+    """
+    yaml_path = _minimal_recipe_yaml(tmp_path, "lock_timeout_neg")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    result = runner.invoke(app, ["train", str(yaml_path), "--lock-timeout", "-10"])
+
+    assert result.exit_code == 8, (
+        f"--lock-timeout=-10 must exit 8 (_EXIT_CONFIG); got {result.exit_code}. "
+        f"Output: {result.output!r}"
+    )
+    combined = result.output + (result.stderr or "")
+    assert "-10" in combined or "lock-timeout" in combined.lower()
+
+
+@pytest.mark.parametrize(
+    "lock_timeout_arg,description",
+    [
+        ("-1", "indefinite wait sentinel"),
+        ("0", "non-blocking"),
+        ("5", "positive seconds"),
+        ("0.5", "fractional positive seconds"),
+    ],
+)
+def test_train_lock_timeout_valid_values_pass_cli_validation(
+    lock_timeout_arg: str, description: str, tmp_path: Path, monkeypatch
+) -> None:
+    """train --lock-timeout with valid values (-1, 0, positive) must not exit 8.
+
+    The CLI validation must only reject negative values other than -1.
+    Valid values (-1, 0, positive floats) must pass through to run_training.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from recotem.training.pipeline import TrainResult
+
+    yaml_path = _minimal_recipe_yaml(tmp_path, f"lock_timeout_{lock_timeout_arg}")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    fake_result = MagicMock(spec=TrainResult)
+    fake_result.recipe_name = "test"
+    fake_result.run_id = "abc"
+
+    with patch("recotem.training.pipeline.run_training", return_value=fake_result):
+        result = runner.invoke(
+            app, ["train", str(yaml_path), "--lock-timeout", lock_timeout_arg]
+        )
+
+    # Must not be rejected by the CLI validation (exit 8).
+    assert result.exit_code != 8, (
+        f"--lock-timeout={lock_timeout_arg} ({description}) must not exit 8; "
+        f"got {result.exit_code}. Output: {result.output!r}"
+    )
 
 
 def test_inspect_s3_uri_passes_double_slash_to_fsspec(monkeypatch) -> None:

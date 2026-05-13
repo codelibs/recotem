@@ -58,8 +58,11 @@ Parquet sources accept only `path` and the optional `sha256` integrity pin. `del
 
 ## Path schemes
 
-Any fsspec-supported scheme is accepted on `source.path` and
-`item_metadata.path`:
+Path schemes for `source.path` and `item_metadata.path` are restricted to an
+explicit allow-list: bare local path, `file://`, `s3://`, `gs://`, `az://`,
+`abfs(s)://`, `http://`, `https://`. Chained fsspec protocols (containing
+`::`) are rejected. Novel or vendor-specific schemes not in this list are
+rejected by default rather than admitted by oversight.
 
 ```yaml
 # Local (relative or absolute)
@@ -79,17 +82,20 @@ sha256: 945fc769205a5976d38c5783500ae473afbb04608043b703951a699993c8f8be
 path: file:///mnt/data/interactions.csv
 ```
 
-Embedded credentials in URIs (e.g. `https://user:pass@host/file.csv`) are
-rejected at recipe load. Credentials must come from the environment
-(instance profile, ADC, `AWS_*` env vars, etc.).
+Embedded credentials in URIs (e.g. `https://user:pass@host/file.csv`,
+`s3://AKID:SECRET@bucket/key`) are rejected at recipe load. Credentials must
+come from the environment (instance profile, ADC, `AWS_*` env vars, etc.).
 
-The userinfo check is scheme-blind: any URI parsed by `urllib.parse` as
-having `username` or `password` is rejected, regardless of scheme. This
-means object-store paths must not contain a `@` before the host — for
-example `gs://bucket@project/file.csv` is rejected even though `@` is
-not used for credentials in GCS URIs. Use the canonical form
-`gs://bucket/path/file.csv` and rely on Application Default Credentials
-or the service-account file referenced by `GOOGLE_APPLICATION_CREDENTIALS`.
+The userinfo check is applied selectively by scheme:
+
+- **Rejected** (`http`, `https`, `ftp`, `ftps`, `s3`, `abfs`, `abfss`): any
+  URI with a `username` or `password` component raises `RecipeError`. These
+  schemes do not use `@` in their canonical addressing syntax, so any
+  `user:pass@host` pattern means embedded plaintext credentials.
+- **Permitted** (`gs`, `az`, bare paths, `file`): the `@` character may be
+  part of the canonical URI syntax. For GCS, `gs://project@bucket/key` is a
+  valid billing-project override accepted by gcsfs. Authentication is always
+  via ADC / `GOOGLE_APPLICATION_CREDENTIALS`, not the URI userinfo.
 
 `${RECOTEM_RECIPE_*}` env-var expansion **is** performed inside `path`
 fields (and is the recommended way to inject bucket names, dates, or

@@ -83,6 +83,8 @@ def split_interactions(
             )
     except SplitError:
         raise
+    except (MemoryError, RecursionError):
+        raise
     except Exception as exc:
         raise SplitError(f"irspack split failed: {exc}") from exc
 

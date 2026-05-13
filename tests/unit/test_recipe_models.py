@@ -497,3 +497,125 @@ def test_recipe_source_dict_with_known_csv_type_passes_mf4() -> None:
         output=OutputConfig(path="/tmp/out.recotem"),
     )
     assert isinstance(recipe.source, dict)
+
+
+# ---------------------------------------------------------------------------
+# I-27: validate_for_filesystem re-exported from recotem.recipe
+# ---------------------------------------------------------------------------
+
+
+def test_validate_for_filesystem_importable_from_recipe_package() -> None:
+    """from recotem.recipe import validate_for_filesystem must succeed."""
+    from recotem.recipe import (
+        validate_for_filesystem,  # noqa: F401 — import is the test
+    )
+
+    assert callable(validate_for_filesystem)
+
+
+def test_validate_for_filesystem_in_all() -> None:
+    """validate_for_filesystem must appear in recotem.recipe.__all__."""
+    import recotem.recipe as recipe_pkg
+
+    assert "validate_for_filesystem" in recipe_pkg.__all__, (
+        "validate_for_filesystem is missing from recotem.recipe.__all__; "
+        f"current __all__: {recipe_pkg.__all__}"
+    )
+
+
+def test_validate_for_filesystem_accepts_valid_name() -> None:
+    """validate_for_filesystem returns the name unchanged for a valid identifier."""
+    from recotem.recipe import validate_for_filesystem
+
+    assert validate_for_filesystem("my_recipe") == "my_recipe"
+    assert validate_for_filesystem("Recipe-123") == "Recipe-123"
+
+
+def test_validate_for_filesystem_rejects_invalid_name() -> None:
+    """validate_for_filesystem raises ValueError for names with disallowed chars."""
+    from recotem.recipe import validate_for_filesystem
+
+    with pytest.raises(ValueError, match="not a valid filesystem identifier"):
+        validate_for_filesystem("bad/name")
+
+    with pytest.raises(ValueError, match="not a valid filesystem identifier"):
+        validate_for_filesystem("a" * 65)  # too long
+
+
+# ---------------------------------------------------------------------------
+# I-19: plugin registry import failure emits structured warning log
+# ---------------------------------------------------------------------------
+
+
+def test_validate_source_emits_warning_on_registry_import_failure() -> None:
+    """When the datasource registry import fails during _validate_source,
+    a structured 'source_registry_unavailable_during_validation' warning log
+    must be emitted before silently returning self.
+
+    Before the I-19 fix, the exception was silently swallowed (``except Exception:
+    return self``), making broken plugin debugging extremely difficult.  After
+    the fix, the exception type and message are emitted as structured log fields.
+    """
+    from unittest.mock import patch
+
+    import structlog.testing
+
+    # Patch get_source_types to raise an ImportError simulating a broken plugin.
+    with patch(
+        "recotem.datasource.registry.get_source_types",
+        side_effect=ImportError("simulated broken plugin import"),
+    ):
+        with structlog.testing.capture_logs() as captured:
+            # Recipe.model_validate triggers _validate_source; the registry
+            # import fails but the model is still returned (graceful degradation).
+            recipe = Recipe.model_validate(_minimal_recipe_dict())
+
+    assert recipe is not None, "Recipe must still be returned when registry fails"
+
+    warnings = [
+        e
+        for e in captured
+        if e.get("event") == "source_registry_unavailable_during_validation"
+    ]
+    assert warnings, (
+        "A 'source_registry_unavailable_during_validation' warning must be emitted "
+        "when the datasource registry import fails during source validation. "
+        f"All captured log events: {[e.get('event') for e in captured]}"
+    )
+    warn = warnings[0]
+    assert warn.get("log_level") == "warning"
+    assert "ImportError" in warn.get("error_class", ""), (
+        f"error_class must contain 'ImportError'; got {warn.get('error_class')!r}"
+    )
+    assert "simulated broken plugin" in warn.get("error", ""), (
+        f"error field must contain the exception message; got {warn.get('error')!r}"
+    )
+
+
+def test_validate_source_warning_contains_error_class_and_message() -> None:
+    """The 'source_registry_unavailable_during_validation' log event must include
+    both error_class and error fields for observability.
+
+    Operators need both the exception type and message to diagnose broken plugins
+    without a full traceback.
+    """
+    from unittest.mock import patch
+
+    import structlog.testing
+
+    with patch(
+        "recotem.datasource.registry.get_source_types",
+        side_effect=RuntimeError("plugin entry_point collision"),
+    ):
+        with structlog.testing.capture_logs() as captured:
+            Recipe.model_validate(_minimal_recipe_dict())
+
+    warnings = [
+        e
+        for e in captured
+        if e.get("event") == "source_registry_unavailable_during_validation"
+    ]
+    assert warnings, "Warning must be emitted for RuntimeError in registry"
+    warn = warnings[0]
+    assert warn.get("error_class") == "RuntimeError"
+    assert "plugin entry_point collision" in warn.get("error", "")

@@ -143,6 +143,16 @@ def recipe_lock(
         the deadline expires before the lock is acquired.  Carries
         ``waited_seconds`` for operational log correlation.
     """
+    # Defence-in-depth: the CLI validates lock_timeout before calling this
+    # function, but library callers may pass an arbitrary float.  Values < 0
+    # other than -1.0 have no defined meaning (−1 = indefinite wait, 0 =
+    # non-blocking, positive = timed wait); catch them early so callers get a
+    # clear AssertionError rather than silent indefinite-wait behaviour.
+    assert timeout == -1.0 or timeout >= 0, (
+        f"lock timeout must be -1 (indefinite), 0 (non-blocking), or a "
+        f"positive number of seconds; got {timeout!r}"
+    )
+
     output_str = str(output_path)
     scheme = urlparse(output_str).scheme.lower() if "://" in output_str else ""
     if scheme not in _LOCAL_SCHEMES:
@@ -330,8 +340,20 @@ def _try_acquire_windows(lock_path: Path) -> int | None:
             os.O_CREAT | os.O_WRONLY,
             0o600,  # noqa: S103 – mode is 0o600 (owner-only); CodeQL false positive (py/world-readable-file)
         )
-    except OSError:
-        return None
+    except OSError as _open_exc:
+        # EACCES / EAGAIN: the lock directory or file is temporarily inaccessible —
+        # treat as "lock contested" and return None so the caller can handle it.
+        # All other errno values indicate a genuine system problem (ENOENT, EROFS,
+        # ENOSPC, …) that must propagate so the operator sees the real root cause.
+        if _open_exc.errno in (errno.EACCES, errno.EAGAIN):
+            return None
+        logger.warning(
+            "recipe_lock_windows_open_failed",
+            lock_path=str(lock_path),
+            errno=_open_exc.errno,
+            error=str(_open_exc),
+        )
+        raise
     try:
         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
     except OSError:

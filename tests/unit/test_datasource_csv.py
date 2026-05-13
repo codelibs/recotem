@@ -519,3 +519,58 @@ def test_csv_source_memory_error_propagates_unwrapped(
     source = CSVSource(cfg)
     with pytest.raises(MemoryError):
         source.fetch(_ctx())
+
+
+# ---------------------------------------------------------------------------
+# C-1: non-sha256 path byte cap enforced via fh.read(cap+1) in CSVSource
+# ---------------------------------------------------------------------------
+
+
+def test_csv_no_sha256_over_byte_cap_rejected(tmp_path: Path, monkeypatch) -> None:
+    """A local CSV without sha256 that exceeds the byte cap must raise DataSourceError.
+
+    C-1 fix: the non-sha256 path now uses fh.read(cap+1) + BytesIO instead of
+    passing the path directly to pd.read_csv, ensuring the byte cap is
+    enforced even when check_size_cap (stat-based) is unavailable.
+    """
+    from recotem.datasource import csv as csv_module
+
+    csv_file = tmp_path / "big_nosig.csv"
+    content = "user_id,item_id\n" + "u1,i1\n" * 200  # ~1.4 KiB
+    csv_file.write_text(content)
+
+    # Make stat-based check a no-op, then set a tiny cap.
+    monkeypatch.setattr(csv_module, "_check_size_cap", lambda *_a, **_kw: None)
+    monkeypatch.setattr(csv_module, "_get_max_download_bytes", lambda: 512)
+
+    cfg = CSVConfig(type="csv", path=str(csv_file))
+    source = CSVSource(cfg)
+    with pytest.raises(DataSourceError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
+        source.fetch(_ctx())
+
+
+def test_parquet_no_sha256_over_byte_cap_rejected(tmp_path: Path, monkeypatch) -> None:
+    """A local Parquet without sha256 that exceeds the byte cap must raise DataSourceError.
+
+    C-1 fix: the non-sha256 path now uses fh.read(cap+1) + BytesIO instead of
+    passing the path directly to pd.read_parquet.
+    """
+    from recotem.datasource import csv as csv_module
+
+    parquet_file = tmp_path / "big_nosig.parquet"
+    df_orig = pd.DataFrame(
+        {
+            "user_id": ["u" + str(i) for i in range(50)],
+            "item_id": ["i" + str(i) for i in range(50)],
+        }
+    )
+    df_orig.to_parquet(parquet_file, index=False)
+
+    # Make stat-based check a no-op, then set a tiny cap.
+    monkeypatch.setattr(csv_module, "_check_size_cap", lambda *_a, **_kw: None)
+    monkeypatch.setattr(csv_module, "_get_max_download_bytes", lambda: 10)
+
+    cfg = ParquetConfig(type="parquet", path=str(parquet_file))
+    source = ParquetSource(cfg)
+    with pytest.raises(DataSourceError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
+        source.fetch(_ctx())

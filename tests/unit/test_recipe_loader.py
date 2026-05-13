@@ -1678,8 +1678,15 @@ output:
         )
 
 
-def test_s3_account_at_bucket_input_accepted(tmp_path: Path) -> None:
-    """s3://account@bucket/key must not be rejected as embedded credentials."""
+def test_s3_account_at_bucket_input_rejected(tmp_path: Path) -> None:
+    """s3://account@bucket/key must be rejected as embedded credentials (I-16).
+
+    S3 does not use ``@`` in its canonical addressing syntax.  Any URI with a
+    userinfo component (``username@host``) in an s3:// path is treated as
+    embedded credentials and is rejected at recipe load time.  Authentication
+    must use environment-based mechanisms (instance profile, ``AWS_*`` env
+    vars, etc.).
+    """
     out = tmp_path / "s3_at.recotem"
     content = f"""\
 name: s3_at_input
@@ -1696,13 +1703,8 @@ output:
   path: {out}
 """
     p = _write_recipe(tmp_path, content)
-    try:
-        recipe = load_recipe(p)
-        assert recipe.source.path == "s3://myaccount@my-bucket/data.csv"
-    except RecipeError as exc:
-        assert "credentials" not in str(exc), (
-            f"s3://account@bucket should not trigger userinfo check; got: {exc}"
-        )
+    with pytest.raises(RecipeError, match="embedded credentials"):
+        load_recipe(p)
 
 
 def test_http_embedded_credentials_still_rejected(tmp_path: Path) -> None:
@@ -2267,3 +2269,86 @@ def test_env_var_expansion_ibm_blacklisted(
     p = _write_recipe(tmp_path, content)
     with pytest.raises(RecipeError, match="blacklisted"):
         load_recipe(p)
+
+
+# ---------------------------------------------------------------------------
+# I-16: Embedded credentials in s3:// and abfs(s):// URIs must be rejected
+# ---------------------------------------------------------------------------
+
+
+def _recipe_with_source_path(
+    tmp_path: Path, source_path: str, name: str = "test"
+) -> Path:
+    """Write a recipe YAML using the given source path (no sha256 — for scheme tests)."""
+    content = f"""\
+name: {name}
+source:
+  type: csv
+  path: {source_path}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {tmp_path / name}.recotem
+"""
+    return _write_recipe(tmp_path, content, filename=f"{name}.yaml")
+
+
+def test_s3_embedded_credentials_rejected(tmp_path: Path) -> None:
+    """s3://AKID:SECRET@bucket/key must raise RecipeError (embedded credentials)."""
+    p = _recipe_with_source_path(
+        tmp_path, "s3://AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI@my-bucket/data.csv"
+    )
+    with pytest.raises(RecipeError, match="embedded credentials"):
+        load_recipe(p)
+
+
+def test_s3_no_credentials_accepted(tmp_path: Path) -> None:
+    """s3://bucket/key without credentials must NOT raise a credentials error."""
+    p = _recipe_with_source_path(tmp_path, "s3://my-bucket/data.csv")
+    # May raise for other reasons (missing sha256 etc.) but NOT for credentials.
+    try:
+        load_recipe(p)
+    except RecipeError as exc:
+        assert "embedded credentials" not in str(exc), (
+            f"Unexpectedly raised credentials error for plain s3:// path: {exc}"
+        )
+
+
+def test_abfs_embedded_credentials_rejected(tmp_path: Path) -> None:
+    """abfs://user:pass@container@account.dfs.core.windows.net must raise RecipeError."""
+    p = _recipe_with_source_path(
+        tmp_path, "abfs://myuser:mysecret@mycontainer/data.csv"
+    )
+    with pytest.raises(RecipeError, match="embedded credentials"):
+        load_recipe(p)
+
+
+def test_abfss_embedded_credentials_rejected(tmp_path: Path) -> None:
+    """abfss://user:pass@... must raise RecipeError (embedded credentials)."""
+    p = _recipe_with_source_path(
+        tmp_path, "abfss://myuser:mysecret@mycontainer/data.csv"
+    )
+    with pytest.raises(RecipeError, match="embedded credentials"):
+        load_recipe(p)
+
+
+def test_gs_project_at_bucket_accepted(tmp_path: Path) -> None:
+    """gs://project@bucket/key must NOT raise a credentials error.
+
+    GCS uses `project@bucket` as its canonical URI syntax for billing-project
+    override.  The `@` character here is not a credential separator.
+    """
+    p = _recipe_with_source_path(tmp_path, "gs://my-project@my-bucket/data.csv")
+    # May raise for other reasons (e.g. missing sha256 or fsspec issues) but
+    # must NOT raise RecipeError for embedded credentials.
+    try:
+        load_recipe(p)
+    except RecipeError as exc:
+        assert "embedded credentials" not in str(exc), (
+            f"gs://project@bucket/key must not trigger credentials rejection; "
+            f"got: {exc}"
+        )

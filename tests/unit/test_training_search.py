@@ -881,6 +881,305 @@ def test_orphaned_total_field_remains_cumulative() -> None:
         search_mod._MAX_LIVE_ORPHANED_THREADS = original_ceiling
 
 
+# ---------------------------------------------------------------------------
+# C-2: SQLite storage + parallelism > 1 → downgrade to 1 with env_var_clamped warning
+# ---------------------------------------------------------------------------
+
+
+def test_sqlite_storage_parallelism_downgraded_to_1() -> None:
+    """When storage_path is SQLite and parallelism > 1, run_search must
+    downgrade parallelism to 1 and emit an 'env_var_clamped' warning.
+    """
+    import structlog.testing
+
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    X = sps.csr_matrix(np.ones((5, 3)))
+    evaluator = MagicMock()
+
+    captured_n_jobs: list[int] = []
+
+    def _spy_optimize(objective, n_trials, *, timeout, n_jobs, callbacks):
+        captured_n_jobs.append(n_jobs)
+        # Immediately expose 0 completed trials so the no_completed_trials
+        # guard fires and we get SearchError rather than doing real work.
+
+    with patch(
+        "recotem.training.search.resolve_algorithm_name", side_effect=lambda x: x
+    ):
+        with patch("recotem.training.search.get_recommender_cls"):
+            with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+                mock_study = MagicMock()
+                mock_study.trials = []
+                mock_study.optimize = _spy_optimize
+                mock_study_fn.return_value = mock_study
+
+                with patch(
+                    "recotem.training.search.optuna.storages.RDBStorage"
+                ) as mock_rdb:
+                    mock_rdb.return_value = MagicMock()
+
+                    with structlog.testing.capture_logs() as cap:
+                        with ProgressReporter(
+                            n_trials=2,
+                            recipe_name="sqlite_test",
+                            run_id="r_sq",
+                        ) as rep:
+                            from recotem.training.errors import SearchError
+
+                            with pytest.raises(SearchError):
+                                run_search(
+                                    algorithms=["TopPop"],
+                                    X_tv_train=X,
+                                    evaluator=evaluator,
+                                    n_trials=2,
+                                    per_algorithm_trials=None,
+                                    per_trial_timeout_seconds=None,
+                                    timeout_seconds=None,
+                                    parallelism=4,  # request 4 — must be clamped
+                                    storage_path="/tmp/optuna_test.db",
+                                    random_seed=42,
+                                    reporter=rep,
+                                    recipe_name="sqlite_test",
+                                    run_id="r_sq",
+                                )
+
+    # n_jobs passed to study.optimize must be 1 (not 4)
+    assert captured_n_jobs, "study.optimize must have been called"
+    assert captured_n_jobs[0] == 1, (
+        f"SQLite + parallelism>1 must downgrade n_jobs to 1; got {captured_n_jobs[0]}"
+    )
+
+    # env_var_clamped warning must have been emitted
+    clamp_events = [e for e in cap if e.get("event") == "env_var_clamped"]
+    assert clamp_events, (
+        f"env_var_clamped warning must be emitted for SQLite + parallelism>1; "
+        f"got events: {[e.get('event') for e in cap]}"
+    )
+    assert clamp_events[0].get("var") == "parallelism"
+    assert clamp_events[0].get("clamped") == 1
+
+
+def test_sqlite_storage_parallelism_1_no_downgrade() -> None:
+    """When parallelism is already 1, no clamping warning must be emitted."""
+    import structlog.testing
+
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    X = sps.csr_matrix(np.ones((5, 3)))
+    evaluator = MagicMock()
+
+    with patch(
+        "recotem.training.search.resolve_algorithm_name", side_effect=lambda x: x
+    ):
+        with patch("recotem.training.search.get_recommender_cls"):
+            with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+                mock_study = MagicMock()
+                mock_study.trials = []
+                mock_study.optimize = MagicMock()
+                mock_study_fn.return_value = mock_study
+
+                with patch(
+                    "recotem.training.search.optuna.storages.RDBStorage"
+                ) as mock_rdb:
+                    mock_rdb.return_value = MagicMock()
+
+                    with structlog.testing.capture_logs() as cap:
+                        with ProgressReporter(
+                            n_trials=1,
+                            recipe_name="sqlite_no_clamp",
+                            run_id="rnc",
+                        ) as rep:
+                            from recotem.training.errors import SearchError
+
+                            with pytest.raises(SearchError):
+                                run_search(
+                                    algorithms=["TopPop"],
+                                    X_tv_train=X,
+                                    evaluator=evaluator,
+                                    n_trials=1,
+                                    per_algorithm_trials=None,
+                                    per_trial_timeout_seconds=None,
+                                    timeout_seconds=None,
+                                    parallelism=1,  # already 1 — no clamp
+                                    storage_path="/tmp/optuna_no_clamp.db",
+                                    random_seed=42,
+                                    reporter=rep,
+                                    recipe_name="sqlite_no_clamp",
+                                    run_id="rnc",
+                                )
+
+    clamp_events = [e for e in cap if e.get("event") == "env_var_clamped"]
+    assert not clamp_events, (
+        f"No env_var_clamped warning for parallelism=1; got {clamp_events}"
+    )
+
+
+def test_in_memory_storage_parallelism_not_downgraded() -> None:
+    """In-memory storage (empty storage_path) with parallelism>1 must NOT trigger
+    the SQLite downgrade warning.
+    """
+    import structlog.testing
+
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    captured_n_jobs: list[int] = []
+
+    def _spy_optimize(objective, n_trials, *, timeout, n_jobs, callbacks):
+        captured_n_jobs.append(n_jobs)
+
+    X = sps.csr_matrix(np.ones((5, 3)))
+    evaluator = MagicMock()
+
+    with patch(
+        "recotem.training.search.resolve_algorithm_name", side_effect=lambda x: x
+    ):
+        with patch("recotem.training.search.get_recommender_cls"):
+            with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+                mock_study = MagicMock()
+                mock_study.trials = []
+                mock_study.optimize = _spy_optimize
+                mock_study_fn.return_value = mock_study
+
+                with structlog.testing.capture_logs() as cap:
+                    with ProgressReporter(
+                        n_trials=2, recipe_name="inmem_test", run_id="rim"
+                    ) as rep:
+                        from recotem.training.errors import SearchError
+
+                        with pytest.raises(SearchError):
+                            run_search(
+                                algorithms=["TopPop"],
+                                X_tv_train=X,
+                                evaluator=evaluator,
+                                n_trials=2,
+                                per_algorithm_trials=None,
+                                per_trial_timeout_seconds=None,
+                                timeout_seconds=None,
+                                parallelism=4,  # in-memory: no clamp
+                                storage_path="",  # in-memory
+                                random_seed=42,
+                                reporter=rep,
+                                recipe_name="inmem_test",
+                                run_id="rim",
+                            )
+
+    clamp_events = [e for e in cap if e.get("event") == "env_var_clamped"]
+    assert not clamp_events, (
+        f"No env_var_clamped for in-memory storage; got {clamp_events}"
+    )
+
+    # n_jobs must remain 4 (not clamped)
+    assert captured_n_jobs, "study.optimize must have been called"
+    assert captured_n_jobs[0] == 4, (
+        f"In-memory storage must not clamp parallelism; got n_jobs={captured_n_jobs[0]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# I-2: trial_learn_failed structured log event emitted on exception in _learn thread
+# ---------------------------------------------------------------------------
+
+
+def test_trial_learn_failed_log_event_emitted_on_exception() -> None:
+    """When the _learn thread raises an exception (not MemoryError/RecursionError),
+    a 'trial_learn_failed' WARNING log event must be emitted with:
+    recipe, run_id, trial, class_name, error_class, error.
+    """
+    import structlog.testing
+
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    class _FailingRecommender:
+        learnt_config: dict = {}
+
+        def __init__(self, X, **kwargs):
+            pass
+
+        @staticmethod
+        def default_suggest_parameter(trial, space):
+            return {}
+
+        def learn_with_optimizer(self, evaluator, trial):
+            raise ValueError("deliberate trial failure for I-2")
+
+        def learn(self):
+            return self
+
+    def _make_fake_completed(number: int) -> MagicMock:
+        t = MagicMock(spec=optuna.trial.FrozenTrial)
+        t.state = optuna.trial.TrialState.COMPLETE
+        t.value = -0.5
+        t.number = number
+        t.params = {"recommender_class_name": "TopPopRecommender"}
+        t.user_attrs = {"recommender_class_name": "TopPopRecommender"}
+        return t
+
+    fake_completed = [_make_fake_completed(i) for i in range(3)]
+
+    with patch(
+        "recotem.training.search.get_recommender_cls",
+        return_value=_FailingRecommender,
+    ):
+        with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+            mock_study = MagicMock()
+
+            def _optimize_one_fail(objective, n_trials, **kwargs):
+                fake_t = MagicMock(spec=optuna.Trial)
+                fake_t.number = 0
+                fake_t.suggest_categorical.return_value = "TopPopRecommender"
+                fake_t.set_user_attr = MagicMock()
+                try:
+                    objective(fake_t)
+                except Exception:  # noqa: BLE001
+                    pass
+                mock_study.trials = fake_completed
+                mock_study.best_trial = fake_completed[0]
+
+            mock_study.trials = []
+            mock_study.optimize = _optimize_one_fail
+            mock_study_fn.return_value = mock_study
+
+            X = sps.csr_matrix(np.ones((5, 3)))
+            evaluator = MagicMock()
+
+            with structlog.testing.capture_logs() as cap:
+                with ProgressReporter(
+                    n_trials=1, recipe_name="i2_test", run_id="ri2"
+                ) as rep:
+                    run_search(
+                        algorithms=["TopPopRecommender"],
+                        X_tv_train=X,
+                        evaluator=evaluator,
+                        n_trials=1,
+                        per_algorithm_trials=None,
+                        per_trial_timeout_seconds=1,  # use thread path
+                        timeout_seconds=None,
+                        parallelism=1,
+                        storage_path="",
+                        random_seed=42,
+                        reporter=rep,
+                        recipe_name="i2_test",
+                        run_id="ri2",
+                    )
+
+    fail_events = [e for e in cap if e.get("event") == "trial_learn_failed"]
+    assert fail_events, (
+        f"trial_learn_failed event must be emitted when _learn thread raises; "
+        f"all events: {[e.get('event') for e in cap]}"
+    )
+    evt = fail_events[0]
+    assert evt.get("recipe") == "i2_test"
+    assert evt.get("run_id") == "ri2"
+    assert evt.get("class_name") == "TopPopRecommender"
+    assert evt.get("error_class") == "ValueError"
+    assert "deliberate trial failure" in evt.get("error", "")
+
+
 def test_unknown_algorithm_in_per_algorithm_trials_raises() -> None:
     """A typo in per_algorithm_trials (e.g. 'IALSS') must raise TrainingError
     with code='unknown_algorithm_in_budget' — not silently drop to zero budget.

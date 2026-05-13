@@ -271,7 +271,12 @@ A missing, malformed, or blacklisted variable produces a `RecipeError` (exit 2).
 
 ### Loading a directory of recipes
 
-`recotem serve --recipes <dir>` and `load_recipes_directory()` enumerate only direct `*.yaml` children of `<dir>` (non-recursive). Subdirectories are ignored. Each recipe file must remain inside the directory after `realpath` resolution — symlinks pointing outside are rejected. Two recipes with the same `name` field abort the load.
+`recotem serve --recipes <dir>` and `load_recipes_directory()` enumerate only direct `*.yaml` children of `<dir>` (non-recursive). Subdirectories are ignored. Each recipe file must remain inside the directory after `realpath` resolution — symlinks pointing outside are rejected.
+
+Duplicate `name` field handling differs by call site:
+
+- **`recotem train` / `load_recipes_directory()` (strict)**: a duplicate `name` across any two files raises `RecipeError` immediately and aborts the entire load.
+- **`recotem serve` / `load_recipes_directory_lenient()` (lenient)**: the first file loaded wins; any subsequent file with the same `name` is skipped and a `recipe_duplicate_name_skipped` warning is emitted to the structured log. The serve process continues with the surviving recipe.
 
 ---
 

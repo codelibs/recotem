@@ -299,15 +299,10 @@ class CSVSource:
             bytes_count = len(raw_bytes)
         else:
             sha256_verified = False
-            read_kwargs = {
-                "sep": cfg.delimiter,
-                "encoding": cfg.encoding,
-                "header": cfg.header,
-            }
-            if cfg.dtype:
-                read_kwargs["dtype"] = cfg.dtype
+            cap = _get_max_download_bytes()
             try:
-                df = pd.read_csv(cfg.path, **read_kwargs)
+                with fsspec.open(cfg.path, "rb") as f:
+                    raw_bytes = f.read(cap + 1)
             except FileNotFoundError as exc:
                 raise DataSourceError(f"CSV file not found: {safe_path}") from exc
             except PermissionError as exc:
@@ -320,7 +315,29 @@ class CSVSource:
                 raise DataSourceError(
                     f"Failed to read CSV from '{safe_path}': {exc}"
                 ) from exc
-            bytes_count = -1  # not measured on the streaming path
+            if len(raw_bytes) > cap:
+                raise DataSourceError(
+                    f"CSV file '{safe_path}' exceeds RECOTEM_MAX_DOWNLOAD_BYTES ({cap}) — "
+                    "increase the cap or split the file."
+                )
+            read_kwargs = {
+                "sep": cfg.delimiter,
+                "encoding": cfg.encoding,
+                "header": cfg.header,
+            }
+            if cfg.dtype:
+                read_kwargs["dtype"] = cfg.dtype
+            compression = _infer_compression(cfg.path)
+            read_kwargs["compression"] = compression
+            try:
+                df = pd.read_csv(BytesIO(raw_bytes), **read_kwargs)
+            except (MemoryError, RecursionError):
+                raise
+            except Exception as exc:
+                raise DataSourceError(
+                    f"Failed to parse CSV from '{safe_path}': {exc}"
+                ) from exc
+            bytes_count = len(raw_bytes)
 
         if df.empty:
             raise DataSourceError(
@@ -475,8 +492,10 @@ class ParquetSource:
             bytes_count = len(raw_bytes)
         else:
             sha256_verified = False
+            cap = _get_max_download_bytes()
             try:
-                df = pd.read_parquet(cfg.path)
+                with fsspec.open(cfg.path, "rb") as f:
+                    raw_bytes = f.read(cap + 1)
             except FileNotFoundError as exc:
                 raise DataSourceError(f"Parquet file not found: {safe_path}") from exc
             except PermissionError as exc:
@@ -489,7 +508,20 @@ class ParquetSource:
                 raise DataSourceError(
                     f"Failed to read Parquet from '{safe_path}': {exc}"
                 ) from exc
-            bytes_count = -1  # not measured on the streaming path
+            if len(raw_bytes) > cap:
+                raise DataSourceError(
+                    f"Parquet file '{safe_path}' exceeds RECOTEM_MAX_DOWNLOAD_BYTES ({cap}) — "
+                    "increase the cap or split the file."
+                )
+            try:
+                df: pd.DataFrame = pd.read_parquet(BytesIO(raw_bytes))
+            except (MemoryError, RecursionError):
+                raise
+            except Exception as exc:
+                raise DataSourceError(
+                    f"Failed to parse Parquet from '{safe_path}': {exc}"
+                ) from exc
+            bytes_count = len(raw_bytes)
 
         logger.info(
             "parquet_source_fetch_done",

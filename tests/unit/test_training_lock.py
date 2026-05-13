@@ -976,3 +976,143 @@ def test_osopen_eloop_emits_warning_and_propagates(tmp_path: Path) -> None:
     assert exc_info.value.errno == _errno.ELOOP
     warnings = [e for e in captured if e.get("event") == "recipe_lock_unsafe_symlink"]
     assert warnings, "ELOOP on lock path must emit recipe_lock_unsafe_symlink warning"
+
+
+# ---------------------------------------------------------------------------
+# I-21: recipe_lock assert validates timeout parameter (defense-in-depth)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_recipe_lock_rejects_negative_timeout_other_than_minus_one(
+    tmp_path: Path,
+) -> None:
+    """recipe_lock must raise AssertionError for timeout values < 0 other than -1.
+
+    This is the defense-in-depth guard at the library level that mirrors the
+    CLI-level validation added by I-21.  The CLI validates first; this guard
+    catches library callers that bypass the CLI.
+    """
+    output_path = tmp_path / "model.recotem"
+
+    with pytest.raises(AssertionError, match="lock timeout must be -1"):
+        with recipe_lock(output_path, timeout=-10.0):
+            pass  # pragma: no cover
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_recipe_lock_accepts_minus_one_as_indefinite(tmp_path: Path) -> None:
+    """recipe_lock must accept timeout=-1 (the indefinite-wait sentinel)."""
+    output_path = tmp_path / "model.recotem"
+    # Must not raise AssertionError.
+    with recipe_lock(output_path, timeout=-1.0) as acquired:
+        assert acquired is True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_recipe_lock_accepts_zero_timeout(tmp_path: Path) -> None:
+    """recipe_lock must accept timeout=0.0 (non-blocking)."""
+    output_path = tmp_path / "model.recotem"
+    with recipe_lock(output_path, timeout=0.0) as acquired:
+        assert acquired is True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_recipe_lock_accepts_positive_timeout(tmp_path: Path) -> None:
+    """recipe_lock must accept a positive timeout value."""
+    output_path = tmp_path / "model.recotem"
+    with recipe_lock(output_path, timeout=0.1) as acquired:
+        assert acquired is True
+
+
+# ---------------------------------------------------------------------------
+# I-18: Windows _try_acquire_windows propagates non-contention OSError
+# ---------------------------------------------------------------------------
+
+
+def test_windows_open_enoent_propagates_oserror(tmp_path: Path, monkeypatch) -> None:
+    """On simulated Windows, _try_acquire_windows must propagate ENOENT rather
+    than silently returning None (which would be treated as lock contention).
+
+    The fix: only EACCES and EAGAIN are treated as "contested" (return None);
+    all other errno values (ENOENT, EROFS, ENOSPC) must be re-raised so the
+    caller gets a clear indication that something other than lock contention
+    occurred.
+    """
+    import errno as _errno
+    import types
+
+    import structlog.testing
+
+    # Fake msvcrt so the Windows path is exercised without real msvcrt.
+    fake_msvcrt = types.SimpleNamespace(
+        LK_NBLCK=2,
+        LK_UNLCK=0,
+        locking=lambda fd, mode, nbytes: None,
+    )
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    # Simulate os.open raising ENOENT (directory does not exist).
+    original_os_open = os.open
+    enoent = FileNotFoundError(_errno.ENOENT, "No such file or directory")
+    enoent.errno = _errno.ENOENT
+
+    def _fake_os_open(path, flags, mode=0o600):
+        if "lock" in str(path):
+            raise enoent
+        return original_os_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", _fake_os_open)
+
+    import recotem.training.lock as lock_mod
+
+    with structlog.testing.capture_logs() as captured:
+        with pytest.raises(OSError) as exc_info:
+            lock_mod._try_acquire_windows(tmp_path / "model.recotem.lock")
+
+    assert exc_info.value.errno == _errno.ENOENT, (
+        f"ENOENT must propagate from _try_acquire_windows; got errno={exc_info.value.errno}"
+    )
+    # A warning must have been emitted before re-raising.
+    warn_events = [
+        e for e in captured if e.get("event") == "recipe_lock_windows_open_failed"
+    ]
+    assert warn_events, (
+        "recipe_lock_windows_open_failed warning must be emitted before re-raising ENOENT"
+    )
+    assert warn_events[0]["errno"] == _errno.ENOENT
+
+
+def test_windows_open_eacces_returns_none(tmp_path: Path, monkeypatch) -> None:
+    """On simulated Windows, _try_acquire_windows must return None for EACCES
+    (treating it as lock contention — the caller handles it gracefully).
+    """
+    import errno as _errno
+    import types
+
+    fake_msvcrt = types.SimpleNamespace(
+        LK_NBLCK=2,
+        LK_UNLCK=0,
+        locking=lambda fd, mode, nbytes: None,
+    )
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    original_os_open = os.open
+    eacces = PermissionError(_errno.EACCES, "Permission denied")
+    eacces.errno = _errno.EACCES
+
+    def _fake_os_open(path, flags, mode=0o600):
+        if "lock" in str(path):
+            raise eacces
+        return original_os_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", _fake_os_open)
+
+    import recotem.training.lock as lock_mod
+
+    result = lock_mod._try_acquire_windows(tmp_path / "model.recotem.lock")
+    assert result is None, (
+        "EACCES must cause _try_acquire_windows to return None (treated as contention)"
+    )

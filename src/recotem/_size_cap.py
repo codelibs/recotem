@@ -134,9 +134,7 @@ def check_size_cap(path: str, cap: int, *, label: str = "file") -> None:
                 "ProfileNotFound",
                 "EndpointConnectionError",
             )
-            if exc_name in credential_shapes or any(
-                marker in exc_name for marker in ("Credential", "Auth")
-            ):
+            if exc_name in credential_shapes:
                 safe_path = redact_url_userinfo(path)
                 logger.info(
                     "size_cap_probe_skipped_credential",

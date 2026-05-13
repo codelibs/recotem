@@ -308,11 +308,22 @@ def test_health_503_when_recipe_loaded_false_even_without_error() -> None:
 
 
 def test_health_per_recipe_status() -> None:
+    """Per-recipe detail is now at /health/details (I-3).
+    /health only returns aggregate {status, total, loaded}."""
     client, _ = _make_test_client()
+    # /health must NOT have per-recipe data (I-3).
     response = client.get("/health")
     data = response.json()
-    assert "recipes" in data
-    assert "test_recipe" in data["recipes"]
+    assert "recipes" not in data, (
+        "/health must not expose per-recipe data (moved to /health/details)"
+    )
+    assert "total" in data
+    assert "loaded" in data
+    # /health/details does have per-recipe data (insecure_no_auth → no creds needed).
+    response_details = client.get("/health/details")
+    details = response_details.json()
+    assert "recipes" in details
+    assert "test_recipe" in details["recipes"]
 
 
 # ---------------------------------------------------------------------------
@@ -1720,4 +1731,214 @@ def test_predict_503_no_entry_logs_reason_no_entry() -> None:
     assert events, (
         "recipe_unavailable with reason='no_entry' must be logged when entry is missing; "
         f"got: {[e for e in cap if 'recipe_unavailable' in str(e)]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# I-3: /health returns only aggregate {status, total, loaded} — no per-recipe
+# ---------------------------------------------------------------------------
+
+
+def test_health_returns_status_total_loaded_only() -> None:
+    """I-3: /health must return only {status, total, loaded}.
+
+    Per-recipe detail (kid, trained_at, best_class, error) is now
+    gated behind /health/details (authenticated).
+    """
+    client, _ = _make_test_client()
+    response = client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+    assert "status" in body
+    assert "total" in body
+    assert "loaded" in body
+    # Must NOT expose per-recipe detail without auth.
+    assert "recipes" not in body, (
+        "/health must not expose per-recipe data (I-3: moved to /health/details)"
+    )
+
+
+def test_health_total_and_loaded_counts_match_registry() -> None:
+    """I-3: total and loaded counts in /health must reflect registry state."""
+    registry = _make_registry_with_recipe("r1")
+    # Add a second, broken recipe.
+    broken = ModelEntry(
+        name="r2",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+        last_load_error="failed",
+    )
+    registry.replace("r2", broken)
+
+    client, _ = _make_test_client(registry=registry)
+    response = client.get("/health")
+    assert response.status_code == 503  # degraded
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert body["total"] == 2
+    assert body["loaded"] == 1
+
+
+def test_health_details_returns_per_recipe_data() -> None:
+    """I-3: /health/details must include the per-recipe breakdown."""
+    client, _ = _make_test_client()
+    response = client.get("/health/details")
+    assert response.status_code == 200
+    body = response.json()
+    assert "status" in body
+    assert "recipes" in body
+    assert "test_recipe" in body["recipes"]
+
+
+def test_health_details_401_when_auth_configured() -> None:
+    """I-3: /health/details returns 401 when API keys are configured and
+    no key is provided.
+    """
+    import hashlib
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from recotem.config import ApiKeyEntry
+
+    registry = _make_registry_with_recipe()
+    plaintext = "api_key_32_bytes_exactly_here!!!"
+    sha256_hex = hashlib.scrypt(
+        plaintext.encode(),
+        salt=b"recotem.api-key.v1",
+        n=2,
+        r=8,
+        p=1,
+        dklen=32,
+    ).hex()
+    entry = ApiKeyEntry(kid="k1", sha256_hex=sha256_hex)
+    router = make_router(registry=registry, api_keys=[entry])
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    # /health is open (no auth)
+    response = client.get("/health")
+    assert response.status_code == 200
+
+    # /health/details requires auth
+    response_details = client.get("/health/details")
+    assert response_details.status_code == 401, (
+        f"/health/details must return 401 without auth key; got {response_details.status_code}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# I-11: metadata degradation signals X-Recotem-Metadata-Degraded header
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_degraded_header_set_when_lookup_fails() -> None:
+    """I-11: When metadata lookup fails for one or more items in the cutoff,
+    the response must include X-Recotem-Metadata-Degraded: 1 header.
+    """
+    from unittest.mock import MagicMock
+
+    import pandas as pd
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+    from recotem.serving.routes import make_router
+
+    # Build a DataFrame where .loc[] will raise AttributeError for one item.
+    # We mock the DataFrame so that item "bad_item" is in the index but
+    # row retrieval fails, causing _lookup_metadata to return {} with a failure.
+    real_df = pd.DataFrame(
+        {"item_id": ["good_item", "bad_item"], "title": ["Good", "Bad"]}
+    ).set_index("item_id")
+
+    class _BrokenLocDF:
+        """DataFrame-like object where 'bad_item' causes AttributeError on to_dict()."""
+
+        @property
+        def index(self):
+            return real_df.index
+
+        def __getitem__(self, key):
+            return self
+
+        @property
+        def loc(self):
+            return self
+
+        def __getitem__(self, key):  # noqa: F811
+            if key == "bad_item":
+
+                class _BadRow:
+                    def to_dict(self):
+                        raise AttributeError("simulated metadata failure")
+
+                return _BadRow()
+            return real_df.loc[key]
+
+    broken_df = MagicMock()
+    broken_df.index = real_df.index
+    # Make "bad_item" appear in the index but fail on to_dict()
+    broken_df.index.__contains__ = lambda self_, item: item in real_df.index
+
+    class _BrokenLoc:
+        def __getitem__(self, key):
+            if key == "bad_item":
+
+                class _BadRow:
+                    def to_dict(self):
+                        raise AttributeError("simulated metadata failure")
+
+                return _BadRow()
+            return real_df.loc[key]
+
+    broken_df.loc = _BrokenLoc()
+
+    recommender = MagicMock()
+    recommender.get_recommendation_for_known_user_id.return_value = [
+        ("good_item", 0.9),
+        ("bad_item", 0.5),
+    ]
+
+    entry = ModelEntry(
+        name="meta_degrade",
+        recommender=recommender,
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="k1",
+        metadata_df=broken_df,
+        metadata_index=None,  # force DataFrame path
+    )
+    registry = ModelRegistry()
+    registry.replace("meta_degrade", entry)
+
+    router = make_router(registry=registry, api_keys=[])
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/predict/meta_degrade",
+        json={"user_id": "user1", "cutoff": 2},
+    )
+    assert response.status_code == 200
+    assert response.headers.get("X-Recotem-Metadata-Degraded") == "1", (
+        "When metadata lookup fails, X-Recotem-Metadata-Degraded: 1 must be set; "
+        f"got headers: {dict(response.headers)!r}"
+    )
+
+
+def test_no_metadata_degraded_header_when_lookup_succeeds() -> None:
+    """I-11: When metadata lookup succeeds for all items, no
+    X-Recotem-Metadata-Degraded header must be set.
+    """
+    client, _ = _make_test_client()
+    response = client.post(
+        "/predict/test_recipe", json={"user_id": "user1", "cutoff": 2}
+    )
+    assert response.status_code == 200
+    assert "X-Recotem-Metadata-Degraded" not in response.headers, (
+        "X-Recotem-Metadata-Degraded must NOT be set when all metadata lookups succeed"
     )

@@ -761,3 +761,56 @@ def test_write_atomic_fsync_einval_succeeds(
 
     # Verify data was actually written (rename completed).
     assert Path(dest).read_bytes() == data
+
+
+# ---------------------------------------------------------------------------
+# I-15: read_artifact default max_bytes is 512 MiB
+# ---------------------------------------------------------------------------
+
+
+def test_read_artifact_default_max_bytes_is_512_mib(tmp_path: Path) -> None:
+    """read_artifact() without explicit max_bytes uses DEFAULT_MAX_PAYLOAD_BYTES.
+
+    We verify that DEFAULT_MAX_PAYLOAD_BYTES == 512 MiB and that read_artifact
+    passes it as the cap.  We intercept parse_header_from_bytes to observe the
+    cap value actually used at read time.
+    """
+    from unittest.mock import patch
+
+    from recotem.artifact.format import DEFAULT_MAX_PAYLOAD_BYTES
+
+    # 1. Confirm the constant itself is 512 MiB.
+    assert DEFAULT_MAX_PAYLOAD_BYTES == 512 * 1024 * 1024, (
+        f"DEFAULT_MAX_PAYLOAD_BYTES expected 512 MiB "
+        f"({512 * 1024 * 1024}), got {DEFAULT_MAX_PAYLOAD_BYTES}"
+    )
+
+    # 2. Write a small artifact and verify parse_header_from_bytes receives
+    #    the 512 MiB cap when max_bytes is not overridden.
+    kr = _make_keyring()
+    output_path = str(tmp_path / "cap_check.recotem")
+    write_artifact(
+        payload_obj={"cap": "test"},
+        header_dict={"recipe_name": "cap_check"},
+        key_ring=kr,
+        fs_path=output_path,
+        versioning="always_overwrite",
+    )
+
+    observed_caps: list[int] = []
+    import recotem.artifact.io as io_mod
+
+    real_parse = io_mod.parse_header_from_bytes
+
+    def _spy_parse(data, max_payload_bytes):
+        observed_caps.append(max_payload_bytes)
+        return real_parse(data, max_payload_bytes)
+
+    with patch.object(io_mod, "parse_header_from_bytes", side_effect=_spy_parse):
+        read_artifact(output_path, kr)  # no explicit max_bytes
+
+    assert observed_caps, "parse_header_from_bytes was not called"
+    assert observed_caps[0] == DEFAULT_MAX_PAYLOAD_BYTES, (
+        f"read_artifact passed cap {observed_caps[0]} to parse_header_from_bytes; "
+        f"expected {DEFAULT_MAX_PAYLOAD_BYTES} (512 MiB)"
+    )

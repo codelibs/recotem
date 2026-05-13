@@ -70,11 +70,30 @@ def _network_scheme(path: str) -> bool:
 
 
 # Schemes for which a `user:pass@host` component is treated as embedded
-# credentials and must be rejected.  Object-store schemes (s3, gs, az, abfs,
-# abfss) use `@` in their canonical addressing syntax (e.g. GCS
-# `gs://project@bucket/key`) and must NOT be subject to userinfo checks.
+# credentials and must be rejected.
+#
+# GCS (`gs://`) uses `project@bucket` in its canonical URI syntax
+# (e.g. `gs://my-project@my-bucket/key`) and must NOT be subject to
+# userinfo rejection — the `@` character there separates the billing project
+# from the bucket name, not a credential.  GCS authentication is always via
+# ADC / GOOGLE_APPLICATION_CREDENTIALS.
+#
+# S3 (`s3://`), Azure Data Lake (`abfs://`, `abfss://`) do NOT use `@` in
+# their canonical addressing syntax.  Any `user:pass@host` pattern in an
+# s3:// or abfs(s):// URI means embedded AWS access keys / SAS tokens in
+# plaintext, which is explicitly prohibited.  Authentication must come from
+# environment-based mechanisms (instance profile, Azure managed identity,
+# `AWS_*` env vars, etc.).
+#
+# az:// Azure Blob Storage similarly does not use `@` as an addressing
+# separator; exclude it from the reject set only because adlfs parses
+# `az://container@account.blob.core.windows.net/` — the `@` here is part
+# of the fsspec URI convention for Azure, not a credential.
+#
 # Aligned with `_USERINFO_SCHEMES` in `_http_fetch.py`.
-_USERINFO_REJECT_SCHEMES: frozenset[str] = frozenset({"http", "https", "ftp", "ftps"})
+_USERINFO_REJECT_SCHEMES: frozenset[str] = frozenset(
+    {"http", "https", "ftp", "ftps", "s3", "abfs", "abfss"}
+)
 
 
 def _check_userinfo(path: str, field_name: str) -> None:
@@ -692,17 +711,22 @@ def load_recipes_directory_lenient(
     every YAML file found, so callers (e.g. a health endpoint) can surface
     failed-load entries without aborting the entire batch.
 
+    Duplicate ``name`` values are handled leniently: the first successfully-
+    loaded file that claims a given name wins; any subsequent file with the
+    same name is **skipped** (not raised) and a ``recipe_duplicate_name_skipped``
+    warning is emitted to the structured log.
+
     Returns
     -------
     list[tuple[Path, Recipe | None, Exception | None]]
         Sorted by filename.  On success: ``(path, recipe, None)``.
-        On failure: ``(path, None, exc)``.
+        On failure (parse error, validation error, or duplicate name):
+        ``(path, None, exc)``.
 
     Raises
     ------
     RecipeError
-        Only for directory-level errors (path does not exist / not a dir) or
-        duplicate recipe names across successfully-loaded files.
+        Only for directory-level errors (path does not exist / not a dir).
     """
     root = Path(path).resolve()
 

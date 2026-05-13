@@ -203,3 +203,19 @@ def test_build_artifact_bytes_kid_too_long_rejected() -> None:
 def test_build_artifact_bytes_kid_empty_rejected() -> None:
     with pytest.raises(ArtifactError, match="kid_len"):
         build_artifact_bytes("", b"\x00" * 32, b"{}", b"")
+
+
+# ---------------------------------------------------------------------------
+# I-15: DEFAULT_MAX_PAYLOAD_BYTES must be 512 MiB (not 2 GiB)
+# ---------------------------------------------------------------------------
+
+
+def test_default_max_payload_bytes_is_512_mib() -> None:
+    """DEFAULT_MAX_PAYLOAD_BYTES must be 512 MiB to align with config.py and docs."""
+    from recotem.artifact.format import DEFAULT_MAX_PAYLOAD_BYTES
+
+    expected = 512 * 1024 * 1024  # 512 MiB
+    assert expected == DEFAULT_MAX_PAYLOAD_BYTES, (
+        f"DEFAULT_MAX_PAYLOAD_BYTES should be {expected} (512 MiB), "
+        f"got {DEFAULT_MAX_PAYLOAD_BYTES}"
+    )

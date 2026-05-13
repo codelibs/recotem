@@ -173,6 +173,16 @@ def train(
     if dev_allow_unsigned:
         _check_dev_env("--dev-allow-unsigned")
 
+    # Validate lock_timeout: -1 = indefinite wait; 0 = nonblocking; >0 = wait N seconds.
+    # Any other negative value is not a recognised sentinel and would silently behave
+    # as indefinite wait, which is almost certainly a caller mistake.
+    if lock_timeout < 0 and lock_timeout != -1.0:
+        _exit(
+            _EXIT_CONFIG,
+            f"--lock-timeout must be -1 (indefinite), 0 (non-blocking), or a "
+            f"positive number of seconds; got {lock_timeout}.",
+        )
+
     extra_allowed: dict[str, str] = {}
     for pair in env_var or []:
         if "=" not in pair:
@@ -337,13 +347,25 @@ def serve(
         # size the host correctly.  Round-12 OOM-propagation policy.
         raise
     except OSError as exc:
+        import errno as _errno  # noqa: PLC0415
+
+        if exc.errno in (_errno.EADDRINUSE, _errno.EACCES, _errno.EADDRNOTAVAIL):
+            _srv_log.error(
+                "serve_bind_failed",
+                error=str(exc),
+                host=cfg.host,
+                port=cfg.port,
+                errno=exc.errno,
+            )
+            _exit(_EXIT_CONFIG, f"Server bind failed: {exc}")
         _srv_log.error(
-            "serve_startup_failed",
+            "serve_runtime_oserror",
             error=str(exc),
+            errno=exc.errno,
             host=cfg.host,
             port=cfg.port,
         )
-        _exit(_EXIT_CONFIG, f"Server bind/startup failed: {exc}")
+        _exit(_map_exception_to_exit(exc), f"Server runtime failure: {exc}")
     except Exception as exc:
         _srv_log.error("serve_startup_failed", error=str(exc))
         code = _map_exception_to_exit(exc)
@@ -559,9 +581,8 @@ def inspect(
         header_dict = json.loads(hdr.header_data.decode("utf-8"))
     except (MemoryError, RecursionError):
         raise
-    except Exception as exc:
-        code = _map_exception_to_exit(exc)
-        _exit(code, f"Header JSON parse failed: {exc}")
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        _exit(_EXIT_ARTIFACT, f"Header JSON parse failed: {exc}")
 
     typer.echo(json.dumps(header_dict, indent=2))
 

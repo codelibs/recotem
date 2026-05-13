@@ -2092,11 +2092,13 @@ def test_no_sidecar_falls_back_to_full_stat_compare(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sidecar_permission_denied_emits_warning_and_returns_false(
+def test_sidecar_permission_denied_emits_warning_and_returns_true(
     tmp_path: Path,
 ) -> None:
     """When sidecar.exists() is True but read_text raises PermissionError
-    (non-ENOENT), _check_sidecar_changed must emit a WARNING log and return False.
+    (non-ENOENT), _check_sidecar_changed must emit a WARNING log and return True
+    (I-10: trigger reload so /health surfaces the failure via _record_load_failure
+    if the main artifact read also fails).
     """
     import errno
     from unittest.mock import patch
@@ -2126,8 +2128,10 @@ def test_sidecar_permission_denied_emits_warning_and_returns_false(
         with structlog.testing.capture_logs() as cap:
             changed = _check_sidecar_changed(state)
 
-    assert changed is False, (
-        "_check_sidecar_changed must return False on PermissionError"
+    # I-10: non-ENOENT OSError must trigger a reload (return True) so that if the
+    # main artifact read also fails, _record_load_failure surfaces it in /health.
+    assert changed is True, (
+        "_check_sidecar_changed must return True on non-ENOENT PermissionError (I-10)"
     )
     warn_events = [e for e in cap if e.get("event") == "sidecar_read_failed"]
     assert warn_events, (
@@ -4256,3 +4260,409 @@ def test_post_hmac_deserialize_streak_reset_on_success(tmp_path: Path) -> None:
         "Post-HMAC failure streak must be reset after a successful _load_recipe"
     )
     watcher._executor.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# C-3: MemoryError in _read_artifact_bytes is NOT wrapped in ArtifactError
+# ---------------------------------------------------------------------------
+
+
+def test_read_artifact_bytes_lets_memory_error_propagate(tmp_path: Path) -> None:
+    """C-3: _read_artifact_bytes must re-raise MemoryError without wrapping it
+    in ArtifactError, so callers can distinguish OOM from I/O failures.
+    """
+    from unittest.mock import patch
+
+    import fsspec
+
+    from recotem.serving.watcher import _read_artifact_bytes
+
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(b"placeholder")
+
+    # Simulate MemoryError inside the fsspec read path.
+    original_url_to_fs = fsspec.core.url_to_fs
+
+    def _oom_url_to_fs(path, **kw):
+        fs, fpath = original_url_to_fs(path, **kw)
+        # Patch fs.open to raise MemoryError on read
+        original_open = fs.open
+
+        class _OOMFile:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+            def read(self, n):
+                raise MemoryError("simulated OOM")
+
+        import contextlib
+
+        @contextlib.contextmanager
+        def _patched_open(*a, **kw2):
+            yield _OOMFile()
+
+        fs.open = _patched_open
+        return fs, fpath
+
+    import pytest
+
+    with patch.object(fsspec.core, "url_to_fs", side_effect=_oom_url_to_fs):
+        with pytest.raises(MemoryError):
+            _read_artifact_bytes(str(artifact_path), 100 * 1024 * 1024)
+
+
+def test_read_artifact_bytes_wraps_os_error_in_artifact_error(tmp_path: Path) -> None:
+    """C-3: Regular OSError (not MemoryError/RecursionError) from _read_artifact_bytes
+    must be wrapped as ArtifactError so callers get a clean error type.
+    """
+    from unittest.mock import patch
+
+    import fsspec
+    import pytest
+
+    from recotem.artifact.format import ArtifactError
+    from recotem.serving.watcher import _read_artifact_bytes
+
+    original_url_to_fs = fsspec.core.url_to_fs
+
+    def _ioerror_url_to_fs(path, **kw):
+        fs, fpath = original_url_to_fs(path, **kw)
+
+        import contextlib
+
+        class _ErrFile:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+            def read(self, n):
+                raise OSError("simulated I/O error")
+
+        @contextlib.contextmanager
+        def _patched_open(*a, **kw2):
+            yield _ErrFile()
+
+        fs.open = _patched_open
+        return fs, fpath
+
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(b"placeholder")
+
+    with patch.object(fsspec.core, "url_to_fs", side_effect=_ioerror_url_to_fs):
+        with pytest.raises(ArtifactError):
+            _read_artifact_bytes(str(artifact_path), 100 * 1024 * 1024)
+
+
+# ---------------------------------------------------------------------------
+# I-8: watcher sentinel cleared even for loaded=False stubs
+# ---------------------------------------------------------------------------
+
+
+def test_clear_watcher_unhealthy_clears_sentinel_on_unloaded_stub() -> None:
+    """I-8: _clear_watcher_unhealthy_errors must clear the sentinel even when
+    the entry has loaded=False (a stub inserted for a never-loaded recipe).
+
+    Pre-fix: the guard `entry.loaded and ...` prevented clearing the sentinel
+    on unloaded stubs, leaving /health permanently degraded after watcher recovery.
+    """
+    from unittest.mock import MagicMock
+
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    registry = ModelRegistry()
+    # Insert a stub with loaded=False and the sentinel error set.
+    stub = ModelEntry(
+        name="stub_recipe",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+        last_load_error=ArtifactWatcher._WATCHER_UNHEALTHY_SENTINEL,
+    )
+    registry.replace("stub_recipe", stub)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=Path("/tmp"),
+        serve_config=cfg,
+        key_ring=kr,
+    )
+
+    # Manually inject the state so _clear_watcher_unhealthy_errors iterates it.
+    fake_recipe = MagicMock()
+    fake_recipe.name = "stub_recipe"
+    watcher._states["stub_recipe"] = _RecipeWatchState(
+        recipe=fake_recipe, artifact_path=""
+    )
+
+    # Sentinel must be present before recovery.
+    entry_before = registry.get("stub_recipe")
+    assert entry_before is not None
+    assert entry_before.last_load_error == ArtifactWatcher._WATCHER_UNHEALTHY_SENTINEL
+
+    # Simulate watcher recovery.
+    watcher._clear_watcher_unhealthy_errors()
+
+    # After recovery, sentinel must be cleared (even though loaded=False).
+    entry_after = registry.get("stub_recipe")
+    assert entry_after is not None
+    assert entry_after.last_load_error is None, (
+        "I-8: _clear_watcher_unhealthy_errors must clear the sentinel for "
+        "loaded=False stubs; loaded=True guard was too strict."
+    )
+    watcher._executor.shutdown(wait=False)
+
+
+def test_clear_watcher_unhealthy_does_not_clear_real_load_errors() -> None:
+    """I-8: _clear_watcher_unhealthy_errors must NOT clear genuine load errors
+    (non-sentinel error strings) — only the specific sentinel is eligible.
+    """
+    from unittest.mock import MagicMock
+
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    registry = ModelRegistry()
+    real_error = "HMAC verify failed: signature mismatch"
+    entry = ModelEntry(
+        name="real_error_recipe",
+        recommender=MagicMock(),
+        header={},
+        kid="k1",
+        loaded=True,
+        last_load_error=real_error,
+    )
+    registry.replace("real_error_recipe", entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=Path("/tmp"),
+        serve_config=cfg,
+        key_ring=kr,
+    )
+
+    fake_recipe = MagicMock()
+    fake_recipe.name = "real_error_recipe"
+    watcher._states["real_error_recipe"] = _RecipeWatchState(
+        recipe=fake_recipe, artifact_path=""
+    )
+
+    watcher._clear_watcher_unhealthy_errors()
+
+    entry_after = registry.get("real_error_recipe")
+    assert entry_after is not None
+    assert entry_after.last_load_error == real_error, (
+        "I-8: genuine load errors must NOT be cleared by _clear_watcher_unhealthy_errors"
+    )
+    watcher._executor.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# I-9: rescan registers stub for brand-new broken YAML
+# ---------------------------------------------------------------------------
+
+
+def test_rescan_broken_yaml_appears_in_health(tmp_path: Path) -> None:
+    """I-9: When the watcher rescans and finds a brand-new YAML file that
+    fails to parse, a stub entry with loaded=False must be inserted in the
+    registry so /health surfaces the problem.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+    watcher.start()
+
+    # Let watcher observe empty dir.
+    import time
+
+    time.sleep(0.1)
+
+    # Drop a syntactically broken YAML file.
+    broken_yaml = recipes_dir / "broken_new.yaml"
+    broken_yaml.write_text(":::invalid yaml:::\nfoo: [unclosed")
+
+    # Wait for watcher to discover it.
+    deadline = time.monotonic() + 2.0
+    found_stub = False
+    while time.monotonic() < deadline:
+        # The stub_name is the file stem.
+        entry = registry.get("broken_new")
+        if entry is not None and not entry.loaded and entry.last_load_error:
+            found_stub = True
+            break
+        time.sleep(0.05)
+
+    watcher.stop()
+    watcher.join(timeout=2.0)
+
+    assert found_stub, (
+        "I-9: A stub entry for a broken YAML must appear in the registry "
+        "within 2s of the file being discovered by the watcher"
+    )
+    entry = registry.get("broken_new")
+    assert entry is not None
+    assert not entry.loaded
+    # The last_load_error may be the initial "YAML parse failed" message or a
+    # subsequent stat/read failure on the empty artifact_path ("" → cannot read).
+    # Either way, the entry must have a non-None, non-empty error.
+    assert entry.last_load_error, (
+        f"stub last_load_error must be set; got {entry.last_load_error!r}"
+    )
+
+
+def test_rescan_stub_removed_when_yaml_fixed(tmp_path: Path) -> None:
+    """I-9: After a broken YAML is fixed (valid parse succeeds), the stub
+    entry must be replaced by a proper load (or removed/replaced by normal
+    recipe lifecycle).  At minimum the stub must no longer block /health.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+    watcher.start()
+
+    import time
+
+    time.sleep(0.1)
+
+    # Write broken YAML first.
+    yaml_path = recipes_dir / "fixable.yaml"
+    yaml_path.write_text(":::invalid yaml:::\nfoo: [unclosed")
+
+    # Wait for stub to appear.
+    deadline = time.monotonic() + 2.0
+    found_stub = False
+    while time.monotonic() < deadline:
+        entry = registry.get("fixable")
+        if entry is not None and not entry.loaded:
+            found_stub = True
+            break
+        time.sleep(0.05)
+
+    assert found_stub, "Broken YAML must produce a stub entry"
+
+    # Fix the YAML (write a valid recipe pointing at a valid artifact).
+    _write_recipe_yaml(recipes_dir, "fixable", artifact_path)
+
+    # Wait for the watcher to load the fixed recipe.
+    deadline = time.monotonic() + 3.0
+    fixed = False
+    while time.monotonic() < deadline:
+        entry = registry.get("fixable")
+        if entry is not None and entry.loaded and entry.last_load_error is None:
+            fixed = True
+            break
+        time.sleep(0.1)
+
+    watcher.stop()
+    watcher.join(timeout=2.0)
+
+    assert fixed, (
+        "I-9: After fixing the broken YAML, the recipe must be loaded within 3s"
+    )
+
+
+# ---------------------------------------------------------------------------
+# I-10: non-ENOENT sidecar OSError returns True (trigger reload)
+# ---------------------------------------------------------------------------
+
+
+def test_sidecar_non_enoent_oserror_returns_true(tmp_path: Path) -> None:
+    """I-10: A non-ENOENT OSError reading the sidecar must return True (reload)
+    so that if the main artifact read also fails, _record_load_failure surfaces
+    the problem in /health.
+
+    ENOENT returns False (sidecar simply absent — conservative, no change).
+    """
+    import errno
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import _check_sidecar_changed, _RecipeWatchState
+
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(b"placeholder")
+    sidecar_path = Path(str(artifact_path) + ".sha256")
+    sidecar_path.write_text("sha_v1\n")
+
+    recipe = MagicMock()
+    recipe.name = "io_err_test"
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_sidecar_contents=None,
+    )
+
+    # Simulate a generic I/O error (not ENOENT).
+    io_error = OSError("simulated I/O error")
+    io_error.errno = errno.EIO
+
+    with patch.object(Path, "read_text", side_effect=io_error):
+        changed = _check_sidecar_changed(state)
+
+    assert changed is True, (
+        "I-10: non-ENOENT OSError reading sidecar must return True to trigger reload"
+    )
+
+
+def test_sidecar_enoent_still_returns_false(tmp_path: Path) -> None:
+    """I-10: ENOENT OSError reading sidecar must still return False (sidecar
+    simply disappeared between exists() and read_text — no reload needed).
+    """
+    import errno
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import _check_sidecar_changed, _RecipeWatchState
+
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(b"placeholder")
+    sidecar_path = Path(str(artifact_path) + ".sha256")
+    sidecar_path.write_text("sha_v1\n")
+
+    recipe = MagicMock()
+    recipe.name = "enoent_test"
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_sidecar_contents=None,
+    )
+
+    enoent = FileNotFoundError("no such file")
+    enoent.errno = errno.ENOENT
+
+    with patch.object(Path, "read_text", side_effect=enoent):
+        changed = _check_sidecar_changed(state)
+
+    assert changed is False, (
+        "I-10: ENOENT sidecar read must still return False (file absent = no change)"
+    )

@@ -1160,3 +1160,125 @@ def test_storage_fallback_non_iam_increments_no_fallback_counter(monkeypatch) ->
                 source.fetch(_ctx())
 
     inc_spy.assert_called_once_with("non_iam_error_no_fallback")
+
+
+# ---------------------------------------------------------------------------
+# I-22: RECOTEM_BQ_REQUIRE_STORAGE_API=1 + ImportError raises DataSourceError
+# ---------------------------------------------------------------------------
+
+
+def test_require_storage_api_and_import_error_raises_datasource_error(
+    monkeypatch,
+) -> None:
+    """When RECOTEM_BQ_REQUIRE_STORAGE_API=1 and the bigquery-storage extra
+    is not installed (ImportError from create_bqstorage_client), fetch() must
+    raise DataSourceError rather than falling back silently to the REST API.
+
+    Before the I-22 fix, only the GoogleAPICallError path checked the env var;
+    the ImportError path always fell back to REST silently even when strict mode
+    was requested.
+    """
+    monkeypatch.setenv("RECOTEM_BQ_REQUIRE_STORAGE_API", "1")
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    # Simulate the bigquery-storage extra not being installed.
+    def _to_dataframe_import_error(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise ImportError("No module named 'google.cloud.bigquery_storage'")
+        # REST fallback — should NOT be reached when REQUIRE_STORAGE_API=1.
+        import pandas as pd
+
+        return pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_import_error
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError) as exc_info:
+            source.fetch(_ctx())
+
+    err_msg = str(exc_info.value)
+    assert "RECOTEM_BQ_REQUIRE_STORAGE_API" in err_msg, (
+        f"Error message must mention the env var; got: {err_msg!r}"
+    )
+    assert "not installed" in err_msg or "extras" in err_msg, (
+        f"Error message must explain the missing extras; got: {err_msg!r}"
+    )
+
+
+def test_require_storage_api_false_import_error_falls_back_silently(
+    monkeypatch,
+) -> None:
+    """When RECOTEM_BQ_REQUIRE_STORAGE_API is NOT set (falsy), an ImportError
+    from create_bqstorage_client must still fall back silently to the REST API.
+
+    This is the original behavior that I-22 preserves for users who have not
+    opted into strict Storage-API mode.
+    """
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    import pandas as pd
+
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    def _to_dataframe_side_effect(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise ImportError("No module named 'google.cloud.bigquery_storage'")
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_side_effect
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        result = source.fetch(_ctx())
+
+    assert len(result) == 1, "REST fallback must return a DataFrame"

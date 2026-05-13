@@ -1110,3 +1110,104 @@ def test_metadata_error_inherits_from_value_error() -> None:
     err = MetadataError("some message", cause="parse")
     assert isinstance(err, ValueError)
     assert err.cause == "parse"
+
+
+# ---------------------------------------------------------------------------
+# I-20: SizeCapExceededError and SizeCapProbeError map to MetadataError(cause="io")
+# ---------------------------------------------------------------------------
+
+
+def test_size_cap_exceeded_raises_metadata_error_not_value_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SizeCapExceededError from check_size_cap must be wrapped in MetadataError(cause='io'),
+    not a plain ValueError.
+
+    I-20 fix: the except clause in _read_file was changed from
+    ``raise ValueError(str(exc))`` to ``raise MetadataError(str(exc), cause='io')``.
+    """
+    from recotem._size_cap import SizeCapExceededError
+    from recotem.metadata import loader as loader_mod
+    from recotem.metadata.loader import MetadataError
+
+    def _raise_size_cap_exceeded(path, cap, *, label):
+        raise SizeCapExceededError(
+            f"file '{path}' exceeds {cap} RECOTEM_MAX_DOWNLOAD_BYTES"
+        )
+
+    monkeypatch.setattr(loader_mod, "check_size_cap", _raise_size_cap_exceeded)
+
+    csv_file = _write_csv(tmp_path, "item_id,title\ni1,Foo\n")
+
+    with pytest.raises(MetadataError) as exc_info:
+        load_item_metadata(_Config("csv", str(csv_file)), fields=["title"])
+
+    assert exc_info.value.cause == "io", (
+        f"SizeCapExceededError must map to MetadataError(cause='io'), "
+        f"got cause={exc_info.value.cause!r}"
+    )
+    assert "RECOTEM_MAX_DOWNLOAD_BYTES" in str(exc_info.value), (
+        "MetadataError message must include RECOTEM_MAX_DOWNLOAD_BYTES"
+    )
+
+
+def test_size_cap_probe_error_raises_metadata_error_io_cause(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SizeCapProbeError from check_size_cap must be wrapped in MetadataError(cause='io').
+
+    I-20 fix: a new except clause was added to catch SizeCapProbeError and
+    re-raise as MetadataError so callers receive a consistent error type.
+    """
+    from recotem._size_cap import SizeCapProbeError
+    from recotem.metadata import loader as loader_mod
+    from recotem.metadata.loader import MetadataError
+
+    def _raise_size_cap_probe(path, cap, *, label):
+        raise SizeCapProbeError(f"probe failed for '{path}'")
+
+    monkeypatch.setattr(loader_mod, "check_size_cap", _raise_size_cap_probe)
+
+    csv_file = _write_csv(tmp_path, "item_id,title\ni1,Foo\n")
+
+    with pytest.raises(MetadataError) as exc_info:
+        load_item_metadata(_Config("csv", str(csv_file)), fields=["title"])
+
+    assert exc_info.value.cause == "io", (
+        f"SizeCapProbeError must map to MetadataError(cause='io'), "
+        f"got cause={exc_info.value.cause!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C-1: non-sha256 metadata path byte cap enforced via fh.read(cap+1)
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_no_sha256_over_byte_cap_rejected(tmp_path: Path, monkeypatch) -> None:
+    """Metadata CSV without sha256 that exceeds the cap must raise MetadataError.
+
+    C-1 fix for metadata: the non-sha256 path now uses fh.read(cap+1) + _parse_bytes
+    instead of passing the path to pd.read_csv directly, ensuring the byte cap is
+    enforced even when check_size_cap (stat-based) is unavailable.
+    """
+    from recotem.metadata import loader as loader_mod
+    from recotem.metadata.loader import MetadataError
+
+    csv_file = _write_csv(
+        tmp_path,
+        "item_id,title\n" + "i1,Alpha\n" * 200,
+        "big_nosig.csv",
+    )
+
+    # Make stat-based check silent and set a tiny cap.
+    monkeypatch.setattr(loader_mod, "check_size_cap", lambda *_a, **_kw: None)
+    monkeypatch.setattr(loader_mod, "get_max_download_bytes", lambda: 64)
+
+    with pytest.raises(MetadataError) as exc_info:
+        load_item_metadata(_Config("csv", str(csv_file)), fields=["title"])
+
+    assert "RECOTEM_MAX_DOWNLOAD_BYTES" in str(exc_info.value), (
+        "MetadataError message must mention RECOTEM_MAX_DOWNLOAD_BYTES"
+    )
+    assert exc_info.value.cause == "io"

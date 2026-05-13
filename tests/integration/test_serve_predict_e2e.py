@@ -152,8 +152,14 @@ def test_serve_health_endpoint_ok_with_loaded_model() -> None:
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
-    assert "healthy_recipe" in data["recipes"]
-    assert data["recipes"]["healthy_recipe"]["loaded"] is True
+    assert data["total"] == 1
+    assert data["loaded"] == 1
+
+    details_resp = client.get("/health/details")
+    assert details_resp.status_code == 200
+    details = details_resp.json()
+    assert "healthy_recipe" in details["recipes"]
+    assert details["recipes"]["healthy_recipe"]["loaded"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -397,25 +403,35 @@ def test_broken_yaml_does_not_abort_serve_other_recipes_still_serve(
     assert health_resp.status_code == 503
     body = health_resp.json()
     assert body["status"] == "degraded"
+    assert body["loaded"] == 0
+    assert body["total"] == 2
+
+    # Per-recipe detail moved to /health/details (auth-gated path).
+    # In this test, insecure_no_auth=True, so /health/details is reachable
+    # without API keys.
+    details_resp = client.get("/health/details")
+    assert details_resp.status_code == 503
+    details = details_resp.json()
 
     # Broken recipe must appear with loaded=false and error info.
-    assert "broken_recipe" in body["recipes"], (
-        f"broken_recipe must appear in /health; got: {list(body['recipes'].keys())}"
+    assert "broken_recipe" in details["recipes"], (
+        f"broken_recipe must appear in /health/details; "
+        f"got: {list(details['recipes'].keys())}"
     )
-    broken_entry = body["recipes"]["broken_recipe"]
+    broken_entry = details["recipes"]["broken_recipe"]
     assert broken_entry["loaded"] is False, (
         f"broken YAML recipe must have loaded=false; got {broken_entry!r}"
     )
     assert broken_entry.get("error"), (
-        "broken YAML recipe must have an error string in /health"
+        "broken YAML recipe must have an error string in /health/details"
     )
     assert "YAML parse failed" in (broken_entry.get("error") or ""), (
         f"error must mention YAML parse failed; got {broken_entry.get('error')!r}"
     )
 
     # Good recipe must also appear (as missing-artifact stub)
-    assert "good_recipe" in body["recipes"], (
-        "good_recipe must appear in /health even when artifact is missing"
+    assert "good_recipe" in details["recipes"], (
+        "good_recipe must appear in /health/details even when artifact is missing"
     )
 
     # /predict for the broken recipe must return 503

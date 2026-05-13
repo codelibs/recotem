@@ -8,6 +8,7 @@ from recotem.recipe.models import (
     SchemaConfig,
     SplitConfig,
     TrainingConfig,
+    validate_for_filesystem,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "TrainingConfig",
     "load_recipe",
     "load_recipes_directory",
+    "validate_for_filesystem",
 ]

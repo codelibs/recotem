@@ -159,7 +159,6 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
   depends on the other. Exception: `cli.py` imports from both sides, but all
   sub-package imports there are **function-local deferred imports** (inside each
   command function body), so neither sub-package is loaded at module import time.
-  See [docs/adr/0002-module-boundary.md](docs/adr/0002-module-boundary.md).
 - The IPython stub required by irspack's transitive
   `fastprogress -> IPython.display` is installed idempotently by both
   `recotem.training._compat` (for training-package callers) and

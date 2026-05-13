@@ -394,8 +394,6 @@ Full list of environment variables recognised by Recotem. Variables marked `serv
 
 > **Note on `signing_key_status` in logs.** The `security.posture` log line emitted at every `recotem serve` startup includes a `signing_key_status` field: `configured` (keys present), `dev_allow_unsigned` (no keys, dev-unsigned mode), or `missing` (keys absent; startup will fail). Use this in SIEM rules to alert on misconfigured deployments.
 
-See [ADR 0001](adr/0001-artifact-format-versioning.md) for the artifact format version strategy and compatibility rules.
-
 ---
 
 ## SLOs

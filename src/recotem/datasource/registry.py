@@ -30,6 +30,7 @@ _FALLBACK_BUILTINS: dict[str, str] = {
     "csv": "recotem.datasource.csv:CSVSource",
     "parquet": "recotem.datasource.csv:ParquetSource",
     "bigquery": "recotem.datasource.bigquery:BigQuerySource",
+    "sql": "recotem.datasource.sql:SQLSource",
 }
 
 
@@ -61,6 +62,23 @@ def get_source_types() -> dict[str, type]:
     for ep in discovered:
         try:
             cls = ep.load()
+        except ModuleNotFoundError as exc:
+            # Builtin optional sources (e.g. sql, bigquery) may not have
+            # their extras installed.  Skip them gracefully so other sources
+            # remain available.  Third-party plugins (non-recotem modules)
+            # are treated as fatal: a misconfigured external plugin should
+            # fail loudly rather than silently disappear.
+            if ep.value.startswith("recotem.datasource."):
+                logger.debug(
+                    "datasource_plugin_skipped",
+                    ep_name=ep.name,
+                    ep_value=ep.value,
+                    reason=str(exc),
+                )
+                continue
+            raise DataSourceError(
+                f"Failed to load DataSource plugin '{ep.name}' from '{ep.value}': {exc}"
+            ) from exc
         except Exception as exc:
             raise DataSourceError(
                 f"Failed to load DataSource plugin '{ep.name}' from '{ep.value}': {exc}"
@@ -101,6 +119,15 @@ def get_source_types() -> dict[str, type]:
         for type_name, fqcn in _FALLBACK_BUILTINS.items():
             try:
                 cls = _load_class(fqcn)
+            except ModuleNotFoundError as exc:
+                # Optional extras may not be installed; skip gracefully.
+                logger.debug(
+                    "datasource_builtin_skipped",
+                    type_name=type_name,
+                    fqcn=fqcn,
+                    reason=str(exc),
+                )
+                continue
             except Exception as exc:
                 raise DataSourceError(
                     f"Failed to load builtin DataSource '{type_name}' "

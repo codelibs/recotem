@@ -607,3 +607,47 @@ def test_apply_auth_posture_does_not_force_when_api_keys_set() -> None:
     assert cfg.host == "0.0.0.0", (
         "apply_auth_posture must not force loopback when api_keys are configured"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 2.2: RECOTEM_MAX_SQL_ROWS and RECOTEM_SQL_ALLOW_PRIVATE
+# ---------------------------------------------------------------------------
+
+
+def test_max_sql_rows_default(monkeypatch) -> None:
+    monkeypatch.delenv("RECOTEM_MAX_SQL_ROWS", raising=False)
+    from recotem.config import get_max_sql_rows
+
+    assert get_max_sql_rows() == 50_000_000
+
+
+def test_max_sql_rows_clamps_low(monkeypatch) -> None:
+    monkeypatch.setenv("RECOTEM_MAX_SQL_ROWS", "10")
+    from recotem.config import get_max_sql_rows
+
+    assert get_max_sql_rows() == 1_000
+
+
+def test_max_sql_rows_clamps_high(monkeypatch) -> None:
+    monkeypatch.setenv("RECOTEM_MAX_SQL_ROWS", "9999999999")
+    from recotem.config import get_max_sql_rows
+
+    assert get_max_sql_rows() == 500_000_000
+
+
+def test_sql_allow_private_default_false(monkeypatch) -> None:
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    from recotem.config import sql_allow_private
+
+    assert sql_allow_private() is False
+
+
+def test_sql_allow_private_truthy_values(monkeypatch) -> None:
+    from recotem.config import sql_allow_private
+
+    for v in ("1", "true", "TRUE", "yes", "on"):
+        monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", v)
+        assert sql_allow_private() is True
+    for v in ("0", "false", "no", "off", "", "anything-else"):
+        monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", v)
+        assert sql_allow_private() is False

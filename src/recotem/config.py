@@ -531,3 +531,33 @@ def get_lock_dir() -> str:
     :mod:`recotem.config`.
     """
     return os.environ.get("RECOTEM_LOCK_DIR", "").strip()
+
+
+# ---------------------------------------------------------------------------
+# SQL row cap (used by datasource/sql.py)
+# ---------------------------------------------------------------------------
+
+_SQL_ROW_CAP_MIN = 1_000
+_SQL_ROW_CAP_MAX = 500_000_000
+_SQL_ROW_CAP_DEFAULT = 50_000_000
+
+
+def get_max_sql_rows() -> int:
+    """Return RECOTEM_MAX_SQL_ROWS, clamped to [1 000, 500 000 000]."""
+    return _clamped_int_env(
+        "RECOTEM_MAX_SQL_ROWS",
+        _SQL_ROW_CAP_DEFAULT,
+        _SQL_ROW_CAP_MIN,
+        _SQL_ROW_CAP_MAX,
+    )
+
+
+def sql_allow_private() -> bool:
+    """Return True if SQL sources may connect to private/loopback host addresses.
+
+    Defaults to False (secure-by-default).  Set ``RECOTEM_SQL_ALLOW_PRIVATE``
+    to ``1`` / ``true`` / ``yes`` / ``on`` to allow recipes whose SQL data
+    source host resolves to RFC1918 / loopback / link-local / reserved
+    addresses.
+    """
+    return is_truthy_env(os.environ.get("RECOTEM_SQL_ALLOW_PRIVATE"))

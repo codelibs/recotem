@@ -148,3 +148,43 @@ def test_init_client_construction_failure_raises(monkeypatch) -> None:
 
     with pytest.raises(DataSourceError, match="ADC|GOOGLE_APPLICATION_CREDENTIALS"):
         GA4Source(_cfg())
+
+
+def test_probe_issues_one_request(monkeypatch) -> None:
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    fake_response = MagicMock(row_count=0, rows=[])
+    fake_client.run_report.return_value = fake_response
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    # Also stub the types module to avoid an ImportError in _build_request:
+    fake_types = MagicMock()
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", fake_types)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    src.probe()
+    assert fake_client.run_report.call_count == 1
+    call_args = fake_client.run_report.call_args
+    request = call_args.kwargs.get("request") or call_args.args[0]
+    # Constructed via fake_types.RunReportRequest(...) — verify it was called once:
+    assert fake_types.RunReportRequest.called
+
+
+def test_probe_permission_denied_raises(monkeypatch) -> None:
+    from google.api_core.exceptions import PermissionDenied
+
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    fake_client.run_report.side_effect = PermissionDenied("denied")
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    with pytest.raises(DataSourceError, match="roles/analytics.viewer|property"):
+        src.probe()

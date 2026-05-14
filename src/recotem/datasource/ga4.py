@@ -95,7 +95,77 @@ class GA4Source:
         )
 
     def probe(self) -> None:
-        raise NotImplementedError  # filled in Task 3.5
+        try:
+            from google.api_core.exceptions import GoogleAPICallError, PermissionDenied
+        except ImportError as exc:
+            raise DataSourceError("google.api_core is required for GA4Source") from exc
+
+        request = self._build_request(limit=1, offset=0)
+        try:
+            self._client.run_report(request=request, retry=self._retry_policy())
+        except PermissionDenied as exc:
+            raise DataSourceError(
+                f"GA4 access denied for property {self._config.property_id!r}; "
+                "grant the service account roles/analytics.viewer on the property."
+            ) from exc
+        except GoogleAPICallError as exc:
+            raise DataSourceError(f"GA4 probe failed: {type(exc).__name__}") from exc
+
+    def _retry_policy(self):
+        from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
+        from google.api_core.retry import Retry, if_exception_type
+
+        return Retry(
+            predicate=if_exception_type(ResourceExhausted, ServiceUnavailable),
+            initial=1.0,
+            maximum=30.0,
+            multiplier=2.0,
+            deadline=float(self._config.api_timeout_seconds),
+        )
+
+    def _build_request(self, *, limit: int, offset: int):
+        from google.analytics.data_v1beta.types import (
+            DateRange,
+            Dimension,
+            Filter,
+            FilterExpression,
+            Metric,
+            RunReportRequest,
+        )
+
+        start, end = self._date_range()
+        return RunReportRequest(
+            property=f"properties/{self._config.property_id}",
+            dimensions=[
+                Dimension(name=self._config.user_dimension),
+                Dimension(name=self._config.item_dimension),
+                Dimension(name=self._config.time_dimension),
+                Dimension(name="eventName"),
+            ],
+            metrics=[Metric(name="eventCount")],
+            date_ranges=[DateRange(start_date=start, end_date=end)],
+            dimension_filter=FilterExpression(
+                filter=Filter(
+                    field_name="eventName",
+                    in_list_filter=Filter.InListFilter(
+                        values=list(self._config.event_names)
+                    ),
+                )
+            ),
+            limit=limit,
+            offset=offset,
+            return_property_quota=True,
+        )
+
+    def _date_range(self) -> tuple[str, str]:
+        if self._config.lookback_days is not None:
+            return (f"{self._config.lookback_days}daysAgo", "yesterday")
+        assert self._config.start_date is not None
+        assert self._config.end_date is not None
+        return (
+            self._config.start_date.isoformat(),
+            self._config.end_date.isoformat(),
+        )
 
     def fetch(self, ctx: FetchContext) -> pd.DataFrame:
         raise NotImplementedError  # filled in Task 3.6

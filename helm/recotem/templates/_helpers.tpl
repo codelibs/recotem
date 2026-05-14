@@ -22,24 +22,26 @@ Create a default fully qualified app name.
 {{- end }}
 
 {{/*
-Create chart name and version as used by the chart label.
+Chart label.
 */}}
 {{- define "recotem.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
-Common labels
+Common labels.
 */}}
 {{- define "recotem.labels" -}}
 helm.sh/chart: {{ include "recotem.chart" . }}
 {{ include "recotem.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
-Selector labels
+Selector labels.
 */}}
 {{- define "recotem.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "recotem.name" . }}
@@ -47,75 +49,19 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Backend selector labels
+ServiceAccount name.
 */}}
-{{- define "recotem.backendSelectorLabels" -}}
-{{ include "recotem.selectorLabels" . }}
-app.kubernetes.io/component: backend
-{{- end }}
-
-{{/*
-Worker selector labels
-*/}}
-{{- define "recotem.workerSelectorLabels" -}}
-{{ include "recotem.selectorLabels" . }}
-app.kubernetes.io/component: worker
-{{- end }}
-
-{{/*
-Proxy selector labels
-*/}}
-{{- define "recotem.proxySelectorLabels" -}}
-{{ include "recotem.selectorLabels" . }}
-app.kubernetes.io/component: proxy
-{{- end }}
-
-{{/*
-Inference selector labels
-*/}}
-{{- define "recotem.inferenceSelectorLabels" -}}
-{{ include "recotem.selectorLabels" . }}
-app.kubernetes.io/component: inference
-{{- end }}
-
-{{/*
-Beat selector labels
-*/}}
-{{- define "recotem.beatSelectorLabels" -}}
-{{ include "recotem.selectorLabels" . }}
-app.kubernetes.io/component: beat
-{{- end }}
-
-{{/*
-Database URL: external or in-cluster
-*/}}
-{{- define "recotem.databaseUrl" -}}
-{{- if .Values.postgresql.external }}
-{{- .Values.secrets.databaseUrl }}
+{{- define "recotem.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "recotem.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
-{{- printf "postgresql://%s@%s-postgresql:%d/%s" .Values.postgresql.username (include "recotem.fullname" .) (.Values.postgresql.port | int) .Values.postgresql.database }}
+{{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
 
 {{/*
-Redis host
+Image reference.
 */}}
-{{- define "recotem.redisHost" -}}
-{{- if .Values.redis.external }}
-{{- .Values.redis.host }}
-{{- else }}
-{{- printf "%s-redis" (include "recotem.fullname" .) }}
-{{- end }}
-{{- end }}
-
-{{/*
-Image pull secrets
-*/}}
-{{- define "recotem.imagePullSecrets" -}}
-{{- with .Values.image.pullSecrets }}
-imagePullSecrets:
-{{- range . }}
-  - name: {{ . }}
-{{- end }}
-{{- end }}
+{{- define "recotem.image" -}}
+{{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) }}
 {{- end }}

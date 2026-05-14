@@ -1,0 +1,29 @@
+[project]
+name = "recotem-echo-source"
+version = "0.1.0"
+description = "Example third-party DataSource plugin for Recotem — returns a static DataFrame."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Example Author", email = "author@example.com" }]
+
+dependencies = [
+    "recotem>=2.0,<3",
+    "pandas>=2.2,<4",
+]
+
+# ── entry point declaration ────────────────────────────────────────────────────
+# This is the key declaration that makes recotem discover EchoSource.
+# Group: "recotem.datasources"
+# Key:   a registry/log identifier (appears in logs and error messages; does
+#        NOT determine the recipe discriminator — that comes from type_name)
+# Value: "<module>:<class>"  (the class's type_name attribute sets source.type:)
+[project.entry-points."recotem.datasources"]
+echo = "recotem_echo:EchoSource"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/recotem_echo"]

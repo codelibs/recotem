@@ -1,0 +1,112 @@
+# examples/k8s/cronjob.yaml
+#
+# Standalone Kubernetes CronJob for daily training.
+# References the helm-installed serve Deployment's shared artifacts PVC.
+#
+# This is a standalone example; for a Helm-managed CronJob, enable
+# .Values.train.enabled=true in the recotem Helm chart instead.
+#
+# Usage:
+#   kubectl apply -f examples/k8s/cronjob.yaml
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: recotem-train
+  namespace: recotem
+  labels:
+    app.kubernetes.io/name: recotem
+    app.kubernetes.io/component: train
+spec:
+  # Daily at 02:00 UTC.
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # Hard deadline: 2 hours per training run.
+      activeDeadlineSeconds: 7200
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: recotem
+            app.kubernetes.io/component: train
+        spec:
+          serviceAccountName: recotem
+          restartPolicy: OnFailure
+          # Pod-level security context — only fields valid at this scope.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            # fsGroup ensures mounted PVC files are owned by GID 1000 (appuser),
+            # matching the Dockerfile USER.  Without this, PVC data may be
+            # inaccessible when the volume's on-disk owner differs from runAsUser.
+            fsGroup: 1000
+
+          containers:
+            - name: train
+              image: ghcr.io/codelibs/recotem:2.0.0a0
+              imagePullPolicy: IfNotPresent
+              # Container-level security context — fields like
+              # allowPrivilegeEscalation / readOnlyRootFilesystem are only
+              # valid here, not under spec.securityContext.
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              # Train all recipes in /recipes.
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  for recipe in /recipes/*.yaml; do
+                    [ -f "$recipe" ] || continue
+                    recotem train "$recipe"
+                  done
+              env:
+                - name: RECOTEM_LOG_FORMAT
+                  value: "json"
+                - name: RECOTEM_SIGNING_KEYS
+                  valueFrom:
+                    secretKeyRef:
+                      name: recotem-auth
+                      key: RECOTEM_SIGNING_KEYS
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 2Gi
+                limits:
+                  cpu: "4"
+                  memory: 8Gi
+              volumeMounts:
+                - name: recipes
+                  mountPath: /recipes
+                  readOnly: true
+                - name: artifacts
+                  mountPath: /artifacts
+                  readOnly: false
+                - name: tmp
+                  mountPath: /tmp
+                # /workspace is the Dockerfile WORKDIR and the process cwd.
+                # readOnlyRootFilesystem=true forbids writes to the container root
+                # filesystem, so this emptyDir provides a writable cwd for lock
+                # files and any tooling that creates temp files relative to cwd.
+                - name: workspace
+                  mountPath: /workspace
+
+          volumes:
+            - name: recipes
+              configMap:
+                name: recotem-recipes
+            - name: artifacts
+              persistentVolumeClaim:
+                claimName: recotem-artifacts
+            - name: tmp
+              emptyDir: {}
+            - name: workspace
+              emptyDir: {}

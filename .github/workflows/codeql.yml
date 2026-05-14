@@ -1,33 +1,40 @@
-name: CodeQL Analysis
+name: recotem / codeql
+
+# CodeQL analysis — Python only.
+# Runs on push to main, PRs targeting main, and weekly schedule.
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
   schedule:
-    - cron: '0 6 * * 1'
+    # Weekly scan every Monday at 07:00 UTC.
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
 
 jobs:
   analyze:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-    strategy:
-      fail-fast: false
-      matrix:
-        language: ['python', 'javascript-typescript']
+    name: analyze (python)
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
-          languages: ${{ matrix.language }}
+          languages: python
+          # Use the default query suite; add security-extended for broader coverage.
+          queries: security-extended
+
       - name: Autobuild
         uses: github/codeql-action/autobuild@v4
+
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
         with:
-          category: "/language:${{ matrix.language }}"
+          category: "/language:python"

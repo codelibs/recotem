@@ -1,186 +1,157 @@
 # Recotem
 
-Recotem is an open-source recommendation system platform. Build, tune, train, deploy, and monitor recommendation models — all from a web UI or REST API.
+[![PyPI](https://img.shields.io/pypi/v/recotem.svg)](https://pypi.org/project/recotem/)
+[![Python](https://img.shields.io/pypi/pyversions/recotem.svg)](https://pypi.org/project/recotem/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![CI](https://github.com/codelibs/recotem/actions/workflows/test.yml/badge.svg)](https://github.com/codelibs/recotem/actions/workflows/test.yml)
 
-Recotem is licensed under Apache 2.0.
+Recipe-driven recommender training and serving, built on
+[irspack](https://github.com/tohtsky/irspack). One YAML recipe describes
+where the data lives, how to train, and where to write the result —
+`recotem train` produces a signed binary artifact, `recotem serve`
+mounts it as a `/predict/{name}` HTTP endpoint and hot-swaps when a new
+artifact appears. No database, no message broker, no admin UI.
+
+## Why Recotem
+
+Most recommender stacks pull in a service mesh of databases, queues, and
+control planes before you can train your first model. Recotem keeps the
+moving parts to a recipe file and a binary artifact:
+
+- **Single binary, two commands.** `recotem train` runs as a batch job;
+  `recotem serve` runs as a long-lived FastAPI process. They share
+  nothing but the artifact file on disk (or object storage).
+- **Reproducible by construction.** Recipes are versioned with your
+  code; artifacts are HMAC-signed with a SHA-checked header you can
+  inspect without loading the model.
+- **Hot-swap, no restart.** The serving process watches the artifact
+  directory and atomically swaps the in-memory model when training
+  emits a new file.
+- **Bring-your-own scheduler.** `recotem train` is a normal process —
+  drive it from cron, Airflow, a Kubernetes CronJob, or anything else.
 
 ## Features
 
-- **Hyperparameter Tuning** — Automated search using Optuna + irspack with real-time progress via WebSocket
-- **Model Training** — Train recommendation models from uploaded interaction data with HMAC-signed serialization
-- **Inference API** — Low-latency FastAPI service for real-time recommendations with hot-swap model loading
-- **API Key Authentication** — Project-scoped API keys with granular permissions (`read`, `write`, `predict`)
-- **Scheduled Retraining** — Cron-based automatic retraining with django-celery-beat
-- **A/B Testing** — Weighted traffic splitting across deployment slots with statistical analysis
+- Recipe-driven: 1 YAML = 1 model = 1 `/predict/{name}` endpoint
+- Hyperparameter search across irspack algorithms via Optuna
+- Pluggable data sources (built-in: CSV / Parquet / BigQuery; extend via Python entry points)
+- HMAC-signed artifacts with multi-key rotation and a deterministic
+  FQCN allow-list at deserialization time
+- API-key authentication (`X-API-Key`); keys hashed at rest
+- fsspec paths everywhere — local, S3, GCS, HTTPS, anything fsspec speaks
+- Optional Prometheus metrics endpoint, structured JSON logs with
+  built-in secret redaction
+
+## Install
+
+```bash
+pip install recotem                 # core
+pip install "recotem[bigquery]"     # BigQuery data source
+pip install "recotem[metrics]"      # Prometheus metrics endpoint
+```
+
+Requires Python 3.12+. A multi-arch Docker image is published to
+`ghcr.io/codelibs/recotem`.
+
+## Quickstart
+
+The repository ships with a self-contained example at
+[`examples/quickstart/`](examples/quickstart/) — recipe, dataset, and
+artifact directory all in one place. Train a TopPop recommender from a
+60-user CSV in under a minute.
+
+```bash
+# 1. Generate keys (once per machine). Copy the values into the exports below.
+recotem keygen --type signing --kid dev
+recotem keygen --type api     --kid dev
+
+export RECOTEM_SIGNING_KEYS="dev:<signing-plaintext>"   # used by train + serve
+export RECOTEM_API_KEYS="dev:sha256:<api-hash>"         # used by serve
+export RECOTEM_API_PLAINTEXT="<api-plaintext>"          # used by curl below
+
+# 2. Train, serve
+recotem train examples/quickstart/recipe.yaml
+recotem serve --recipes examples/quickstart/ &
+
+# Wait for the server to become ready before sending traffic.
+until curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health | grep -q "200"; do sleep 1; done
+
+# 3. Predict
+curl -X POST http://localhost:8080/predict/top_picks \
+  -H "X-API-Key: $RECOTEM_API_PLAINTEXT" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "u01", "cutoff": 5}'
+```
+
+```json
+{
+  "items": [{"item_id": "i00", "score": 0.91}],
+  "model": {"recipe": "top_picks", "trained_at": "...",
+            "best_class": "TopPopRecommender", "kid": "dev"},
+  "request_id": "..."
+}
+```
+
+The recipe itself is 11 lines — every other field has a sensible default.
+See [`examples/quickstart/recipe.yaml`](examples/quickstart/recipe.yaml)
+for the source of truth and
+[docs/recipe-reference.md](docs/recipe-reference.md) for the full schema.
+
+### Which env var is needed where?
+
+| Variable | Required by | Purpose |
+|---|---|---|
+| `RECOTEM_SIGNING_KEYS` | `train` and `serve` | HMAC sign / verify artifact files (server keeps plaintext; needed for both sides) |
+| `RECOTEM_API_KEYS` | `serve` | Authenticate `/predict` callers (server keeps **hash** only) |
+| `X-API-Key: <plaintext>` | HTTP clients | Sent by clients on every `/predict` call; server re-hashes and compares |
+
+Both variables accept multiple comma-separated entries (`kid:value,kid2:value,…`)
+to enable zero-downtime key rotation — that is why they are pluralised.
 
 ## Architecture
 
 ```
-                    ┌──────────────────┐
-                    │  Clients         │
-                    │  (Browser / API) │
-                    └────────┬─────────┘
-                             │ X-API-Key or JWT
-                    ┌────────▼─────────┐
-                    │  nginx (proxy)   │ :8000
-                    └──┬─────┬─────┬───┘
-                       │     │     │
-         /api/ /ws/    │     │     │  /inference/
-         /admin/       │     │     │
-            ┌──────────▼┐  ┌▼─────▼──────────┐
-            │  Backend  │  │  Inference       │
-            │  Django 5 │  │  FastAPI         │
-            │  (daphne) │  │  :8081           │
-            └──┬────┬───┘  └──┬────┬─────────┘
-               │    │         │    │ read-only
-          ┌────▼┐  ┌▼────┐   │  ┌─▼──────────┐
-          │Redis│  │Celery│   │  │ PostgreSQL  │
-          │     │  │Worker│   │  │ :5432       │
-          │db0-3│  └──────┘   │  └─────────────┘
-          └──┬──┘             │
-             │    ┌───────────┘
-          ┌──▼────▼──┐
-          │  Celery  │
-          │  Beat    │
-          └──────────┘
-
-Redis databases:
-  db0 = Celery broker    db2 = Django cache
-  db1 = Channels (WS)    db3 = Model event Pub/Sub
+┌────────────────────────────────────────────────────────────────────────┐
+│                  recotem (single Python package)                       │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│   recipe.yaml ──▶ recotem train ──▶ artifact.recotem ──▶ recotem serve │
+│                   (batch job)        (HMAC-signed)        (FastAPI,    │
+│                                                            hot-swap)   │
+│                                                                        │
+│   any scheduler          local FS, S3,             POST /predict/{name}│
+│   (cron / k8s / …)       GCS, fsspec               X-API-Key auth      │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-**7 services**: PostgreSQL, Redis, Backend (Django), Worker (Celery), Beat (Celery Beat), Inference (FastAPI), Proxy (nginx + SPA)
-
-## Quick Start
-
-### Docker Compose
-
-```bash
-docker compose up
-```
-
-The app is available at `http://localhost:8000`. Default admin credentials are configured via environment variables.
-
-> **Production:** Copy `envs/.env.example` to `envs/production.env` and change all `CHANGE_ME_*` values before deploying.
-
-### Pre-built Images
-
-1. Visit the [latest release](https://github.com/codelibs/recotem/releases/latest)
-2. Download "Docker resources to try out" from Assets
-3. Unzip and run `docker compose up`
-
-## Usage Workflow
-
-1. **Create a Project** — Define user/item/time column names
-2. **Upload Training Data** — CSV file with interaction records
-3. **Tune Hyperparameters** — Run Optuna-based search across irspack algorithms
-4. **Train a Model** — Use the best configuration (auto or manual)
-5. **Create an API Key** — Generate a `rctm_`-prefixed key with `predict` scope
-6. **Deploy to Inference** — Create a deployment slot pointing to a trained model
-7. **Get Recommendations** — Call the inference API with your API key
-
-```bash
-# Example: get recommendations
-curl -X POST http://localhost:8000/inference/predict/project/1 \
-  -H "X-API-Key: rctm_your_api_key_here" \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "42", "cutoff": 10}'
-```
-
-## Development
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full developer guide.
-
-### Prerequisites
-
-- Python 3.12+, [uv](https://docs.astral.sh/uv/)
-- Node.js 22+
-- Docker and Docker Compose
-
-### Quick Setup
-
-```bash
-# Infrastructure (PostgreSQL + Redis)
-docker compose -f compose-dev.yaml up -d
-
-# Backend
-cd backend && uv sync
-cd recotem
-uv run python manage.py migrate
-uv run python manage.py createsuperuser
-uv run daphne recotem.asgi:application -b 0.0.0.0 -p 8000
-
-# Celery worker (separate terminal)
-cd backend/recotem
-uv run celery -A recotem worker --loglevel=INFO
-
-# Celery beat (separate terminal)
-cd backend/recotem
-uv run celery -A recotem beat --loglevel=INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler
-
-# Frontend (separate terminal)
-cd frontend && npm install && npm run dev
-```
-
-### Testing
-
-```bash
-# Backend
-cd backend && uv run pytest recotem/tests/ -v
-
-# Frontend
-cd frontend && npm run test:unit      # Vitest
-cd frontend && npm run test:e2e       # Playwright
-cd frontend && npm run type-check     # vue-tsc
-```
+`train` and `serve` communicate **only via signed artifact files**. They
+can run on different machines; the watcher swaps models per recipe based
+on file mtime.
 
 ## Documentation
 
-### User Guide
+- [Getting started](docs/getting-started.md) — Docker Compose / pip walkthrough end-to-end
+- [Recipe reference](docs/recipe-reference.md) — every field documented
+- [Operations](docs/operations.md) — key rotation, sizing, troubleshooting
+- [Security](docs/security.md) — threat model, IAM scopes, secrets handling
+- [Plugin authoring](docs/plugin-authoring.md) — write a custom data source
+- [Documentation index](docs/README.md)
 
-| Topic | Link |
-|-------|------|
-| Getting Started | [docs/guide/getting-started.md](docs/guide/getting-started.md) |
-| Projects | [docs/guide/projects.md](docs/guide/projects.md) |
-| Data Management | [docs/guide/data-management.md](docs/guide/data-management.md) |
-| Hyperparameter Tuning | [docs/guide/tuning.md](docs/guide/tuning.md) |
-| Model Training | [docs/guide/training.md](docs/guide/training.md) |
-| API Keys | [docs/guide/api-keys.md](docs/guide/api-keys.md) |
-| Inference API | [docs/guide/inference.md](docs/guide/inference.md) |
-| Deployment Slots | [docs/guide/deployment-slots.md](docs/guide/deployment-slots.md) |
-| A/B Testing | [docs/guide/ab-testing.md](docs/guide/ab-testing.md) |
-| Scheduled Retraining | [docs/guide/retraining.md](docs/guide/retraining.md) |
-| User Management | [docs/guide/user-management.md](docs/guide/user-management.md) |
+## Contributing
 
-### Specification
+Issues and pull requests welcome. Development uses
+[uv](https://docs.astral.sh/uv/) for dependency management:
 
-| Topic | Link |
-|-------|------|
-| Architecture | [docs/specification/architecture.md](docs/specification/architecture.md) |
-| Data Model | [docs/specification/data-model.md](docs/specification/data-model.md) |
-| API Reference | [docs/specification/api-reference.md](docs/specification/api-reference.md) |
-| WebSocket Protocol | [docs/specification/websocket-protocol.md](docs/specification/websocket-protocol.md) |
-| Security Design | [docs/specification/security-design.md](docs/specification/security-design.md) |
-| Inference Service | [docs/specification/inference-service.md](docs/specification/inference-service.md) |
-| Task System | [docs/specification/task-system.md](docs/specification/task-system.md) |
+```bash
+uv sync --all-extras
+uv run pytest tests
+uv run ruff check src tests
+```
 
-### Deployment
+See `CLAUDE.md` (or the project guidelines therein) for the full
+contributor workflow.
 
-| Topic | Link |
-|-------|------|
-| Docker Compose | [docs/deployment/docker-compose.md](docs/deployment/docker-compose.md) |
-| Kubernetes | [docs/deployment/kubernetes.md](docs/deployment/kubernetes.md) |
-| AWS | [docs/deployment/aws.md](docs/deployment/aws.md) |
-| GCP | [docs/deployment/gcp.md](docs/deployment/gcp.md) |
-| Environment Variables | [docs/deployment/environment-variables.md](docs/deployment/environment-variables.md) |
-| Standalone Inference | [docs/deployment/standalone-inference.md](docs/deployment/standalone-inference.md) |
-| Separate Frontend | [docs/deployment/separate-frontend.md](docs/deployment/separate-frontend.md) |
-| Management Commands | [docs/deployment/management-commands.md](docs/deployment/management-commands.md) |
-| Contributing | [CONTRIBUTING.md](CONTRIBUTING.md) |
+## License
 
-## Links
-
-- Website: [recotem.org](https://recotem.org)
-- CLI tool: [recotem-cli](https://github.com/codelibs/recotem-cli)
-- Batch on ECS: [recotem-batch-example](https://github.com/codelibs/recotem-batch-example)
-- Issues / Questions: [discuss.codelibs.org](https://discuss.codelibs.org/c/recotemen/11)
+[Apache License 2.0](LICENSE).

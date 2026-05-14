@@ -1,53 +1,22 @@
-{{- if .Values.podDisruptionBudget.enabled }}
+{{- if .Values.pdb.enabled -}}
+{{- if and .Values.pdb.minAvailable .Values.pdb.maxUnavailable -}}
+{{- fail "pdb.minAvailable and pdb.maxUnavailable are mutually exclusive — set only one (see values.yaml comment)" -}}
+{{- end -}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "recotem.fullname" . }}-backend
+  name: {{ include "recotem.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "recotem.labels" . | nindent 4 }}
-    app.kubernetes.io/component: backend
 spec:
-  minAvailable: {{ .Values.podDisruptionBudget.backend.minAvailable }}
   selector:
     matchLabels:
-      {{- include "recotem.backendSelectorLabels" . | nindent 6 }}
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: {{ include "recotem.fullname" . }}-worker
-  labels:
-    {{- include "recotem.labels" . | nindent 4 }}
-    app.kubernetes.io/component: worker
-spec:
-  minAvailable: {{ .Values.podDisruptionBudget.worker.minAvailable }}
-  selector:
-    matchLabels:
-      {{- include "recotem.workerSelectorLabels" . | nindent 6 }}
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: {{ include "recotem.fullname" . }}-proxy
-  labels:
-    {{- include "recotem.labels" . | nindent 4 }}
-    app.kubernetes.io/component: proxy
-spec:
-  minAvailable: {{ .Values.podDisruptionBudget.proxy.minAvailable }}
-  selector:
-    matchLabels:
-      {{- include "recotem.proxySelectorLabels" . | nindent 6 }}
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: {{ include "recotem.fullname" . }}-inference
-  labels:
-    {{- include "recotem.labels" . | nindent 4 }}
-    app.kubernetes.io/component: inference
-spec:
-  minAvailable: {{ .Values.podDisruptionBudget.inference.minAvailable }}
-  selector:
-    matchLabels:
-      {{- include "recotem.inferenceSelectorLabels" . | nindent 6 }}
+      {{- include "recotem.selectorLabels" . | nindent 6 }}
+  {{- if .Values.pdb.minAvailable }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- end }}
+  {{- if .Values.pdb.maxUnavailable }}
+  maxUnavailable: {{ .Values.pdb.maxUnavailable }}
+  {{- end }}
 {{- end }}

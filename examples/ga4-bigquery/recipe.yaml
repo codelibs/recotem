@@ -1,0 +1,100 @@
+# examples/ga4-bigquery/recipe.yaml
+#
+# Recipe that trains a news-article recommender from GA4 events exported to
+# BigQuery.  The query follows the GA4 BigQuery export schema:
+#   https://support.google.com/analytics/answer/7029846
+#
+# Prerequisites:
+#   pip install recotem[bigquery]
+#   gcloud auth application-default login   # or use a Service Account key via
+#                                           # GOOGLE_APPLICATION_CREDENTIALS
+#
+# Train:
+#   RECOTEM_RECIPE_GCP_PROJECT=my-gcp-project \
+#   recotem train examples/ga4-bigquery/recipe.yaml
+#
+# Environment variable expansion:
+#   Only variables with the RECOTEM_RECIPE_ prefix are expanded in recipe fields
+#   (except inside source.query and source.query_parameters).
+#   Credentials (GOOGLE_*, GCP_*, *_SECRET*) are never expanded — use ADC or
+#   Workload Identity instead.
+
+name: news_articles
+
+source:
+  # Choices: csv, parquet, bigquery (or a plugin name).
+  type: bigquery
+  # Optional: falls back to the ADC project if omitted.
+  # Use RECOTEM_RECIPE_ prefix for env expansion.
+  project: "${RECOTEM_RECIPE_GCP_PROJECT}"
+
+  # GA4 BigQuery export — standard select_content event pattern.
+  # @-parameters are BigQuery native parameters; values come from query_parameters.
+  # NOTE: env var expansion is NOT performed inside the query block.
+  #       Use BigQuery @param placeholders for runtime values.
+  query: |
+    SELECT
+      user_pseudo_id                                                    AS user_id,
+      (
+        SELECT value.int_value
+        FROM   UNNEST(event_params)
+        WHERE  key = 'article_id'
+      )                                                                 AS item_id,
+      TIMESTAMP_MICROS(event_timestamp)                                 AS ts
+    FROM
+      `analytics_123.events_*`
+    WHERE
+      _TABLE_SUFFIX BETWEEN
+        FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL @lookback_days DAY))
+        AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+      AND event_name = 'select_content'
+      -- Require at least @min_events interactions per user for signal quality.
+      AND user_pseudo_id IN (
+        SELECT user_pseudo_id
+        FROM   `analytics_123.events_*`
+        WHERE  event_name = 'select_content'
+        GROUP  BY 1
+        HAVING COUNT(*) >= @min_events
+      )
+
+  query_parameters:
+    lookback_days: 30     # int: rolling window for training data
+    min_events: 5         # int: minimum events per user to be included
+
+schema:
+  user_column: user_id
+  item_column: item_id
+  time_column: ts
+
+cleansing:
+  drop_null_ids: true      # drop rows where article_id UNNEST returned NULL
+  dedup: keep_last
+  min_rows: 1000
+  min_users: 100
+  min_items: 50
+
+training:
+  # Choices: IALS, CosineKNN, TopPop, RP3beta, DenseSLIM, TruncatedSVD, BPRFM. Optuna picks the best combination.
+  algorithms: [IALS, CosineKNN, TopPop]
+  # Choices: ndcg, map, recall, hit.
+  metric: ndcg
+  cutoff: 20
+  n_trials: 40
+  # Keys must match algorithm names listed in `algorithms` above; overrides the even split of n_trials.
+  per_algorithm_trials:
+    IALS: 24
+    CosineKNN: 12
+    TopPop: 4
+  per_trial_timeout_seconds: 600
+  timeout_seconds: 1800
+  parallelism: 1
+  split:
+    scheme: time_user
+    heldout_ratio: 0.1
+    test_user_ratio: 1.0
+    seed: 42
+
+output:
+  # Write to GCS; no local disk required on the training host.
+  path: gs://my-ml-bucket/recotem/artifacts/news_articles.recotem
+  versioning: append_sha

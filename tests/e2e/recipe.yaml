@@ -1,0 +1,17 @@
+name: e2e_test
+source:
+  type: csv
+  path: /tmp/recotem_e2e/interactions.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 2
+  split:
+    scheme: random
+    heldout_ratio: 0.1
+    seed: 42
+output:
+  path: /tmp/recotem_e2e/artifacts/e2e_test.recotem
+  versioning: always_overwrite

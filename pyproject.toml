@@ -1,0 +1,107 @@
+[project]
+name = "recotem"
+version = "2.0.0a0"
+description = "Recipe-driven recommender training and serving on irspack."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "CodeLibs, Inc.", email = "info@codelibs.co" }]
+
+dependencies = [
+    "fastapi>=0.120,<0.140",
+    # Pin starlette >=0.49.1 to fix CVE-2025-62727 (Range header DoS in
+    # FileResponse).  FastAPI <0.120 caps starlette below 0.49, so we also
+    # bump the FastAPI floor to 0.120.
+    "starlette>=0.49.1,<0.50",
+    "uvicorn[standard]>=0.30,<0.40",
+    "pydantic>=2.7,<3",
+    "typer>=0.12,<0.20",
+    "urllib3>=2.7.0",  # CVE-2026-44431, CVE-2026-44432
+    "pyyaml>=6.0,<7",
+    "structlog>=24,<26",
+    "fsspec>=2024.6,<2026",
+    "pandas>=2.2,<4",
+    "pyarrow>=15,<22",
+    "numpy>=2.1,<3",
+    "scipy>=1.11,<2",
+    "irspack==0.4.0",
+    "optuna>=4.1,<5",
+    "rich>=13,<15",
+]
+
+[project.optional-dependencies]
+bigquery = ["google-cloud-bigquery>=3.25,<4", "google-cloud-bigquery-storage>=2.25,<3", "db-dtypes>=1.2,<2"]
+s3 = ["s3fs>=2024.6,<2026"]
+gcs = ["gcsfs>=2024.6,<2026"]
+azure = ["adlfs>=2024.6,<2026"]
+metrics = ["prometheus-client>=0.20,<1"]
+
+[project.scripts]
+recotem = "recotem.cli:app"
+
+[project.entry-points."recotem.datasources"]
+csv = "recotem.datasource.csv:CSVSource"
+parquet = "recotem.datasource.csv:ParquetSource"
+bigquery = "recotem.datasource.bigquery:BigQuerySource"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/recotem"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/recotem", "README.md", "LICENSE"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.24,<2",
+    "pytest-cov>=6,<7",
+    "pytest-httpserver>=1.0,<2",
+    "hypothesis>=6.100,<8",
+    "httpx>=0.27,<1",
+    "freezegun>=1.5,<2",
+    "ruff>=0.6,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# Slow tests are excluded by default to keep local and CI runs fast.
+# Override with: uv run pytest -m slow --override-ini='addopts='
+# or:            uv run pytest --override-ini='addopts=' (runs everything)
+addopts = ["-m", "not slow"]
+markers = [
+    "slow: marks tests as slow (deselect with -m \"not slow\")",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:google.*",
+    "ignore::pydantic.warnings.PydanticDeprecatedSince20",
+    "ignore::DeprecationWarning:irspack.*",
+    "ignore::DeprecationWarning:fastprogress.*",
+    # pytest-httpserver / werkzeug sockets are closed but their FDs are
+    # surfaced as unraisable ResourceWarnings during a later test's teardown
+    # on CPython 3.12. The warning has no production analog.
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM", "TID"]
+ignore = ["E501", "SIM105", "SIM108"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = ["S101", "F841", "B007", "B011", "SIM117"]
+"src/recotem/artifact/io.py" = ["SIM117"]
+"src/recotem/training/lock.py" = ["SIM117"]
+"src/recotem/training/pipeline.py" = ["B904"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["recotem"]

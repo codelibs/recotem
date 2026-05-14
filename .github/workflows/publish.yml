@@ -1,0 +1,56 @@
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Least-privilege: read-only by default; each job adds only what it needs.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Assert tag trigger
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          case "${GITHUB_REF}" in
+            refs/tags/v*) ;;
+            *) echo "publish.yml workflow_dispatch requires a v* tag ref"; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish-pypi:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/p/recotem
+    permissions:
+      id-token: write      # Required for OIDC trusted publishing
+      attestations: write  # Required for Sigstore attestations (pypa/gh-action-pypi-publish v1.10+)
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          generate-attestations: true

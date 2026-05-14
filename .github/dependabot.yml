@@ -1,13 +1,11 @@
 version: 2
 updates:
-  - package-ecosystem: "pip"
-    directory: "/backend"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-
-  - package-ecosystem: "npm"
-    directory: "/frontend"
+  # uv ecosystem reads uv.lock and pyproject.toml.
+  # Dependabot added native uv support in 2025 (GA as of early 2025).
+  # PRs from Dependabot will update uv.lock automatically — no manual
+  # `uv lock` regeneration needed after merging.
+  - package-ecosystem: "uv"
+    directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
@@ -19,7 +17,7 @@ updates:
     open-pull-requests-limit: 5
 
   - package-ecosystem: "docker"
-    directory: "/backend"
+    directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3

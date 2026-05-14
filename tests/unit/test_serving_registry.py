@@ -1,0 +1,864 @@
+"""Unit tests for recotem.serving.registry.
+
+Tests:
+- Atomic replace
+- RLock semantics (concurrent access)
+- In-flight references stay valid
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from unittest.mock import MagicMock
+
+from recotem.serving.registry import ModelEntry, ModelRegistry
+
+
+def _make_entry(name: str, recommender: object | None = None) -> ModelEntry:
+    return ModelEntry(
+        name=name,
+        recommender=recommender or MagicMock(),
+        header={
+            "best_class": "TopPopRecommender",
+            "trained_at": "2026-01-01T00:00:00Z",
+        },
+        kid="active",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Basic CRUD
+# ---------------------------------------------------------------------------
+
+
+def test_registry_get_returns_none_for_unknown() -> None:
+    reg = ModelRegistry()
+    assert reg.get("nonexistent") is None
+
+
+def test_registry_replace_and_get() -> None:
+    reg = ModelRegistry()
+    entry = _make_entry("recipe1")
+    reg.replace("recipe1", entry)
+    assert reg.get("recipe1") is entry
+
+
+def test_registry_remove_clears_entry() -> None:
+    reg = ModelRegistry()
+    entry = _make_entry("recipe1")
+    reg.replace("recipe1", entry)
+    reg.remove("recipe1")
+    assert reg.get("recipe1") is None
+
+
+def test_registry_remove_noop_if_not_present() -> None:
+    reg = ModelRegistry()
+    reg.remove("ghost")  # should not raise
+
+
+def test_registry_list_returns_all_entries() -> None:
+    reg = ModelRegistry()
+    e1 = _make_entry("r1")
+    e2 = _make_entry("r2")
+    reg.replace("r1", e1)
+    reg.replace("r2", e2)
+    entries = reg.list()
+    assert len(entries) == 2
+
+
+def test_registry_names_sorted() -> None:
+    reg = ModelRegistry()
+    reg.replace("zzz", _make_entry("zzz"))
+    reg.replace("aaa", _make_entry("aaa"))
+    assert reg.names() == ["aaa", "zzz"]
+
+
+# ---------------------------------------------------------------------------
+# Atomic replace
+# ---------------------------------------------------------------------------
+
+
+def test_atomic_replace_old_entry_replaced() -> None:
+    reg = ModelRegistry()
+    old = _make_entry("r", recommender=MagicMock(name="old"))
+    new = _make_entry("r", recommender=MagicMock(name="new"))
+    reg.replace("r", old)
+    reg.replace("r", new)
+    assert reg.get("r") is new
+
+
+# ---------------------------------------------------------------------------
+# Concurrent access
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_replace_no_data_race() -> None:
+    """Multiple threads replacing and reading do not cause data races."""
+    reg = ModelRegistry()
+    reg.replace("shared", _make_entry("shared"))
+
+    errors = []
+
+    def _reader():
+        for _ in range(100):
+            entry = reg.get("shared")
+            if entry is None:
+                errors.append("entry is None during read")
+            time.sleep(0.0001)
+
+    def _writer():
+        for i in range(50):
+            reg.replace("shared", _make_entry("shared"))
+            time.sleep(0.0001)
+
+    threads = [threading.Thread(target=_reader) for _ in range(5)]
+    threads += [threading.Thread(target=_writer) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    assert errors == [], f"Data race detected: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# In-flight references stay valid
+# ---------------------------------------------------------------------------
+
+
+def test_in_flight_reference_stays_valid_after_replace() -> None:
+    """An existing reference to an old entry is not invalidated by replace."""
+    reg = ModelRegistry()
+    old_entry = _make_entry("r")
+    reg.replace("r", old_entry)
+
+    # Simulate in-flight: grab a reference before the swap
+    in_flight_ref = reg.get("r")
+    assert in_flight_ref is old_entry
+
+    # Swap
+    new_entry = _make_entry("r")
+    reg.replace("r", new_entry)
+
+    # The old reference is still alive and usable
+    assert in_flight_ref is old_entry
+    assert in_flight_ref.kid == "active"
+
+
+# ---------------------------------------------------------------------------
+# Health snapshot
+# ---------------------------------------------------------------------------
+
+
+def test_health_snapshot_contains_loaded_true() -> None:
+    reg = ModelRegistry()
+    entry = _make_entry("healthy_recipe")
+    reg.replace("healthy_recipe", entry)
+    snap = reg.health_snapshot()
+    assert "healthy_recipe" in snap
+    assert snap["healthy_recipe"]["loaded"] is True
+
+
+def test_health_snapshot_shows_last_load_error() -> None:
+    reg = ModelRegistry()
+    entry = _make_entry("broken")
+    entry.last_load_error = "hmac mismatch"
+    reg.replace("broken", entry)
+    snap = reg.health_snapshot()
+    assert snap["broken"].get("error") == "hmac mismatch"
+
+
+# ---------------------------------------------------------------------------
+# E1–E4: set_load_error and update_loaded_marker
+# ---------------------------------------------------------------------------
+
+
+def test_registry_set_load_error_marks_existing_entry() -> None:
+    """set_load_error sets last_load_error on an existing entry and returns True."""
+    reg = ModelRegistry()
+    entry = _make_entry("recipe_err")
+    reg.replace("recipe_err", entry)
+
+    result = reg.set_load_error("recipe_err", "hmac mismatch during hot-swap")
+
+    assert result is True
+    assert reg.get("recipe_err").last_load_error == "hmac mismatch during hot-swap"
+
+
+def test_registry_set_load_error_no_op_on_missing_entry() -> None:
+    """set_load_error returns False (no-op) when the entry does not exist."""
+    reg = ModelRegistry()
+
+    result = reg.set_load_error("nonexistent", "some error")
+
+    assert result is False
+
+
+def test_registry_set_load_error_clears_when_none() -> None:
+    """Passing None to set_load_error clears a previously-set error."""
+    reg = ModelRegistry()
+    entry = _make_entry("recipe_clr")
+    entry.last_load_error = "previous error"
+    reg.replace("recipe_clr", entry)
+
+    reg.set_load_error("recipe_clr", None)
+
+    assert reg.get("recipe_clr").last_load_error is None
+
+
+def test_registry_update_loaded_marker_writes_under_lock() -> None:
+    """update_loaded_marker is safe under concurrent read/write.
+
+    We run 100 iterations of concurrent readers and a writer to verify that
+    the marker tuple is always a valid tuple (no partial-write tearing).
+    """
+    reg = ModelRegistry()
+    entry = _make_entry("shared_marker")
+    reg.replace("shared_marker", entry)
+
+    errors: list[str] = []
+
+    def _reader() -> None:
+        for _ in range(100):
+            e = reg.get("shared_marker")
+            if e is None:
+                errors.append("entry disappeared")
+                return
+            m = e._loaded_marker
+            # A valid marker is always a 2-tuple
+            if not (isinstance(m, tuple) and len(m) == 2):
+                errors.append(f"unexpected marker type/length: {m!r}")
+            time.sleep(0.0001)
+
+    def _writer() -> None:
+        for i in range(50):
+            reg.update_loaded_marker("shared_marker", (i, f"sha{i:04d}" * 16))
+            time.sleep(0.0001)
+
+    readers = [threading.Thread(target=_reader) for _ in range(4)]
+    writer = threading.Thread(target=_writer)
+    threads = readers + [writer]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    assert errors == [], f"Concurrent marker access errors: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-11: update_loaded_marker lock contract
+# ---------------------------------------------------------------------------
+
+
+def test_update_loaded_marker_takes_lock() -> None:
+    """update_loaded_marker must execute inside the registry lock.
+
+    We verify this by replacing the registry lock with a tracked proxy that
+    records acquire/release calls, then confirm that acquire was called at
+    least once during update_loaded_marker execution.
+    """
+
+    reg = ModelRegistry()
+    entry = _make_entry("lock_test")
+    reg.replace("lock_test", entry)
+
+    acquire_count = [0]
+    original_lock = reg._lock
+
+    class _TrackedRLock:
+        """Proxy that counts acquire calls on the underlying RLock."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def acquire(self, *a, **kw):
+            acquire_count[0] += 1
+            return self._inner.acquire(*a, **kw)
+
+        def release(self):
+            self._inner.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    tracked = _TrackedRLock(original_lock)
+    reg._lock = tracked  # type: ignore[assignment]
+
+    new_marker = ("new_mtime", "abc123" * 10)
+    count_before = acquire_count[0]
+    result = reg.update_loaded_marker("lock_test", new_marker)
+
+    assert result is True
+    assert reg.get("lock_test")._loaded_marker == new_marker
+    # The lock must have been acquired at least once during update_loaded_marker
+    assert acquire_count[0] > count_before, (
+        "update_loaded_marker must acquire the registry lock; "
+        f"acquire count did not change (before={count_before}, after={acquire_count[0]})"
+    )
+
+
+def test_update_loaded_marker_returns_false_for_missing() -> None:
+    """update_loaded_marker returns False for a name not in the registry."""
+    reg = ModelRegistry()
+    result = reg.update_loaded_marker("does_not_exist", ("mtime", "sha256"))
+    assert result is False
+
+
+# ---------------------------------------------------------------------------
+# I-D: models_dict() — hmac/key not in header schema, strip removed
+# ---------------------------------------------------------------------------
+
+
+def test_models_dict_returns_all_header_fields() -> None:
+    """models_dict() must include all header fields without dropping any.
+
+    The artifact header JSON never contains 'hmac' or 'key' fields — those
+    live in separate binary regions.  After the I-D fix the misleading filter
+    is removed and all header fields pass through.
+    """
+    header = {
+        "recipe_name": "test_recipe",
+        "recipe_hash": "abc123",
+        "best_class": "TopPopRecommender",
+        "best_params": {},
+        "best_score": 0.75,
+        "metric": "ndcg",
+        "cutoff": 10,
+        "tuning": {},
+        "data_stats": {"n_users": 100, "n_items": 50, "n_interactions": 500},
+        "recotem_version": "2.0.0",
+        "irspack_version": "0.3.0",
+        "trained_at": "2026-01-01T00:00:00Z",
+    }
+    entry = ModelEntry(
+        name="test_recipe",
+        recommender=MagicMock(),
+        header=header,
+        kid="active",
+    )
+    result = entry.models_dict()
+
+    # All header keys must be present.
+    for key in header:
+        assert key in result, f"models_dict() dropped header field {key!r}"
+
+    # Mandatory additions must also be present.
+    assert result["kid"] == "active"
+    assert result["name"] == "test_recipe"
+
+
+def test_models_dict_does_not_strip_hmac_key_if_present() -> None:
+    """If a header somehow contains 'hmac' or 'key' (defensive), they are retained.
+
+    The artifact format never puts these in header_json, but a future extension
+    or test fixture might add them.  The old filter would silently drop them;
+    after the I-D fix they pass through unchanged so callers see the full dict.
+    """
+    header_with_extras = {
+        "recipe_name": "defensive_test",
+        "best_score": 0.5,
+        # These would never appear from the real artifact writer, but confirm
+        # no silent data loss occurs if they did.
+        "hmac": "should_not_be_dropped",
+        "key": "also_not_dropped",
+    }
+    entry = ModelEntry(
+        name="defensive_test",
+        recommender=MagicMock(),
+        header=header_with_extras,
+        kid="active",
+    )
+    result = entry.models_dict()
+
+    # Nothing should be silently dropped.
+    assert result.get("hmac") == "should_not_be_dropped", (
+        "models_dict() must not strip 'hmac' from header"
+    )
+    assert result.get("key") == "also_not_dropped", (
+        "models_dict() must not strip 'key' from header"
+    )
+
+
+def test_models_dict_normal_header_has_no_hmac_or_key() -> None:
+    """A normally-constructed ModelEntry header does not contain 'hmac' or 'key'.
+
+    This documents the invariant: the artifact format stores HMAC and kid in
+    binary fields, never in header_json.  Confirms the strip was genuinely dead
+    code, not a security guard against real header content.
+    """
+    # Standard header as produced by artifact/io.py.
+    standard_header = {
+        "recipe_name": "normal",
+        "best_class": "TopPopRecommender",
+        "best_score": 0.9,
+        "trained_at": "2026-01-01T00:00:00Z",
+    }
+    entry = ModelEntry(
+        name="normal",
+        recommender=MagicMock(),
+        header=standard_header,
+        kid="active",
+    )
+    result = entry.models_dict()
+
+    assert "hmac" not in standard_header, (
+        "A real artifact header must never contain an 'hmac' field"
+    )
+    assert "key" not in standard_header, (
+        "A real artifact header must never contain a 'key' field"
+    )
+    # The result is the header plus kid/name — nothing more, nothing less.
+    expected_keys = set(standard_header.keys()) | {"kid", "name"}
+    assert set(result.keys()) == expected_keys, (
+        f"models_dict() added unexpected keys: {set(result.keys()) - expected_keys}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P-1: ModelEntry carries metadata_index dict
+# ---------------------------------------------------------------------------
+
+
+def test_registry_entry_carries_metadata_index_dict() -> None:
+    """ModelEntry must accept and expose a metadata_index dict.
+
+    The metadata_index field is the pre-flattened dict[str, dict[str, Any]]
+    built by build_metadata_index at model-load time.  Verify that:
+    - ModelEntry can be constructed with metadata_index set.
+    - The field value is preserved exactly (same object identity).
+    - metadata_index defaults to None when not supplied.
+    - Both metadata_df and metadata_index can coexist (dual-carry design).
+    """
+    import pandas as pd
+
+    metadata_index = {
+        "i1": {"title": "Widget A", "category": "tools"},
+        "i2": {"title": "Widget B", "category": "garden"},
+    }
+    df = pd.DataFrame(
+        {"title": ["Widget A", "Widget B"], "category": ["tools", "garden"]},
+        index=pd.Index(["i1", "i2"], name="item_id"),
+    )
+
+    entry = ModelEntry(
+        name="recipe_with_index",
+        recommender=MagicMock(),
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="active",
+        metadata_df=df,
+        metadata_index=metadata_index,
+    )
+
+    # The index is carried as-is (same object).
+    assert entry.metadata_index is metadata_index, (
+        "ModelEntry.metadata_index must be the same object passed at construction"
+    )
+    # The DataFrame is also carried alongside the index.
+    assert entry.metadata_df is df, (
+        "ModelEntry.metadata_df must be carried alongside metadata_index"
+    )
+    # Spot-check a lookup.
+    assert entry.metadata_index["i1"]["title"] == "Widget A"
+    assert entry.metadata_index["i2"]["category"] == "garden"
+
+
+def test_registry_entry_metadata_index_defaults_to_none() -> None:
+    """ModelEntry.metadata_index must default to None when not provided."""
+    entry = ModelEntry(
+        name="no_metadata_recipe",
+        recommender=MagicMock(),
+        header={},
+        kid="active",
+    )
+    assert entry.metadata_index is None, (
+        "metadata_index must default to None when not set"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: replace_with_marker — atomic entry + marker in one lock
+# ---------------------------------------------------------------------------
+
+
+def test_replace_with_marker_sets_entry_and_marker_atomically() -> None:
+    """replace_with_marker must set the entry AND its _loaded_marker in a
+    single lock acquisition, so readers can never see a fresh recommender
+    with a stale (None, '') _loaded_marker.
+    """
+    from unittest.mock import MagicMock
+
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+
+    reg = ModelRegistry()
+    old = _make_entry("r")
+    reg.replace("r", old)
+
+    new_entry = ModelEntry(
+        name="r",
+        recommender=MagicMock(name="new_recommender"),
+        header={"best_class": "TopPop"},
+        kid="active",
+    )
+    marker = ("etag-v2", "abc123" * 10)
+
+    reg.replace_with_marker("r", new_entry, marker)
+
+    result = reg.get("r")
+    assert result is new_entry, "replace_with_marker must insert the new entry"
+    assert result._loaded_marker == marker, (
+        f"replace_with_marker must set _loaded_marker atomically; "
+        f"got {result._loaded_marker!r}"
+    )
+
+
+def test_replace_with_marker_no_stale_marker_window() -> None:
+    """Readers iterating list() after replace_with_marker must always see
+    the new entry with the new marker — never the new entry with the old marker.
+    """
+    import threading
+
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+
+    reg = ModelRegistry()
+    initial_entry = _make_entry("r")
+    initial_entry._loaded_marker = ("v1", "sha1" * 16)
+    reg.replace("r", initial_entry)
+
+    stale_marker_observed: list[bool] = []
+
+    def _reader() -> None:
+        for _ in range(200):
+            entries = reg.list()
+            for e in entries:
+                # If _loaded_marker is still the default (None, ""), the
+                # replace and the marker assignment haven't happened atomically.
+                if e._loaded_marker == (None, ""):
+                    stale_marker_observed.append(True)
+
+    new_entry = ModelEntry(
+        name="r",
+        recommender=MagicMock(name="new"),
+        header={"best_class": "TopPop"},
+        kid="active2",
+    )
+    new_marker = ("v2", "sha2" * 16)
+
+    reader_thread = threading.Thread(target=_reader)
+    reader_thread.start()
+
+    # Perform the atomic replace while reader is running
+    for _ in range(50):
+        reg.replace_with_marker("r", new_entry, new_marker)
+
+    reader_thread.join(timeout=5.0)
+
+    assert not stale_marker_observed, (
+        "replace_with_marker must be atomic: no reader should see (None, '') "
+        "marker after the call — that would indicate a non-atomic two-step update"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R-1: _loaded_count counter and loaded_count() O(1) method
+# ---------------------------------------------------------------------------
+
+
+def _make_loaded_entry(name: str) -> ModelEntry:
+    """Return an entry with loaded=True."""
+    return ModelEntry(
+        name=name,
+        recommender=MagicMock(),
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="active",
+        loaded=True,
+    )
+
+
+def _make_stub_entry(name: str) -> ModelEntry:
+    """Return an entry with loaded=False (startup load failure stub)."""
+    return ModelEntry(
+        name=name,
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+        last_load_error="initial load failed",
+    )
+
+
+def test_loaded_count_is_zero_on_empty_registry() -> None:
+    """An empty registry must report loaded_count() == 0."""
+    reg = ModelRegistry()
+    assert reg.loaded_count() == 0
+
+
+def test_loaded_count_increments_on_replace_with_loaded_entry() -> None:
+    """Replacing a missing entry with a loaded entry increments loaded_count."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+
+
+def test_loaded_count_not_incremented_by_stub_entry() -> None:
+    """Replacing a missing entry with a stub (loaded=False) does not increment."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_stub_entry("r1"))
+    assert reg.loaded_count() == 0
+
+
+def test_loaded_count_decrements_on_remove_of_loaded_entry() -> None:
+    """Removing a loaded entry decrements loaded_count."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+    reg.remove("r1")
+    assert reg.loaded_count() == 0
+
+
+def test_loaded_count_unchanged_on_remove_of_stub_entry() -> None:
+    """Removing a stub (loaded=False) entry does not change loaded_count."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_stub_entry("r1"))
+    assert reg.loaded_count() == 0
+    reg.remove("r1")
+    assert reg.loaded_count() == 0
+
+
+def test_loaded_count_unchanged_on_remove_of_missing_entry() -> None:
+    """Removing a non-existent entry (no-op) does not change loaded_count."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_loaded_entry("r1"))
+    reg.remove("ghost")  # not in registry
+    assert reg.loaded_count() == 1
+
+
+def test_loaded_count_net_change_on_swap_loaded_to_stub() -> None:
+    """Swapping a loaded entry for a stub decrements loaded_count by 1."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+    reg.replace("r1", _make_stub_entry("r1"))
+    assert reg.loaded_count() == 0
+
+
+def test_loaded_count_net_change_on_swap_stub_to_loaded() -> None:
+    """Swapping a stub for a loaded entry increments loaded_count by 1."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_stub_entry("r1"))
+    assert reg.loaded_count() == 0
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+
+
+def test_loaded_count_unchanged_on_swap_loaded_to_loaded() -> None:
+    """Replacing a loaded entry with another loaded entry keeps count constant."""
+    reg = ModelRegistry()
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+
+
+def test_loaded_count_with_replace_with_marker() -> None:
+    """replace_with_marker also maintains loaded_count correctly."""
+    reg = ModelRegistry()
+    stub = _make_stub_entry("r1")
+    reg.replace("r1", stub)
+    assert reg.loaded_count() == 0
+
+    loaded = _make_loaded_entry("r1")
+    reg.replace_with_marker("r1", loaded, ("mtime-1", "sha256-abc"))
+    assert reg.loaded_count() == 1
+
+
+def test_loaded_count_set_load_error_does_not_change_count() -> None:
+    """set_load_error annotates an entry but does not change loaded_count.
+
+    A stale-but-loaded entry that picks up a load error still counts as loaded.
+    """
+    reg = ModelRegistry()
+    reg.replace("r1", _make_loaded_entry("r1"))
+    assert reg.loaded_count() == 1
+    reg.set_load_error("r1", "hmac mismatch")
+    assert reg.loaded_count() == 1
+
+
+def test_loaded_count_matches_manual_count_across_operations() -> None:
+    """loaded_count() must match the manually-counted loaded entries after a
+    sequence of replace/remove/set_load_error/replace_with_marker operations.
+    """
+    reg = ModelRegistry()
+
+    # Insert 3 loaded and 2 stub entries.
+    reg.replace("loaded_a", _make_loaded_entry("loaded_a"))
+    reg.replace("loaded_b", _make_loaded_entry("loaded_b"))
+    reg.replace("loaded_c", _make_loaded_entry("loaded_c"))
+    reg.replace("stub_x", _make_stub_entry("stub_x"))
+    reg.replace("stub_y", _make_stub_entry("stub_y"))
+    assert reg.loaded_count() == 3
+
+    # Annotate with error — does not change loaded-ness.
+    reg.set_load_error("loaded_a", "stale artifact")
+    assert reg.loaded_count() == 3
+
+    # Swap one stub to loaded via replace_with_marker.
+    reg.replace_with_marker("stub_x", _make_loaded_entry("stub_x"), ("m", "s"))
+    assert reg.loaded_count() == 4
+
+    # Remove a loaded entry.
+    reg.remove("loaded_b")
+    assert reg.loaded_count() == 3
+
+    # Swap a loaded entry back to stub.
+    reg.replace("loaded_c", _make_stub_entry("loaded_c"))
+    assert reg.loaded_count() == 2
+
+    # Remove a stub entry — count unchanged.
+    reg.remove("stub_y")
+    assert reg.loaded_count() == 2
+
+    # Verify against manual count.
+    manual = sum(1 for e in reg.list() if e.loaded)
+    assert reg.loaded_count() == manual, (
+        f"loaded_count() {reg.loaded_count()} != manual count {manual}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R-1: health_snapshot() builds dicts OUTSIDE the lock
+# ---------------------------------------------------------------------------
+
+
+def test_health_snapshot_concurrent_mutations_no_exceptions() -> None:
+    """health_snapshot() must tolerate concurrent mutations without exceptions.
+
+    Spawn 10 threads calling health_snapshot() while 1 thread mutates entries.
+    Verify:
+    1. No exceptions are raised by any thread.
+    2. All snapshots return dicts (correct return type).
+    3. The final loaded_count matches the manually-counted loaded entries.
+
+    This exercises the two-phase lock design: snapshot the items list under
+    the lock, then build health_dict() outside — health() must not hold the
+    lock while building per-entry dicts or /predict threads would block.
+    """
+    reg = ModelRegistry()
+    for i in range(20):
+        reg.replace(f"recipe_{i}", _make_loaded_entry(f"recipe_{i}"))
+
+    errors: list[str] = []
+
+    def _snapshotter() -> None:
+        for _ in range(50):
+            try:
+                snap = reg.health_snapshot()
+                if not isinstance(snap, dict):
+                    errors.append(f"health_snapshot returned {type(snap)!r}")
+                # Each value must also be a dict.
+                for k, v in snap.items():
+                    if not isinstance(v, dict):
+                        errors.append(f"entry {k!r} health_dict is {type(v)!r}")
+            except Exception as exc:
+                errors.append(f"health_snapshot raised {type(exc).__name__}: {exc}")
+
+    def _mutator() -> None:
+        for i in range(30):
+            name = f"recipe_{i % 20}"
+            if i % 3 == 0:
+                reg.replace(name, _make_loaded_entry(name))
+            elif i % 3 == 1:
+                reg.replace(name, _make_stub_entry(name))
+            else:
+                reg.set_load_error(name, f"error-{i}")
+
+    threads = [threading.Thread(target=_snapshotter) for _ in range(10)]
+    threads.append(threading.Thread(target=_mutator))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+
+    assert errors == [], f"Concurrent health_snapshot errors: {errors}"
+
+    # Final consistency: loaded_count must match manual count.
+    final_count = reg.loaded_count()
+    manual = sum(1 for e in reg.list() if e.loaded)
+    assert final_count == manual, (
+        f"loaded_count() {final_count} != manual count {manual} after concurrent ops"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R-4: models_dict() returns pre-built immutable cached view (O(1))
+# ---------------------------------------------------------------------------
+
+
+def test_models_dict_returns_same_object_each_call() -> None:
+    """models_dict() must return the pre-built cached dict (same object identity).
+
+    Callers must not mutate the returned dict.  Returning the same object avoids
+    a dict copy on every /models request.
+    """
+    header = {"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"}
+    entry = ModelEntry(
+        name="cached_recipe",
+        recommender=MagicMock(),
+        header=header,
+        kid="active",
+    )
+    first = entry.models_dict()
+    second = entry.models_dict()
+    assert first is second, (
+        "models_dict() must return the same cached dict object on repeated calls"
+    )
+
+
+def test_models_dict_cached_view_contains_all_header_fields() -> None:
+    """The pre-built models_view must contain all header fields plus kid and name."""
+    header = {
+        "best_class": "TopPop",
+        "trained_at": "2026-01-01T00:00:00Z",
+        "recipe_name": "test",
+        "best_score": 0.42,
+    }
+    entry = ModelEntry(
+        name="test",
+        recommender=MagicMock(),
+        header=header,
+        kid="k1",
+    )
+    result = entry.models_dict()
+    for k in header:
+        assert k in result, f"models_dict() must include header field {k!r}"
+    assert result["kid"] == "k1"
+    assert result["name"] == "test"
+
+
+# ---------------------------------------------------------------------------
+# R-5: plain Lock (not RLock) — verify lock type
+# ---------------------------------------------------------------------------
+
+
+def test_registry_lock_is_plain_lock_not_rlock() -> None:
+    """ModelRegistry must use threading.Lock (non-reentrant), not RLock.
+
+    No public registry method calls another public method while holding the
+    lock, so RLock's reentrancy is unnecessary.  A plain Lock is lighter-weight
+    and makes deadlock from accidental recursion fail-fast rather than silently
+    succeed.
+    """
+    reg = ModelRegistry()
+    # threading.Lock() returns a _thread.lock instance on CPython.
+    # threading.RLock() returns a threading.RLock instance.
+    # We detect RLock by checking the type name.
+    lock_type_name = type(reg._lock).__name__
+    assert "RLock" not in lock_type_name, (
+        f"ModelRegistry._lock must be a plain threading.Lock, "
+        f"got {lock_type_name!r} — reentrancy is not needed and adds overhead"
+    )

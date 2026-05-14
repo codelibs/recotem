@@ -1,0 +1,27 @@
+# examples/quickstart/recipe.yaml
+#
+# The smallest runnable Recotem recipe. Trains a TopPop recommender from
+# a tiny local CSV. Both source.path and output.path are scoped to this
+# directory, so everything stays self-contained.
+#
+# From the repository root:
+#   recotem train examples/quickstart/recipe.yaml
+#   recotem serve --recipes examples/quickstart/
+
+name: top_picks
+
+source:
+  # Choices: csv, parquet, bigquery (or a plugin name).
+  type: csv
+  path: examples/quickstart/interactions.csv
+
+schema:
+  user_column: user_id
+  item_column: item_id
+
+training:
+  # Choices: IALS, CosineKNN, TopPop, RP3beta, DenseSLIM, TruncatedSVD, BPRFM. Optuna picks the best combination.
+  algorithms: [TopPop]
+
+output:
+  path: examples/quickstart/artifacts/top_picks.recotem

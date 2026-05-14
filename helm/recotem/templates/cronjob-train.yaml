@@ -1,0 +1,169 @@
+{{- if .Values.train.enabled -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "recotem.fullname" . }}-train
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "recotem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: train
+spec:
+  # Default: daily at 02:00 UTC.  Override via .Values.train.schedule.
+  schedule: {{ .Values.train.schedule | quote }}
+  concurrencyPolicy: {{ .Values.train.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.train.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.train.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      # Allow up to 1 h for a single training run before hard-kill.
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            {{- include "recotem.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: train
+        spec:
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          serviceAccountName: {{ include "recotem.serviceAccountName" . }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          restartPolicy: OnFailure
+
+          {{- /* Mirror the serve Deployment: when recipes.source=objectStore,
+                 sync the bucket into the shared emptyDir before train runs.
+                 Without this, train would loop over an empty /recipes. */}}
+          {{- if eq .Values.recipes.source "objectStore" }}
+          {{- if not .Values.recipes.objectStore.initContainer }}
+          {{- fail "recipes.source=objectStore requires recipes.objectStore.initContainer to be set" }}
+          {{- end }}
+          initContainers:
+            - name: sync-recipes
+              {{- toYaml .Values.recipes.objectStore.initContainer | nindent 14 }}
+              volumeMounts:
+                - name: recipes
+                  mountPath: {{ .Values.recipes.mountPath }}
+          {{- end }}
+
+          containers:
+            - name: train
+              image: {{ include "recotem.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              {{- if .Values.train.recipeFiles }}
+              # Train specific recipe files listed in .Values.train.recipeFiles.
+              # recipeFiles must be a YAML list (e.g. ["a.yaml","b.yaml"]).
+              # String values (legacy comma-separated) are also accepted via
+              # IFS splitting but are deprecated — migrate to the list form.
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  {{- if kindIs "slice" .Values.train.recipeFiles }}
+                  {{- range $r := .Values.train.recipeFiles }}
+                  recotem train {{ $.Values.recipes.mountPath }}/{{ $r }}{{ if $.Values.train.failOnBusy }} --fail-on-busy{{ end }}
+                  {{- end }}
+                  {{- else }}
+                  IFS=, read -ra _recipes <<< {{ .Values.train.recipeFiles | quote }}
+                  for recipe in "${_recipes[@]}"; do
+                    recipe="${recipe// /}"
+                    [ -n "$recipe" ] || continue
+                    recotem train {{ .Values.recipes.mountPath }}/${recipe}{{ if .Values.train.failOnBusy }} --fail-on-busy{{ end }}
+                  done
+                  {{- end }}
+              {{- else }}
+              # Train all *.yaml recipes in the recipes directory.
+              # Fail explicitly when the directory is empty so a misconfigured
+              # objectStore sync (or wrong PVC) surfaces as a CronJob failure
+              # rather than a silent exit 0.
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  shopt -s nullglob 2>/dev/null || true
+                  count=0
+                  for recipe in {{ .Values.recipes.mountPath }}/*.yaml; do
+                    [ -f "$recipe" ] || continue
+                    count=$((count + 1))
+                    recotem train "$recipe"{{ if .Values.train.failOnBusy }} --fail-on-busy{{ end }}
+                  done
+                  if [ "$count" -eq 0 ]; then
+                    echo "no recipe files found under {{ .Values.recipes.mountPath }}" >&2
+                    exit 1
+                  fi
+              {{- end }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+
+              env:
+                {{- range $key, $value := .Values.train.env }}
+                {{- if $value }}
+                - name: {{ $key }}
+                  value: {{ $value | quote }}
+                {{- end }}
+                {{- end }}
+                # Signing keys from the shared Kubernetes Secret.
+                - name: RECOTEM_SIGNING_KEYS
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secrets.secretName }}
+                      key: RECOTEM_SIGNING_KEYS
+
+              resources:
+                {{- toYaml .Values.train.resources | nindent 16 }}
+
+              volumeMounts:
+                - name: recipes
+                  mountPath: {{ .Values.recipes.mountPath }}
+                  readOnly: true
+                {{- if .Values.artifacts.enabled }}
+                - name: artifacts
+                  mountPath: {{ .Values.artifacts.mountPath }}
+                  # Train needs write access; readOnly must be false for the train job.
+                  readOnly: false
+                {{- end }}
+                - name: tmp
+                  mountPath: /tmp
+                # /workspace is the Dockerfile WORKDIR and the process cwd.
+                # readOnlyRootFilesystem=true forbids writes to the container root
+                # filesystem, so this emptyDir provides a writable cwd for lock
+                # files and any tooling that creates temp files relative to cwd.
+                - name: workspace
+                  mountPath: /workspace
+
+          volumes:
+            - name: recipes
+              {{- if eq .Values.recipes.source "configMap" }}
+              configMap:
+                name: {{ .Values.recipes.configMap.name }}
+              {{- else if eq .Values.recipes.source "pvc" }}
+              persistentVolumeClaim:
+                claimName: {{ .Values.recipes.pvc.claimName }}
+                readOnly: true
+              {{- else if eq .Values.recipes.source "objectStore" }}
+              emptyDir: {}
+              {{- else }}
+              {{- fail (printf "recipes.source must be one of configMap|pvc|objectStore, got %q" .Values.recipes.source) }}
+              {{- end }}
+            {{- if .Values.artifacts.enabled }}
+            - name: artifacts
+              persistentVolumeClaim:
+                claimName: {{ .Values.artifacts.pvc.claimName }}
+            {{- end }}
+            - name: tmp
+              emptyDir: {}
+            - name: workspace
+              emptyDir: {}
+
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

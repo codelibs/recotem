@@ -1,228 +1,229 @@
 # Recotem
 
-Recommender system builder — Docker-first web app for tuning, training, deploying, and monitoring recommendation models via UI and REST API.
+Recipe-driven recommender training and serving on irspack. Distributed as a
+single Python package (`pip install recotem`) plus a single Docker image.
 
 ## Architecture
 
-**7 Docker services** (see `compose.yaml`):
-- `db` — PostgreSQL 17
-- `redis` — Redis 7 (broker db0, channels db1, cache db2, model events db3)
-- `backend` — Django 5.1 + DRF + Channels, served by Daphne (ASGI)
-- `worker` — Celery (same Docker image as backend)
-- `beat` — Celery Beat for scheduled retraining (same Docker image as backend)
-- `inference` — FastAPI service for real-time recommendations (separate image)
-- `proxy` — Nginx + Vue 3 SPA (built in `proxy.dockerfile`)
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                  recotem (single Python package)                 │
+├──────────────────────────────────────────────────────────────────┤
+│  CLI (Typer)                                                     │
+│  ├─ recotem train   <recipe.yaml>      batch: fetch→train→sign   │
+│  ├─ recotem serve   --recipes <dir>    FastAPI /predict          │
+│  ├─ recotem inspect <artifact>         read header (no payload)  │
+│  ├─ recotem validate <recipe.yaml>     schema + connectivity     │
+│  ├─ recotem schema                     emit JSON Schema for IDEs │
+│  └─ recotem keygen                     generate signing/api key  │
+│                                                                   │
+│  Core layer                                                       │
+│  ├─ recipe       pydantic v2 models, YAML loader, env expansion   │
+│  ├─ datasource   protocol + builtin csv / bigquery (entry_points) │
+│  ├─ training     irspack + Optuna driver, split, evaluate         │
+│  ├─ artifact     binary container with HMAC signing               │
+│  ├─ metadata     item metadata loader (CSV/Parquet, fsspec)       │
+│  └─ serving      FastAPI app, ModelRegistry, file watcher, auth   │
+└──────────────────────────────────────────────────────────────────┘
+```
 
-**Inference-only deployment** (see `compose-inference.yaml`):
-- `db` — PostgreSQL 17
-- `inference` — FastAPI service
-- `proxy` — Nginx (inference routes only, via `nginx-inference.conf`)
-
-**ML stack**: irspack 0.4.0 + Optuna for hyperparameter tuning.
+`train` and `serve` communicate **only via signed artifact files**. They can
+run on different machines. Hot-swap is file-mtime-driven and recipe-scoped.
 
 ## Directory Layout
 
 ```
-backend/
-  Dockerfile              # Multi-stage: base → builder → testing → production
-  pyproject.toml          # Project metadata, dependencies, Ruff config
-  uv.lock                 # Locked dependency versions (committed)
-  recotem/
-    recotem/
-      settings.py         # Django settings (django-environ)
-      urls.py             # Root URL conf: /api/v1/, /admin/, /ws/
-      asgi.py / celery.py
-      api/
-        authentication.py # API key auth (X-API-Key header)
-        models/           # Django models (Project, TrainingData, TrainedModel, ApiKey, etc.)
-        views/            # DRF ViewSets + mixins (OwnedResourceMixin, CreatedByResourceMixin)
-        serializers/      # DRF serializers (api_key, retraining, deployment, ab_test, events)
-        services/         # Business logic (model, training, tuning, pickle_signing, scheduling, ab_testing)
-        tasks.py          # Celery tasks (tuning, training, scheduled retraining)
-        consumers.py      # WebSocket consumers (Django Channels)
-        urls.py           # API router registration
-    tests/                # pytest + pytest-django
-      conftest.py         # MovieLens100K fixtures
-inference/
-  Dockerfile              # Multi-stage FastAPI build
-  pyproject.toml
-  inference/
-    main.py               # FastAPI app with lifespan + rate limiting
-    config.py             # Pydantic Settings
-    auth.py               # API key verification (Django PBKDF2 compatible)
-    model_loader.py       # Thread-safe LRU model cache
-    hot_swap.py           # Redis Pub/Sub listener for model updates
-    models.py             # SQLAlchemy read-only models
-    routes/               # predict, project (A/B routing), health
-frontend/
-  package.json            # Vue 3.5 + Vite 6 + PrimeVue 4 + Tailwind CSS 4 + Pinia + TanStack Query
-  src/
-    pages/                # Page components (Login, Dashboard, Data*, Tuning*, Model*, ApiKey*, ABTest*, etc.)
-    layouts/              # MainLayout, AuthLayout, ProjectLayout
-    stores/               # Pinia stores (auth, project, notification)
-    composables/          # useWebSocket, useJobStatus, useAbortOnUnmount, useNotification
-    api/                  # API client (ofetch) + production.ts
-    types/                # TypeScript types + production.ts
-    utils/                # format.ts (formatDate, formatFileSize, formatScore)
-    router/index.ts       # Vue Router with auth guards
-helm/recotem/             # Helm chart (ServiceAccount, PDB, NetworkPolicy, HPA)
-envs/                     # Environment files (dev.env, production.env)
-nginx.conf                # Proxy config: SPA + /api/ + /ws/ + /admin/ + /inference/ + /static/
+src/recotem/
+├── cli.py              Typer entry; thin orchestration only
+├── recipe/             pydantic v2 Recipe + YAML loader + env expansion
+├── datasource/         DataSource Protocol + entry_points discovery (csv / bq)
+├── training/           Optuna search + irspack train; per-recipe file lock
+├── artifact/           HMAC-signed binary container with FQCN allow-list
+├── metadata/           item metadata loader (CSV/Parquet via fsspec)
+├── serving/            FastAPI app, ModelRegistry, ArtifactWatcher
+├── _idmap.py           Neutral home for IDMappedRecommender (canonical FQCN)
+├── _http_fetch.py      SSRF-guarded HTTP/HTTPS fetcher with sha256 verify
+├── _size_cap.py        Shared download-size cap helper (used by csv source + metadata loader)
+├── _metrics_bigquery.py  Neutral Prometheus counter for BQ Storage API fallbacks (no serving dep)
+├── _metrics_watcher.py   Neutral Prometheus counter for recipes-dir scan failures (no serving dep)
+├── log_redaction.py    structlog processor stripping API/signing keys + creds
+├── config.py           ServeConfig / TrainConfig from env vars
+└── logging.py          structlog setup with redaction processor first
+
+tests/
+├── unit/               per-module tests (recipe, artifact, training, ...)
+├── integration/        in-process train + serve + predict
+├── fuzz/               hypothesis byte mutations on artifact / recipe loaders
+└── e2e/                bash script: train → serve → curl /predict
+
 docs/
-  guide/                  # User-facing guides (getting started, tuning, training, etc.)
-  specification/          # Developer-facing specs (architecture, data model, API, security)
-  deployment/             # Deployment and operations documentation
+├── getting-started.md  Docker / pip walkthrough → train → /predict
+├── recipe-reference.md every recipe field, type, default, validation
+├── data-sources/       bigquery.md, csv.md
+├── deployment/         docker.md, k8s.md, cron.md
+├── operations.md       key rotation, recovery, sizing, troubleshooting
+├── security.md         trust boundaries, FQCN allow-list, threat model
+└── plugin-authoring.md DataSource plugin contract walkthrough
+
+helm/recotem/           serve-only chart with optional CronJob train
+examples/               quickstart/, csv-local/, ga4-bigquery/, k8s/, plugins/echo-source/, tutorial-purchase-log/
+Dockerfile              multi-stage python:3.12-slim, appuser:1000
+compose.yaml            train one-shot + serve long-running (tutorial)
 ```
 
-## Development Setup
+## Quick Start (development)
 
 ```bash
-# Start infrastructure (postgres + redis)
-docker compose -f compose-dev.yaml up -d
+# Install (uv handles the venv)
+uv sync --all-extras
 
-# Backend
-cd backend
-uv sync
-cd recotem
-uv run python manage.py migrate
-uv run python manage.py createsuperuser
-uv run daphne recotem.asgi:application -b 0.0.0.0 -p 8000
+# Generate a signing key + (optional) API key
+uv run recotem keygen --type signing
+uv run recotem keygen --type api
 
-# Celery worker (separate terminal)
-cd backend/recotem
-uv run celery -A recotem worker --loglevel=INFO
+export RECOTEM_SIGNING_KEYS="dev:<hex64>"
+export RECOTEM_API_KEYS="key1:sha256:<hex64>"
 
-# Celery beat (separate terminal, for scheduled retraining)
-cd backend/recotem
-uv run celery -A recotem beat --loglevel=INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler
+# Train from a recipe
+uv run recotem train examples/tutorial-purchase-log/recipe.yaml
 
-# Frontend
-cd frontend
-npm install
-npm run dev
+# Serve from a directory of recipes
+uv run recotem serve --recipes ./recipes/ --port 8080
+
+# Predict
+curl -X POST http://localhost:8080/predict/news_articles \
+     -H "X-API-Key: <plaintext>" \
+     -H "Content-Type: application/json" \
+     -d '{"user_id":"u1","cutoff":10}'
 ```
 
-Dev env variables are in `envs/dev.env`. Backend expects `DATABASE_URL`, `CELERY_BROKER_URL` pointing to local postgres:5432 and redis:6379.
+## Recipe model
 
-## Key Commands
+A recipe is the single source of truth: 1 YAML = 1 model = 1 `/predict/{name}`.
+See `docs/recipe-reference.md` for the full schema. Highlights:
 
-```bash
-# Backend tests (requires MovieLens100K dataset download on first run)
-cd backend && uv run pytest recotem/tests/ -v
+- `source.type` is a discriminator (`csv` | `parquet` | `bigquery` | plugins).
+- Env-var expansion is restricted to `${RECOTEM_RECIPE_*}` and never applied
+  inside `source.query` / `source.query_parameters` (forecloses SQL injection).
+- Path scheme: `source.path` and `item_metadata.path` accept an explicit
+  allow-list of schemes: `""` (bare local path), `file://`, `s3://`, `gs://`,
+  `az://`, `abfs://`, `abfss://`, `http://`, `https://`. Schemes are
+  explicitly enumerated rather than relying on fsspec's full registry to
+  prevent unvetted handlers from being reachable via recipe content.
+  Chained fsspec protocols (containing `::`) are rejected. `output.path`
+  is a strict subset of the above — it rejects `http://`, `https://`,
+  `ftp://`, `ftps://`, and `memory://` (write not supported). For
+  network-scheme inputs (`http://`, `https://`), `sha256` is mandatory and
+  `RECOTEM_MAX_DOWNLOAD_BYTES` (default 256 MiB) caps the body. Embedded
+  URI credentials are rejected.
+- Cleansing block: `drop_null_ids`, `dedup` policy, `min_rows / min_users /
+  min_items` data preconditions.
+- Multi-algorithm Optuna search with optional per-algorithm trial budgets.
 
-# Frontend
-cd frontend && npm run test:unit          # Vitest
-cd frontend && npm run test:e2e           # Playwright
-cd frontend && npm run type-check         # vue-tsc
-cd frontend && npm run lint               # ESLint
+## Artifact format
 
-# Python linting
-ruff check backend/ --fix
-ruff format backend/
+Binary container `magic | version | reserved | kid | hmac | header_json | payload`.
 
-# OpenAPI type generation
-cd frontend && npm run generate:types     # Requires backend running on :8000
-
-# Full production stack
-docker compose up --build
-```
-
-## API Structure
-
-### Management API
-
-Base path: `/api/v1/` (backward compat at `/api/`)
-
-| Endpoint | ViewSet |
-|---|---|
-| `project/` | ProjectViewSet |
-| `training_data/` | TrainingDataViewset |
-| `item_meta_data/` | ItemMetaDataViewset |
-| `split_config/` | SplitConfigViewSet |
-| `evaluation_config/` | EvaluationConfigViewSet |
-| `parameter_tuning_job/` | ParameterTuningJobViewSet |
-| `model_configuration/` | ModelConfigurationViewset |
-| `trained_model/` | TrainedModelViewset |
-| `task_log/` | TaskLogViewSet |
-| `api_keys/` | ApiKeyViewSet |
-| `retraining_schedule/` | RetrainingScheduleViewSet |
-| `retraining_run/` | RetrainingRunViewSet |
-| `deployment_slot/` | DeploymentSlotViewSet |
-| `ab_test/` | ABTestViewSet |
-| `conversion_event/` | ConversionEventViewSet |
-| `ping/` | PingView |
-| `project_summary/<id>/` | ProjectSummaryView |
-| `auth/login/` | dj-rest-auth LoginView |
-| `schema/` | drf-spectacular |
-
-Auth: JWT via dj-rest-auth + simplejwt, or API key via `X-API-Key` header.
-
-WebSocket: `/ws/job/{id}/` for job status updates.
-
-### Inference API
-
-Base path: `/inference/` (proxied to FastAPI service on port 8081)
-
-| Endpoint | Description |
-|---|---|
-| `POST /inference/predict/{model_id}` | Single-user recommendations |
-| `POST /inference/predict/{model_id}/batch` | Multi-user batch recommendations |
-| `POST /inference/predict/project/{project_id}` | Project-level with A/B slot routing |
-| `GET /inference/health` | Health check |
-| `GET /inference/models` | List loaded models |
-
-Auth: API key with `predict` scope via `X-API-Key` header.
-
-## Data Flow
-
-1. Create Project (user/item/time column definitions)
-2. Upload TrainingData CSV
-3. Create SplitConfig + EvaluationConfig
-4. Create ParameterTuningJob → Celery task runs Optuna + irspack
-5. Best ModelConfiguration saved automatically
-6. Train model (auto or manual) → TrainedModel with HMAC-signed serialized file
-7. Create API key with `predict` scope
-8. Create DeploymentSlot(s) pointing to trained model(s)
-9. Call inference API → weighted slot selection → real-time recommendations (impression auto-recorded)
-10. Record ConversionEvents → analyze A/B test results
+- HMAC scope: `kid_bytes || header_json || payload`. Tampering anywhere fails verify.
+- Header JSON carries `recipe_name`, `recipe_hash`, `best_class`, `best_params`,
+  `best_score`, `metric`, `cutoff`, `tuning`, `data_stats`, `recotem_version`,
+  `irspack_version`, `trained_at`. Inspectable without deserialisation via
+  `recotem inspect`.
+- Multi-kid `KeyRing` (env: `RECOTEM_SIGNING_KEYS=kid1:hex,kid2:hex`) enables
+  zero-downtime key rotation. Operations doc has the four-step procedure (Step 4 includes verification).
+- Payload uses Python's native binary serialisation because irspack's
+  `IDMappedRecommender` carries scipy sparse matrices and numpy arrays. Defence
+  in depth: HMAC verify before any byte is interpreted, plus a hand-enumerated
+  FQCN allow-list augmented by a narrow `numpy.*` / `scipy.sparse.*` module-
+  prefix allow-list (with a deny-list for high-risk submodules) during load.
+  See `docs/security.md`.
 
 ## Conventions
 
-- **Python**: 3.12, uv for dependency management, Ruff for linting/formatting (line-length 88, rules: E/F/I/W/UP/B/SIM)
-- **Frontend**: TypeScript strict, Vue 3 Composition API, PrimeVue components, Tailwind CSS 4
-- **ViewSets**: Use `OwnedResourceMixin` / `CreatedByResourceMixin` from `views/mixins.py` for ownership filtering
-- **Services**: Business logic in `api/services/`, not in views
-- **Model security**: HMAC-SHA256 signing via `pickle_signing_core.py` (Django-independent) — models signed on save, verified on load
-- **Uniqueness**: Project.name is per-owner, ModelConfiguration.name is per-training-data
-- **Backend user**: runs as `appuser:1000` in Docker
-- **Proxy**: nginx on port 8000 (non-root)
-- **Python package manager**: `uv` (not pip). Use `uv sync` to install, `uv run` to execute
-- **Frontend package manager**: use `npm` (not pnpm)
+- Python 3.12+, `uv` for dependency management. Never use `pip` / `python`
+  directly — always `uv add` / `uv run python`.
+- Ruff is the linter and formatter (`uv run ruff check src tests` /
+  `uv run ruff format src tests`). Line-length 88. Selected rules in
+  `pyproject.toml`.
+- pytest 8 + hypothesis 6. `@pytest.mark.slow` deselected by default.
+- `from __future__ import annotations` is used everywhere except where it
+  breaks FastAPI dependency introspection (e.g. `routes.py` uses
+  `kid: str = Depends(_require_auth)` instead of `Annotated[...]`).
+- structlog logger per module; the redaction processor in
+  `recotem.log_redaction` is first in the chain and strips API keys, signing
+  keys, and cloud creds. Lives at the top level so `train`-only invocations do
+  not pull in the serving package.
+- Modules `training/` and `serving/` never import each other; they communicate
+  only via artifact files. Shared classes such as `IDMappedRecommender` live
+  in neutral top-level modules (`recotem._idmap`) so neither sub-package
+  depends on the other. Exception: `cli.py` imports from both sides, but all
+  sub-package imports there are **function-local deferred imports** (inside each
+  command function body), so neither sub-package is loaded at module import time.
+- The IPython stub required by irspack's transitive
+  `fastprogress -> IPython.display` is installed idempotently by both
+  `recotem.training._compat` (for training-package callers) and
+  `recotem._idmap` (for direct importers, e.g. serving).
 
-## Environment Variables
+## CLI exit codes
 
-Core (see `envs/.env.example`):
-- `DATABASE_URL` — PostgreSQL connection string
-- `CELERY_BROKER_URL` — Redis URL for Celery (db 0)
-- `CACHE_REDIS_URL` — Redis URL for cache (db 2)
-- `MODEL_EVENTS_REDIS_URL` — Redis URL for model event Pub/Sub (db 3)
-- `SECRET_KEY` — Django secret (must change for production)
-- `DEBUG` — true/false
-- `DEFAULT_ADMIN_PASSWORD` — Initial admin password
-- `REDIS_PASSWORD` — Optional Redis auth
-- `ACCESS_TOKEN_LIFETIME` — JWT access token TTL in seconds (default 300)
-- `RECOTEM_STORAGE_TYPE` — Empty for local, "S3" for S3 storage
-- `CELERY_TASK_TIME_LIMIT` — Task timeout in seconds (default 3600)
-- `CELERY_BEAT_SCHEDULER` — `django_celery_beat.schedulers:DatabaseScheduler`
-- `INFERENCE_MAX_LOADED_MODELS` — Max models in inference LRU cache (default 10)
-- `INFERENCE_RATE_LIMIT` — Inference rate limit per API key (default 100/minute)
-- `INFERENCE_PRELOAD_MODEL_IDS` — Comma-separated model IDs to pre-load on startup
-- `LOG_LEVEL`, `DJANGO_LOG_LEVEL`, `CELERY_LOG_LEVEL` — Logging levels
+| Code | Constant | Meaning |
+|------|----------|---------|
+| 0 | `_EXIT_SUCCESS` | success |
+| 1 | `_EXIT_UNKNOWN` | unhandled / unmapped exception |
+| 2 | `_EXIT_RECIPE` | `RecipeError` (schema, env, path scheme) |
+| 3 | `_EXIT_DATASOURCE` | `DataSourceError` (CSV parse, missing column, BQ access) |
+| 4 | `_EXIT_TRAINING` | `TrainingError` (all trials failed, min-data violation) |
+| 5 | `_EXIT_ARTIFACT` | `ArtifactError` (magic / version / HMAC verify) |
+| 6 | `_EXIT_LOCK_CONTESTED` | per-recipe training lock held by another process |
+| 7 | `_EXIT_HTTP_FETCH` | `HttpFetchError` (SSRF guard / sha256 mismatch / scheme-changing redirect / byte cap) |
+| 8 | `_EXIT_CONFIG` | configuration error (e.g. signing keys missing without `--dev-allow-unsigned`) |
 
-## CI/CD
+## Test commands
 
-GitHub Actions (`.github/workflows/`):
-- `pre-commit.yml` — Ruff + basic hooks
-- `run-test.yml` — Playwright + pytest + coverage
-- `release.yml` — Multi-arch container build/push + Trivy scan
-- `codeql.yml` — CodeQL analysis
+```bash
+uv run pytest tests                          # full suite (~5s without slow)
+uv run pytest tests -m slow                  # MovieLens100K end-to-end
+uv run pytest tests/integration tests/fuzz   # cross-module + hypothesis
+uv run ruff check src tests
+uv run ruff format --check src tests
+```
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RECOTEM_SIGNING_KEYS` | (required) | `kid:hex64,kid2:hex64` for HMAC sign/verify (64 hex = 32 bytes). |
+| `RECOTEM_API_KEYS` | (empty) | `kid:sha256:hex64,...` for serve auth. Empty forces 127.0.0.1 bind. |
+| `RECOTEM_HOST` / `RECOTEM_PORT` | 127.0.0.1 / 8080 | uvicorn bind. Must be `0.0.0.0` inside Docker; overridden to 127.0.0.1 when no API keys are set. |
+| `RECOTEM_WATCH_INTERVAL` | 5 | Watcher poll seconds (clamped 1–30). |
+| `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. Clamped [1 MiB, 16 GiB]. |
+| `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Raw I/O bytes cap on source-path reads (HTTP/HTTPS, local, and object-store). Clamped [1 MiB, 16 GiB]. Does NOT cap the decompressed DataFrame size — see `docs/security.md#decompressed-size-cap-not-enforced-medium-5`. |
+| `RECOTEM_HTTP_TIMEOUT_SECONDS` | 30 | Connect/read timeout for HTTP/HTTPS source fetch. Clamped [1, 600]. |
+| `RECOTEM_HTTP_ALLOW_PRIVATE` | (empty) | Truthy (`1`/`true`/`yes`/`on`) opts the HTTP fetcher into accepting private/loopback/link-local destinations. Default refuses RFC1918 / `127.0.0.0/8` / `169.254.0.0/16` to block SSRF on cloud-metadata services. |
+| `RECOTEM_ALLOWED_HOSTS` | 127.0.0.1,localhost | TrustedHostMiddleware list. Whitespace-only comma input falls back to default. |
+| `RECOTEM_ALLOWED_ORIGINS` | (empty) | CORS allow-list. Empty = deny. |
+| `RECOTEM_ENV` | (empty) | `--insecure-no-auth` permitted when set to `development`, `dev`, or `test`; `--dev-allow-unsigned` permitted only when set to `development`. See `docs/security.md`. |
+| `RECOTEM_DRAIN_SECONDS` | 30 | SIGTERM grace window. Clamped [1, 300]. |
+| `RECOTEM_LOG_FORMAT` | auto | `auto` / `json` / `console`. |
+| `RECOTEM_MAX_PAYLOAD_BYTES` | 512 MiB | Per-payload cap (post-HMAC-verify) for serve-side deserialization. Clamped [1 MiB, 16 GiB]. Smaller than `RECOTEM_MAX_ARTIFACT_BYTES` to bound deserialization memory expansion. |
+| `RECOTEM_ARTIFACT_ROOT` | (empty) | If set, local `output.path` must lie under it. |
+| `RECOTEM_RECIPE_*` | — | Allow-listed for `${...}` recipe expansion. |
+| `RECOTEM_METADATA_FIELD_DENY` | (empty) | Comma-separated columns stripped from `/predict` responses. |
+| `RECOTEM_METRICS_ENABLED` | (empty) | Opt-in Prometheus `/metrics` endpoint. Truthy values: `1`, `true`, `yes`, `on`. Requires `recotem[metrics]` extra. |
+| `RECOTEM_LOCK_DIR` | (empty) | Override directory for per-recipe training lock files. Local outputs always lock at `<output_path>.lock`; remote outputs (`s3://`, `gs://`, ...) need a host-local path and fall back to `<tempdir>/recotem-locks/`. `flock` is host-local — across hosts use scheduler-level mutex (`concurrencyPolicy: Forbid`). |
+| `RECOTEM_BQ_REQUIRE_STORAGE_API` | (empty) | When truthy (`1`/`true`/`yes`/`on`), the BigQuery source raises `DataSourceError` instead of falling back to the REST path when the Storage Read API fails. Requires the service account to hold `bigquery.readSessions.create`. |
+| `RECOTEM_STARTUP_PARALLELISM` | (empty = auto) | Number of parallel threads used to load artifacts at `recotem serve` startup. Leave unset (default) for auto-sizing (`min(len(recipes), 8)`). Setting to `0` is NOT a sentinel — it clamps to 1 and emits an `env_var_clamped` warning. Clamped [1, 32]. Set to `1` to force sequential loading for debugging. |
+
+## CI
+
+`.github/workflows/`:
+- `test.yml` — ruff + pytest unit/integration + e2e + secrets-in-logs grep
+- `docker.yml` — build + push multi-arch image to ghcr.io on main + tags;
+  build-only on PRs
+- `codeql.yml` — Python CodeQL, push/PR + weekly schedule
+
+## Reference docs
+
+- Getting started: `docs/getting-started.md`
+- Operations runbook: `docs/operations.md`
+- Security model: `docs/security.md`

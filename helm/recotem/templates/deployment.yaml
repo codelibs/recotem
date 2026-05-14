@@ -1,0 +1,217 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "recotem.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "recotem.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "recotem.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Force pod rollout when the ConfigMap changes (if managed).
+        {{- if and (eq .Values.recipes.source "configMap") .Values.recipes.configMap.managed }}
+        checksum/recipes-configmap: {{ toYaml .Values.recipes.configMap.data | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "recotem.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "recotem.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      {{- /* Object store init container to sync recipes before serve starts.
+             Empty initContainer with source=objectStore would mount an empty
+             emptyDir over /recipes, so fail the chart render instead. */}}
+      {{- if eq .Values.recipes.source "objectStore" }}
+      {{- if not .Values.recipes.objectStore.initContainer }}
+      {{- fail "recipes.source=objectStore requires recipes.objectStore.initContainer to be set" }}
+      {{- end }}
+      initContainers:
+        - name: sync-recipes
+          {{- toYaml .Values.recipes.objectStore.initContainer | nindent 10 }}
+          volumeMounts:
+            - name: recipes
+              mountPath: {{ .Values.recipes.mountPath }}
+      {{- end }}
+
+      containers:
+        - name: serve
+          image: {{ include "recotem.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["recotem", "serve", "--recipes", {{ .Values.recipes.mountPath | quote }}]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+
+          env:
+            {{- /* RECOTEM_ALLOWED_HOSTS is rendered explicitly below so we can
+                   merge ingress hosts into it.  Skip it in the loop. */}}
+            {{- range $key, $value := .Values.env }}
+            {{- if and $value (ne $key "RECOTEM_ALLOWED_HOSTS") }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+            {{- /* RECOTEM_ALLOWED_HOSTS:
+                   - explicit value in .Values.env wins (operator override),
+                   - else derive from ingress.hosts[*].host when ingress is enabled,
+                     so TrustedHostMiddleware does not 400 every external request,
+                   - else omit and let the app default ("127.0.0.1,localhost") apply. */}}
+            {{- $allowed := index .Values.env "RECOTEM_ALLOWED_HOSTS" }}
+            {{- if not $allowed }}
+            {{- if and .Values.ingress.enabled .Values.ingress.hosts }}
+            {{- $hosts := list }}
+            {{- range .Values.ingress.hosts }}
+            {{- if .host }}{{ $hosts = append $hosts .host }}{{ end }}
+            {{- end }}
+            {{- /* localhost is always prepended so that kubelet probe requests
+                   (which hard-code "Host: localhost") are accepted by
+                   TrustedHostMiddleware even when ingress hostnames are set.
+                   Without it every readiness/liveness probe returns 400 and
+                   pods cycle unready indefinitely. */}}
+            {{- $hosts = prepend $hosts "localhost" }}
+            {{- $allowed = join "," $hosts }}
+            {{- end }}
+            {{- end }}
+            {{- if $allowed }}
+            - name: RECOTEM_ALLOWED_HOSTS
+              value: {{ $allowed | quote }}
+            {{- end }}
+            # API keys and signing keys from Kubernetes Secret.
+            # Secret data keys match the env var names (see values.yaml).
+            - name: RECOTEM_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.secretName }}
+                  key: RECOTEM_API_KEYS
+            - name: RECOTEM_SIGNING_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.secretName }}
+                  key: RECOTEM_SIGNING_KEYS
+
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+
+          # startupProbe guards cold starts where a large artifact is being
+          # loaded. Liveness/readiness only take over after startup succeeds.
+          # failureThreshold * periodSeconds = 12 * 10s = 120s max startup window.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            periodSeconds: 10
+            failureThreshold: 12
+            timeoutSeconds: 5
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          # preStop sleep lets kube-proxy finish propagating the endpoint
+          # removal before SIGTERM is sent, eliminating 503/RST spikes during
+          # rolling updates.  terminationGracePeriodSeconds must be at least
+          # preStopSleepSeconds + RECOTEM_DRAIN_SECONDS + buffer (5 s).
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep {{ .Values.preStopSleepSeconds | default 5 }}"]
+
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          volumeMounts:
+            - name: recipes
+              mountPath: {{ .Values.recipes.mountPath }}
+              readOnly: true
+            {{- if .Values.artifacts.enabled }}
+            - name: artifacts
+              mountPath: {{ .Values.artifacts.mountPath }}
+              readOnly: {{ .Values.artifacts.pvc.readOnly }}
+            {{- end }}
+            # tmpfs for any writable scratch space the process needs.
+            - name: tmp
+              mountPath: /tmp
+            # /workspace is the Dockerfile WORKDIR and the process cwd.
+            # readOnlyRootFilesystem=true forbids writes to the container root
+            # filesystem, so this emptyDir provides a writable cwd for any
+            # tooling that creates temp files relative to cwd.
+            - name: workspace
+              mountPath: /workspace
+
+      volumes:
+        - name: recipes
+          {{- if eq .Values.recipes.source "configMap" }}
+          configMap:
+            name: {{ .Values.recipes.configMap.name }}
+          {{- else if eq .Values.recipes.source "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.recipes.pvc.claimName }}
+            readOnly: {{ .Values.recipes.pvc.readOnly }}
+          {{- else if eq .Values.recipes.source "objectStore" }}
+          emptyDir: {}
+          {{- else }}
+          {{- fail (printf "recipes.source must be one of configMap|pvc|objectStore, got %q" .Values.recipes.source) }}
+          {{- end }}
+        {{- if .Values.artifacts.enabled }}
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: {{ .Values.artifacts.pvc.claimName }}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+        - name: workspace
+          emptyDir: {}
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

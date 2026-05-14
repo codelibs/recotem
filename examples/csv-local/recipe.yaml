@@ -1,0 +1,58 @@
+# examples/csv-local/recipe.yaml
+#
+# Minimal recipe that trains a recommender from a local gzip-compressed CSV.
+# The interactions.csv.gz file is expected in the same directory as this recipe.
+#
+# Train:
+#   recotem train examples/csv-local/recipe.yaml
+#
+# The trained artifact is written to ./artifacts/csv_local_example.recotem
+# (or a sha-suffixed variant if versioning: append_sha).
+
+name: csv_local_example
+
+source:
+  # Choices: csv, parquet, bigquery (or a plugin name).
+  type: csv
+  # Path is relative to the working directory where `recotem train` is invoked,
+  # or an absolute path.  s3:// and gs:// are also supported.
+  path: examples/csv-local/interactions.csv.gz
+  delimiter: ","
+  encoding: utf-8
+  header: 0
+  dtype:
+    user_id: str
+    item_id: str
+
+schema:
+  user_column: user_id
+  item_column: item_id
+  time_column: timestamp       # optional; remove if the CSV has no time column
+
+# Optional `item_metadata:` block enriches /predict responses with item fields; see docs/recipe-reference.md.
+
+cleansing:
+  drop_null_ids: true
+  dedup: keep_last
+  min_rows: 100
+  min_users: 10
+  min_items: 10
+
+training:
+  # Choices: IALS, CosineKNN, TopPop, RP3beta, DenseSLIM, TruncatedSVD, BPRFM. Optuna picks the best combination.
+  algorithms: [IALS, CosineKNN, TopPop]
+  # Choices: ndcg, map, recall, hit.
+  metric: ndcg
+  cutoff: 20
+  n_trials: 30
+  timeout_seconds: 600
+  parallelism: 1
+  split:
+    scheme: time_user          # requires time_column above
+    heldout_ratio: 0.1
+    test_user_ratio: 1.0
+    seed: 42
+
+output:
+  path: ./artifacts/csv_local_example.recotem
+  versioning: append_sha       # writes a sha-suffixed file + atomic pointer update

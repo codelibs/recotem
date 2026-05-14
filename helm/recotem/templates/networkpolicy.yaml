@@ -1,189 +1,72 @@
-{{- if .Values.networkPolicy.enabled }}
+{{- if .Values.networkPolicy.enabled -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "recotem.fullname" . }}-backend
+  name: {{ include "recotem.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "recotem.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "recotem.backendSelectorLabels" . | nindent 6 }}
+      {{- include "recotem.selectorLabels" . | nindent 6 }}
   policyTypes:
     - Ingress
     - Egress
+
+  # Note: an ingress rule with `from: []` matches ALL sources (Kubernetes
+  # NetworkPolicy spec) — the opposite of deny-all. The canonical deny-all
+  # form is `ingress: []` combined with policyTypes including Ingress.
+  {{- if or .Values.networkPolicy.ingressFromPodSelector .Values.networkPolicy.allowKubeletProbes }}
   ingress:
-    # Allow traffic from proxy
+    {{- if .Values.networkPolicy.ingressFromPodSelector }}
     - from:
         - podSelector:
             matchLabels:
-              {{- include "recotem.proxySelectorLabels" . | nindent 14 }}
+              {{- toYaml .Values.networkPolicy.ingressFromPodSelector | nindent 14 }}
       ports:
-        - port: 8080
+        - port: {{ .Values.service.targetPort }}
           protocol: TCP
-  egress:
-    # Allow DNS resolution (kube-system only)
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
+    {{- end }}
+    {{- if .Values.networkPolicy.allowKubeletProbes }}
+    # Kubelet health probes originate from the node network (not from a pod),
+    # so podSelector cannot match them.  This rule opens the probe port to
+    # the sources identified below so readiness/liveness checks are not
+    # silently dropped by the NetworkPolicy.
+    - {{- if .Values.networkPolicy.kubeletCIDRs }}
+      from:
+        {{- range .Values.networkPolicy.kubeletCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      {{- else }}
+      # No kubeletCIDRs specified — allow probes from any source.
+      # Restrict via networkPolicy.kubeletCIDRs if tighter control is needed.
+      {{- end }}
       ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
+        - port: {{ .Values.service.targetPort }}
           protocol: TCP
-    # Allow connections to PostgreSQL
-    - to:
-        - podSelector:
-            matchLabels:
-              {{- toYaml .Values.postgresql.podLabels | nindent 14 }}
-      ports:
-        - port: {{ .Values.postgresql.port }}
-          protocol: TCP
-    # Allow connections to Redis
-    - to:
-        - podSelector:
-            matchLabels:
-              {{- toYaml .Values.redis.podLabels | nindent 14 }}
-      ports:
-        - port: {{ .Values.redis.port }}
-          protocol: TCP
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ include "recotem.fullname" . }}-worker
-  labels:
-    {{- include "recotem.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-      {{- include "recotem.workerSelectorLabels" . | nindent 6 }}
-  policyTypes:
-    - Ingress
-    - Egress
+    {{- end }}
+  {{- else }}
+  # No ingress pod selector configured and allowKubeletProbes=false —
+  # deny all inbound traffic including kubelet probes.
   ingress: []
+  {{- end }}
+
   egress:
-    # Allow DNS resolution (kube-system only)
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
-          protocol: TCP
-    # Allow connections to PostgreSQL
-    - to:
-        - podSelector:
-            matchLabels:
-              {{- toYaml .Values.postgresql.podLabels | nindent 14 }}
-      ports:
-        - port: {{ .Values.postgresql.port }}
-          protocol: TCP
-    # Allow connections to Redis
-    - to:
-        - podSelector:
-            matchLabels:
-              {{- toYaml .Values.redis.podLabels | nindent 14 }}
-      ports:
-        - port: {{ .Values.redis.port }}
-          protocol: TCP
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ include "recotem.fullname" . }}-proxy
-  labels:
-    {{- include "recotem.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-      {{- include "recotem.proxySelectorLabels" . | nindent 6 }}
-  policyTypes:
-    - Ingress
-    - Egress
-  ingress:
-    # Allow traffic from ingress controller or external
+    # Allow DNS resolution.
     - ports:
-        - port: 8000
-          protocol: TCP
-  egress:
-    # Allow DNS resolution (kube-system only)
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
         - port: 53
           protocol: UDP
         - port: 53
           protocol: TCP
-    # Allow connections to backend
-    - to:
-        - podSelector:
-            matchLabels:
-              {{- include "recotem.backendSelectorLabels" . | nindent 14 }}
-      ports:
+    # Allow outbound HTTPS for object store access (S3, GCS, Azure Blob).
+    - ports:
+        - port: 443
+          protocol: TCP
+    # Allow outbound HTTP on 8080 for internal health checks or sidecars if needed.
+    # Remove this rule if not needed.
+    - ports:
         - port: 8080
-          protocol: TCP
-    # Allow connections to inference
-    - to:
-        - podSelector:
-            matchLabels:
-              {{- include "recotem.inferenceSelectorLabels" . | nindent 14 }}
-      ports:
-        - port: 8081
-          protocol: TCP
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ include "recotem.fullname" . }}-inference
-  labels:
-    {{- include "recotem.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-      {{- include "recotem.inferenceSelectorLabels" . | nindent 6 }}
-  policyTypes:
-    - Ingress
-    - Egress
-  ingress:
-    # Allow traffic from proxy
-    - from:
-        - podSelector:
-            matchLabels:
-              {{- include "recotem.proxySelectorLabels" . | nindent 14 }}
-      ports:
-        - port: 8081
-          protocol: TCP
-  egress:
-    # Allow DNS resolution (kube-system only)
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
-          protocol: TCP
-    # Allow connections to PostgreSQL (read-only)
-    - to:
-        - podSelector:
-            matchLabels:
-              {{- toYaml .Values.postgresql.podLabels | nindent 14 }}
-      ports:
-        - port: {{ .Values.postgresql.port }}
-          protocol: TCP
-    # Allow connections to Redis
-    - to:
-        - podSelector:
-            matchLabels:
-              {{- toYaml .Values.redis.podLabels | nindent 14 }}
-      ports:
-        - port: {{ .Values.redis.port }}
           protocol: TCP
 {{- end }}

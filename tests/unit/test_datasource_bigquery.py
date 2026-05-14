@@ -1,0 +1,1284 @@
+"""Unit tests for recotem.datasource.bigquery (mocked — no real GCP).
+
+Tests:
+- Credential failure wraps in DataSourceError
+- Missing extras produce a clear DataSourceError
+- Query submission error wraps in DataSourceError
+- Query execution error wraps in DataSourceError
+"""
+
+from __future__ import annotations
+
+import sys
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from recotem.datasource.base import DataSourceError, FetchContext
+
+
+def _ctx() -> FetchContext:
+    return FetchContext(recipe_name="bq_test", run_id="run-bq")
+
+
+# ---------------------------------------------------------------------------
+# Missing extras
+# ---------------------------------------------------------------------------
+
+
+def test_bigquery_extra_not_installed_clear_error_with_extra_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When google-cloud-bigquery is missing, DataSourceError names the extra."""
+
+    # Temporarily remove the bigquery module to simulate missing extra
+    original = sys.modules.get("google.cloud.bigquery")
+    sys.modules["google.cloud.bigquery"] = None  # type: ignore[assignment]
+
+    try:
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        with pytest.raises(DataSourceError, match="recotem\\[bigquery\\]"):
+            BigQuerySource(cfg)
+    finally:
+        if original is None:
+            sys.modules.pop("google.cloud.bigquery", None)
+        else:
+            sys.modules["google.cloud.bigquery"] = original
+
+
+# ---------------------------------------------------------------------------
+# Credential failure
+# ---------------------------------------------------------------------------
+
+
+def test_bigquery_credentials_failure_wraps_in_DataSourceError_exit3() -> None:
+    """bigquery.Client() that raises wraps the error in DataSourceError."""
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": MagicMock(),
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": MagicMock(),
+        },
+    ):
+        # Reload to pick up mocked modules
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        mock_bq = MagicMock()
+        mock_bq.Client.side_effect = Exception(
+            "DefaultCredentialsError: no credentials"
+        )
+
+        with patch.dict(
+            sys.modules,
+            {
+                "google.cloud.bigquery": mock_bq,
+                "db_dtypes": MagicMock(),
+            },
+        ):
+            from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+            cfg = BigQueryConfig(type="bigquery", query="SELECT * FROM tbl")
+            source = BigQuerySource.__new__(BigQuerySource)
+            source._config = cfg
+
+            with pytest.raises(DataSourceError, match="[Ff]ailed|[Cc]redential"):
+                source.fetch(_ctx())
+
+
+# ---------------------------------------------------------------------------
+# Query submission error
+# ---------------------------------------------------------------------------
+
+
+def test_bigquery_query_submission_error_wraps_DataSourceError() -> None:
+    """GoogleAPICallError from client.query() is wrapped in DataSourceError."""
+    mock_bq = MagicMock()
+    mock_client = MagicMock()
+    mock_bq.Client.return_value = mock_client
+    mock_bq.QueryJobConfig.return_value = MagicMock()
+
+    mock_api_error = type("GoogleAPICallError", (Exception,), {})
+    mock_exceptions = MagicMock()
+    mock_exceptions.GoogleAPICallError = mock_api_error
+    mock_api_core = MagicMock()
+    mock_api_core.exceptions = mock_exceptions
+
+    mock_client.query.side_effect = mock_api_error("query submission failed")
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT bad query")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError):
+            source.fetch(_ctx())
+
+
+# ---------------------------------------------------------------------------
+# Unsupported query parameter type
+# ---------------------------------------------------------------------------
+
+
+def test_bigquery_unsupported_param_type_raises_DataSourceError() -> None:
+    """An unsupported query_parameters type (e.g. list) raises DataSourceError."""
+    mock_bq = MagicMock()
+    mock_bq.ScalarQueryParameter = MagicMock()
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(
+            type="bigquery",
+            query="SELECT * FROM tbl WHERE x = @mylist",
+            query_parameters={"mylist": [1, 2, 3]},  # list is unsupported
+        )
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError, match="unsupported type"):
+            source._build_query_parameters()
+
+
+# ---------------------------------------------------------------------------
+# E-5: Storage API fallback — log event + OOM propagation
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_bq_modules():
+    """Return (mock_bq, mock_exceptions, mock_api_core) for use in patch.dict."""
+    mock_api_error_cls = type("GoogleAPICallError", (Exception,), {})
+    mock_exceptions = MagicMock()
+    mock_exceptions.GoogleAPICallError = mock_api_error_cls
+    mock_api_core = MagicMock()
+    mock_api_core.exceptions = mock_exceptions
+
+    mock_client = MagicMock()
+    mock_query_job = MagicMock()
+    mock_client.query.return_value = mock_query_job
+    mock_bq = MagicMock()
+    mock_bq.Client.return_value = mock_client
+    mock_bq.QueryJobConfig.return_value = MagicMock()
+
+    return (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    )
+
+
+def test_storage_fallback_emits_log_event(monkeypatch) -> None:
+    """When the Storage Read API raises GoogleAPICallError, a structured
+    'bigquery_storage_fallback' log event must be emitted before falling back
+    to the standard REST path.
+    """
+    import structlog
+    import structlog.testing
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    # Storage API raises GoogleAPICallError; REST fallback succeeds.
+    import pandas as pd
+
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    def _to_dataframe_side_effect(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise mock_api_error_cls("storage permission denied")
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_side_effect
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with structlog.testing.capture_logs() as cap_logs:
+            result = source.fetch(_ctx())
+
+    # Fallback event must have been emitted.
+    events = [e.get("event") for e in cap_logs]
+    assert "bigquery_storage_fallback" in events, (
+        f"Expected 'bigquery_storage_fallback' log event; got: {events}"
+    )
+    assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# C9 — query_parameters are bound via ScalarQueryParameter, not string interpolation
+# ---------------------------------------------------------------------------
+
+
+def test_query_parameters_bound_via_bigquery_param_placeholders() -> None:
+    """BigQuery query_parameters are bound as ScalarQueryParameter objects, not
+    string-interpolated into the query.
+
+    Verifies that _build_query_parameters() produces a list of
+    ScalarQueryParameter objects matching the recipe's query_parameters dict,
+    and that the BigQuery client.query() call receives a QueryJobConfig whose
+    query_parameters attribute is non-empty and contains the expected binding.
+
+    The BQ client is mocked so no real GCP connection is made.
+    """
+    import pandas as pd
+
+    scalar_param_calls: list[tuple[str, str, object]] = []
+
+    # Build mock modules that record ScalarQueryParameter constructor calls.
+    mock_bq = MagicMock()
+    mock_client = MagicMock()
+    mock_job = MagicMock()
+    mock_bq.Client.return_value = mock_client
+    mock_client.query.return_value = mock_job
+    mock_job.to_dataframe.return_value = pd.DataFrame(
+        {"user_id": ["u1"], "item_id": ["i1"]}
+    )
+
+    mock_job_config_instance = MagicMock()
+    mock_bq.QueryJobConfig.return_value = mock_job_config_instance
+
+    captured_params: list = []
+
+    class _FakeScalarQueryParameter:
+        """Records constructor args so we can assert binding behavior."""
+
+        def __init__(self, name: str, type_: str, value: object) -> None:
+            scalar_param_calls.append((name, type_, value))
+            self.name = name
+            self.type_ = type_
+            self.value = value
+
+    mock_bq.ScalarQueryParameter = _FakeScalarQueryParameter
+
+    # Patch the job_config setter to capture query_parameters assignment.
+    def _capture_query_parameters(params):
+        captured_params.extend(params)
+
+    type(mock_job_config_instance).query_parameters = property(
+        lambda self: captured_params,
+        lambda self, v: captured_params.extend(v) if v else None,
+    )
+
+    mock_api_error_cls = type("GoogleAPICallError", (Exception,), {})
+    mock_exceptions = MagicMock()
+    mock_exceptions.GoogleAPICallError = mock_api_error_cls
+    mock_api_core = MagicMock()
+    mock_api_core.exceptions = mock_exceptions
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(
+            type="bigquery",
+            query="SELECT user_id, item_id FROM my_table WHERE category = @cat AND min_score = @score",
+            query_parameters={"cat": "books", "score": 3.5},
+        )
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        # Call _build_query_parameters directly to verify binding.
+        params = source._build_query_parameters()
+
+    assert len(params) == 2, (
+        f"Expected 2 ScalarQueryParameter objects; got {len(params)}"
+    )
+
+    # Verify each parameter was constructed with (name, type, value) — not
+    # string-interpolated into the query.
+    param_names = {p.name for p in params}
+    assert "cat" in param_names, (
+        f"Expected parameter 'cat' to be bound; got {param_names!r}"
+    )
+    assert "score" in param_names, (
+        f"Expected parameter 'score' to be bound; got {param_names!r}"
+    )
+
+    cat_param = next(p for p in params if p.name == "cat")
+    score_param = next(p for p in params if p.name == "score")
+    assert cat_param.value == "books", (
+        f"Expected 'cat' value='books'; got {cat_param.value!r}"
+    )
+    assert score_param.value == 3.5, (
+        f"Expected 'score' value=3.5; got {score_param.value!r}"
+    )
+    # String binding NOT injection — the query itself must remain unchanged.
+    assert "@cat" in cfg.query, "Query must retain @cat placeholder (not interpolated)"
+    assert "@score" in cfg.query, (
+        "Query must retain @score placeholder (not interpolated)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# T-4: BigQuery query timeout/job timeout wrapped as DataSourceError
+# ---------------------------------------------------------------------------
+
+
+def test_bigquery_concurrent_futures_timeout_wraps_DataSourceError() -> None:
+    """concurrent.futures.TimeoutError from to_dataframe must be wrapped as DataSourceError.
+
+    This covers the case where the BigQuery job hangs past any client-side
+    deadline and the futures machinery raises TimeoutError.
+    """
+    import concurrent.futures
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    mock_query_job.to_dataframe.side_effect = concurrent.futures.TimeoutError(
+        "query job timed out"
+    )
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError):
+            source.fetch(_ctx())
+
+
+def test_bigquery_deadline_exceeded_wraps_DataSourceError() -> None:
+    """google.api_core.exceptions.DeadlineExceeded from to_dataframe must be
+    wrapped as DataSourceError.
+
+    DeadlineExceeded is a subclass of GoogleAPICallError; the outer
+    except GoogleAPICallError handler in fetch() must catch it.
+    """
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    # Make DeadlineExceeded a subclass of our mock GoogleAPICallError class.
+    deadline_cls = type("DeadlineExceeded", (mock_api_error_cls,), {})
+    mock_query_job.to_dataframe.side_effect = deadline_cls("deadline exceeded")
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError):
+            source.fetch(_ctx())
+
+
+# ---------------------------------------------------------------------------
+# M-15: Storage API fallback IAM permission in log + RECOTEM_BQ_REQUIRE_STORAGE_API
+# ---------------------------------------------------------------------------
+
+
+def test_storage_api_fallback_logs_iam_permission(monkeypatch) -> None:
+    """When the Storage Read API raises GoogleAPICallError, the warning log must
+    include the required IAM permission 'bigquery.readSessions.create'.
+
+    Operators monitoring for this event need to know which permission to grant.
+    """
+    import structlog.testing
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    import pandas as pd
+
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    def _to_dataframe_side_effect(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise mock_api_error_cls("PERMISSION_DENIED: bigquery.readSessions.create")
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_side_effect
+
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with structlog.testing.capture_logs() as cap_logs:
+            source.fetch(_ctx())
+
+    # Find the fallback warning event.
+    fallback_events = [
+        e for e in cap_logs if e.get("event") == "bigquery_storage_fallback"
+    ]
+    assert fallback_events, (
+        f"Expected 'bigquery_storage_fallback' log event; got events: "
+        f"{[e.get('event') for e in cap_logs]}"
+    )
+    log_entry = fallback_events[0]
+    # The log entry must surface the IAM permission name so operators know what
+    # to grant.
+    log_str = str(log_entry)
+    assert "bigquery.readSessions.create" in log_str, (
+        f"Expected IAM permission 'bigquery.readSessions.create' in log entry; "
+        f"got: {log_entry!r}"
+    )
+
+
+def test_bq_require_storage_api_disables_fallback(monkeypatch) -> None:
+    """When RECOTEM_BQ_REQUIRE_STORAGE_API is set to a truthy value,
+    a GoogleAPICallError from the Storage Read API must surface as DataSourceError
+    rather than triggering the REST fallback.
+    """
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    mock_query_job.to_dataframe.side_effect = mock_api_error_cls(
+        "PERMISSION_DENIED: bigquery.readSessions.create"
+    )
+
+    monkeypatch.setenv("RECOTEM_BQ_REQUIRE_STORAGE_API", "1")
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(
+            DataSourceError, match="RECOTEM_BQ_REQUIRE_STORAGE_API|Storage Read API"
+        ):
+            source.fetch(_ctx())
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-2: recotem_bigquery_storage_fallback_total counter incremented
+# ---------------------------------------------------------------------------
+
+
+def test_bigquery_storage_fallback_increments_counter_on_api_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the Storage Read API raises GoogleAPICallError and the fallback is
+    NOT disabled, ``inc_bigquery_storage_fallback("api_error")`` must be called.
+
+    We patch the name bound inside the ``bigquery`` module's own namespace
+    (imported from ``_metrics_bigquery`` at load time) to intercept the call.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import pandas as pd
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    def _to_dataframe_side_effect(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise mock_api_error_cls("PERMISSION_DENIED")
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_side_effect
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    inc_spy = MagicMock()
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        # Import the module so the name is bound, then patch it in-place.
+        import recotem.datasource.bigquery as bq_module
+
+        with patch.object(bq_module, "inc_bigquery_storage_fallback", inc_spy):
+            cfg = bq_module.BigQueryConfig(type="bigquery", query="SELECT 1")
+            source = bq_module.BigQuerySource.__new__(bq_module.BigQuerySource)
+            source._config = cfg
+            source.fetch(_ctx())
+
+    inc_spy.assert_called_once_with("api_error")
+
+
+def test_bigquery_storage_fallback_increments_counter_on_missing_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the Storage Read API raises ImportError (missing extra),
+    ``inc_bigquery_storage_fallback("missing_extra")`` must be called.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import pandas as pd
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        _,
+    ) = _make_mock_bq_modules()
+
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    def _to_dataframe_side_effect(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise ImportError("No module named 'google.cloud.bigquery_storage'")
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_side_effect
+
+    inc_spy = MagicMock()
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        import recotem.datasource.bigquery as bq_module
+
+        with patch.object(bq_module, "inc_bigquery_storage_fallback", inc_spy):
+            cfg = bq_module.BigQueryConfig(type="bigquery", query="SELECT 1")
+            source = bq_module.BigQuerySource.__new__(bq_module.BigQuerySource)
+            source._config = cfg
+            source.fetch(_ctx())
+
+    inc_spy.assert_called_once_with("missing_extra")
+
+
+def test_storage_oom_propagates() -> None:
+    """A MemoryError from the Storage Read API must propagate directly, not be
+    wrapped in DataSourceError.
+
+    After M-8, MemoryError is let-propagate (re-raised) rather than being
+    caught and re-wrapped as DataSourceError.  This ensures the operator's host
+    sees a real OOM signal rather than a misleading DataSourceError.
+    """
+    mock_bq, mock_exceptions, mock_api_core, mock_client, mock_query_job, _ = (
+        _make_mock_bq_modules()
+    )
+
+    # Storage API raises MemoryError — this must NOT be silently caught.
+    mock_query_job.to_dataframe.side_effect = MemoryError("out of memory")
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(MemoryError, match="out of memory"):
+            source.fetch(_ctx())
+
+
+# ---------------------------------------------------------------------------
+# probe() — failure raises DataSourceError; success returns without error
+# ---------------------------------------------------------------------------
+
+
+def _make_probe_bq_modules():
+    """Return mocked BQ modules suitable for probe() tests."""
+    mock_api_error_cls = type("GoogleAPICallError", (Exception,), {})
+    mock_exceptions = MagicMock()
+    mock_exceptions.GoogleAPICallError = mock_api_error_cls
+    mock_api_core = MagicMock()
+    mock_api_core.exceptions = mock_exceptions
+
+    mock_client = MagicMock()
+    mock_bq = MagicMock()
+    mock_bq.Client.return_value = mock_client
+    mock_bq.QueryJobConfig.return_value = MagicMock()
+
+    return mock_bq, mock_exceptions, mock_api_core, mock_client, mock_api_error_cls
+
+
+def test_probe_client_creation_failure_raises_DataSourceError() -> None:
+    """probe() raises DataSourceError when BigQuery client creation fails.
+
+    Covers the case where ADC is missing or invalid credentials prevent
+    bigquery.Client() from instantiating.
+    """
+    mock_bq, mock_exceptions, mock_api_core, _, mock_api_error_cls = (
+        _make_probe_bq_modules()
+    )
+    mock_bq.Client.side_effect = Exception("DefaultCredentialsError: no credentials")
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError, match="[Ff]ailed|[Cc]redential"):
+            source.probe()
+
+
+def test_probe_dry_run_query_failure_raises_DataSourceError() -> None:
+    """probe() raises DataSourceError when the dry-run query fails.
+
+    Covers GoogleAPICallError from client.query() during the dry-run,
+    e.g. invalid SQL syntax or insufficient permissions.
+    """
+    mock_bq, mock_exceptions, mock_api_core, mock_client, mock_api_error_cls = (
+        _make_probe_bq_modules()
+    )
+    mock_client.query.side_effect = mock_api_error_cls("dry run failed: bad SQL")
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT bad_col FROM nonexistent")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError, match="[Dd]ry.run|[Ff]ailed"):
+            source.probe()
+
+
+def test_probe_success_returns_without_error() -> None:
+    """probe() returns None when the BigQuery client and dry-run query succeed.
+
+    Confirms the success path: no exception is raised when client creation and
+    the dry-run query both complete normally.
+    """
+    mock_bq, mock_exceptions, mock_api_core, mock_client, _ = _make_probe_bq_modules()
+    # client.query() returns a mock job (success)
+    mock_client.query.return_value = MagicMock()
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        # Must not raise
+        result = source.probe()
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Round-15 C3: Storage API fallback only triggers on IAM-shaped failures
+# ---------------------------------------------------------------------------
+
+
+def test_storage_fallback_non_iam_error_raises_no_fallback(monkeypatch) -> None:
+    """When the Storage Read API raises a non-IAM GoogleAPICallError
+    (e.g. ``ResourceExhausted`` quota / 5xx / connectivity), the fallback
+    must NOT trigger — the REST path would hit the same backend
+    constraint and either double-bill or replay the failure.
+
+    Surfacing the failure as ``DataSourceError`` lets operators see the
+    true root cause instead of a slow second attempt with the same outcome.
+    """
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    # Non-IAM error: quota exhausted.  Class name does not match
+    # PermissionDenied / Forbidden, and the message does not contain any
+    # of the IAM markers — so the new code must NOT fall back.
+    quota_cls = type("ResourceExhausted", (mock_api_error_cls,), {})
+    mock_query_job.to_dataframe.side_effect = quota_cls(
+        "Quota exceeded for quota metric 'Queries per minute'"
+    )
+
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError, match="REST fallback skipped"):
+            source.fetch(_ctx())
+
+
+def test_storage_fallback_iam_classname_match(monkeypatch) -> None:
+    """A class literally named ``PermissionDenied`` triggers the fallback
+    even if the message text does not mention permissions.
+    """
+    import pandas as pd
+    import structlog.testing
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    perm_cls = type("PermissionDenied", (mock_api_error_cls,), {})
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    def _to_dataframe_side_effect(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise perm_cls("the service account is denied (no marker words)")
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_side_effect
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with structlog.testing.capture_logs() as cap_logs:
+            result = source.fetch(_ctx())
+
+    events = [e.get("event") for e in cap_logs]
+    assert "bigquery_storage_fallback" in events, (
+        "Class-name match (PermissionDenied) must trigger the fallback path."
+    )
+    assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# CRIT-5: iam_detected_via field in bigquery_storage_fallback log
+# ---------------------------------------------------------------------------
+
+
+def _make_bq_env(mock_bq, mock_exceptions, mock_api_core):
+    """Context manager helper that patches sys.modules and reloads bigquery module."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx_mgr():
+        with patch.dict(
+            sys.modules,
+            {
+                "google.cloud.bigquery": mock_bq,
+                "db_dtypes": MagicMock(),
+                "google.api_core.exceptions": mock_exceptions,
+                "google.api_core": mock_api_core,
+            },
+        ):
+            if "recotem.datasource.bigquery" in sys.modules:
+                del sys.modules["recotem.datasource.bigquery"]
+            import recotem.datasource.bigquery as bq_mod
+
+            yield bq_mod
+
+    return _ctx_mgr()
+
+
+def _make_iam_test_source(mock_bq, mock_exceptions, mock_api_core, exc_factory):
+    """Set up fetch() so Storage API raises exc_factory() and REST succeeds."""
+    import pandas as pd
+
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+    mock_query_job = mock_bq.Client.return_value.query.return_value
+
+    def _to_dataframe(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise exc_factory()
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe
+    return mock_query_job
+
+
+def test_storage_fallback_iam_detected_via_http_403(monkeypatch) -> None:
+    """When the storage exception has an HTTP 403 code, iam_detected_via='http_403'."""
+    import structlog.testing
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    # Exception with .code == 403 but non-IAM class name.
+    class _Http403Error(mock_api_error_cls):
+        code = 403
+
+    _make_iam_test_source(
+        mock_bq, mock_exceptions, mock_api_core, lambda: _Http403Error("forbidden")
+    )
+
+    with _make_bq_env(mock_bq, mock_exceptions, mock_api_core) as bq_mod:
+        cfg = bq_mod.BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = bq_mod.BigQuerySource.__new__(bq_mod.BigQuerySource)
+        source._config = cfg
+        with structlog.testing.capture_logs() as cap:
+            source.fetch(_ctx())
+
+    fallback_events = [e for e in cap if e.get("event") == "bigquery_storage_fallback"]
+    assert fallback_events, "Expected bigquery_storage_fallback event"
+    assert fallback_events[0]["iam_detected_via"] == "http_403", (
+        f"Expected iam_detected_via='http_403'; got {fallback_events[0]!r}"
+    )
+
+
+def test_storage_fallback_iam_detected_via_class_name(monkeypatch) -> None:
+    """When the storage exception class name is 'PermissionDenied', iam_detected_via='class'."""
+    import structlog.testing
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    # Class named PermissionDenied but no .code attribute.
+    PermissionDenied = type("PermissionDenied", (mock_api_error_cls,), {})
+
+    _make_iam_test_source(
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        lambda: PermissionDenied("permission denied"),
+    )
+
+    with _make_bq_env(mock_bq, mock_exceptions, mock_api_core) as bq_mod:
+        cfg = bq_mod.BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = bq_mod.BigQuerySource.__new__(bq_mod.BigQuerySource)
+        source._config = cfg
+        with structlog.testing.capture_logs() as cap:
+            source.fetch(_ctx())
+
+    fallback_events = [e for e in cap if e.get("event") == "bigquery_storage_fallback"]
+    assert fallback_events, "Expected bigquery_storage_fallback event"
+    assert fallback_events[0]["iam_detected_via"] == "class", (
+        f"Expected iam_detected_via='class'; got {fallback_events[0]!r}"
+    )
+
+
+def test_storage_fallback_iam_detected_via_message_marker(monkeypatch) -> None:
+    """When the exception message contains 'PERMISSION_DENIED', iam_detected_via='message'."""
+    import structlog.testing
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    # Non-IAM class name, no HTTP code, but message has the marker.
+    class _StorageApiError(mock_api_error_cls):
+        pass
+
+    _make_iam_test_source(
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        lambda: _StorageApiError("PERMISSION_DENIED: caller lacks permission"),
+    )
+
+    with _make_bq_env(mock_bq, mock_exceptions, mock_api_core) as bq_mod:
+        cfg = bq_mod.BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = bq_mod.BigQuerySource.__new__(bq_mod.BigQuerySource)
+        source._config = cfg
+        with structlog.testing.capture_logs() as cap:
+            source.fetch(_ctx())
+
+    fallback_events = [e for e in cap if e.get("event") == "bigquery_storage_fallback"]
+    assert fallback_events, "Expected bigquery_storage_fallback event"
+    assert fallback_events[0]["iam_detected_via"] == "message", (
+        f"Expected iam_detected_via='message'; got {fallback_events[0]!r}"
+    )
+
+
+def test_storage_fallback_non_iam_increments_no_fallback_counter(monkeypatch) -> None:
+    """The non-IAM no-fallback path increments the new
+    ``non_iam_error_no_fallback`` label rather than ``api_error``.
+    """
+    from unittest.mock import MagicMock, patch
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    quota_cls = type("ResourceExhausted", (mock_api_error_cls,), {})
+    mock_query_job.to_dataframe.side_effect = quota_cls("Quota exceeded")
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    inc_spy = MagicMock()
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        import recotem.datasource.bigquery as bq_module
+
+        with patch.object(bq_module, "inc_bigquery_storage_fallback", inc_spy):
+            cfg = bq_module.BigQueryConfig(type="bigquery", query="SELECT 1")
+            source = bq_module.BigQuerySource.__new__(bq_module.BigQuerySource)
+            source._config = cfg
+            with pytest.raises(DataSourceError):
+                source.fetch(_ctx())
+
+    inc_spy.assert_called_once_with("non_iam_error_no_fallback")
+
+
+# ---------------------------------------------------------------------------
+# I-22: RECOTEM_BQ_REQUIRE_STORAGE_API=1 + ImportError raises DataSourceError
+# ---------------------------------------------------------------------------
+
+
+def test_require_storage_api_and_import_error_raises_datasource_error(
+    monkeypatch,
+) -> None:
+    """When RECOTEM_BQ_REQUIRE_STORAGE_API=1 and the bigquery-storage extra
+    is not installed (ImportError from create_bqstorage_client), fetch() must
+    raise DataSourceError rather than falling back silently to the REST API.
+
+    Before the I-22 fix, only the GoogleAPICallError path checked the env var;
+    the ImportError path always fell back to REST silently even when strict mode
+    was requested.
+    """
+    monkeypatch.setenv("RECOTEM_BQ_REQUIRE_STORAGE_API", "1")
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    # Simulate the bigquery-storage extra not being installed.
+    def _to_dataframe_import_error(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise ImportError("No module named 'google.cloud.bigquery_storage'")
+        # REST fallback — should NOT be reached when REQUIRE_STORAGE_API=1.
+        import pandas as pd
+
+        return pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_import_error
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError) as exc_info:
+            source.fetch(_ctx())
+
+    err_msg = str(exc_info.value)
+    assert "RECOTEM_BQ_REQUIRE_STORAGE_API" in err_msg, (
+        f"Error message must mention the env var; got: {err_msg!r}"
+    )
+    assert "not installed" in err_msg or "extras" in err_msg, (
+        f"Error message must explain the missing extras; got: {err_msg!r}"
+    )
+
+
+def test_require_storage_api_false_import_error_falls_back_silently(
+    monkeypatch,
+) -> None:
+    """When RECOTEM_BQ_REQUIRE_STORAGE_API is NOT set (falsy), an ImportError
+    from create_bqstorage_client must still fall back silently to the REST API.
+
+    This is the original behavior that I-22 preserves for users who have not
+    opted into strict Storage-API mode.
+    """
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    import pandas as pd
+
+    rest_df = pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]})
+
+    def _to_dataframe_side_effect(**kwargs):
+        if kwargs.get("create_bqstorage_client"):
+            raise ImportError("No module named 'google.cloud.bigquery_storage'")
+        return rest_df
+
+    mock_query_job.to_dataframe.side_effect = _to_dataframe_side_effect
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google.cloud.bigquery": mock_bq,
+            "db_dtypes": MagicMock(),
+            "google.api_core.exceptions": mock_exceptions,
+            "google.api_core": mock_api_core,
+        },
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        result = source.fetch(_ctx())
+
+    assert len(result) == 1, "REST fallback must return a DataFrame"

@@ -1,13 +1,16 @@
 apiVersion: v2
 name: recotem
-description: A Helm chart for Recotem - recommendation system builder
+description: >
+  Helm chart for Recotem — recipe-driven recommender training and serving.
+  Provides a stateless serve Deployment with optional CronJob for training,
+  NetworkPolicy, PodDisruptionBudget, and HorizontalPodAutoscaler.
 type: application
-version: 2.0.0
-appVersion: "2.0.0"
+version: 2.0.0-alpha.0
+appVersion: "2.0.0a0"
 keywords:
   - recommendation
   - machine-learning
-  - django
-  - vue
+  - fastapi
 maintainers:
-  - name: Recotem Team
+  - name: CodeLibs, Inc.
+    email: info@codelibs.co

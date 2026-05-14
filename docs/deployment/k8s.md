@@ -68,7 +68,7 @@ Exit code mapping for `restartPolicy: OnFailure`:
 | 8 | Configuration error | No retry (missing signing keys, bad env) |
 | 1 | Unexpected error | Retry |
 
-Set `backoffLimit: 2` for production CronJobs to avoid runaway retry loops on persistent data issues. The bundled Helm CronJob also sets `activeDeadlineSeconds: 3600` (1 h hard kill); raise it for slow Optuna budgets or data sources.
+Set `backoffLimit: 2` for production CronJobs to avoid runaway retry loops on persistent data issues — the bundled Helm CronJob template does *not* set `backoffLimit`, so add it via your values overlay (or on plain manifests). The bundled Helm CronJob does set `activeDeadlineSeconds: 3600` (1 h hard kill); raise it for slow Optuna budgets or data sources.
 
 When `failOnBusy: false` (the chart default), a lock collision from
 `concurrencyPolicy: Forbid` is impossible at the K8s layer, but if you set
@@ -100,7 +100,8 @@ spec:
         app.kubernetes.io/name: recotem
         app.kubernetes.io/component: serve
     spec:
-      # terminationGracePeriodSeconds >= RECOTEM_DRAIN_SECONDS + 5 (default 30+5=35)
+      # terminationGracePeriodSeconds >= RECOTEM_DRAIN_SECONDS + 5 (default 30+5=35).
+      # The bundled Helm chart adds a 5 s preStop sleep so its default is 5+30+5=40.
       terminationGracePeriodSeconds: 35
       containers:
         - name: serve

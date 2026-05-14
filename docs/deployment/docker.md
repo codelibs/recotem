@@ -107,7 +107,7 @@ mkdir -p ./artifacts && chown 1000:1000 ./artifacts
 
 Named Docker volumes (as in `compose.yaml`) are pre-created with the right ownership and need no chown. The container also has `readOnlyRootFilesystem` semantics in mind — `/tmp` is the only writable location outside mounted volumes.
 
-**Image-level HEALTHCHECK.** The Dockerfile declares its own `HEALTHCHECK` that uses `urllib.request.urlopen('http://127.0.0.1:8080/health')` every 30 s to probe the `/health` endpoint. For one-shot `train` containers this fires after the process has already exited and causes no spurious failures. The Compose-level healthcheck shown in the annotated example also targets `/health` and overrides the image default for the `serve` service — orchestrators should rely on the HTTP 200 response from `/health`.
+**Image-level HEALTHCHECK.** The Dockerfile declares its own `HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3` that probes the public `/health` endpoint with `urllib.request.urlopen(f'http://127.0.0.1:{RECOTEM_PORT}/health', timeout=3)` (so it picks up an overridden `RECOTEM_PORT`). For one-shot `train` containers this fires after the process has already exited and causes no spurious failures. The Compose-level healthcheck shown in the annotated example also targets `/health` (with a slightly looser `timeout=5` inside the Python probe) and overrides the image default for the `serve` service — orchestrators should rely on the HTTP 200 response from `/health`.
 
 **Bind port only on localhost on the host if you put a reverse proxy in front:**
 

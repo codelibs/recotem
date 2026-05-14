@@ -44,14 +44,16 @@ This multi-kid pattern enables zero-downtime rotation:
    RECOTEM_SIGNING_KEYS="prod-2026-q3:ddeeff..."
    ```
 
-   Restart `recotem serve`. Any artifact still signed with the old kid will fail to load and appear as `loaded: false` in `/health`. Retrain those recipes.
+   Restart `recotem serve`. Any artifact still signed with the old kid will fail to load and will show up as `loaded: false` in `/health/details`. Retrain those recipes.
 
-   Confirm all recipes loaded successfully:
+   Confirm all recipes loaded successfully. Per-recipe state lives behind the authenticated `/health/details` endpoint — the public `/health` returns only `{status, total, loaded}` aggregates, not the `recipes` map:
 
    ```bash
    # -f / --fail returns exit 22 on 4xx/5xx, which would mask a 503.
    # Use -w to capture the status code instead.
-   HTTP_STATUS=$(curl -s -o /tmp/health.json -w "%{http_code}" http://localhost:8080/health)
+   HTTP_STATUS=$(curl -s -o /tmp/health.json -w "%{http_code}" \
+     -H "X-API-Key: $RECOTEM_API_PLAINTEXT" \
+     http://localhost:8080/health/details)
    echo "HTTP $HTTP_STATUS"
    jq '.recipes | to_entries[] | select(.value.loaded == false)' /tmp/health.json
    ```

@@ -18,7 +18,7 @@ From the repository root:
 recotem keygen --type signing --kid dev
 recotem keygen --type api     --kid dev
 
-export RECOTEM_SIGNING_KEYS="dev:<signing-plaintext>"   # signing: env_entry value
+export RECOTEM_SIGNING_KEYS="dev:<signing-hex64>"       # signing: env_entry value (the 64-char hex from keygen)
 export RECOTEM_API_KEYS="dev:sha256:<api-hash>"         # api:     env_entry value
 export RECOTEM_API_PLAINTEXT="<api-plaintext>"          # api:     plaintext, for curl
 

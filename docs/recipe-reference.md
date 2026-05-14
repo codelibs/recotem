@@ -240,9 +240,10 @@ block.
 > [security.md — Decompressed-size cap not enforced](security.md#decompressed-size-cap-not-enforced-medium-5).
 
 `output.path` is restricted to the following schemes: bare local path (no prefix),
-`file://`, `s3://`, `gs://`, `az://`, `abfs://`, `abfss://`. All other schemes
-(including `http://`, `https://`, `ftp://`, `ftps://`, and `memory://`) are
-rejected because write is not supported for those destinations.
+`file://`, `s3://`, `gs://`, `az://`, `abfs://`, `abfss://`. Other schemes are
+rejected: `http://`, `https://`, `ftp://`, and `ftps://` because Recotem does
+not support writing artifacts over those protocols; `memory://` because it is
+process-local and would not survive past the training run.
 
 Embedded credentials (`s3://AKIA...:secret@bucket/`) are rejected at recipe
 load on every path field.

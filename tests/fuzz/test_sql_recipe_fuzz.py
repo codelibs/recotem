@@ -131,20 +131,22 @@ def test_sql_recipe_fuzz_single_byte_flip(
 # ---------------------------------------------------------------------------
 
 
-def test_empty_input_raises_recipe_error(tmp_path: Path) -> None:
+def test_empty_input_does_not_cause_unhandled_exception(tmp_path: Path) -> None:
     """Empty file must not produce an unhandled exception."""
     _try_load_bytes(b"", tmp_path)
 
 
 def test_sql_recipe_base_loads_successfully(tmp_path: Path) -> None:
     """Sanity: the unmutated MINIMAL_SQL_YAML must load without error."""
+    from recotem.datasource.sql import SQLConfig
     from recotem.recipe.loader import load_recipe
 
     yaml_file = tmp_path / "base.yaml"
     yaml_file.write_text(MINIMAL_SQL_YAML, encoding="utf-8")
     recipe = load_recipe(yaml_file)
     assert recipe.name == "sql_fuzz"
-    assert recipe.source.type == "sql"  # type: ignore[union-attr]
+    assert isinstance(recipe.source, SQLConfig)
+    assert recipe.source.type == "sql"
 
 
 def test_sql_source_type_mutated_to_unknown(tmp_path: Path) -> None:

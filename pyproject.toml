@@ -49,6 +49,7 @@ csv = "recotem.datasource.csv:CSVSource"
 parquet = "recotem.datasource.csv:ParquetSource"
 bigquery = "recotem.datasource.bigquery:BigQuerySource"
 sql = "recotem.datasource.sql:SQLSource"
+ga4 = "recotem.datasource.ga4:GA4Source"
 
 [build-system]
 requires = ["hatchling"]

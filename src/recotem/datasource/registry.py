@@ -31,6 +31,7 @@ _FALLBACK_BUILTINS: dict[str, str] = {
     "parquet": "recotem.datasource.csv:ParquetSource",
     "bigquery": "recotem.datasource.bigquery:BigQuerySource",
     "sql": "recotem.datasource.sql:SQLSource",
+    "ga4": "recotem.datasource.ga4:GA4Source",
 }
 
 

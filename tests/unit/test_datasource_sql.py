@@ -190,3 +190,21 @@ def test_init_log_safe_dsn_format(monkeypatch) -> None:
     assert "/orders" in flat  # path separator preserved
     assert "alice" not in flat
     assert "s3cret" not in flat
+
+
+def test_probe_sqlite_in_memory(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+    src.probe()  # no exception
+
+
+def test_probe_unreachable_db_raises(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@127.0.0.1:1/none")
+    src = SQLSource(_make_cfg(connect_timeout_seconds=1))
+    with pytest.raises(DataSourceError):
+        src.probe()

@@ -124,7 +124,31 @@ class SQLSource:
         )
 
     def probe(self) -> None:
-        raise NotImplementedError  # filled in Task 2.5
+        import sqlalchemy
+        from sqlalchemy import text
+        from sqlalchemy.pool import NullPool
+
+        try:
+            engine = sqlalchemy.create_engine(
+                self._url,
+                connect_args=self._connect_args(),
+                poolclass=NullPool,
+            )
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        except Exception as exc:
+            raise DataSourceError(
+                f"probe failed for dialect {self._dialect!r}: {type(exc).__name__}"
+            ) from exc
+
+    def _connect_args(self) -> dict[str, object]:
+        if self._dialect.startswith("postgres"):
+            return {"connect_timeout": self._config.connect_timeout_seconds}
+        if self._dialect in {"mysql", "mariadb"}:
+            return {"connect_timeout": self._config.connect_timeout_seconds}
+        if self._dialect == "sqlite":
+            return {"timeout": self._config.connect_timeout_seconds}
+        return {}
 
     def fetch(self, ctx: FetchContext) -> pd.DataFrame:
         raise NotImplementedError  # filled in Task 2.6

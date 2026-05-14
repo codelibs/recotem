@@ -4282,11 +4282,10 @@ def test_read_artifact_bytes_lets_memory_error_propagate(tmp_path: Path) -> None
 
     # Simulate MemoryError inside the fsspec read path.
     original_url_to_fs = fsspec.core.url_to_fs
+    mutated_filesystems: list = []
 
     def _oom_url_to_fs(path, **kw):
         fs, fpath = original_url_to_fs(path, **kw)
-        # Patch fs.open to raise MemoryError on read
-        original_open = fs.open
 
         class _OOMFile:
             def __enter__(self):
@@ -4305,13 +4304,21 @@ def test_read_artifact_bytes_lets_memory_error_propagate(tmp_path: Path) -> None
             yield _OOMFile()
 
         fs.open = _patched_open
+        mutated_filesystems.append(fs)
         return fs, fpath
 
     import pytest
 
-    with patch.object(fsspec.core, "url_to_fs", side_effect=_oom_url_to_fs):
-        with pytest.raises(MemoryError):
-            _read_artifact_bytes(str(artifact_path), 100 * 1024 * 1024)
+    try:
+        with patch.object(fsspec.core, "url_to_fs", side_effect=_oom_url_to_fs):
+            with pytest.raises(MemoryError):
+                _read_artifact_bytes(str(artifact_path), 100 * 1024 * 1024)
+    finally:
+        for fs in mutated_filesystems:
+            try:
+                del fs.open
+            except AttributeError:
+                pass
 
 
 def test_read_artifact_bytes_wraps_os_error_in_artifact_error(tmp_path: Path) -> None:
@@ -4327,6 +4334,7 @@ def test_read_artifact_bytes_wraps_os_error_in_artifact_error(tmp_path: Path) ->
     from recotem.serving.watcher import _read_artifact_bytes
 
     original_url_to_fs = fsspec.core.url_to_fs
+    mutated_filesystems: list = []
 
     def _ioerror_url_to_fs(path, **kw):
         fs, fpath = original_url_to_fs(path, **kw)
@@ -4348,14 +4356,22 @@ def test_read_artifact_bytes_wraps_os_error_in_artifact_error(tmp_path: Path) ->
             yield _ErrFile()
 
         fs.open = _patched_open
+        mutated_filesystems.append(fs)
         return fs, fpath
 
     artifact_path = tmp_path / "model.recotem"
     artifact_path.write_bytes(b"placeholder")
 
-    with patch.object(fsspec.core, "url_to_fs", side_effect=_ioerror_url_to_fs):
-        with pytest.raises(ArtifactError):
-            _read_artifact_bytes(str(artifact_path), 100 * 1024 * 1024)
+    try:
+        with patch.object(fsspec.core, "url_to_fs", side_effect=_ioerror_url_to_fs):
+            with pytest.raises(ArtifactError):
+                _read_artifact_bytes(str(artifact_path), 100 * 1024 * 1024)
+    finally:
+        for fs in mutated_filesystems:
+            try:
+                del fs.open
+            except AttributeError:
+                pass
 
 
 # ---------------------------------------------------------------------------

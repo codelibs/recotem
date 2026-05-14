@@ -19,6 +19,7 @@ _DIALECT_TO_EXTRA = {
     "sqlite": "sqlite",
 }
 
+# keyed by extra name, not dialect
 _DIALECT_DRIVER_PROBE = {
     "postgres": "psycopg",
     "mysql": "pymysql",
@@ -108,10 +109,13 @@ class SQLSource:
 
         # Redact userinfo from DSN before logging; redact_url_userinfo only covers
         # HTTP(S)/FTP schemes so we strip credentials directly from the URL object.
+        # The path separator must be explicit so postgres "host:5432/mydb" does not
+        # render as "host:5432mydb"; sqlite stays correct because host is empty
+        # and database is ":memory:" → "sqlite:///:memory:".
         safe_netloc = url.host or ""
         if url.port is not None:
             safe_netloc = f"{safe_netloc}:{url.port}"
-        safe_dsn = f"{url.drivername}://{safe_netloc}{url.database or ''}"
+        safe_dsn = f"{url.drivername}://{safe_netloc}/{url.database or ''}"
         _log.debug(
             "sql_source_initialized",
             dialect=backend,

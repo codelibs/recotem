@@ -145,7 +145,9 @@ def test_init_allows_private_host_when_opted_in(monkeypatch) -> None:
     from recotem.datasource.sql import SQLSource
 
     monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
-    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@127.0.0.1/x")
+    # Driver probe will succeed because psycopg is installed in dev env.
+    # SSRF guard must NOT raise because allow_private=1.
     SQLSource(_make_cfg())  # must not raise
 
 
@@ -167,5 +169,24 @@ def test_init_does_not_log_dsn_userinfo(monkeypatch) -> None:
     with structlog.testing.capture_logs() as captured:
         SQLSource(_make_cfg())
     flat = repr(captured)
+    assert "alice" not in flat
+    assert "s3cret" not in flat
+
+
+def test_init_log_safe_dsn_format(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        "postgresql://alice:s3cret@db.public.example:5432/orders",
+    )
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    with structlog.testing.capture_logs() as captured:
+        SQLSource(_make_cfg())
+    flat = repr(captured)
+    # safe DSN includes scheme, host, port, and DB path separator — but no creds
+    assert "postgresql://" in flat
+    assert "db.public.example" in flat
+    assert "/orders" in flat  # path separator preserved
     assert "alice" not in flat
     assert "s3cret" not in flat

@@ -30,6 +30,7 @@ _FALLBACK_BUILTINS: dict[str, str] = {
     "csv": "recotem.datasource.csv:CSVSource",
     "parquet": "recotem.datasource.csv:ParquetSource",
     "bigquery": "recotem.datasource.bigquery:BigQuerySource",
+    "sql": "recotem.datasource.sql:SQLSource",
 }
 
 

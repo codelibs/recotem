@@ -29,6 +29,16 @@ Environment variables:
   RECOTEM_STARTUP_PARALLELISM  Number of parallel threads used to load
                                  artifacts at startup (default min(recipes, 8);
                                  clamped 1–32)
+  RECOTEM_MAX_SQL_ROWS         Maximum rows fetched by the SQL data source
+                                 (default unlimited; set to a positive integer
+                                 to cap result sets)
+  RECOTEM_SQL_ALLOW_PRIVATE    Truthy (1/true/yes/on) opts the SQL source into
+                                 accepting private/loopback host addresses.
+                                 Default refuses RFC1918 / 127.0.0.0/8 to
+                                 block SSRF via crafted DSNs.
+  RECOTEM_GA4_MAX_PAGES        Maximum paginated API response pages fetched by
+                                 the GA4 data source (default 100;
+                                 clamped 1–10000)
 """
 
 from __future__ import annotations

@@ -66,7 +66,7 @@ docs/
 └── plugin-authoring.md DataSource plugin contract walkthrough
 
 helm/recotem/           serve-only chart with optional CronJob train
-examples/               quickstart/, csv-local/, ga4-bigquery/, k8s/, plugins/echo-source/, tutorial-purchase-log/
+examples/               quickstart/, csv-local/, sql-sqlite/, ga4-bigquery/, ga4-data-api/, k8s/, plugins/echo-source/, tutorial-purchase-log/
 Dockerfile              multi-stage python:3.12-slim, appuser:1000
 compose.yaml            train one-shot + serve long-running (tutorial)
 ```

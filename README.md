@@ -34,7 +34,7 @@ moving parts to a recipe file and a binary artifact:
 
 - Recipe-driven: 1 YAML = 1 model = 1 `/predict/{name}` endpoint
 - Hyperparameter search across irspack algorithms via Optuna
-- Pluggable data sources (built-in: CSV / Parquet / BigQuery; extend via Python entry points)
+- Pluggable data sources (built-in: CSV / Parquet / BigQuery / SQL / GA4; extend via Python entry points)
 - HMAC-signed artifacts with multi-key rotation and a deterministic
   FQCN allow-list at deserialization time
 - API-key authentication (`X-API-Key`); keys hashed at rest
@@ -56,6 +56,10 @@ moving parts to a recipe file and a binary artifact:
 pip install recotem                 # core
 pip install "recotem[bigquery]"     # BigQuery data source
 pip install "recotem[metrics]"      # Prometheus metrics endpoint
+pip install 'recotem[postgres]'     # PostgreSQL via psycopg
+pip install 'recotem[mysql]'        # MySQL/MariaDB via PyMySQL
+pip install 'recotem[sqlite]'       # SQLite (stdlib)
+pip install 'recotem[ga4]'          # Google Analytics 4 Data API
 ```
 
 Requires Python 3.12+. A multi-arch Docker image is published to

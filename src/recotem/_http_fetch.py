@@ -183,29 +183,20 @@ def _is_address_internal(addr: ipaddress._BaseAddress) -> bool:
 
 
 def assert_host_public(url: str, *, allow_private: bool) -> str | None:
-    """Raise :class:`HttpFetchError` if *url*'s host resolves to a private IP.
+    """Resolve the host portion of ``url`` and reject private/loopback/link-local IPs.
 
-    Returns the resolved IP that the connection should be pinned to — a
-    single one of the public IPs the hostname resolved to.  Callers feed
-    this into :func:`_open_with_pinned_ip` so that the actual TCP connect
-    bypasses a second DNS lookup, foreclosing the DNS-rebinding TOCTOU
-    where the first lookup returns a public IP and the second returns a
-    private one (e.g. cloud metadata).
+    Used by:
+      - ``_http_fetch.fetch_http_bytes`` for HTTP/HTTPS source fetch (default deny;
+        opt-in via ``RECOTEM_HTTP_ALLOW_PRIVATE``).
+      - ``recotem.datasource.sql.SQLSource.__init__`` for the DB host
+        (default deny; opt-in via ``RECOTEM_SQL_ALLOW_PRIVATE``).
 
-    Returns ``None`` **only** when *allow_private* is True (no SSRF check,
-    and no pinning — the caller defers to the system resolver).
+    Callers that don't have an HTTP-shaped URL can wrap a bare host as
+    ``f"db://{host}"`` — only the scheme/host portion is inspected.
 
-    When *url*'s host is already a numeric IP literal, the address is
-    validated against the internal-address check exactly like a
-    DNS-resolved hostname.  If it passes, the IP string is returned as the
-    pinned-IP for the actual TCP connect — the same path as any hostname.
-    There is no fast-return-``None`` shortcut for numeric-IP hosts.
-
-    No-op when *allow_private* is True — operators of internal-only
-    deployments can opt in via ``RECOTEM_HTTP_ALLOW_PRIVATE=1``.
-
-    Refuses when DNS resolution fails outright; callers prefer a clear
-    refusal over racing against a potentially-poisoned resolver.
+    Raises ``HttpFetchError`` if the host resolves to a bogon IP and
+    ``allow_private`` is False. Returns the resolved IP (for pinning) or
+    ``None`` when ``allow_private`` is True.
     """
     if allow_private:
         return None

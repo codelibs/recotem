@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
+import structlog
 from pydantic import ValidationError
+
+from recotem.datasource.base import DataSourceError
 
 
 def test_sql_config_minimal_valid() -> None:
@@ -83,3 +88,84 @@ def test_sql_source_registered_in_registry() -> None:
 
     cls = get_source_class("sql")
     assert cls.__name__ == "SQLSource"
+
+
+# ---------------------------------------------------------------------------
+# Task 2.4 — SQLSource.__init__ validation tests
+# ---------------------------------------------------------------------------
+
+
+def _make_cfg(**kw):
+    from recotem.datasource.sql import SQLConfig
+
+    base = dict(
+        type="sql",
+        dsn_env="RECOTEM_RECIPE_DB_DSN",
+        query="SELECT user_id, item_id, ts FROM events",
+    )
+    base.update(kw)
+    return SQLConfig(**base)
+
+
+def test_init_missing_dsn_env_raises(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_RECIPE_DB_DSN", raising=False)
+    with pytest.raises(DataSourceError, match="RECOTEM_RECIPE_DB_DSN"):
+        SQLSource(_make_cfg())
+
+
+def test_init_unknown_dialect_raises(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "weirddb://host/db")
+    with pytest.raises(DataSourceError, match="dialect|driver"):
+        SQLSource(_make_cfg())
+
+
+def test_init_missing_driver_extra_pg(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/x")
+    monkeypatch.setitem(sys.modules, "psycopg", None)
+    with pytest.raises(DataSourceError, match=r"recotem\[postgres\]"):
+        SQLSource(_make_cfg())
+
+
+def test_init_rejects_private_host_by_default(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@127.0.0.1/x")
+    with pytest.raises(DataSourceError, match="SSRF|private|RECOTEM_SQL_ALLOW_PRIVATE"):
+        SQLSource(_make_cfg())
+
+
+def test_init_allows_private_host_when_opted_in(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    SQLSource(_make_cfg())  # must not raise
+
+
+def test_init_sqlite_no_host_no_ssrf_check(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    SQLSource(_make_cfg())  # must not raise (no host)
+
+
+def test_init_does_not_log_dsn_userinfo(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql://alice:s3cret@db.public.example/x"
+    )
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    with structlog.testing.capture_logs() as captured:
+        SQLSource(_make_cfg())
+    flat = repr(captured)
+    assert "alice" not in flat
+    assert "s3cret" not in flat

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import sys
 from datetime import date
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
+
+from recotem.datasource.base import DataSourceError
 
 
 def _cfg(**kw):
@@ -113,3 +117,34 @@ def test_ga4_source_registered_in_registry() -> None:
 
     cls = get_source_class("ga4")
     assert cls.__name__ == "GA4Source"
+
+
+def test_init_missing_extra_raises(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", None)
+    from recotem.datasource.ga4 import GA4Source
+
+    with pytest.raises(DataSourceError, match=r"recotem\[ga4\]"):
+        GA4Source(_cfg())
+
+
+def test_init_constructs_client(monkeypatch) -> None:
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    assert src._client is fake_client
+
+
+def test_init_client_construction_failure_raises(monkeypatch) -> None:
+    fake_mod = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.side_effect = Exception("ADC missing")
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    with pytest.raises(DataSourceError, match="ADC|GOOGLE_APPLICATION_CREDENTIALS"):
+        GA4Source(_cfg())

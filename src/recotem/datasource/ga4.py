@@ -5,11 +5,13 @@ from datetime import date
 from typing import ClassVar, Literal
 
 import pandas as pd
+import structlog
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from recotem.datasource.base import FetchContext
+from recotem.datasource.base import DataSourceError, FetchContext
 
 _EVENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,39}$")
+_log = structlog.get_logger(__name__)
 
 
 class GA4Config(BaseModel):
@@ -68,7 +70,29 @@ class GA4Source:
     no_expand_fields: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(self, config: GA4Config) -> None:
-        raise NotImplementedError  # filled in Task 3.4
+        try:
+            from google.analytics.data_v1beta import BetaAnalyticsDataClient
+        except ImportError as exc:
+            raise DataSourceError(
+                "google-analytics-data is required for GA4Source. "
+                "Install with: pip install 'recotem[ga4]'"
+            ) from exc
+
+        try:
+            self._client = BetaAnalyticsDataClient()
+        except Exception as exc:
+            raise DataSourceError(
+                "failed to construct BetaAnalyticsDataClient — confirm ADC "
+                "is configured (GOOGLE_APPLICATION_CREDENTIALS or "
+                "Workload Identity)."
+            ) from exc
+
+        self._config = config
+        _log.debug(
+            "ga4_source_initialized",
+            property_id=config.property_id,
+            event_names=config.event_names,
+        )
 
     def probe(self) -> None:
         raise NotImplementedError  # filled in Task 3.5

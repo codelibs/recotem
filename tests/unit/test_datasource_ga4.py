@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
-from recotem.datasource.base import DataSourceError
+from recotem.datasource.base import DataSourceError, FetchContext
 
 
 def _cfg(**kw):
@@ -188,3 +188,116 @@ def test_probe_permission_denied_raises(monkeypatch) -> None:
     src = GA4Source(_cfg())
     with pytest.raises(DataSourceError, match="roles/analytics.viewer|property"):
         src.probe()
+
+
+def _row(values: list[str], metric: str):
+    """Build a fake GA4 row protobuf-shape."""
+    row = MagicMock()
+    row.dimension_values = [MagicMock(value=v) for v in values]
+    row.metric_values = [MagicMock(value=metric)]
+    return row
+
+
+def _fetch_ctx() -> FetchContext:
+    return FetchContext(recipe_name="t", run_id="r-001")
+
+
+def test_fetch_paginates_until_drained(monkeypatch) -> None:
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+
+    pages = [
+        MagicMock(
+            row_count=4,
+            rows=[
+                _row(["u1", "i1", "20260101", "purchase"], "3"),
+                _row(["u2", "i2", "20260102", "purchase"], "1"),
+            ],
+        ),
+        MagicMock(
+            row_count=4,
+            rows=[
+                _row(["u3", "i3", "20260103", "purchase"], "2"),
+                _row(["u4", "i4", "20260104", "purchase"], "5"),
+            ],
+        ),
+        MagicMock(row_count=4, rows=[]),
+    ]
+    for p in pages:
+        p.property_quota = None
+    fake_client.run_report.side_effect = pages
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    df = src.fetch(_fetch_ctx())
+    assert len(df) == 4
+    assert list(df.columns) == ["userId", "itemId", "date", "event_count"]
+    assert df["event_count"].dtype.name == "int64"
+
+
+def test_fetch_drops_event_name_column(monkeypatch) -> None:
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = MagicMock(
+        row_count=1, rows=[_row(["u1", "i1", "20260101", "purchase"], "1")]
+    )
+    resp.property_quota = None
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    df = src.fetch(_fetch_ctx())
+    assert "eventName" not in df.columns
+
+
+def test_fetch_max_rows_exceeded(monkeypatch) -> None:
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = MagicMock(
+        row_count=100,
+        rows=[_row([f"u{i}", "i", "20260101", "purchase"], "1") for i in range(100)],
+    )
+    resp.property_quota = None
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg(max_rows=2))
+    with pytest.raises(DataSourceError, match="max_rows|exceeds"):
+        src.fetch(_fetch_ctx())
+
+
+def test_fetch_max_pages_exceeded(monkeypatch) -> None:
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = MagicMock(
+        row_count=1_000_000,
+        rows=[_row(["u", "i", "20260101", "purchase"], "1")],
+    )
+    resp.property_quota = None
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    # Patch the module-level get_ga4_max_pages alias to 3:
+    import recotem.datasource.ga4 as ga4_mod
+
+    monkeypatch.setattr(ga4_mod, "get_ga4_max_pages", lambda: 3)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg(max_rows=1_000_000))
+    with pytest.raises(DataSourceError, match="RECOTEM_GA4_MAX_PAGES|page"):
+        src.fetch(_fetch_ctx())

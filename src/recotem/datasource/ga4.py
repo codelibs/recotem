@@ -8,6 +8,8 @@ import pandas as pd
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from recotem._metrics_ga4 import inc_ga4_pages, inc_ga4_rows, set_ga4_quota_remaining
+from recotem.config import get_ga4_max_pages
 from recotem.datasource.base import DataSourceError, FetchContext
 
 _EVENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,39}$")
@@ -168,4 +170,100 @@ class GA4Source:
         )
 
     def fetch(self, ctx: FetchContext) -> pd.DataFrame:
-        raise NotImplementedError  # filled in Task 3.6
+        try:
+            from google.api_core.exceptions import GoogleAPICallError, PermissionDenied
+        except ImportError as exc:
+            raise DataSourceError("google.api_core is required for GA4Source") from exc
+
+        page_size = 100_000
+        max_pages = get_ga4_max_pages()
+        accumulated: list[dict[str, object]] = []
+        offset = 0
+        retry_policy = self._retry_policy()
+
+        for page_idx in range(max_pages):
+            request = self._build_request(limit=page_size, offset=offset)
+            try:
+                response = self._client.run_report(request=request, retry=retry_policy)
+            except PermissionDenied as exc:
+                raise DataSourceError(
+                    f"GA4 access denied for property {self._config.property_id!r}; "
+                    "grant roles/analytics.viewer."
+                ) from exc
+            except GoogleAPICallError as exc:
+                raise DataSourceError(
+                    f"GA4 fetch failed on page {page_idx}: {type(exc).__name__}"
+                ) from exc
+
+            inc_ga4_pages(ctx.recipe_name)
+            self._record_quota(ctx.recipe_name, response)
+
+            page_rows = list(response.rows or [])
+            for row in page_rows:
+                dv = [d.value for d in row.dimension_values]
+                mv = row.metric_values[0].value
+                accumulated.append(
+                    {
+                        self._config.user_dimension: dv[0],
+                        self._config.item_dimension: dv[1],
+                        self._config.time_dimension: dv[2],
+                        "eventName": dv[3],
+                        self._config.weight_column: mv,
+                    }
+                )
+            inc_ga4_rows(ctx.recipe_name, len(page_rows))
+
+            if len(accumulated) > self._config.max_rows:
+                raise DataSourceError(
+                    f"GA4 result exceeds max_rows={self._config.max_rows}; "
+                    "narrow the date range or event filter"
+                )
+
+            total_remote = int(getattr(response, "row_count", 0) or 0)
+            if not page_rows:
+                break
+            if total_remote and len(accumulated) >= total_remote:
+                break
+            offset += page_size
+        else:
+            raise DataSourceError(
+                f"GA4 fetch exceeded RECOTEM_GA4_MAX_PAGES={max_pages}; "
+                "tighten the query or raise the cap"
+            )
+
+        df = pd.DataFrame.from_records(accumulated)
+        if "eventName" in df.columns:
+            df = df.drop(columns=["eventName"])
+        if self._config.weight_column in df.columns:
+            df[self._config.weight_column] = df[self._config.weight_column].astype(
+                "int64"
+            )
+        _log.info(
+            "ga4_fetch_complete",
+            recipe=ctx.recipe_name,
+            run_id=ctx.run_id,
+            property_id=self._config.property_id,
+            rows_loaded=len(df),
+        )
+        return df
+
+    def _record_quota(self, recipe: str, response) -> None:
+        quota = getattr(response, "property_quota", None)
+        if quota is None:
+            return
+        for attr in (
+            "tokens_per_hour",
+            "tokens_per_day",
+            "concurrent_requests",
+            "server_errors_per_project_per_hour",
+        ):
+            q = getattr(quota, attr, None)
+            if q is None:
+                continue
+            remaining = getattr(q, "remaining", None)
+            if remaining is None:
+                continue
+            try:
+                set_ga4_quota_remaining(recipe, attr, float(remaining))
+            except (TypeError, ValueError):
+                pass

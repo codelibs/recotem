@@ -651,3 +651,29 @@ def test_sql_allow_private_truthy_values(monkeypatch) -> None:
     for v in ("0", "false", "no", "off", "", "anything-else"):
         monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", v)
         assert sql_allow_private() is False
+
+
+# ---------------------------------------------------------------------------
+# Task 3.2: RECOTEM_GA4_MAX_PAGES
+# ---------------------------------------------------------------------------
+
+
+def test_ga4_max_pages_default(monkeypatch) -> None:
+    monkeypatch.delenv("RECOTEM_GA4_MAX_PAGES", raising=False)
+    from recotem.config import get_ga4_max_pages
+
+    assert get_ga4_max_pages() == 500
+
+
+def test_ga4_max_pages_clamp_low(monkeypatch) -> None:
+    monkeypatch.setenv("RECOTEM_GA4_MAX_PAGES", "0")
+    from recotem.config import get_ga4_max_pages
+
+    assert get_ga4_max_pages() == 1
+
+
+def test_ga4_max_pages_clamp_high(monkeypatch) -> None:
+    monkeypatch.setenv("RECOTEM_GA4_MAX_PAGES", "999999")
+    from recotem.config import get_ga4_max_pages
+
+    assert get_ga4_max_pages() == 10_000

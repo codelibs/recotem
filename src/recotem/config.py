@@ -561,3 +561,22 @@ def sql_allow_private() -> bool:
     addresses.
     """
     return is_truthy_env(os.environ.get("RECOTEM_SQL_ALLOW_PRIVATE"))
+
+
+# ---------------------------------------------------------------------------
+# GA4 page cap (used by datasource/ga4.py)
+# ---------------------------------------------------------------------------
+
+_GA4_MAX_PAGES_MIN = 1
+_GA4_MAX_PAGES_MAX = 10_000
+_GA4_MAX_PAGES_DEFAULT = 500
+
+
+def get_ga4_max_pages() -> int:
+    """Return RECOTEM_GA4_MAX_PAGES, clamped to [1, 10 000]."""
+    return _clamped_int_env(
+        "RECOTEM_GA4_MAX_PAGES",
+        _GA4_MAX_PAGES_DEFAULT,
+        _GA4_MAX_PAGES_MIN,
+        _GA4_MAX_PAGES_MAX,
+    )

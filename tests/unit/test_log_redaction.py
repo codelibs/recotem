@@ -555,3 +555,33 @@ def test_redact_internal_failure_does_not_raise() -> None:
         result = redact_sensitive_keys(None, "info", {"event": "test"})  # type: ignore[arg-type]
 
     assert isinstance(result, dict), "Result must always be a dict"
+
+
+# ---------------------------------------------------------------------------
+# DSN userinfo redaction
+# ---------------------------------------------------------------------------
+
+
+def test_dsn_userinfo_in_message_is_redacted() -> None:
+    from recotem.log_redaction import redact_sensitive_keys
+
+    event = {
+        "event": "connecting",
+        "dsn": "postgresql://alice:s3cret@db.example.com:5432/orders",
+        "message": "Tried postgresql+psycopg://bob:hunter2@10.0.0.1/orders; failed",
+    }
+    out = redact_sensitive_keys(None, None, event)
+    assert "alice" not in out["dsn"]
+    assert "s3cret" not in out["dsn"]
+    assert "bob" not in out["message"]
+    assert "hunter2" not in out["message"]
+    assert out["dsn"].startswith("postgresql://")
+    assert out["dsn"].endswith("/orders") or "host" in out["dsn"].lower()
+
+
+def test_dsn_redaction_preserves_non_credentialed_url() -> None:
+    from recotem.log_redaction import redact_sensitive_keys
+
+    event = {"event": "ok", "url": "postgresql://db.example.com:5432/orders"}
+    out = redact_sensitive_keys(None, None, event)
+    assert out["url"] == "postgresql://db.example.com:5432/orders"

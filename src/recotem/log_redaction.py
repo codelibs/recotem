@@ -115,6 +115,15 @@ _REDACTED_HEX64 = "[REDACTED-HEX64]"
 _B64URL43_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43,}(?![A-Za-z0-9_-])")
 _REDACTED_B64URL43 = "[REDACTED-B64URL43]"
 
+# DSN / connection-URL userinfo scrubbing.  Matches any scheme://user[:pass]@host
+# pattern and replaces the userinfo with ***.  Applied before hex/base64 passes
+# so that passwords containing high-entropy hex/base64 chars are still removed.
+_DSN_USERINFO_RE = re.compile(
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+\-.]*\+?[A-Za-z0-9]*)://"
+    r"(?:[^/@\s:]+(?::[^/@\s]*)?@)"
+    r"(?P<host>[^/?#\s]+)"
+)
+
 _REDACTED = "[REDACTED]"
 
 
@@ -149,6 +158,7 @@ def _scrub_string_value(s: str) -> str:
     """
     if s == _REDACTED or s.startswith("[REDACTED"):
         return s
+    s = _DSN_USERINFO_RE.sub(r"\g<scheme>://***@\g<host>", s)
     s = _HEX64_RE.sub(_REDACTED_HEX64, s)
     s = _B64URL43_RE.sub(_REDACTED_B64URL43, s)
     return s

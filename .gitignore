@@ -39,6 +39,9 @@ recipes/local/
 *.recotem.lock
 *.recotem.tmp
 
+# Example-generated databases
+examples/sql-sqlite/events.db
+
 # Stray local directories created by fsspec when a remote-scheme path (s3://,
 # gs://, az://) is resolved without a proper backend.  These are never valid
 # outputs and must not be committed.

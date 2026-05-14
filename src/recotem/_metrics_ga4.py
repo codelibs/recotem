@@ -30,7 +30,10 @@ except ImportError:  # pragma: no cover - exercised via env without extra
 
 # Module-level metric instances.  Initialised lazily on the first call so that
 # importing this module does not register metrics in environments where
-# prometheus_client is absent.
+# prometheus_client is absent.  ``_INITIALIZED`` short-circuits subsequent
+# calls so the three metrics are always created atomically as a group, mirroring
+# the single early-return guard in ``recotem._metrics_bigquery``.
+_INITIALIZED: bool = False
 _PAGES: Any = None
 _ROWS: Any = None
 _QUOTA: Any = None
@@ -38,29 +41,27 @@ _QUOTA: Any = None
 
 def _ensure_initialized() -> None:
     """Idempotently create the counter and gauge objects."""
-    global _PAGES, _ROWS, _QUOTA
+    global _INITIALIZED, _PAGES, _ROWS, _QUOTA
 
-    if not _PROMETHEUS_AVAILABLE:
+    if not _PROMETHEUS_AVAILABLE or _INITIALIZED:
         return
 
-    if _PAGES is None:
-        _PAGES = Counter(
-            "recotem_ga4_pages_fetched_total",
-            "GA4 Data API pages fetched during training.",
-            ["recipe"],
-        )
-    if _ROWS is None:
-        _ROWS = Counter(
-            "recotem_ga4_rows_fetched_total",
-            "GA4 Data API rows fetched during training.",
-            ["recipe"],
-        )
-    if _QUOTA is None:
-        _QUOTA = Gauge(
-            "recotem_ga4_quota_remaining",
-            "GA4 Data API propertyQuota remaining at last response.",
-            ["recipe", "quota_type"],
-        )
+    _PAGES = Counter(
+        "recotem_ga4_pages_fetched_total",
+        "GA4 Data API pages fetched during training.",
+        ["recipe"],
+    )
+    _ROWS = Counter(
+        "recotem_ga4_rows_fetched_total",
+        "GA4 Data API rows fetched during training.",
+        ["recipe"],
+    )
+    _QUOTA = Gauge(
+        "recotem_ga4_quota_remaining",
+        "GA4 Data API propertyQuota remaining at last response.",
+        ["recipe", "quota_type"],
+    )
+    _INITIALIZED = True
 
 
 def inc_ga4_pages(recipe: str) -> None:
@@ -102,7 +103,12 @@ def set_ga4_quota_remaining(recipe: str, quota_type: str, value: float) -> None:
         The recipe name label.
     quota_type:
         One of the ``propertyQuota`` token-bucket names returned by the GA4
-        Data API, e.g. ``"tokensPerHour"`` or ``"tokensPerDay"``.
+        Data API, e.g. ``"tokensPerHour"`` or ``"tokensPerDay"``.  Callers
+        MUST restrict this value to the closed set of GA4 ``propertyQuota``
+        field names (``tokens_per_hour``, ``tokens_per_day``,
+        ``concurrent_requests``, ``server_errors_per_project_per_hour``,
+        and the analogous ``tokensPer*`` camelCase variants) to keep
+        Prometheus label cardinality bounded.
     value:
         Remaining token count from the latest API response.
     """

@@ -19,7 +19,9 @@ uv run python examples/sql-sqlite/seed.py
 
 # 2. Generate a signing key and export it.
 #    keygen prints four lines; grep out just the env_entry line.
-export $(uv run recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=/RECOTEM_SIGNING_KEYS=/')
+#    The env_entry value already starts with `RECOTEM_SIGNING_KEYS=`,
+#    so we only strip the leading `env_entry=` prefix.
+export $(uv run recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
 
 # 3. Point Recotem at the SQLite file.
 #    The DSN lives in an env var — never in the recipe itself.

@@ -6,7 +6,7 @@ import pytest
 import structlog
 from pydantic import ValidationError
 
-from recotem.datasource.base import DataSourceError
+from recotem.datasource.base import DataSourceError, FetchContext
 
 
 def test_sql_config_minimal_valid() -> None:
@@ -208,3 +208,86 @@ def test_probe_unreachable_db_raises(monkeypatch) -> None:
     src = SQLSource(_make_cfg(connect_timeout_seconds=1))
     with pytest.raises(DataSourceError):
         src.probe()
+
+
+# ---------------------------------------------------------------------------
+# Task 2.6 — SQLSource.fetch tests
+# ---------------------------------------------------------------------------
+
+
+def _ctx() -> FetchContext:
+    return FetchContext(recipe_name="t", run_id="r-001")
+
+
+def _seed_sqlite(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "t.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE events (user_id TEXT, item_id TEXT, ts TEXT);
+        INSERT INTO events VALUES ('u1','i1','2026-01-01');
+        INSERT INTO events VALUES ('u2','i2','2026-01-02');
+        INSERT INTO events VALUES ('u1','i2','2026-01-03');
+        """
+    )
+    con.commit()
+    con.close()
+    return db
+
+
+def test_fetch_sqlite_happy_path(monkeypatch, tmp_path) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    db = _seed_sqlite(tmp_path)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+    src = SQLSource(
+        _make_cfg(query="SELECT user_id, item_id, ts FROM events ORDER BY ts")
+    )
+    df = src.fetch(_ctx())
+    assert list(df.columns) == ["user_id", "item_id", "ts"]
+    assert len(df) == 3
+
+
+def test_fetch_parameters_bind_safely(monkeypatch, tmp_path) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    db = _seed_sqlite(tmp_path)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+    src = SQLSource(
+        _make_cfg(
+            query="SELECT user_id, item_id, ts FROM events WHERE user_id = :uid",
+            query_parameters={"uid": "u1' OR '1'='1"},
+        )
+    )
+    df = src.fetch(_ctx())
+    # injection payload is bound as a literal -> matches no rows
+    assert len(df) == 0
+
+
+def test_fetch_max_rows_exceeded(monkeypatch, tmp_path) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    db = _seed_sqlite(tmp_path)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+    src = SQLSource(_make_cfg(query="SELECT user_id, item_id, ts FROM events"))
+    # Patch get_max_sql_rows to return 2 directly (clamp floor is 1000 so we
+    # patch the source-module-level alias rather than fight the env clamp).
+    import recotem.datasource.sql as sql_mod
+
+    monkeypatch.setattr(sql_mod, "get_max_sql_rows", lambda: 2)
+    with pytest.raises(DataSourceError, match="exceeds RECOTEM_MAX_SQL_ROWS|row cap"):
+        src.fetch(_ctx())
+
+
+def test_fetch_passes_columns_through_unchanged(monkeypatch, tmp_path) -> None:
+    # Schema diffing happens at the training layer, not in SQLSource.fetch.
+    # This test pins that contract: whatever the query produces, fetch returns.
+    from recotem.datasource.sql import SQLSource
+
+    db = _seed_sqlite(tmp_path)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+    src = SQLSource(_make_cfg(query="SELECT user_id AS u, item_id AS i FROM events"))
+    df = src.fetch(_ctx())
+    assert list(df.columns) == ["u", "i"]

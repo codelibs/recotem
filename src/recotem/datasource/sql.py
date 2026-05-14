@@ -8,7 +8,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 from recotem._http_fetch import HttpFetchError, assert_host_public
-from recotem.config import sql_allow_private
+from recotem.config import get_max_sql_rows, sql_allow_private
 from recotem.datasource.base import DataSourceError, FetchContext
 
 _DIALECT_TO_EXTRA = {
@@ -151,4 +151,77 @@ class SQLSource:
         return {}
 
     def fetch(self, ctx: FetchContext) -> pd.DataFrame:
-        raise NotImplementedError  # filled in Task 2.6
+        import sqlalchemy
+        from sqlalchemy import text
+        from sqlalchemy.pool import NullPool
+
+        cap = get_max_sql_rows()
+        engine = sqlalchemy.create_engine(
+            self._url,
+            connect_args=self._connect_args(),
+            poolclass=NullPool,
+        )
+        try:
+            with engine.connect() as conn:
+                self._apply_read_only(conn)
+                self._apply_statement_timeout(conn)
+                stmt = text(self._config.query)
+                if self._config.query_parameters:
+                    stmt = stmt.bindparams(**self._config.query_parameters)
+                chunks: list[pd.DataFrame] = []
+                total = 0
+                for chunk in pd.read_sql(stmt, conn, chunksize=100_000):
+                    total += len(chunk)
+                    if total > cap:
+                        raise DataSourceError(
+                            f"query result exceeds RECOTEM_MAX_SQL_ROWS={cap} rows; "
+                            "tighten the query or raise the cap"
+                        )
+                    chunks.append(chunk)
+                df = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+        except DataSourceError:
+            raise
+        except Exception as exc:
+            raise DataSourceError(
+                f"query failed on dialect {self._dialect!r}: {type(exc).__name__}"
+            ) from exc
+
+        _log.info(
+            "sql_fetch_complete",
+            recipe=ctx.recipe_name,
+            run_id=ctx.run_id,
+            dialect=self._dialect,
+            rows_loaded=len(df),
+        )
+        return df
+
+    def _apply_read_only(self, conn) -> None:
+        from sqlalchemy import text
+
+        try:
+            if self._dialect.startswith("postgres"):
+                conn.execute(text("SET TRANSACTION READ ONLY"))
+            elif self._dialect in {"mysql", "mariadb"}:
+                conn.execute(text("SET SESSION TRANSACTION READ ONLY"))
+        except Exception as exc:
+            _log.warning(
+                "sql_read_only_set_failed",
+                dialect=self._dialect,
+                error=type(exc).__name__,
+            )
+
+    def _apply_statement_timeout(self, conn) -> None:
+        from sqlalchemy import text
+
+        ms = self._config.statement_timeout_seconds * 1000
+        try:
+            if self._dialect.startswith("postgres"):
+                conn.execute(text(f"SET LOCAL statement_timeout = {ms}"))
+            elif self._dialect in {"mysql", "mariadb"}:
+                conn.execute(text(f"SET SESSION MAX_EXECUTION_TIME = {ms}"))
+        except Exception as exc:
+            _log.warning(
+                "sql_statement_timeout_set_failed",
+                dialect=self._dialect,
+                error=type(exc).__name__,
+            )

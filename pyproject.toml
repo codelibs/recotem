@@ -38,6 +38,8 @@ metrics = ["prometheus-client>=0.20,<1"]
 postgres = ["sqlalchemy>=2,<3", "psycopg[binary]>=3.1,<4"]
 mysql = ["sqlalchemy>=2,<3", "pymysql>=1.1,<2"]
 sqlite = ["sqlalchemy>=2,<3"]
+ga4 = ["google-analytics-data>=0.18,<1", "google-auth>=2,<3"]
+all = ["recotem[bigquery,postgres,mysql,sqlite,ga4,s3,gcs,azure,metrics]"]
 
 [project.scripts]
 recotem = "recotem.cli:app"

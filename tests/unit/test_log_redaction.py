@@ -664,3 +664,65 @@ def test_dsn_scrubber_short_circuit_skips_regex_on_plain_strings() -> None:
     # A short hex string (< 64 chars) without a scheme — untouched.
     short_hex = "deadbeef1234"
     assert _scrub_string_value(short_hex) == short_hex
+
+
+# ---------------------------------------------------------------------------
+# DSN scrubber — additional coverage (m1)
+# ---------------------------------------------------------------------------
+
+
+def test_dsn_userinfo_postgresql_basic_scrubbed() -> None:
+    """postgresql://user:pass@host DSN must have userinfo replaced with ***."""
+    from urllib.parse import urlparse
+
+    from recotem.log_redaction import _scrub_string_value
+
+    result = _scrub_string_value("postgresql://user:pass@db.example.com/mydb")
+    assert "user" not in result
+    assert "pass" not in result
+    parsed = urlparse(result)
+    assert parsed.hostname == "db.example.com"
+
+
+def test_dsn_userinfo_postgresql_psycopg2_with_query_scrubbed() -> None:
+    """postgresql+psycopg2 DSN with port and query string: userinfo must be scrubbed."""
+    from urllib.parse import urlparse
+
+    from recotem.log_redaction import _scrub_string_value
+
+    dsn = "postgresql+psycopg2://u:p@host:5432/db?sslmode=require"
+    result = _scrub_string_value(dsn)
+    assert ":p@" not in result
+    assert "u:" not in result or result.startswith("postgresql+psycopg2://***@")
+    parsed = urlparse(result)
+    assert parsed.hostname == "host"
+
+
+def test_dsn_userinfo_mysql_ipv4_host_scrubbed() -> None:
+    """mysql+pymysql DSN with an IPv4 address as host: userinfo must be scrubbed."""
+    from urllib.parse import urlparse
+
+    from recotem.log_redaction import _scrub_string_value
+
+    dsn = "mysql+pymysql://root:secret@127.0.0.1/test"
+    result = _scrub_string_value(dsn)
+    assert "root" not in result
+    assert "secret" not in result
+    parsed = urlparse(result)
+    assert parsed.hostname == "127.0.0.1"
+
+
+def test_dsn_already_redacted_string_unchanged() -> None:
+    """A value starting with '[REDACTED' must not be double-processed."""
+    from recotem.log_redaction import _scrub_string_value
+
+    already = "[REDACTED]"
+    assert _scrub_string_value(already) == already
+
+
+def test_plain_https_url_without_credentials_unchanged() -> None:
+    """https://example.com/path contains no userinfo and must pass through unchanged."""
+    from recotem.log_redaction import _scrub_string_value
+
+    url = "https://example.com/path"
+    assert _scrub_string_value(url) == url

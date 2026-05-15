@@ -1,9 +1,9 @@
 # SQL Data Source
 
 The `sql` source lets Recotem train recommenders directly from a relational
-database via [SQLAlchemy 2](https://www.sqlalchemy.org/). PostgreSQL, MySQL,
-and SQLite are officially supported; other SQLAlchemy-compatible dialects
-work if you install the driver yourself.
+database via [SQLAlchemy 2](https://www.sqlalchemy.org/). Supported dialects
+are PostgreSQL, MySQL/MariaDB, and SQLite. Other dialects are not supported
+and will raise a `DataSourceError` at training time.
 
 See `examples/sql-sqlite/` for a zero-cloud walkthrough.
 
@@ -43,8 +43,8 @@ source:
 | `dsn_env` | yes | — | Name of an env var matching `^RECOTEM_RECIPE_[A-Z0-9_]+$` containing the DSN. The DSN itself is never written to the recipe. |
 | `query` | yes | — | Raw SQL. Never subject to `${...}` expansion (SQL injection foreclosure). |
 | `query_parameters` | no | `{}` | Bound via SQLAlchemy `text().bindparams(...)`. Subject to `${RECOTEM_RECIPE_*}` expansion. |
-| `connect_timeout_seconds` | no | 10 | Clamp `[1, 60]`. Passed as `connect_timeout` (PG/MySQL) or `timeout` (SQLite). |
-| `statement_timeout_seconds` | no | 300 | Clamp `[1, 1800]`. PG: `SET LOCAL statement_timeout`. MySQL/MariaDB: `SET SESSION MAX_EXECUTION_TIME`. Failure aborts training on PG/MySQL/MariaDB. SQLite: no-op (no server-side timeout). |
+| `connect_timeout_seconds` | no | 10 | Valid range `[1, 60]` (out-of-range raises ValidationError). Passed as `connect_timeout` (PG/MySQL) or `timeout` (SQLite). |
+| `statement_timeout_seconds` | no | 300 | Valid range `[1, 1800]` (out-of-range raises ValidationError). PG: `SET LOCAL statement_timeout`. MySQL/MariaDB: `SET SESSION MAX_EXECUTION_TIME`. Failure aborts training on PG/MySQL/MariaDB. SQLite: no-op (no server-side timeout). |
 
 ## DSN examples
 
@@ -54,7 +54,6 @@ source:
 | MySQL | `mysql+pymysql://user:pass@host:3306/db?ssl=true` |
 | SQLite (file) | `sqlite:///absolute/path/to/file.db` |
 | SQLite (read-only) | `sqlite:///file:absolute/path/to/file.db?mode=ro&uri=true` |
-| Snowflake (BYO driver) | `snowflake://user:pass@account/db?warehouse=wh` |
 
 ## Parameter binding
 
@@ -106,7 +105,7 @@ source:
 | Error | Exit | Message pattern |
 |-------|------|----------------|
 | DSN env var not set or empty | 3 | `DataSourceError: env var RECOTEM_RECIPE_DB_DSN is not set or is empty; set it to the database DSN (e.g. postgresql://user:pass@host/db)` |
-| Unsupported dialect | 3 | `DataSourceError: unsupported SQL dialect 'oracle'; officially supported: ['mysql', 'postgres', 'sqlite']. Other SQLAlchemy dialects work if you install the driver yourself.` |
+| Unsupported dialect | 3 | `DataSourceError: unsupported SQL dialect 'oracle'; officially supported: ['mysql', 'postgres', 'sqlite'].` |
 | Missing driver for dialect | 3 | `DataSourceError: psycopg driver is required for dialect 'postgresql'. Install it with: pip install 'recotem[postgres]'` |
 | Query exceeds row cap | 3 | `DataSourceError: query result exceeds RECOTEM_MAX_SQL_ROWS=50000000 rows; tighten the query or raise the cap` |
 | Private/loopback host refused | 3 | `DataSourceError: refusing to connect to private/loopback host '10.0.0.5'; set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in (intended for in-cluster or compose service-name destinations)` |

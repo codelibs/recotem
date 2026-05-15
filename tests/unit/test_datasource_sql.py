@@ -79,7 +79,9 @@ def test_sql_source_classvars() -> None:
 
     assert SQLSource.type_name == "sql"
     assert SQLSource.Config is SQLConfig
-    assert "sqlalchemy" in SQLSource.extras_required
+    assert "postgres" in SQLSource.extras_required
+    assert "mysql" in SQLSource.extras_required
+    assert "sqlite" in SQLSource.extras_required
     assert SQLSource.no_expand_fields == frozenset({"query", "dsn_env"})
 
 
@@ -710,3 +712,277 @@ def test_dsn_env_bad_name_validation_error(monkeypatch) -> None:
 
     with pytest.raises(ValidationError):
         SQLConfig(type="sql", dsn_env="MY_DSN", query="SELECT 1")
+
+
+# ---------------------------------------------------------------------------
+# New tests for review findings C1, C2, C3, M3, m2, m5, m7, m8
+# ---------------------------------------------------------------------------
+
+
+# C1 — stream_results execution option is applied
+def test_fetch_stream_results_applied(monkeypatch, tmp_path) -> None:
+    """engine.connect().execution_options(stream_results=True) must be applied."""
+    from unittest.mock import patch
+
+    import recotem.datasource.sql as sql_mod
+    from recotem.datasource.sql import SQLSource
+
+    db = _seed_sqlite(tmp_path)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+    src = SQLSource(_make_cfg(query="SELECT user_id, item_id, ts FROM events"))
+
+    recorded_options: list[dict] = []
+
+    original_create_engine = sql_mod.pd.read_sql  # keep reference
+
+    import sqlalchemy
+
+    real_create = sqlalchemy.create_engine
+
+    def patched_create_engine(url, **kwargs):
+        engine = real_create(url, **kwargs)
+        original_connect = engine.connect
+
+        class TrackingConn:
+            def __init__(self):
+                self._conn = original_connect()
+
+            def execution_options(self, **opts):
+                recorded_options.append(dict(opts))
+                return self._conn.execution_options(**opts)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                self._conn.__exit__(*a)
+
+        original_engine_connect = engine.connect
+
+        def new_connect():
+            return TrackingConn()
+
+        engine.connect = new_connect
+        return engine
+
+    with patch("sqlalchemy.create_engine", side_effect=patched_create_engine):
+        src.fetch(_ctx())
+
+    assert any(opts.get("stream_results") is True for opts in recorded_options), (
+        f"stream_results=True was not recorded in execution_options calls: {recorded_options}"
+    )
+
+
+# C2 — MariaDB emits max_statement_time (seconds), not MAX_EXECUTION_TIME
+def test_apply_statement_timeout_mariadb_uses_seconds(monkeypatch) -> None:
+    """MariaDB must use SET SESSION max_statement_time = <seconds>."""
+    from unittest.mock import MagicMock
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg(statement_timeout_seconds=120))
+    src._dialect = "mariadb"
+
+    mock_conn = MagicMock()
+    src._apply_statement_timeout(mock_conn)
+
+    executed_sqls = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+    assert any("max_statement_time" in s for s in executed_sqls), (
+        f"expected max_statement_time in executed SQL but got: {executed_sqls}"
+    )
+    assert not any("MAX_EXECUTION_TIME" in s for s in executed_sqls), (
+        f"MAX_EXECUTION_TIME must NOT appear for MariaDB, got: {executed_sqls}"
+    )
+    # Verify seconds value (not ms)
+    assert any("120" in s for s in executed_sqls), (
+        f"expected 120 seconds in SQL but got: {executed_sqls}"
+    )
+
+
+# C2 — MySQL emits MAX_EXECUTION_TIME (milliseconds)
+def test_apply_statement_timeout_mysql_uses_ms(monkeypatch) -> None:
+    """MySQL must use SET SESSION MAX_EXECUTION_TIME = <ms>."""
+    from unittest.mock import MagicMock
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg(statement_timeout_seconds=30))
+    src._dialect = "mysql"
+
+    mock_conn = MagicMock()
+    src._apply_statement_timeout(mock_conn)
+
+    executed_sqls = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+    assert any("MAX_EXECUTION_TIME" in s for s in executed_sqls), (
+        f"expected MAX_EXECUTION_TIME in executed SQL but got: {executed_sqls}"
+    )
+    # 30 seconds → 30000 ms
+    assert any("30000" in s for s in executed_sqls), (
+        f"expected 30000 ms in SQL but got: {executed_sqls}"
+    )
+    assert not any("max_statement_time" in s for s in executed_sqls), (
+        f"max_statement_time must NOT appear for MySQL, got: {executed_sqls}"
+    )
+
+
+# C3 — DNS rebinding detection: different IP on re-check raises DataSourceError
+def test_rebinding_different_ip_raises(monkeypatch) -> None:
+    """When DNS resolves to a different IP on re-check, DataSourceError is raised."""
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
+    )
+
+    # During __init__, assert_host_public returns a pinned public IP.
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        return_value="203.0.113.1",
+    ):
+        src = SQLSource(_make_cfg())
+
+    assert src._pinned_ips == {"203.0.113.1"}
+
+    # During _check_rebinding, socket.gethostbyname_ex returns a different IP
+    # simulating a DNS rebinding attack.
+    def fake_gethostbyname_ex_rebind(host):
+        return (host, [], ["10.0.0.1"])
+
+    with patch(
+        "recotem.datasource.sql.socket.gethostbyname_ex",
+        side_effect=fake_gethostbyname_ex_rebind,
+    ):
+        with pytest.raises(DataSourceError, match="(?i)rebind"):
+            src._check_rebinding()
+
+
+# C3 — Numeric IP literal skips re-validation
+@pytest.mark.parametrize("ip_literal", ["127.0.0.1", "::1"])
+def test_rebinding_skipped_for_numeric_ip(monkeypatch, ip_literal) -> None:
+    """Numeric IP literals in DSN must skip the DNS re-resolution check."""
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    encoded = f"[{ip_literal}]" if ":" in ip_literal else ip_literal
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"postgresql://u:p@{encoded}/db")
+    src = SQLSource(_make_cfg())
+
+    gethostbyname_called = []
+
+    def fake_gethostbyname_ex(host):
+        gethostbyname_called.append(host)
+        return (host, [], ["10.0.0.1"])
+
+    with patch("recotem.datasource.sql.socket.gethostbyname_ex", fake_gethostbyname_ex):
+        src._check_rebinding()  # must not raise
+
+    assert not gethostbyname_called, (
+        "socket.gethostbyname_ex must not be called for numeric IP literals"
+    )
+
+
+# M3 — Unsupported dialect error must not mention "Other SQLAlchemy dialects work"
+def test_unsupported_dialect_no_byo_driver_message(monkeypatch) -> None:
+    """The error for unsupported dialects must not claim other dialects work."""
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "oracle+cx_oracle://u:p@host/db")
+    with pytest.raises(DataSourceError) as exc_info:
+        SQLSource(_make_cfg())
+    assert "Other SQLAlchemy dialects work" not in str(exc_info.value)
+
+
+# m2 — safe_dsn fallback only catches AttributeError/TypeError; RuntimeError propagates
+def test_safe_dsn_runtimeerror_propagates(monkeypatch) -> None:
+    """RuntimeError from URL.create must propagate, not be silently swallowed."""
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/db")
+    import types
+
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+
+    with patch(
+        "recotem._http_fetch._resolve_host_addresses",
+        return_value=[__import__("ipaddress").ip_address("203.0.113.1")],
+    ):
+        with patch(
+            "sqlalchemy.engine.url.URL.create",
+            side_effect=RuntimeError("unexpected internal error"),
+        ):
+            with pytest.raises(RuntimeError, match="unexpected internal error"):
+                SQLSource(_make_cfg())
+
+
+# m5 — DNS failure message contains "does not resolve", not "private/loopback"
+def test_dns_failure_message_does_not_say_private(monkeypatch) -> None:
+    """When hostname does not resolve, the error must mention 'does not resolve'."""
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@nonexistent.invalid/db"
+    )
+
+    dns_error_msg = (
+        "Refusing fetch to db://nonexistent.invalid: hostname does not resolve. "
+        "Set RECOTEM_HTTP_ALLOW_PRIVATE=1 to bypass for offline tests."
+    )
+
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        side_effect=__import__(
+            "recotem._http_fetch", fromlist=["HttpFetchError"]
+        ).HttpFetchError(dns_error_msg),
+    ):
+        with pytest.raises(DataSourceError) as exc_info:
+            SQLSource(_make_cfg())
+
+    msg = str(exc_info.value)
+    assert "does not resolve" in msg, f"expected 'does not resolve' in: {msg}"
+    assert "private/loopback" not in msg, (
+        f"must not say 'private/loopback' for DNS failure: {msg}"
+    )
+
+
+# m7 — make_url raising ValueError is wrapped in DataSourceError
+def test_make_url_valueerror_wrapped(monkeypatch) -> None:
+    """ValueError from make_url must raise DataSourceError('not a valid SQLAlchemy URL')."""
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "not-a-url")
+
+    with patch(
+        "sqlalchemy.engine.url.make_url",
+        side_effect=ValueError("bad url"),
+    ):
+        with pytest.raises(DataSourceError, match="(?i)valid SQLAlchemy URL"):
+            SQLSource(_make_cfg())
+
+
+# m8 — extras_required lists pyproject.toml extra names, not PyPI package names
+def test_extras_required_are_extra_names() -> None:
+    """extras_required must list pyproject.toml extra names: postgres, mysql, sqlite."""
+    from recotem.datasource.sql import SQLSource
+
+    assert SQLSource.extras_required == ["postgres", "mysql", "sqlite"]

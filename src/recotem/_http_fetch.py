@@ -194,9 +194,28 @@ def assert_host_public(url: str, *, allow_private: bool) -> str | None:
     Callers that don't have an HTTP-shaped URL can wrap a bare host as
     ``f"db://{host}"`` — only the scheme/host portion is inspected.
 
-    Raises ``HttpFetchError`` if the host resolves to a bogon IP and
-    ``allow_private`` is False. Returns the resolved IP (for pinning) or
-    ``None`` when ``allow_private`` is True.
+    Return value
+    ------------
+    Returns the resolved IP string for callers that can pin the actual
+    connect to that IP (``_open_with_pinned_ip``).  This closes a
+    DNS-rebinding TOCTOU window between this check and the connect call.
+
+    Returns ``None`` when ``allow_private`` is True (the caller has opted out
+    of SSRF defence and pinning is unnecessary).
+
+    Numeric IP literals also resolve via ``_resolve_host_addresses`` and yield
+    a single-element list — the function does NOT shortcut bare-IP inputs to
+    None.
+
+    Best-effort caveat for callers (e.g. SQL) that cannot pin the connect IP
+    directly: the returned IP can still be used to re-verify the hostname
+    immediately before connect (catches most DNS rebinding) but the
+    library-level connect may re-resolve.  Document the caveat in the caller.
+
+    Raises ``HttpFetchError`` if (a) hostname does not resolve, or (b) any
+    resolved address is a bogon/private IP.  Callers MUST distinguish these
+    two failure modes by inspecting the error message if they want to give
+    operators a clearer message.
     """
     if allow_private:
         return None

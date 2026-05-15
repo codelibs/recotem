@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ipaddress
 import os
+import socket
 from typing import ClassVar, Literal
 
 import pandas as pd
@@ -51,7 +53,8 @@ class SQLConfig(BaseModel):
 class SQLSource:
     type_name: ClassVar[str] = "sql"
     Config: ClassVar[type[BaseModel]] = SQLConfig
-    extras_required: ClassVar[list[str]] = ["sqlalchemy"]
+    # Extras correspond to pyproject.toml extra names (postgres, mysql, sqlite).
+    extras_required: ClassVar[list[str]] = ["postgres", "mysql", "sqlite"]
     no_expand_fields: ClassVar[frozenset[str]] = frozenset({"query", "dsn_env"})
 
     def __init__(self, config: SQLConfig) -> None:
@@ -73,7 +76,7 @@ class SQLSource:
 
         try:
             url = make_url(dsn)
-        except sqlalchemy.exc.ArgumentError as exc:
+        except (sqlalchemy.exc.ArgumentError, ValueError, TypeError) as exc:
             raise DataSourceError(
                 f"env var {config.dsn_env} is not a valid SQLAlchemy URL"
             ) from exc
@@ -83,8 +86,7 @@ class SQLSource:
         if extra is None:
             raise DataSourceError(
                 f"unsupported SQL dialect {backend!r}; "
-                f"officially supported: {sorted(set(_DIALECT_TO_EXTRA.values()))}. "
-                "Other SQLAlchemy dialects work if you install the driver yourself."
+                f"officially supported: {sorted(set(_DIALECT_TO_EXTRA.values()))}."
             )
 
         driver_mod = _DIALECT_DRIVER_PROBE.get(extra)
@@ -97,6 +99,10 @@ class SQLSource:
                     f"Install it with: pip install 'recotem[{extra}]'"
                 ) from exc
 
+        # SSRF guard: reject private/loopback/link-local hosts unless opted in.
+        # The resolved IP is pinned so that a DNS rebinding attack between
+        # __init__ and the actual connect can be detected in fetch()/probe().
+        self._pinned_ips: set[str] = set()
         if url.host and not sql_allow_private():
             # Wrap IPv6 literals in brackets so urlparse inside assert_host_public
             # correctly identifies the full address (e.g. "fe80::1" not just "fe80").
@@ -105,13 +111,24 @@ class SQLSource:
             if ":" in host_for_check and not host_for_check.startswith("["):
                 host_for_check = f"[{host_for_check}]"
             try:
-                assert_host_public(f"db://{host_for_check}", allow_private=False)
+                pinned_ip = assert_host_public(
+                    f"db://{host_for_check}", allow_private=False
+                )
             except HttpFetchError as exc:
+                msg = str(exc)
+                if "does not resolve" in msg:
+                    raise DataSourceError(
+                        f"hostname {url.host!r} does not resolve; "
+                        "verify the DSN host or set RECOTEM_SQL_ALLOW_PRIVATE=1 "
+                        "to bypass for offline tests"
+                    ) from exc
                 raise DataSourceError(
                     f"refusing to connect to private/loopback host {url.host!r}; "
                     "set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in (intended for "
                     "in-cluster or compose service-name destinations)"
                 ) from exc
+            if pinned_ip is not None:
+                self._pinned_ips = {pinned_ip}
 
         self._config = config
         self._url = url
@@ -135,7 +152,7 @@ class SQLSource:
                 database=url.database,
                 query=url.query,
             ).render_as_string(hide_password=True)
-        except (AttributeError, TypeError, Exception):
+        except (AttributeError, TypeError):
             safe_netloc = url.host or ""
             if url.port is not None:
                 safe_netloc = f"{safe_netloc}:{url.port}"
@@ -147,11 +164,52 @@ class SQLSource:
             dsn=safe_dsn,
         )
 
+    def _check_rebinding(self) -> None:
+        """Re-resolve the DSN host and raise DataSourceError if the IP changed.
+
+        This is a TOCTOU mitigation: an attacker who controls DNS could change
+        a public IP to a private one between __init__ (where SSRF is checked)
+        and the actual TCP connect in fetch()/probe().  We re-verify that the
+        current resolution still intersects the pinned set.
+
+        Skipped when:
+        - no pinned IPs were recorded (allow_private mode, no host, or SQLite)
+        - url.host is already a numeric IP literal (no DNS involved)
+        """
+        if not self._pinned_ips:
+            return
+        host = self._url.host
+        if not host:
+            return
+        # Skip re-check for numeric IP literals — there is no DNS rebinding risk.
+        try:
+            ipaddress.ip_address(host)
+            return
+        except ValueError:
+            pass  # hostname, not a literal IP
+
+        try:
+            _, _, addrs = socket.gethostbyname_ex(host)
+        except OSError as exc:
+            # DNS resolution failed on re-check; treat as a changed/gone address.
+            raise DataSourceError(
+                f"DNS re-resolution of {host!r} failed before connect; "
+                "aborting to prevent SSRF via DNS rebinding"
+            ) from exc
+        current_ips = set(addrs)
+        if not current_ips.intersection(self._pinned_ips):
+            raise DataSourceError(
+                f"DNS rebinding detected for host {host!r}: "
+                f"pinned={self._pinned_ips}, current={current_ips}; "
+                "aborting to prevent SSRF"
+            )
+
     def probe(self) -> None:
         import sqlalchemy
         from sqlalchemy import text
         from sqlalchemy.pool import NullPool
 
+        self._check_rebinding()
         engine = None
         try:
             engine = sqlalchemy.create_engine(
@@ -161,6 +219,8 @@ class SQLSource:
             )
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
+        except DataSourceError:
+            raise
         except Exception as exc:
             raise DataSourceError(
                 f"probe failed for dialect {self._dialect!r}: {type(exc).__name__}"
@@ -183,6 +243,7 @@ class SQLSource:
         from sqlalchemy import text
         from sqlalchemy.pool import NullPool
 
+        self._check_rebinding()
         cap = get_max_sql_rows()
         engine = None
         try:
@@ -191,14 +252,20 @@ class SQLSource:
                 connect_args=self._connect_args(),
                 poolclass=NullPool,
             )
-            with engine.connect() as conn:
+            # stream_results=True enables server-side cursors where the driver
+            # supports them (PostgreSQL: named server-side cursor via psycopg;
+            # MySQL/MariaDB: SSCursor when pymysql is used with the appropriate
+            # connect_args).  For SQLite this option is accepted but has no
+            # effect — SQLite always materialises the full result in the client.
+            # True streaming (avoiding full materialisation) is therefore only
+            # guaranteed on PostgreSQL with psycopg, and on MySQL/MariaDB when
+            # SSCursor is active.
+            with engine.connect().execution_options(stream_results=True) as conn:
                 self._apply_read_only(conn)
                 self._apply_statement_timeout(conn)
                 stmt = text(self._config.query)
                 if self._config.query_parameters:
                     stmt = stmt.bindparams(**self._config.query_parameters)
-                # Use chunksize = min(100_000, cap) so that the first chunk
-                # never physically loads more rows than the cap allows.
                 chunksize = min(100_000, max(1, cap))
                 chunks: list[pd.DataFrame] = []
                 total = 0
@@ -257,7 +324,11 @@ class SQLSource:
         try:
             if self._dialect.startswith("postgres"):
                 conn.execute(text(f"SET LOCAL statement_timeout = {ms}"))
-            elif self._dialect in {"mysql", "mariadb"}:
+            elif self._dialect == "mariadb":
+                # MariaDB uses max_statement_time in seconds (DOUBLE), not ms.
+                seconds = self._config.statement_timeout_seconds
+                conn.execute(text(f"SET SESSION max_statement_time = {seconds}"))
+            elif self._dialect == "mysql":
                 conn.execute(text(f"SET SESSION MAX_EXECUTION_TIME = {ms}"))
         except Exception as exc:
             raise DataSourceError(

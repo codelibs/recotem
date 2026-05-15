@@ -301,6 +301,220 @@ def test_builtin_ep_attribute_error_is_fatal() -> None:
             registry.get_source_types.cache_clear()
 
 
+# ---------------------------------------------------------------------------
+# M7: correct install hints for builtin sources (sql / ga4 / bigquery)
+# ---------------------------------------------------------------------------
+
+
+def test_sql_import_error_hint_names_correct_extras() -> None:
+    """ImportError for the sql builtin must list postgres/mysql/sqlite extras.
+
+    The entry-point name is 'sql', but there is no 'recotem[sql]' extra in
+    pyproject.toml.  The hint must name the real extras and must NOT contain
+    the misleading 'recotem[sql]' string.
+    """
+    import structlog.testing
+
+    ep = MagicMock()
+    ep.name = "sql"
+    ep.value = "recotem.datasource.sql:SQLSource"
+    ep.load.side_effect = ImportError("sqlalchemy not installed")
+
+    with patch("recotem.datasource.registry.entry_points", return_value=[ep]):
+        from recotem.datasource import registry
+
+        registry.get_source_types.cache_clear()
+        try:
+            with structlog.testing.capture_logs() as captured:
+                registry.get_source_types()
+
+            skip_events = [
+                e for e in captured if e.get("event") == "datasource_builtin_skipped"
+            ]
+            assert skip_events, "Expected a datasource_builtin_skipped warning"
+            hint = skip_events[0].get("hint", "")
+            assert "recotem[postgres]" in hint, (
+                f"Missing recotem[postgres] in hint: {hint!r}"
+            )
+            assert "recotem[mysql]" in hint, f"Missing recotem[mysql] in hint: {hint!r}"
+            assert "recotem[sqlite]" in hint, (
+                f"Missing recotem[sqlite] in hint: {hint!r}"
+            )
+            assert "recotem[sql]" not in hint, (
+                f"Misleading 'recotem[sql]' must NOT appear in hint: {hint!r}"
+            )
+        finally:
+            registry.get_source_types.cache_clear()
+
+
+def test_ga4_import_error_hint_names_ga4_extra() -> None:
+    """ImportError for the ga4 builtin must hint at recotem[ga4]."""
+    import structlog.testing
+
+    ep = MagicMock()
+    ep.name = "ga4"
+    ep.value = "recotem.datasource.ga4:GA4Source"
+    ep.load.side_effect = ImportError("google-analytics-data not installed")
+
+    with patch("recotem.datasource.registry.entry_points", return_value=[ep]):
+        from recotem.datasource import registry
+
+        registry.get_source_types.cache_clear()
+        try:
+            with structlog.testing.capture_logs() as captured:
+                registry.get_source_types()
+
+            skip_events = [
+                e for e in captured if e.get("event") == "datasource_builtin_skipped"
+            ]
+            assert skip_events, "Expected a datasource_builtin_skipped warning"
+            hint = skip_events[0].get("hint", "")
+            assert "recotem[ga4]" in hint, f"Expected 'recotem[ga4]' in hint: {hint!r}"
+        finally:
+            registry.get_source_types.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# m9: clear_registry_cache() actually clears the LRU cache
+# ---------------------------------------------------------------------------
+
+
+def test_clear_registry_cache_invalidates_cached_result() -> None:
+    """clear_registry_cache() must cause get_source_types() to re-run discovery.
+
+    Strategy:
+    1. Call get_source_types() once — populates the cache with real results.
+    2. Monkeypatch entry_points to return a different set.
+    3. Call get_source_types() again without clearing — still returns the old
+       cached result (confirms the cache was active).
+    4. Call clear_registry_cache() then get_source_types() again — now returns
+       the patched result, proving the cache was cleared.
+    """
+    from pydantic import BaseModel, Field
+
+    from recotem.datasource import registry
+
+    class SentinelConfig(BaseModel):
+        type: str = Field(default="sentinel", pattern="^sentinel$")
+
+    class SentinelSource:
+        type_name = "sentinel"
+        Config = SentinelConfig
+        extras_required = []
+        no_expand_fields = frozenset()
+
+        def fetch(self, ctx): ...
+
+    ep = MagicMock()
+    ep.load.return_value = SentinelSource
+
+    # 1. Warm the cache with real entry-points.
+    registry.get_source_types.cache_clear()
+    first_result = registry.get_source_types()
+
+    # 2 & 3. Patch entry_points but do NOT clear cache — still returns old result.
+    with patch("recotem.datasource.registry.entry_points", return_value=[ep]):
+        cached_result = registry.get_source_types()
+        assert cached_result is first_result, (
+            "Without cache_clear(), get_source_types() must return the cached result"
+        )
+
+        # 4. After clearing, the patched entry_points are used.
+        registry.clear_registry_cache()
+        fresh_result = registry.get_source_types()
+        assert "sentinel" in fresh_result, (
+            "After clear_registry_cache(), get_source_types() must re-run discovery"
+        )
+
+    registry.get_source_types.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# m10: fallback path ImportError graceful skip
+# ---------------------------------------------------------------------------
+
+
+def test_fallback_builtin_import_error_with_hint_is_skipped() -> None:
+    """In the fallback path, a builtin with a known install hint must be skipped
+    gracefully (not raise DataSourceError) when its import fails.
+
+    We simulate an editable-install scenario by patching entry_points to return
+    an empty list (triggering the fallback), then patching _load_class to raise
+    ImportError only for 'sql' (which has a known hint).
+    """
+    import structlog.testing
+
+    from recotem.datasource import registry
+
+    original_load_class = registry._load_class
+
+    def _patched_load_class(fqcn: str) -> type:
+        if "sql" in fqcn:
+            raise ImportError("sqlalchemy not installed")
+        return original_load_class(fqcn)
+
+    registry.get_source_types.cache_clear()
+    try:
+        with (
+            patch("recotem.datasource.registry.entry_points", return_value=[]),
+            patch(
+                "recotem.datasource.registry._load_class",
+                side_effect=_patched_load_class,
+            ),
+            structlog.testing.capture_logs() as captured,
+        ):
+            # Must not raise — sql is skipped; csv/parquet still load fine.
+            result = registry.get_source_types()
+
+        assert "sql" not in result, "sql must be absent from fallback registry"
+        skip_events = [
+            e for e in captured if e.get("event") == "datasource_builtin_skipped"
+        ]
+        assert skip_events, (
+            "Expected datasource_builtin_skipped warning in fallback path"
+        )
+        assert skip_events[0].get("type_name") == "sql"
+    finally:
+        registry.get_source_types.cache_clear()
+
+
+def test_fallback_builtin_import_error_without_hint_raises_datasource_error() -> None:
+    """In the fallback path, an ImportError for a source NOT in _BUILTIN_INSTALL_HINTS
+    must still raise DataSourceError (preserves the original fatal behaviour for
+    unknown/unexpected breakage).
+
+    We inject a fake entry in _FALLBACK_BUILTINS without a corresponding hint.
+    """
+    from recotem.datasource import registry
+
+    patched_fallback = {
+        **registry._FALLBACK_BUILTINS,
+        "unknown_src": "recotem.datasource.unknown_src:UnknownSource",
+    }
+
+    def _patched_load_class(fqcn: str) -> type:
+        if "unknown_src" in fqcn:
+            raise ImportError("unknown dependency missing")
+        # For every other fqcn we also raise to keep the test simple — the
+        # first entry that raises and has no hint should trigger DataSourceError.
+        raise ImportError("not relevant")
+
+    registry.get_source_types.cache_clear()
+    try:
+        with (
+            patch("recotem.datasource.registry.entry_points", return_value=[]),
+            patch("recotem.datasource.registry._FALLBACK_BUILTINS", patched_fallback),
+            patch(
+                "recotem.datasource.registry._load_class",
+                side_effect=_patched_load_class,
+            ),
+        ):
+            with pytest.raises(DataSourceError):
+                registry.get_source_types()
+    finally:
+        registry.get_source_types.cache_clear()
+
+
 def test_builtin_ep_skipped_other_eps_still_registered() -> None:
     """When a builtin EP is skipped, other successfully-loaded EPs are still
     registered in the result dict.

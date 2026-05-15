@@ -15,6 +15,9 @@ Value-side scrubbing (applied to string values of non-redacted keys):
     ``[REDACTED-HEX64]``
   - 43-char base64url substrings (api key material): replaced with
     ``[REDACTED-B64URL43]``
+  - URL-shaped strings containing ``scheme://user[:pass]@host``: the userinfo
+    is replaced with ``***`` (any SQL DSN or HTTP basic-auth URL embedded in a
+    string value is scrubbed before the hex/base64 passes run)
 """
 
 from __future__ import annotations

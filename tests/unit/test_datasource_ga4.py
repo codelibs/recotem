@@ -108,7 +108,7 @@ def test_ga4_source_classvars() -> None:
 
     assert GA4Source.type_name == "ga4"
     assert GA4Source.Config is GA4Config
-    assert "google-analytics-data" in GA4Source.extras_required
+    assert "ga4" in GA4Source.extras_required
     assert GA4Source.no_expand_fields == frozenset()
 
 
@@ -772,3 +772,155 @@ def test_fetch_error_message_includes_exception_text(monkeypatch) -> None:
     src = GA4Source(_cfg())
     with pytest.raises(DataSourceError, match="metric Y not recognized"):
         src.fetch(_fetch_ctx())
+
+
+# ---------------------------------------------------------------------------
+# C4 — eventCount float→int handling
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_weight_column_integer_float_values_accepted(monkeypatch) -> None:
+    """weight_column values like '3.0' and '5.0' must be accepted and cast to int64."""
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = _make_page(
+        rows=[
+            _row(["u1", "i1", "20260101", "purchase"], "3.0"),
+            _row(["u2", "i2", "20260101", "purchase"], "5.0"),
+        ],
+        row_count=2,
+    )
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    df = src.fetch(_fetch_ctx())
+    assert df["event_count"].dtype.name == "int64"
+    assert list(df["event_count"]) == [3, 5]
+
+
+def test_fetch_weight_column_non_integer_float_raises(monkeypatch) -> None:
+    """weight_column value '2.9' must raise DataSourceError with the offending value."""
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = _make_page(
+        rows=[
+            _row(["u1", "i1", "20260101", "purchase"], "2.9"),
+        ],
+        row_count=1,
+    )
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    with pytest.raises(DataSourceError, match="2.9"):
+        src.fetch(_fetch_ctx())
+
+
+def test_fetch_weight_column_string_integers_accepted(monkeypatch) -> None:
+    """weight_column values like '3' and '5' (string integers) must be cast to int64."""
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = _make_page(
+        rows=[
+            _row(["u1", "i1", "20260101", "purchase"], "3"),
+            _row(["u2", "i2", "20260101", "purchase"], "5"),
+        ],
+        row_count=2,
+    )
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    df = src.fetch(_fetch_ctx())
+    assert df["event_count"].dtype.name == "int64"
+    assert list(df["event_count"]) == [3, 5]
+
+
+# ---------------------------------------------------------------------------
+# m3 — except Exception (not BaseException) — KeyboardInterrupt propagates
+# ---------------------------------------------------------------------------
+
+
+def test_get_client_keyboard_interrupt_propagates(monkeypatch) -> None:
+    """KeyboardInterrupt from BetaAnalyticsDataClient() must propagate, not be wrapped."""
+    fake_mod = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.side_effect = KeyboardInterrupt
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    with pytest.raises(KeyboardInterrupt):
+        src._get_client()
+
+
+# ---------------------------------------------------------------------------
+# m6 — GA4 row shape validation
+# ---------------------------------------------------------------------------
+
+
+def _row_bad_dims(n_dims: int, n_metrics: int = 1):
+    """Build a fake GA4 row with an unexpected shape."""
+    row = MagicMock()
+    row.dimension_values = [MagicMock(value=f"v{i}") for i in range(n_dims)]
+    row.metric_values = [MagicMock(value="1") for _ in range(n_metrics)]
+    return row
+
+
+def test_fetch_row_too_few_dimensions_raises(monkeypatch) -> None:
+    """A row with only 3 dimension_values must raise DataSourceError with page number."""
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = _make_page(rows=[_row_bad_dims(n_dims=3, n_metrics=1)], row_count=1)
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    with pytest.raises(DataSourceError, match=r"page 0"):
+        src.fetch(_fetch_ctx())
+
+
+def test_fetch_row_no_metrics_raises(monkeypatch) -> None:
+    """A row with 0 metric_values must raise DataSourceError."""
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = _make_page(rows=[_row_bad_dims(n_dims=4, n_metrics=0)], row_count=1)
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    with pytest.raises(DataSourceError, match=r"unexpected GA4 row shape"):
+        src.fetch(_fetch_ctx())
+
+
+# ---------------------------------------------------------------------------
+# m8 — extras_required uses extra name, not PyPI package name
+# ---------------------------------------------------------------------------
+
+
+def test_extras_required_uses_extra_name() -> None:
+    """GA4Source.extras_required must list the pyproject.toml extra name 'ga4'."""
+    from recotem.datasource.ga4 import GA4Source
+
+    assert GA4Source.extras_required == ["ga4"]

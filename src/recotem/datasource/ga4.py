@@ -69,7 +69,7 @@ class GA4Config(BaseModel):
 class GA4Source:
     type_name: ClassVar[str] = "ga4"
     Config: ClassVar[type[BaseModel]] = GA4Config
-    extras_required: ClassVar[list[str]] = ["google-analytics-data"]
+    extras_required: ClassVar[list[str]] = ["ga4"]
     no_expand_fields: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(self, config: GA4Config) -> None:
@@ -112,13 +112,11 @@ class GA4Source:
         except ImportError:
             _DCE = None  # type: ignore[assignment,misc]
 
-        _exc_types: tuple[type[BaseException], ...] = (
-            (_DCE,) if _DCE is not None else ()
-        )
+        _exc_types: tuple[type[Exception], ...] = (_DCE,) if _DCE is not None else ()
 
         try:
             self._client = BetaAnalyticsDataClient()
-        except BaseException as exc:
+        except Exception as exc:
             if _exc_types and isinstance(exc, _exc_types):
                 raise DataSourceError(
                     "ADC is not configured for the GA4 Data API. "
@@ -274,16 +272,24 @@ class GA4Source:
             self._record_quota(ctx.recipe_name, response)
 
             page_rows = list(response.rows or [])
-            page_records = [
-                {
-                    self._config.user_dimension: row.dimension_values[0].value,
-                    self._config.item_dimension: row.dimension_values[1].value,
-                    self._config.time_dimension: row.dimension_values[2].value,
-                    "eventName": row.dimension_values[3].value,
-                    self._config.weight_column: row.metric_values[0].value,
-                }
-                for row in page_rows
-            ]
+            page_records = []
+            for row in page_rows:
+                if len(row.dimension_values) < 4 or len(row.metric_values) < 1:
+                    raise DataSourceError(
+                        f"unexpected GA4 row shape on page {page_idx}: got "
+                        f"{len(row.dimension_values)} dimensions and "
+                        f"{len(row.metric_values)} metrics (expected 4 and 1); "
+                        "SDK version may be incompatible"
+                    )
+                page_records.append(
+                    {
+                        self._config.user_dimension: row.dimension_values[0].value,
+                        self._config.item_dimension: row.dimension_values[1].value,
+                        self._config.time_dimension: row.dimension_values[2].value,
+                        "eventName": row.dimension_values[3].value,
+                        self._config.weight_column: row.metric_values[0].value,
+                    }
+                )
             if page_records:
                 page_frames.append(pd.DataFrame.from_records(page_records))
             del page_records
@@ -323,9 +329,14 @@ class GA4Source:
             df = pd.DataFrame(columns=expected_columns)
 
         if self._config.weight_column in df.columns:
-            df[self._config.weight_column] = pd.to_numeric(
-                df[self._config.weight_column], errors="raise"
-            ).astype("int64")
+            numeric = pd.to_numeric(df[self._config.weight_column], errors="raise")
+            if not (numeric % 1 == 0).all():
+                offender = numeric[numeric % 1 != 0].iloc[0]
+                raise DataSourceError(
+                    f"GA4 eventCount contains non-integer value {offender!r} for "
+                    f"property {self._config.property_id!r}; expected integer metric"
+                )
+            df[self._config.weight_column] = numeric.astype("int64")
 
         _log.info(
             "ga4_fetch_complete",

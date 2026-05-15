@@ -79,7 +79,7 @@ source:
   query: |
     SELECT user_id, item_id, created_at AS ts
     FROM events
-    WHERE created_at >= ?
+    WHERE created_at >= :min_date
   query_parameters:
     min_date: "2026-04-01"
   connect_timeout_seconds: 10
@@ -90,9 +90,9 @@ source:
 |-------|------|---------|-------|
 | `dsn_env` | string | required | Environment variable name containing the SQLAlchemy connection URL. Must be a `RECOTEM_RECIPE_*` variable (e.g. `RECOTEM_RECIPE_DATABASE_DSN`). The URL can use any SQLAlchemy-supported dialect: PostgreSQL, MySQL, MariaDB, SQLite. The connection is read-only and attempts to set transaction isolation appropriately per dialect. |
 | `query` | string | required | SQL. Trusted code — not env-expanded. Use parameterized queries to pass dynamic values. Results are read in chunks (100,000 rows per chunk) and are capped by `RECOTEM_MAX_SQL_ROWS` (default configurable). |
-| `query_parameters` | map | `{}` | Named or positional parameters bound to the query. Type values: `str`, `int`, `float`, or `bool`. |
-| `connect_timeout_seconds` | int | `10` | Connection establishment timeout in seconds. Clamped [1, 60]. |
-| `statement_timeout_seconds` | int | `300` | Per-statement execution timeout in seconds. Clamped [1, 1800]. |
+| `query_parameters` | map | `{}` | Named parameters bound via SQLAlchemy `text().bindparams(...)`. Use `:name` placeholders in `query`. Type values: `str`, `int`, `float`, or `bool`. |
+| `connect_timeout_seconds` | int | `10` | Connection establishment timeout in seconds. Valid range [1, 60] (out-of-range raises ValidationError). |
+| `statement_timeout_seconds` | int | `300` | Per-statement execution timeout in seconds. Valid range [1, 1800] (out-of-range raises ValidationError). |
 
 Install the extra for your SQL dialect: `pip install "recotem[postgres]"`, `recotem[mysql]`, or `recotem[sqlite]`.
 
@@ -121,10 +121,10 @@ source:
 | `item_dimension` | string | `"itemId"` | Item identifier dimension. Custom GA4 dimension name (1–64 chars). |
 | `time_dimension` | string | `"date"` | Time bucket dimension. One of `date`, `dateHour`, or `dateHourMinute`. |
 | `event_names` | list[string] | required | Event names to include. At least one required; max 50. Each must match GA4 naming rules: `^[A-Za-z_][A-Za-z0-9_]{0,39}$`. |
-| `lookback_days` XOR `start_date` / `end_date` | int / date | (one required) | Either set `lookback_days` (1–3650 days in the past, relative to today) **or** both `start_date` and `end_date` (inclusive, YYYY-MM-DD format). Exactly one of these two approaches must be set. |
-| `max_rows` | int | required | Maximum number of rows to fetch from GA4. Clamped [1, 50,000,000]. Query is aborted if this limit is exceeded. |
+| `lookback_days` XOR `start_date` / `end_date` | int / date | (one required) | Either set `lookback_days` (1–3650 days; rolling window ending at `yesterday`, the previous complete day in the property's timezone) **or** both `start_date` and `end_date` (inclusive, YYYY-MM-DD format). Exactly one of these two approaches must be set. |
+| `max_rows` | int | required | Maximum number of rows to fetch from GA4. Valid range [1, 50,000,000] (out-of-range raises ValidationError). Query is aborted if this limit is exceeded. |
 | `weight_column` | string | `"event_count"` | Column name for the event count metric (typically `event_count`). |
-| `api_timeout_seconds` | int | `60` | API request timeout in seconds. Clamped [5, 600]. |
+| `api_timeout_seconds` | int | `60` | API request timeout in seconds. Valid range [5, 600] (out-of-range raises ValidationError). |
 
 Install the extra: `pip install "recotem[ga4]"`. Requires Google Application Credentials (via `GOOGLE_APPLICATION_CREDENTIALS` or Workload Identity) with `roles/analytics.viewer` on the GA4 property.
 

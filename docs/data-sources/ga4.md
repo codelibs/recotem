@@ -45,11 +45,11 @@ source:
 | `item_dimension` | no | `itemId` | Any GA4 item-scoped dimension. |
 | `time_dimension` | no | `date` | Granularity of the time bucket. |
 | `event_names` | yes | — | 1–50 event names; each matches `^[A-Za-z_][A-Za-z0-9_]{0,39}$`. |
-| `lookback_days` | XOR | — | 1–3650; rolling window ending at `yesterday`. |
+| `lookback_days` | XOR | — | 1–3650; rolling window ending at `yesterday` (the previous complete day in the property's timezone). |
 | `start_date` / `end_date` | XOR | — | ISO dates. Both required if either is set; `start <= end`. |
-| `max_rows` | yes | — | Hard cap on rows returned. Clamp `[1, 50_000_000]`. |
+| `max_rows` | yes | — | Hard cap on rows returned. Valid range `[1, 50_000_000]` (out-of-range raises ValidationError). |
 | `weight_column` | no | `event_count` | Output DataFrame column name for the `eventCount` metric. Must match `schema.weight_column`. |
-| `api_timeout_seconds` | no | 60 | Clamp `[5, 600]`. |
+| `api_timeout_seconds` | no | 60 | Valid range `[5, 600]` (out-of-range raises ValidationError). |
 
 ## Authentication
 
@@ -86,7 +86,8 @@ discard the weight from the other event types. irspack aggregates repeated
 - Loop until `row_count` is drained, `max_rows` is hit, or
   `RECOTEM_GA4_MAX_PAGES` (default 500) is reached.
 - Retries `RESOURCE_EXHAUSTED` / `UNAVAILABLE` gRPC codes via
-  `google.api_core.retry.Retry` (3 attempts, exp. backoff, max 30 s).
+  `google.api_core.retry.Retry` (initial 1 s, exponential backoff up to 30 s,
+  total budget = 3 × `api_timeout_seconds`).
 - `PERMISSION_DENIED` / `NOT_FOUND` → immediate `DataSourceError` pointing
   at the role / property ID.
 
@@ -106,4 +107,4 @@ discard the weight from the other event types. irspack aggregates repeated
 | `GA4 access denied for property ...` | Service account lacks the role. | Grant `roles/analytics.viewer` on the GA4 property. |
 | `set exactly one of lookback_days OR (start_date + end_date)` | Both or neither set. | Pick one. |
 | `GA4 result exceeds max_rows=...` | Genuinely huge result. | Narrow `event_names` or shorten the window. |
-| `GA4 fetch exceeded RECOTEM_GA4_MAX_PAGES=500; tighten the query or raise the cap` | Property is too large for default ceiling. | Raise `RECOTEM_GA4_MAX_PAGES` after confirming quota. |
+| `GA4 fetch reached max_pages=<n> without seeing a short page; increase RECOTEM_GA4_MAX_PAGES or tighten the query` | Property is too large for default ceiling. | Raise `RECOTEM_GA4_MAX_PAGES` after confirming quota. |

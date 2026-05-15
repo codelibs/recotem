@@ -59,7 +59,7 @@ tests/
 docs/
 ├── getting-started.md  Docker / pip walkthrough → train → /predict
 ├── recipe-reference.md every recipe field, type, default, validation
-├── data-sources/       bigquery.md, csv.md
+├── data-sources/       bigquery.md, csv.md, ga4.md, sql.md
 ├── deployment/         docker.md, k8s.md, cron.md
 ├── operations.md       key rotation, recovery, sizing, troubleshooting
 ├── security.md         trust boundaries, FQCN allow-list, threat model
@@ -102,7 +102,7 @@ curl -X POST http://localhost:8080/predict/news_articles \
 A recipe is the single source of truth: 1 YAML = 1 model = 1 `/predict/{name}`.
 See `docs/recipe-reference.md` for the full schema. Highlights:
 
-- `source.type` is a discriminator (`csv` | `parquet` | `bigquery` | plugins).
+- `source.type` is a discriminator (`csv` | `parquet` | `bigquery` | `sql` | `ga4` | plugins).
 - Env-var expansion is restricted to `${RECOTEM_RECIPE_*}` and never applied
   inside `source.query` / `source.query_parameters` (forecloses SQL injection).
 - Path scheme: `source.path` and `item_metadata.path` accept an explicit

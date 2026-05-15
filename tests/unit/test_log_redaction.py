@@ -613,3 +613,43 @@ def test_sqlite_path_passes_through_unchanged() -> None:
     original = "sqlite:///local.db"
     result = _scrub_string_value(original)
     assert result == original
+
+
+# ---------------------------------------------------------------------------
+# MINOR-1: DSN scrubber short-circuit on "://" absence
+# ---------------------------------------------------------------------------
+
+
+def test_dsn_scrubber_short_circuit_does_not_break_credentialed_dsn() -> None:
+    """Strings containing '://' with DSN credentials must still be scrubbed.
+
+    This verifies the '://' short-circuit guard doesn't accidentally skip
+    DSNs that contain user credentials.
+    """
+    from recotem.log_redaction import _scrub_string_value
+
+    dsn = "postgresql://alice:s3cret@db.example.com:5432/orders"
+    result = _scrub_string_value(dsn)
+    assert "alice" not in result
+    assert "s3cret" not in result
+    assert "db.example.com" in result
+
+
+def test_dsn_scrubber_short_circuit_skips_regex_on_plain_strings() -> None:
+    """Strings without '://' must pass through the DSN scrubber unchanged.
+
+    This validates the short-circuit: a bare hex token or log message that
+    contains no '://' must not be touched by the DSN regex.
+    """
+    from recotem.log_redaction import _scrub_string_value
+
+    # A bare hex token — no '://', so DSN regex should not run.
+    # (It may still be caught by the HEX64 pattern if long enough, but that
+    # is separate from the DSN scrubber.)
+    plain = "just a plain log message with no URL"
+    result = _scrub_string_value(plain)
+    assert result == plain
+
+    # A short hex string (< 64 chars) without a scheme — untouched.
+    short_hex = "deadbeef1234"
+    assert _scrub_string_value(short_hex) == short_hex

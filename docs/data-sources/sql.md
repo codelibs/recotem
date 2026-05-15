@@ -44,7 +44,7 @@ source:
 | `query` | yes | — | Raw SQL. Never subject to `${...}` expansion (SQL injection foreclosure). |
 | `query_parameters` | no | `{}` | Bound via SQLAlchemy `text().bindparams(...)`. Subject to `${RECOTEM_RECIPE_*}` expansion. |
 | `connect_timeout_seconds` | no | 10 | Clamp `[1, 60]`. Passed as `connect_timeout` (PG/MySQL) or `timeout` (SQLite). |
-| `statement_timeout_seconds` | no | 300 | Clamp `[1, 1800]`. PG: `SET LOCAL statement_timeout`. MySQL/MariaDB: `SET SESSION MAX_EXECUTION_TIME`. SQLite: not enforced. |
+| `statement_timeout_seconds` | no | 300 | Clamp `[1, 1800]`. PG: `SET LOCAL statement_timeout`. MySQL/MariaDB: `SET SESSION MAX_EXECUTION_TIME`. Failure aborts training on PG/MySQL/MariaDB. SQLite: no-op (no server-side timeout). |
 
 ## DSN examples
 
@@ -85,7 +85,10 @@ source:
   (MySQL). Recotem does not inspect or enforce DSN flags.
 - The DB user should have `SELECT` only on the relevant tables. Recotem issues
   `SET TRANSACTION READ ONLY` (PG) or `SET SESSION TRANSACTION READ ONLY` (MySQL/MariaDB)
-  as defence in depth, but the authoritative boundary is your grant model.
+  before running the query. If this command fails (e.g. insufficient privilege), training
+  is aborted with `DataSourceError`; it is not silently skipped. SQLite has no transactional
+  READ ONLY mechanism and the call is a no-op there. The authoritative boundary is still your
+  grant model — never rely solely on the session flag.
 - SSRF: by default, DSN hosts that resolve to private / loopback / link-local IPs are
   rejected. Set `RECOTEM_SQL_ALLOW_PRIVATE=1` to opt in (intended for Docker Compose /
   Kubernetes service-name destinations).
@@ -117,10 +120,13 @@ included in the stderr JSON line.
 
 - `recotem validate recipes/my_recipe.yaml` probes the database by issuing `SELECT 1`
   before training starts. This validates the DSN, driver installation, and host connectivity.
-- Query results are read in 100 000-row chunks to bound memory usage during streaming.
+- Query results are read in chunks to bound memory usage during streaming. The chunk size is
+  `min(100_000, RECOTEM_MAX_SQL_ROWS)` so the row cap is enforced before the first chunk is
+  fully loaded.
 - `source.query` and `source.dsn_env` are unconditionally exempt from `${...}` expansion
   regardless of variable name; only `query_parameters` values are expanded.
-- SQLite `statement_timeout_seconds` is accepted by the recipe schema but not enforced —
-  SQLite has no server-side query timeout mechanism.
+- SQLite `statement_timeout_seconds` is accepted by the recipe schema but is a no-op —
+  SQLite has no server-side query timeout mechanism. On PostgreSQL and MySQL/MariaDB,
+  failure to set the timeout aborts training with `DataSourceError`.
 - `flock` is host-local; across hosts use scheduler-level mutex (`concurrencyPolicy: Forbid`
   in Kubernetes CronJobs).

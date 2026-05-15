@@ -125,6 +125,12 @@ def _clamped_int_env(name: str, default: int, lo: int, hi: int) -> int:
     try:
         value = int(raw)
     except ValueError:
+        _logger.warning(
+            "env_var_unparseable",
+            name=name,
+            raw=raw,
+            fallback=default,
+        )
         return default
     clamped = max(lo, min(hi, value))
     if clamped != value:

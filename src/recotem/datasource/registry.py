@@ -63,6 +63,22 @@ def get_source_types() -> dict[str, type]:
     for ep in discovered:
         try:
             cls = ep.load()
+        except ImportError as exc:
+            # Gracefully skip builtin optional sources whose extras are not
+            # installed.  Third-party plugins or other (non-ImportError)
+            # failures remain fatal so operators notice broken plugin installs.
+            if ep.value.startswith("recotem.datasource."):
+                logger.warning(
+                    "datasource_builtin_skipped",
+                    type_name=ep.name,
+                    module=ep.value,
+                    hint=f"install `recotem[{ep.name}]` to enable this source",
+                    error=str(exc),
+                )
+                continue
+            raise DataSourceError(
+                f"Failed to load DataSource plugin '{ep.name}' from '{ep.value}': {exc}"
+            ) from exc
         except Exception as exc:
             raise DataSourceError(
                 f"Failed to load DataSource plugin '{ep.name}' from '{ep.value}': {exc}"

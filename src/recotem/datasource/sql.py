@@ -35,6 +35,10 @@ class SQLConfig(BaseModel):
         ...,
         min_length=1,
         pattern=r"^RECOTEM_RECIPE_[A-Z0-9_]+$",
+        description=(
+            "Name of the environment variable holding the DSN. Must match "
+            "^RECOTEM_RECIPE_[A-Z0-9_]+$ (set RECOTEM_RECIPE_DB_DSN, etc.)."
+        ),
     )
     query: str = Field(..., min_length=1)
     query_parameters: dict[str, str | int | float | bool] = Field(default_factory=dict)
@@ -94,8 +98,14 @@ class SQLSource:
                 ) from exc
 
         if url.host and not sql_allow_private():
+            # Wrap IPv6 literals in brackets so urlparse inside assert_host_public
+            # correctly identifies the full address (e.g. "fe80::1" not just "fe80").
+            # SQLAlchemy's make_url strips the brackets from "[::1]" and returns "::1".
+            host_for_check = url.host
+            if ":" in host_for_check and not host_for_check.startswith("["):
+                host_for_check = f"[{host_for_check}]"
             try:
-                assert_host_public(f"db://{url.host}", allow_private=False)
+                assert_host_public(f"db://{host_for_check}", allow_private=False)
             except HttpFetchError as exc:
                 raise DataSourceError(
                     f"refusing to connect to private/loopback host {url.host!r}; "
@@ -107,15 +117,29 @@ class SQLSource:
         self._url = url
         self._dialect = backend
 
-        # Redact userinfo from DSN before logging; redact_url_userinfo only covers
-        # HTTP(S)/FTP schemes so we strip credentials directly from the URL object.
-        # The path separator must be explicit so postgres "host:5432/mydb" does not
-        # render as "host:5432mydb"; sqlite stays correct because host is empty
-        # and database is ":memory:" → "sqlite:///:memory:".
-        safe_netloc = url.host or ""
-        if url.port is not None:
-            safe_netloc = f"{safe_netloc}:{url.port}"
-        safe_dsn = f"{url.drivername}://{safe_netloc}/{url.database or ''}"
+        # Redact userinfo from DSN before logging.  Build a credential-free
+        # URL using URL.create (SQLAlchemy 2.x) so username and password are
+        # fully omitted from the rendered string.  Query parameters (e.g.
+        # sslmode, connect_timeout) and the driver suffix (+psycopg) are
+        # preserved.  The try/except guards against future SQLAlchemy API
+        # changes.
+        try:
+            from sqlalchemy.engine.url import URL as _SAUrl
+
+            safe_dsn = _SAUrl.create(
+                drivername=url.drivername,
+                username=None,
+                password=None,
+                host=url.host,
+                port=url.port,
+                database=url.database,
+                query=url.query,
+            ).render_as_string(hide_password=True)
+        except (AttributeError, TypeError, Exception):
+            safe_netloc = url.host or ""
+            if url.port is not None:
+                safe_netloc = f"{safe_netloc}:{url.port}"
+            safe_dsn = f"{url.drivername}://{safe_netloc}/{url.database or ''}"
         _log.debug(
             "sql_source_initialized",
             dialect=backend,
@@ -128,6 +152,7 @@ class SQLSource:
         from sqlalchemy import text
         from sqlalchemy.pool import NullPool
 
+        engine = None
         try:
             engine = sqlalchemy.create_engine(
                 self._url,
@@ -140,6 +165,9 @@ class SQLSource:
             raise DataSourceError(
                 f"probe failed for dialect {self._dialect!r}: {type(exc).__name__}"
             ) from exc
+        finally:
+            if engine is not None:
+                engine.dispose()
 
     def _connect_args(self) -> dict[str, object]:
         if self._dialect.startswith("postgres"):
@@ -156,27 +184,31 @@ class SQLSource:
         from sqlalchemy.pool import NullPool
 
         cap = get_max_sql_rows()
-        engine = sqlalchemy.create_engine(
-            self._url,
-            connect_args=self._connect_args(),
-            poolclass=NullPool,
-        )
+        engine = None
         try:
+            engine = sqlalchemy.create_engine(
+                self._url,
+                connect_args=self._connect_args(),
+                poolclass=NullPool,
+            )
             with engine.connect() as conn:
                 self._apply_read_only(conn)
                 self._apply_statement_timeout(conn)
                 stmt = text(self._config.query)
                 if self._config.query_parameters:
                     stmt = stmt.bindparams(**self._config.query_parameters)
+                # Use chunksize = min(100_000, cap) so that the first chunk
+                # never physically loads more rows than the cap allows.
+                chunksize = min(100_000, max(1, cap))
                 chunks: list[pd.DataFrame] = []
                 total = 0
-                for chunk in pd.read_sql(stmt, conn, chunksize=100_000):
-                    total += len(chunk)
-                    if total > cap:
+                for chunk in pd.read_sql(stmt, conn, chunksize=chunksize):
+                    if total + len(chunk) > cap:
                         raise DataSourceError(
                             f"query result exceeds RECOTEM_MAX_SQL_ROWS={cap} rows; "
                             "tighten the query or raise the cap"
                         )
+                    total += len(chunk)
                     chunks.append(chunk)
                 df = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
         except DataSourceError:
@@ -185,6 +217,9 @@ class SQLSource:
             raise DataSourceError(
                 f"query failed on dialect {self._dialect!r}: {type(exc).__name__}"
             ) from exc
+        finally:
+            if engine is not None:
+                engine.dispose()
 
         _log.info(
             "sql_fetch_complete",
@@ -198,21 +233,26 @@ class SQLSource:
     def _apply_read_only(self, conn) -> None:
         from sqlalchemy import text
 
+        if self._dialect == "sqlite":
+            # SQLite has no transactional READ ONLY mode; intentional no-op.
+            return
         try:
             if self._dialect.startswith("postgres"):
                 conn.execute(text("SET TRANSACTION READ ONLY"))
             elif self._dialect in {"mysql", "mariadb"}:
                 conn.execute(text("SET SESSION TRANSACTION READ ONLY"))
         except Exception as exc:
-            _log.warning(
-                "sql_read_only_set_failed",
-                dialect=self._dialect,
-                error=type(exc).__name__,
-            )
+            raise DataSourceError(
+                f"failed to enforce READ ONLY transaction on {self._dialect!r}: "
+                f"{type(exc).__name__}: {exc}; refusing to run the query"
+            ) from exc
 
     def _apply_statement_timeout(self, conn) -> None:
         from sqlalchemy import text
 
+        if self._dialect == "sqlite":
+            # SQLite has no statement_timeout; intentional no-op.
+            return
         ms = self._config.statement_timeout_seconds * 1000
         try:
             if self._dialect.startswith("postgres"):
@@ -220,8 +260,7 @@ class SQLSource:
             elif self._dialect in {"mysql", "mariadb"}:
                 conn.execute(text(f"SET SESSION MAX_EXECUTION_TIME = {ms}"))
         except Exception as exc:
-            _log.warning(
-                "sql_statement_timeout_set_failed",
-                dialect=self._dialect,
-                error=type(exc).__name__,
-            )
+            raise DataSourceError(
+                f"failed to enforce statement_timeout on {self._dialect!r}: "
+                f"{type(exc).__name__}: {exc}; refusing to run the query"
+            ) from exc

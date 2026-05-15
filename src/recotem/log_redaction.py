@@ -158,7 +158,8 @@ def _scrub_string_value(s: str) -> str:
     """
     if s == _REDACTED or s.startswith("[REDACTED"):
         return s
-    s = _DSN_USERINFO_RE.sub(r"\g<scheme>://***@\g<host>", s)
+    if "://" in s:
+        s = _DSN_USERINFO_RE.sub(r"\g<scheme>://***@\g<host>", s)
     s = _HEX64_RE.sub(_REDACTED_HEX64, s)
     s = _B64URL43_RE.sub(_REDACTED_B64URL43, s)
     return s

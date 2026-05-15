@@ -141,20 +141,19 @@ def test_get_source_class_unknown_type_raises() -> None:
 # ---------------------------------------------------------------------------
 # MAJOR-9: entry_points ep.load() ImportError — graceful vs fatal behaviour
 # ---------------------------------------------------------------------------
-# The implementation raises DataSourceError (fatal) when ep.load() fails.
-# This test pins that behaviour so a regression (silently skipping the broken
-# plugin) is immediately caught.
+# Third-party plugin load failures remain fatal (DataSourceError).
+# Builtin sources (recotem.datasource.*) that raise ImportError are skipped
+# gracefully so that optional extras (sql, ga4, bigquery) can be absent
+# without aborting startup for unrelated sources.
 
 
 def test_plugin_ep_load_failure_raises_datasource_error() -> None:
-    """When ep.load() raises ImportError, get_source_types must raise DataSourceError.
+    """When a THIRD-PARTY ep.load() raises ImportError, get_source_types must raise
+    DataSourceError.
 
-    The implementation is FATAL on load failure (not graceful/silent-skip):
-    it is better to fail loudly at startup than to silently omit a plugin the
-    operator configured, which would cause mysterious 'unknown type' errors later.
-
-    This test pins that fatal behaviour so a future refactor to 'graceful skip'
-    is an explicit, reviewed decision.
+    Third-party plugins are fatal on load failure: it is better to fail loudly
+    at startup than to silently omit a plugin the operator explicitly configured,
+    which would cause mysterious 'unknown type' errors later.
     """
     ep = MagicMock()
     ep.name = "broken_plugin"
@@ -209,5 +208,140 @@ def test_plugin_ep_load_raises_attribute_error_raises_datasource_error() -> None
         try:
             with pytest.raises(DataSourceError):
                 registry.get_source_types()
+        finally:
+            registry.get_source_types.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL-1: graceful skip for builtin optional sources on ImportError
+# ---------------------------------------------------------------------------
+
+
+def test_builtin_ep_import_error_is_skipped_with_warning() -> None:
+    """A builtin EP (recotem.datasource.*) raising ImportError must be skipped
+    with a 'datasource_builtin_skipped' warning rather than raising DataSourceError.
+
+    Note: get_source_types is lru_cache'd; tests must call cache_clear() before
+    and after to avoid state leakage between test runs.
+    """
+    import structlog.testing
+
+    ep = MagicMock()
+    ep.name = "foo"
+    ep.value = "recotem.datasource.foo:FooSource"
+    ep.load.side_effect = ImportError("no module named 'recotem.datasource.foo'")
+
+    with patch("recotem.datasource.registry.entry_points", return_value=[ep]):
+        from recotem.datasource import registry
+
+        registry.get_source_types.cache_clear()
+        try:
+            with structlog.testing.capture_logs() as captured:
+                # Must not raise — the builtin EP is gracefully skipped.
+                types = registry.get_source_types()
+
+            # The skipped source must not appear in the registry.
+            assert "foo" not in types, (
+                "Skipped builtin EP must not appear in the registry"
+            )
+
+            # A warning must have been emitted.
+            skip_events = [
+                e for e in captured if e.get("event") == "datasource_builtin_skipped"
+            ]
+            assert skip_events, (
+                "A 'datasource_builtin_skipped' warning must be logged when a "
+                "builtin EP raises ImportError"
+            )
+            assert skip_events[0].get("log_level") == "warning"
+            assert skip_events[0].get("type_name") == "foo"
+        finally:
+            registry.get_source_types.cache_clear()
+
+
+def test_third_party_ep_import_error_is_fatal() -> None:
+    """A third-party EP (not starting with 'recotem.datasource.') raising
+    ImportError must still raise DataSourceError.
+    """
+    ep = MagicMock()
+    ep.name = "evil"
+    ep.value = "mypkg.evil:EvilSource"
+    ep.load.side_effect = ImportError("mypkg not installed")
+
+    with patch("recotem.datasource.registry.entry_points", return_value=[ep]):
+        from recotem.datasource import registry
+
+        registry.get_source_types.cache_clear()
+        try:
+            with pytest.raises(
+                DataSourceError, match="Failed to load DataSource plugin"
+            ):
+                registry.get_source_types()
+        finally:
+            registry.get_source_types.cache_clear()
+
+
+def test_builtin_ep_attribute_error_is_fatal() -> None:
+    """A builtin EP raising AttributeError (not ImportError) must still raise
+    DataSourceError — only ImportError gets the graceful-skip treatment.
+    """
+    ep = MagicMock()
+    ep.name = "sql"
+    ep.value = "recotem.datasource.sql:SQLSource"
+    ep.load.side_effect = AttributeError("module has no attribute 'SQLSource'")
+
+    with patch("recotem.datasource.registry.entry_points", return_value=[ep]):
+        from recotem.datasource import registry
+
+        registry.get_source_types.cache_clear()
+        try:
+            with pytest.raises(DataSourceError):
+                registry.get_source_types()
+        finally:
+            registry.get_source_types.cache_clear()
+
+
+def test_builtin_ep_skipped_other_eps_still_registered() -> None:
+    """When a builtin EP is skipped, other successfully-loaded EPs are still
+    registered in the result dict.
+
+    Note: get_source_types is lru_cache'd; cache_clear() is called before and
+    after to prevent state leakage between test runs.
+    """
+    from pydantic import BaseModel, Field
+
+    class GoodConfig(BaseModel):
+        type: str = Field(default="good", pattern="^good$")
+
+    class GoodSource:
+        type_name = "good"
+        Config = GoodConfig
+        extras_required = []
+        no_expand_fields = frozenset()
+
+        def fetch(self, ctx): ...
+
+    ep_bad = MagicMock()
+    ep_bad.name = "missing_extra"
+    ep_bad.value = "recotem.datasource.missing_extra:MissingSource"
+    ep_bad.load.side_effect = ImportError("optional extra not installed")
+
+    ep_good = MagicMock()
+    ep_good.load.return_value = GoodSource
+
+    with patch(
+        "recotem.datasource.registry.entry_points", return_value=[ep_bad, ep_good]
+    ):
+        from recotem.datasource import registry
+
+        registry.get_source_types.cache_clear()
+        try:
+            types = registry.get_source_types()
+            assert "good" in types, (
+                "Successfully-loaded EP must still appear after a builtin skip"
+            )
+            assert "missing_extra" not in types, (
+                "Skipped builtin EP must not appear in the registry"
+            )
         finally:
             registry.get_source_types.cache_clear()

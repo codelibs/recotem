@@ -357,58 +357,85 @@ def test_ssrf_allow_private_bypasses_ssrf_check(monkeypatch, host) -> None:
 
 
 # ---------------------------------------------------------------------------
-# A3 — _apply_read_only failure emits warning log
+# A3 — _apply_read_only raises DataSourceError on failure (pg/mysql/mariadb)
+#       SQLite is a silent no-op.
 # ---------------------------------------------------------------------------
 
 
-def test_apply_read_only_failure_emits_warning_log(monkeypatch) -> None:
+@pytest.mark.parametrize("dialect", ["postgresql", "mysql", "mariadb"])
+def test_apply_read_only_raises_on_failure(monkeypatch, dialect) -> None:
     from unittest.mock import MagicMock
-
-    import structlog.testing
 
     from recotem.datasource.sql import SQLSource
 
     monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
     src = SQLSource(_make_cfg())
     mock_conn = MagicMock()
-    mock_conn.execute.side_effect = Exception("boom")
+    mock_conn.execute.side_effect = Exception("perm denied")
 
-    with structlog.testing.capture_logs() as captured:
-        # Call with postgresql dialect so the execute path is exercised.
-        orig_dialect = src._dialect
-        src._dialect = "postgresql"
-        src._apply_read_only(mock_conn)
+    orig_dialect = src._dialect
+    src._dialect = dialect
+    try:
+        with pytest.raises(DataSourceError, match="READ ONLY"):
+            src._apply_read_only(mock_conn)
+    finally:
         src._dialect = orig_dialect
 
-    events = [e["event"] for e in captured]
-    assert "sql_read_only_set_failed" in events
 
-
-# ---------------------------------------------------------------------------
-# A4 — _apply_statement_timeout failure emits warning log
-# ---------------------------------------------------------------------------
-
-
-def test_apply_statement_timeout_failure_emits_warning_log(monkeypatch) -> None:
+def test_apply_read_only_sqlite_is_noop(monkeypatch) -> None:
     from unittest.mock import MagicMock
-
-    import structlog.testing
 
     from recotem.datasource.sql import SQLSource
 
     monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
     src = SQLSource(_make_cfg())
     mock_conn = MagicMock()
-    mock_conn.execute.side_effect = Exception("boom")
+    mock_conn.execute.side_effect = Exception("should not be called")
 
-    with structlog.testing.capture_logs() as captured:
-        orig_dialect = src._dialect
-        src._dialect = "postgresql"
-        src._apply_statement_timeout(mock_conn)
+    # Must not raise — sqlite path returns early before execute()
+    src._apply_read_only(mock_conn)
+    mock_conn.execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# A4 — _apply_statement_timeout raises DataSourceError on failure (pg/mysql/mariadb)
+#       SQLite is a silent no-op.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dialect", ["postgresql", "mysql", "mariadb"])
+def test_apply_statement_timeout_raises_on_failure(monkeypatch, dialect) -> None:
+    from unittest.mock import MagicMock
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+    mock_conn = MagicMock()
+    mock_conn.execute.side_effect = Exception("perm denied")
+
+    orig_dialect = src._dialect
+    src._dialect = dialect
+    try:
+        with pytest.raises(DataSourceError, match="statement_timeout"):
+            src._apply_statement_timeout(mock_conn)
+    finally:
         src._dialect = orig_dialect
 
-    events = [e["event"] for e in captured]
-    assert "sql_statement_timeout_set_failed" in events
+
+def test_apply_statement_timeout_sqlite_is_noop(monkeypatch) -> None:
+    from unittest.mock import MagicMock
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+    mock_conn = MagicMock()
+    mock_conn.execute.side_effect = Exception("should not be called")
+
+    # Must not raise — sqlite path returns early before execute()
+    src._apply_statement_timeout(mock_conn)
+    mock_conn.execute.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -471,3 +498,215 @@ def test_connect_args_mysql_has_connect_timeout(monkeypatch) -> None:
     args = src._connect_args()
     assert "connect_timeout" in args
     assert args["connect_timeout"] == 15
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL-1 — IPv6 SSRF: bracket-wrap ensures correct address classification
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "ipv6_addr",
+    [
+        "::1",  # loopback
+        "fe80::1",  # link-local
+        "::ffff:127.0.0.1",  # IPv4-mapped loopback
+    ],
+)
+def test_ipv6_private_addresses_blocked(monkeypatch, ipv6_addr) -> None:
+    """IPv6 private/loopback addresses in DSN must raise DataSourceError."""
+    import types
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    # psycopg stub so driver probe passes
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"postgresql://u:p@[{ipv6_addr}]/db")
+    with pytest.raises(DataSourceError, match="(?i)private|loopback"):
+        SQLSource(_make_cfg())
+
+
+def test_ipv6_public_hostname_not_blocked(monkeypatch) -> None:
+    """A public hostname must not raise even without RECOTEM_SQL_ALLOW_PRIVATE."""
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
+    )
+    # Patch assert_host_public to avoid real DNS lookup in CI.
+    with patch("recotem.datasource.sql.assert_host_public", return_value="203.0.113.1"):
+        # Must not raise DataSourceError for the SSRF check.
+        src = SQLSource(_make_cfg())
+    assert src._dialect == "postgresql"
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-1 — Row cap overshoot: chunksize capped to min(100_000, cap)
+# ---------------------------------------------------------------------------
+
+
+def _seed_sqlite_n_rows(tmp_path, n: int):
+    import sqlite3
+
+    db = tmp_path / "big.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE events (user_id TEXT, item_id TEXT, ts TEXT)")
+    con.executemany(
+        "INSERT INTO events VALUES (?, ?, ?)",
+        [(f"u{i}", f"i{i}", "2026-01-01") for i in range(n)],
+    )
+    con.commit()
+    con.close()
+    return db
+
+
+def test_row_cap_exceeded_raises_before_all_data_loaded(monkeypatch, tmp_path) -> None:
+    """With cap=3, seeding 10 rows must raise DataSourceError."""
+    import recotem.datasource.sql as sql_mod
+    from recotem.datasource.sql import SQLSource
+
+    db = _seed_sqlite_n_rows(tmp_path, 10)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+    monkeypatch.setattr(sql_mod, "get_max_sql_rows", lambda: 3)
+    src = SQLSource(_make_cfg(query="SELECT user_id, item_id, ts FROM events"))
+    with pytest.raises(DataSourceError, match="(?i)exceeds RECOTEM_MAX_SQL_ROWS"):
+        src.fetch(_ctx())
+
+
+def test_row_cap_boundary_exactly_at_cap_succeeds(monkeypatch, tmp_path) -> None:
+    """Exactly cap rows must NOT raise."""
+    import recotem.datasource.sql as sql_mod
+    from recotem.datasource.sql import SQLSource
+
+    db = _seed_sqlite_n_rows(tmp_path, 5)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+    monkeypatch.setattr(sql_mod, "get_max_sql_rows", lambda: 5)
+    src = SQLSource(_make_cfg(query="SELECT user_id, item_id, ts FROM events"))
+    df = src.fetch(_ctx())
+    assert len(df) == 5
+
+
+def test_row_cap_one_over_raises(monkeypatch, tmp_path) -> None:
+    """cap+1 rows must raise DataSourceError."""
+    import recotem.datasource.sql as sql_mod
+    from recotem.datasource.sql import SQLSource
+
+    db = _seed_sqlite_n_rows(tmp_path, 6)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+    monkeypatch.setattr(sql_mod, "get_max_sql_rows", lambda: 5)
+    src = SQLSource(_make_cfg(query="SELECT user_id, item_id, ts FROM events"))
+    with pytest.raises(DataSourceError, match="(?i)exceeds RECOTEM_MAX_SQL_ROWS"):
+        src.fetch(_ctx())
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-2 — engine.dispose() called even when exception is raised
+# ---------------------------------------------------------------------------
+
+
+def test_probe_calls_engine_dispose_on_success(monkeypatch) -> None:
+    """engine.dispose() must be called after a successful probe()."""
+    from unittest.mock import MagicMock, patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+
+    mock_engine = MagicMock()
+    mock_conn = MagicMock()
+    mock_engine.connect.return_value.__enter__ = lambda s: mock_conn
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch("sqlalchemy.create_engine", return_value=mock_engine):
+        src.probe()
+    mock_engine.dispose.assert_called_once()
+
+
+def test_probe_calls_engine_dispose_on_exception(monkeypatch) -> None:
+    """engine.dispose() must be called even when probe() raises DataSourceError."""
+    from unittest.mock import MagicMock, patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+
+    mock_engine = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.execute.side_effect = Exception("conn refused")
+    mock_engine.connect.return_value.__enter__ = lambda s: mock_conn
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch("sqlalchemy.create_engine", return_value=mock_engine):
+        with pytest.raises(DataSourceError):
+            src.probe()
+    mock_engine.dispose.assert_called_once()
+
+
+def test_fetch_calls_engine_dispose_on_exception(monkeypatch) -> None:
+    """engine.dispose() must be called even when fetch() raises DataSourceError."""
+    from unittest.mock import MagicMock, patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+
+    mock_engine = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.execute.side_effect = Exception("query blew up")
+    mock_engine.connect.return_value.__enter__ = lambda s: mock_conn
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch("sqlalchemy.create_engine", return_value=mock_engine):
+        with pytest.raises(DataSourceError):
+            src.fetch(_ctx())
+    mock_engine.dispose.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# MINOR-1 — safe_dsn via render_as_string does not leak password
+# ---------------------------------------------------------------------------
+
+
+def test_init_safe_dsn_no_password_with_query_string(monkeypatch) -> None:
+    """render_as_string preserves driver+query but hides password."""
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        "postgresql+psycopg://alice:s3cret@db.example.com:5432/orders?sslmode=require",
+    )
+    with structlog.testing.capture_logs() as captured:
+        SQLSource(_make_cfg())
+    flat = repr(captured)
+    assert "s3cret" not in flat
+    assert "alice" not in flat
+    # Query string is preserved in the DSN logged
+    assert "sslmode" in flat
+
+
+# ---------------------------------------------------------------------------
+# MINOR-2 — dsn_env pattern error message
+# ---------------------------------------------------------------------------
+
+
+def test_dsn_env_bad_name_validation_error(monkeypatch) -> None:
+    """A dsn_env value that doesn't match ^RECOTEM_RECIPE_... must raise ValidationError."""
+    from pydantic import ValidationError
+
+    from recotem.datasource.sql import SQLConfig
+
+    with pytest.raises(ValidationError):
+        SQLConfig(type="sql", dsn_env="DATABASE_URL", query="SELECT 1")
+
+    with pytest.raises(ValidationError):
+        SQLConfig(type="sql", dsn_env="MY_DSN", query="SELECT 1")

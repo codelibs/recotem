@@ -19,7 +19,8 @@ Metric inventory:
 
 from __future__ import annotations
 
-from typing import Any
+import threading
+from typing import Any, Literal
 
 try:
     from prometheus_client import Counter, Gauge
@@ -33,35 +34,63 @@ except ImportError:  # pragma: no cover - exercised via env without extra
 # prometheus_client is absent.  ``_INITIALIZED`` short-circuits subsequent
 # calls so the three metrics are always created atomically as a group, mirroring
 # the single early-return guard in ``recotem._metrics_bigquery``.
+#
+# ``_INIT_LOCK`` ensures that concurrent first-calls from multiple threads
+# cannot each attempt to register the same Counter/Gauge name, which would
+# raise ``ValueError: Duplicated timeseries`` from prometheus_client.
 _INITIALIZED: bool = False
 _PAGES: Any = None
 _ROWS: Any = None
 _QUOTA: Any = None
+_INIT_LOCK: threading.Lock = threading.Lock()
 
 
 def _ensure_initialized() -> None:
-    """Idempotently create the counter and gauge objects."""
+    """Idempotently create the counter and gauge objects.
+
+    Thread-safe: all three metrics are created inside ``_INIT_LOCK`` so that
+    concurrent callers cannot each register the same timeseries name.
+    """
     global _INITIALIZED, _PAGES, _ROWS, _QUOTA
 
     if not _PROMETHEUS_AVAILABLE or _INITIALIZED:
         return
 
-    _PAGES = Counter(
-        "recotem_ga4_pages_fetched_total",
-        "GA4 Data API pages fetched during training.",
-        ["recipe"],
-    )
-    _ROWS = Counter(
-        "recotem_ga4_rows_fetched_total",
-        "GA4 Data API rows fetched during training.",
-        ["recipe"],
-    )
-    _QUOTA = Gauge(
-        "recotem_ga4_quota_remaining",
-        "GA4 Data API propertyQuota remaining at last response.",
-        ["recipe", "quota_type"],
-    )
-    _INITIALIZED = True
+    with _INIT_LOCK:
+        # Double-checked locking: another thread may have initialised while we
+        # were waiting for the lock.
+        if _INITIALIZED:
+            return
+
+        _PAGES = Counter(
+            "recotem_ga4_pages_fetched_total",
+            "GA4 Data API pages fetched during training.",
+            ["recipe"],
+        )
+        _ROWS = Counter(
+            "recotem_ga4_rows_fetched_total",
+            "GA4 Data API rows fetched during training.",
+            ["recipe"],
+        )
+        _QUOTA = Gauge(
+            "recotem_ga4_quota_remaining",
+            "GA4 Data API propertyQuota remaining at last response.",
+            ["recipe", "quota_type"],
+        )
+        _INITIALIZED = True
+
+
+# ---------------------------------------------------------------------------
+# Literal type for quota_type — fixed cardinality keeps Prometheus label
+# cardinality bounded.  Callers MUST restrict to this closed set.
+# ---------------------------------------------------------------------------
+
+GA4QuotaType = Literal[
+    "tokens_per_hour",
+    "tokens_per_day",
+    "concurrent_requests",
+    "server_errors_per_project_per_hour",
+]
 
 
 def inc_ga4_pages(recipe: str) -> None:
@@ -94,7 +123,9 @@ def inc_ga4_rows(recipe: str, n: int) -> None:
     _ROWS.labels(recipe=recipe).inc(n)
 
 
-def set_ga4_quota_remaining(recipe: str, quota_type: str, value: float) -> None:
+def set_ga4_quota_remaining(
+    recipe: str, quota_type: GA4QuotaType, value: float
+) -> None:
     """Set the GA4 quota-remaining gauge.
 
     Parameters
@@ -103,12 +134,10 @@ def set_ga4_quota_remaining(recipe: str, quota_type: str, value: float) -> None:
         The recipe name label.
     quota_type:
         One of the ``propertyQuota`` token-bucket names returned by the GA4
-        Data API, e.g. ``"tokensPerHour"`` or ``"tokensPerDay"``.  Callers
-        MUST restrict this value to the closed set of GA4 ``propertyQuota``
-        field names (``tokens_per_hour``, ``tokens_per_day``,
-        ``concurrent_requests``, ``server_errors_per_project_per_hour``,
-        and the analogous ``tokensPer*`` camelCase variants) to keep
-        Prometheus label cardinality bounded.
+        Data API.  Must be one of the four snake_case values defined in
+        :data:`GA4QuotaType` (``tokens_per_hour``, ``tokens_per_day``,
+        ``concurrent_requests``, ``server_errors_per_project_per_hour``) to
+        keep Prometheus label cardinality bounded.
     value:
         Remaining token count from the latest API response.
     """

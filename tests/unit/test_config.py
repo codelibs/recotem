@@ -708,3 +708,60 @@ def test_non_integer_env_value_falls_back_to_default(
     assert result == expected_default, (
         f"{env_var}={env_value!r}: expected default {expected_default}, got {result}"
     )
+
+
+# ---------------------------------------------------------------------------
+# MINOR-2: env_var_unparseable warning on bad numeric env vars
+# ---------------------------------------------------------------------------
+
+
+def test_max_sql_rows_non_integer_logs_env_var_unparseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_MAX_SQL_ROWS set to a non-integer must return the default AND
+    emit an 'env_var_unparseable' warning with the variable name and raw value.
+    """
+    import structlog.testing
+
+    from recotem.config import get_max_sql_rows
+
+    monkeypatch.setenv("RECOTEM_MAX_SQL_ROWS", "notanumber")
+    with structlog.testing.capture_logs() as captured:
+        result = get_max_sql_rows()
+
+    assert result == 50_000_000, f"Expected default 50_000_000, got {result}"
+    warn_events = [e for e in captured if e.get("event") == "env_var_unparseable"]
+    assert warn_events, (
+        "An 'env_var_unparseable' warning must be logged when "
+        "RECOTEM_MAX_SQL_ROWS is not a valid integer"
+    )
+    assert warn_events[0].get("log_level") == "warning"
+    assert warn_events[0].get("name") == "RECOTEM_MAX_SQL_ROWS"
+    assert warn_events[0].get("raw") == "notanumber"
+    assert warn_events[0].get("fallback") == 50_000_000
+
+
+def test_ga4_max_pages_non_integer_logs_env_var_unparseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_GA4_MAX_PAGES set to '5OO' (letter O typo) must return the default
+    AND emit an 'env_var_unparseable' warning with the variable name and raw value.
+    """
+    import structlog.testing
+
+    from recotem.config import get_ga4_max_pages
+
+    monkeypatch.setenv("RECOTEM_GA4_MAX_PAGES", "5OO")
+    with structlog.testing.capture_logs() as captured:
+        result = get_ga4_max_pages()
+
+    assert result == 500, f"Expected default 500, got {result}"
+    warn_events = [e for e in captured if e.get("event") == "env_var_unparseable"]
+    assert warn_events, (
+        "An 'env_var_unparseable' warning must be logged when "
+        "RECOTEM_GA4_MAX_PAGES is not a valid integer (e.g. '5OO' typo)"
+    )
+    assert warn_events[0].get("log_level") == "warning"
+    assert warn_events[0].get("name") == "RECOTEM_GA4_MAX_PAGES"
+    assert warn_events[0].get("raw") == "5OO"
+    assert warn_events[0].get("fallback") == 500

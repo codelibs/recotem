@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import date
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 import pandas as pd
 import structlog
@@ -72,29 +73,63 @@ class GA4Source:
     no_expand_fields: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(self, config: GA4Config) -> None:
+        # Verify the library is installed at construction time so that a missing
+        # extra produces a clear DataSourceError rather than an AttributeError
+        # later.  Client construction is deferred to ``_get_client()`` so that
+        # ``recotem validate`` (which instantiates sources) does not trigger
+        # ADC resolution.
         try:
-            from google.analytics.data_v1beta import BetaAnalyticsDataClient
+            from google.analytics.data_v1beta import (
+                BetaAnalyticsDataClient,  # noqa: F401
+            )
         except ImportError as exc:
             raise DataSourceError(
                 "google-analytics-data is required for GA4Source. "
                 "Install with: pip install 'recotem[ga4]'"
             ) from exc
 
-        try:
-            self._client = BetaAnalyticsDataClient()
-        except Exception as exc:
-            raise DataSourceError(
-                "failed to construct BetaAnalyticsDataClient — confirm ADC "
-                "is configured (GOOGLE_APPLICATION_CREDENTIALS or "
-                "Workload Identity)."
-            ) from exc
-
         self._config = config
+        self._client: Any = None  # constructed lazily in _get_client()
         _log.debug(
             "ga4_source_initialized",
             property_id=config.property_id,
             event_names=config.event_names,
         )
+
+    def _get_client(self) -> Any:
+        """Return the BetaAnalyticsDataClient, constructing it on first call."""
+        if self._client is not None:
+            return self._client
+
+        from google.analytics.data_v1beta import BetaAnalyticsDataClient
+
+        # Catch ADC-specific errors with a user-friendly message that does not
+        # leak the ADC search path.  DefaultCredentialsError may not exist if
+        # google-auth is not installed (unlikely in practice but handled
+        # defensively).
+        try:
+            from google.auth.exceptions import DefaultCredentialsError as _DCE
+        except ImportError:
+            _DCE = None  # type: ignore[assignment,misc]
+
+        _exc_types: tuple[type[BaseException], ...] = (
+            (_DCE,) if _DCE is not None else ()
+        )
+
+        try:
+            self._client = BetaAnalyticsDataClient()
+        except BaseException as exc:
+            if _exc_types and isinstance(exc, _exc_types):
+                raise DataSourceError(
+                    "ADC is not configured for the GA4 Data API. "
+                    "See docs/data-sources/ga4.md for setup."
+                ) from None  # suppress chain to avoid leaking ADC search paths
+            raise DataSourceError(
+                f"failed to construct BetaAnalyticsDataClient: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+        return self._client
 
     def probe(self) -> None:
         try:
@@ -102,27 +137,39 @@ class GA4Source:
         except ImportError as exc:
             raise DataSourceError("google.api_core is required for GA4Source") from exc
 
+        client = self._get_client()
         request = self._build_request(limit=1, offset=0)
         try:
-            self._client.run_report(request=request, retry=self._retry_policy())
+            client.run_report(
+                request=request,
+                retry=self._retry_policy(),
+                timeout=float(self._config.api_timeout_seconds),
+            )
         except PermissionDenied as exc:
             raise DataSourceError(
                 f"GA4 access denied for property {self._config.property_id!r}; "
                 "grant the service account roles/analytics.viewer on the property."
             ) from exc
         except GoogleAPICallError as exc:
-            raise DataSourceError(f"GA4 probe failed: {type(exc).__name__}") from exc
+            raise DataSourceError(
+                f"GA4 probe failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
     def _retry_policy(self):
         from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
         from google.api_core.retry import Retry, if_exception_type
 
+        # ``timeout`` is the total retry *budget* (sum of all attempt wait
+        # times).  We set it to 3× the per-attempt timeout so that up to ~3
+        # full retry cycles can fire before giving up.  The per-attempt wall
+        # time is controlled by the separate ``timeout=`` kwarg passed to
+        # ``run_report``.
         return Retry(
             predicate=if_exception_type(ResourceExhausted, ServiceUnavailable),
             initial=1.0,
             maximum=30.0,
             multiplier=2.0,
-            deadline=float(self._config.api_timeout_seconds),
+            timeout=float(self._config.api_timeout_seconds) * 3.0,
         )
 
     def _build_request(self, *, limit: int, offset: int):
@@ -175,16 +222,33 @@ class GA4Source:
         except ImportError as exc:
             raise DataSourceError("google.api_core is required for GA4Source") from exc
 
+        client = self._get_client()
         page_size = 100_000
         max_pages = get_ga4_max_pages()
-        accumulated: list[dict[str, object]] = []
+        page_frames: list[pd.DataFrame] = []
         offset = 0
-        retry_policy = self._retry_policy()
+        total_rows_accumulated = 0
+
+        # Per-fetch wall-clock budget: 10× the per-attempt timeout.  At the
+        # default api_timeout=60 s that is 10 minutes; the budget scales with
+        # configured timeouts.  This prevents runaway loops under sustained
+        # ResourceExhausted back-pressure across hundreds of pages.
+        deadline_wall = time.monotonic() + float(self._config.api_timeout_seconds) * 10
 
         for page_idx in range(max_pages):
+            if time.monotonic() > deadline_wall:
+                raise DataSourceError(
+                    f"GA4 fetch exceeded total wall-clock budget of "
+                    f"{self._config.api_timeout_seconds * 10}s on page {page_idx}"
+                )
+
             request = self._build_request(limit=page_size, offset=offset)
             try:
-                response = self._client.run_report(request=request, retry=retry_policy)
+                response = client.run_report(
+                    request=request,
+                    retry=self._retry_policy(),
+                    timeout=float(self._config.api_timeout_seconds),
+                )
             except PermissionDenied as exc:
                 raise DataSourceError(
                     f"GA4 access denied for property {self._config.property_id!r}; "
@@ -192,52 +256,77 @@ class GA4Source:
                 ) from exc
             except GoogleAPICallError as exc:
                 raise DataSourceError(
-                    f"GA4 fetch failed on page {page_idx}: {type(exc).__name__}"
+                    f"GA4 fetch failed on page {page_idx}: {type(exc).__name__}: {exc}"
                 ) from exc
+
+            # Warn if the GA4 backend omitted rows due to cardinality limits.
+            metadata = getattr(response, "metadata", None)
+            if metadata is not None and getattr(
+                metadata, "data_loss_from_other_row", False
+            ):
+                _log.warning(
+                    "ga4_data_loss_from_other_row",
+                    recipe=ctx.recipe_name,
+                    page=page_idx,
+                )
 
             inc_ga4_pages(ctx.recipe_name)
             self._record_quota(ctx.recipe_name, response)
 
             page_rows = list(response.rows or [])
-            for row in page_rows:
-                dv = [d.value for d in row.dimension_values]
-                mv = row.metric_values[0].value
-                accumulated.append(
-                    {
-                        self._config.user_dimension: dv[0],
-                        self._config.item_dimension: dv[1],
-                        self._config.time_dimension: dv[2],
-                        "eventName": dv[3],
-                        self._config.weight_column: mv,
-                    }
-                )
-            inc_ga4_rows(ctx.recipe_name, len(page_rows))
+            page_records = [
+                {
+                    self._config.user_dimension: row.dimension_values[0].value,
+                    self._config.item_dimension: row.dimension_values[1].value,
+                    self._config.time_dimension: row.dimension_values[2].value,
+                    "eventName": row.dimension_values[3].value,
+                    self._config.weight_column: row.metric_values[0].value,
+                }
+                for row in page_rows
+            ]
+            if page_records:
+                page_frames.append(pd.DataFrame.from_records(page_records))
+            del page_records
 
-            if len(accumulated) > self._config.max_rows:
+            inc_ga4_rows(ctx.recipe_name, len(page_rows))
+            total_rows_accumulated += len(page_rows)
+
+            if total_rows_accumulated > self._config.max_rows:
                 raise DataSourceError(
                     f"GA4 result exceeds max_rows={self._config.max_rows}; "
                     "narrow the date range or event filter"
                 )
 
-            total_remote = int(getattr(response, "row_count", 0) or 0)
-            if not page_rows:
+            if len(page_rows) < page_size:
+                # Short page (including empty) means end of result set.
                 break
-            if total_remote and len(accumulated) >= total_remote:
-                break
+
             offset += page_size
         else:
+            # Completed max_pages full pages without seeing a short page.
             raise DataSourceError(
-                f"GA4 fetch exceeded RECOTEM_GA4_MAX_PAGES={max_pages}; "
-                "tighten the query or raise the cap"
+                f"GA4 fetch reached max_pages={max_pages} without seeing a short "
+                f"page; increase RECOTEM_GA4_MAX_PAGES or tighten the query"
             )
 
-        df = pd.DataFrame.from_records(accumulated)
-        if "eventName" in df.columns:
+        # Build result DataFrame — always include expected columns even when empty.
+        expected_columns = [
+            self._config.user_dimension,
+            self._config.item_dimension,
+            self._config.time_dimension,
+            self._config.weight_column,
+        ]
+        if page_frames:
+            df = pd.concat(page_frames, ignore_index=True)
             df = df.drop(columns=["eventName"])
+        else:
+            df = pd.DataFrame(columns=expected_columns)
+
         if self._config.weight_column in df.columns:
-            df[self._config.weight_column] = df[self._config.weight_column].astype(
-                "int64"
-            )
+            df[self._config.weight_column] = pd.to_numeric(
+                df[self._config.weight_column], errors="raise"
+            ).astype("int64")
+
         _log.info(
             "ga4_fetch_complete",
             recipe=ctx.recipe_name,
@@ -247,10 +336,11 @@ class GA4Source:
         )
         return df
 
-    def _record_quota(self, recipe: str, response) -> None:
+    def _record_quota(self, recipe: str, response: Any) -> None:
         quota = getattr(response, "property_quota", None)
         if quota is None:
             return
+        parsed_count = 0
         for attr in (
             "tokens_per_hour",
             "tokens_per_day",
@@ -264,6 +354,13 @@ class GA4Source:
             if remaining is None:
                 continue
             try:
-                set_ga4_quota_remaining(recipe, attr, float(remaining))
-            except (TypeError, ValueError):
-                pass
+                set_ga4_quota_remaining(recipe, attr, float(remaining))  # type: ignore[arg-type]
+                parsed_count += 1
+            except (TypeError, ValueError) as exc:
+                _log.warning(
+                    "ga4_quota_parse_failed",
+                    attr=attr,
+                    error=type(exc).__name__,
+                )
+        if parsed_count == 0:
+            _log.warning("ga4_quota_all_attrs_missing", recipe=recipe)

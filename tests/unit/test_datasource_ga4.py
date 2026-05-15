@@ -127,7 +127,8 @@ def test_init_missing_extra_raises(monkeypatch) -> None:
         GA4Source(_cfg())
 
 
-def test_init_constructs_client(monkeypatch) -> None:
+def test_init_does_not_construct_client_eagerly(monkeypatch) -> None:
+    """Client construction is deferred to _get_client(); __init__ must not call it."""
     fake_mod = MagicMock()
     fake_client = MagicMock()
     fake_mod.BetaAnalyticsDataClient.return_value = fake_client
@@ -136,18 +137,61 @@ def test_init_constructs_client(monkeypatch) -> None:
     from recotem.datasource.ga4 import GA4Source
 
     src = GA4Source(_cfg())
-    assert src._client is fake_client
+    # _client must still be None — no ADC call at init time
+    assert src._client is None
+    assert fake_mod.BetaAnalyticsDataClient.call_count == 0
+
+
+def test_init_constructs_client(monkeypatch) -> None:
+    """_get_client() constructs the client on first call and caches it."""
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    client = src._get_client()
+    assert client is fake_client
+    # Second call must return the same instance without a second construction.
+    client2 = src._get_client()
+    assert client2 is fake_client
+    assert fake_mod.BetaAnalyticsDataClient.call_count == 1
 
 
 def test_init_client_construction_failure_raises(monkeypatch) -> None:
+    """Generic exception from BetaAnalyticsDataClient() is wrapped as DataSourceError."""
     fake_mod = MagicMock()
     fake_mod.BetaAnalyticsDataClient.side_effect = Exception("ADC missing")
     monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
 
     from recotem.datasource.ga4 import GA4Source
 
-    with pytest.raises(DataSourceError, match="ADC|GOOGLE_APPLICATION_CREDENTIALS"):
-        GA4Source(_cfg())
+    src = GA4Source(_cfg())
+    with pytest.raises(DataSourceError, match="BetaAnalyticsDataClient"):
+        src._get_client()
+
+
+def test_init_default_credentials_error_raises_clean_message(monkeypatch) -> None:
+    """DefaultCredentialsError produces a user-friendly message without ADC paths."""
+    from google.auth.exceptions import DefaultCredentialsError
+
+    fake_mod = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.side_effect = DefaultCredentialsError(
+        "Could not automatically determine credentials from the filesystem or "
+        "environment. ADC search path: /home/user/.config/gcloud/..."
+    )
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    with pytest.raises(DataSourceError, match="ADC is not configured") as exc_info:
+        src._get_client()
+    # The error must NOT leak the ADC search path (chain is suppressed with from None).
+    assert exc_info.value.__cause__ is None
+    assert "filesystem" not in str(exc_info.value).lower()
 
 
 def test_probe_issues_one_request(monkeypatch) -> None:
@@ -167,9 +211,10 @@ def test_probe_issues_one_request(monkeypatch) -> None:
     src = GA4Source(_cfg())
     src.probe()
     assert fake_client.run_report.call_count == 1
-    call_args = fake_client.run_report.call_args
-    request = call_args.kwargs.get("request") or call_args.args[0]
-    # Constructed via fake_types.RunReportRequest(...) — verify it was called once:
+    call_kwargs = fake_client.run_report.call_args.kwargs
+    # probe() must pass timeout= kwarg
+    assert "timeout" in call_kwargs
+    assert call_kwargs["timeout"] == 60.0
     assert fake_types.RunReportRequest.called
 
 
@@ -202,29 +247,42 @@ def _fetch_ctx() -> FetchContext:
     return FetchContext(recipe_name="t", run_id="r-001")
 
 
+def _make_page(rows, row_count=None, property_quota=None, has_data_loss=False):
+    """Build a fake GA4 run_report response."""
+    m = MagicMock()
+    m.rows = rows
+    m.row_count = row_count if row_count is not None else len(rows)
+    m.property_quota = property_quota
+    metadata = MagicMock()
+    metadata.data_loss_from_other_row = has_data_loss
+    m.metadata = metadata
+    return m
+
+
 def test_fetch_paginates_until_drained(monkeypatch) -> None:
+    """Pagination accumulates rows across pages; short final page ends the loop.
+
+    Page 0: 100_000 rows (full page → loop continues).
+    Page 1: 4 rows (short page → loop breaks).
+    Total: 100_004 rows.
+    """
     fake_mod = MagicMock()
     fake_client = MagicMock()
 
-    pages = [
-        MagicMock(
-            row_count=4,
-            rows=[
-                _row(["u1", "i1", "20260101", "purchase"], "3"),
-                _row(["u2", "i2", "20260102", "purchase"], "1"),
-            ],
-        ),
-        MagicMock(
-            row_count=4,
-            rows=[
-                _row(["u3", "i3", "20260103", "purchase"], "2"),
-                _row(["u4", "i4", "20260104", "purchase"], "5"),
-            ],
-        ),
-        MagicMock(row_count=4, rows=[]),
+    page_size = 100_000
+    full_rows = [
+        _row([f"u{i}", "i1", "20260101", "purchase"], "1") for i in range(page_size)
     ]
-    for p in pages:
-        p.property_quota = None
+    partial_rows = [
+        _row(["u1", "i1", "20260101", "purchase"], "3"),
+        _row(["u2", "i2", "20260102", "purchase"], "1"),
+        _row(["u3", "i3", "20260103", "purchase"], "2"),
+        _row(["u4", "i4", "20260104", "purchase"], "5"),
+    ]
+    pages = [
+        _make_page(rows=full_rows, row_count=100_004),
+        _make_page(rows=partial_rows, row_count=100_004),
+    ]
     fake_client.run_report.side_effect = pages
     fake_mod.BetaAnalyticsDataClient.return_value = fake_client
     monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
@@ -232,20 +290,22 @@ def test_fetch_paginates_until_drained(monkeypatch) -> None:
 
     from recotem.datasource.ga4 import GA4Source
 
-    src = GA4Source(_cfg())
+    src = GA4Source(_cfg(max_rows=1_000_000))
     df = src.fetch(_fetch_ctx())
-    assert len(df) == 4
+    assert len(df) == 100_004
     assert list(df.columns) == ["userId", "itemId", "date", "event_count"]
     assert df["event_count"].dtype.name == "int64"
+    # Two API calls: one full page + one short page
+    assert fake_client.run_report.call_count == 2
 
 
 def test_fetch_drops_event_name_column(monkeypatch) -> None:
     fake_mod = MagicMock()
     fake_client = MagicMock()
-    resp = MagicMock(
-        row_count=1, rows=[_row(["u1", "i1", "20260101", "purchase"], "1")]
+    resp = _make_page(
+        rows=[_row(["u1", "i1", "20260101", "purchase"], "1")],
+        row_count=1,
     )
-    resp.property_quota = None
     fake_client.run_report.return_value = resp
     fake_mod.BetaAnalyticsDataClient.return_value = fake_client
     monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
@@ -261,11 +321,10 @@ def test_fetch_drops_event_name_column(monkeypatch) -> None:
 def test_fetch_max_rows_exceeded(monkeypatch) -> None:
     fake_mod = MagicMock()
     fake_client = MagicMock()
-    resp = MagicMock(
-        row_count=100,
+    resp = _make_page(
         rows=[_row([f"u{i}", "i", "20260101", "purchase"], "1") for i in range(100)],
+        row_count=100,
     )
-    resp.property_quota = None
     fake_client.run_report.return_value = resp
     fake_mod.BetaAnalyticsDataClient.return_value = fake_client
     monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
@@ -281,11 +340,9 @@ def test_fetch_max_rows_exceeded(monkeypatch) -> None:
 def test_fetch_max_pages_exceeded(monkeypatch) -> None:
     fake_mod = MagicMock()
     fake_client = MagicMock()
-    resp = MagicMock(
-        row_count=1_000_000,
-        rows=[_row(["u", "i", "20260101", "purchase"], "1")],
-    )
-    resp.property_quota = None
+    # Return a full page (100_000 rows) every call to never hit a short-page break
+    full_page_rows = [_row(["u", "i", "20260101", "purchase"], "1")] * 100_000
+    resp = _make_page(rows=full_page_rows, row_count=1_000_000)
     fake_client.run_report.return_value = resp
     fake_mod.BetaAnalyticsDataClient.return_value = fake_client
     monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
@@ -299,7 +356,7 @@ def test_fetch_max_pages_exceeded(monkeypatch) -> None:
     from recotem.datasource.ga4 import GA4Source
 
     src = GA4Source(_cfg(max_rows=1_000_000))
-    with pytest.raises(DataSourceError, match="RECOTEM_GA4_MAX_PAGES|page"):
+    with pytest.raises(DataSourceError, match="max_pages|short"):
         src.fetch(_fetch_ctx())
 
 
@@ -364,11 +421,11 @@ def test_fetch_records_quota_remaining(monkeypatch) -> None:
     quota_obj.concurrent_requests = None
     quota_obj.server_errors_per_project_per_hour = None
 
-    resp = MagicMock(
-        row_count=1,
+    resp = _make_page(
         rows=[_row(["u1", "i1", "20260101", "purchase"], "1")],
+        row_count=1,
+        property_quota=quota_obj,
     )
-    resp.property_quota = quota_obj
     fake_client.run_report.return_value = resp
     fake_mod.BetaAnalyticsDataClient.return_value = fake_client
     monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
@@ -409,8 +466,7 @@ def test_fetch_zero_rows_returns_empty_dataframe(monkeypatch) -> None:
 
     fake_mod = MagicMock()
     fake_client = MagicMock()
-    resp = MagicMock(row_count=0, rows=[])
-    resp.property_quota = None
+    resp = _make_page(rows=[], row_count=0)
     fake_client.run_report.return_value = resp
     fake_mod.BetaAnalyticsDataClient.return_value = fake_client
     monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
@@ -422,3 +478,297 @@ def test_fetch_zero_rows_returns_empty_dataframe(monkeypatch) -> None:
     df = src.fetch(_fetch_ctx())
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 0
+    # Empty result still has the right columns.
+    assert "userId" in df.columns
+    assert "itemId" in df.columns
+    assert "date" in df.columns
+    assert "event_count" in df.columns
+
+
+# ---------------------------------------------------------------------------
+# T3 — PermissionDenied on page > 0 wraps with proper message format
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_permission_denied_on_page_gt_0_raises(monkeypatch) -> None:
+    """PermissionDenied raised on page 1 (not page 0) must still be caught."""
+    from google.api_core.exceptions import PermissionDenied
+
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+
+    # Page 0: return a full page so the loop continues to page 1
+    full_page_rows = [
+        _row([f"u{i}", "i", "20260101", "purchase"], "1") for i in range(100_000)
+    ]
+    page0 = _make_page(rows=full_page_rows, row_count=2_000_000)
+    fake_client.run_report.side_effect = [page0, PermissionDenied("denied on page 1")]
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg(max_rows=50_000_000))
+    with pytest.raises(DataSourceError, match="roles/analytics.viewer"):
+        src.fetch(_fetch_ctx())
+
+
+# ---------------------------------------------------------------------------
+# Short-page early-break test
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_short_page_breaks_early(monkeypatch) -> None:
+    """3 full pages (100k rows each) + 1 partial page = 305k rows, no error."""
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+
+    page_size = 100_000
+    full_rows = [
+        _row([f"u{i}", "i", "20260101", "purchase"], "1") for i in range(page_size)
+    ]
+    partial_rows = [
+        _row([f"u{i}", "i", "20260101", "purchase"], "1") for i in range(5_000)
+    ]
+
+    pages = [
+        _make_page(rows=full_rows, row_count=305_000),
+        _make_page(rows=full_rows, row_count=305_000),
+        _make_page(rows=full_rows, row_count=305_000),
+        _make_page(rows=partial_rows, row_count=305_000),
+    ]
+    fake_client.run_report.side_effect = pages
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    import recotem.datasource.ga4 as ga4_mod
+
+    monkeypatch.setattr(ga4_mod, "get_ga4_max_pages", lambda: 500)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg(max_rows=50_000_000))
+    df = src.fetch(_fetch_ctx())
+    assert len(df) == 305_000
+    # Exactly 4 API calls (3 full + 1 partial)
+    assert fake_client.run_report.call_count == 4
+
+
+# ---------------------------------------------------------------------------
+# Wall-clock budget exceeded test
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_wall_clock_budget_exceeded(monkeypatch) -> None:
+    """Mock time.monotonic advancing past the wall-clock deadline raises DataSourceError."""
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+
+    # Return a full page every call so the loop would normally continue
+    full_page_rows = [
+        _row([f"u{i}", "i", "20260101", "purchase"], "1") for i in range(100_000)
+    ]
+    resp = _make_page(rows=full_page_rows, row_count=10_000_000)
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    import recotem.datasource.ga4 as ga4_mod
+
+    monkeypatch.setattr(ga4_mod, "get_ga4_max_pages", lambda: 500)
+
+    # Simulate time.monotonic: first call (deadline_wall = t0 + budget) returns 0,
+    # subsequent calls (the per-iteration check) return a value past the deadline.
+    # api_timeout_seconds=60, budget = 60*10 = 600s
+    call_count = [0]
+
+    def fake_monotonic():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return 0.0  # initial call to set deadline_wall = 600.0
+        return 601.0  # immediately past deadline on first page check
+
+    import recotem.datasource.ga4 as ga4_mod2
+
+    monkeypatch.setattr(ga4_mod2.time, "monotonic", fake_monotonic)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg(max_rows=50_000_000))
+    with pytest.raises(DataSourceError, match="wall-clock budget"):
+        src.fetch(_fetch_ctx())
+
+
+# ---------------------------------------------------------------------------
+# Retry policy deadline = 3× api_timeout test
+# ---------------------------------------------------------------------------
+
+
+def test_retry_policy_deadline_is_3x_api_timeout(monkeypatch) -> None:
+    """_retry_policy() must return a Retry whose timeout is 3× api_timeout_seconds."""
+    fake_mod = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.return_value = MagicMock()
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg(api_timeout_seconds=60))
+    retry = src._retry_policy()
+    # google-api-core Retry stores the budget as _timeout (aliased as .timeout and .deadline)
+    assert retry._timeout == pytest.approx(180.0)  # 60 * 3
+
+
+def test_retry_policy_and_timeout_kwarg_passed_to_run_report(monkeypatch) -> None:
+    """run_report must be called with both retry= and timeout= kwargs in fetch()."""
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = _make_page(
+        rows=[_row(["u1", "i1", "20260101", "purchase"], "1")], row_count=1
+    )
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg(api_timeout_seconds=45))
+    src.fetch(_fetch_ctx())
+
+    call_kwargs = fake_client.run_report.call_args.kwargs
+    assert "retry" in call_kwargs
+    assert "timeout" in call_kwargs
+    assert call_kwargs["timeout"] == pytest.approx(45.0)
+
+
+# ---------------------------------------------------------------------------
+# Quota all-missing warning test
+# ---------------------------------------------------------------------------
+
+
+def test_record_quota_all_attrs_missing_emits_warning(monkeypatch) -> None:
+    """_record_quota with a quota object that has no recognized attrs emits a warning."""
+    import structlog.testing
+
+    fake_mod = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.return_value = MagicMock()
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+
+    # quota object where all recognized attrs return None
+    quota_obj = MagicMock()
+    quota_obj.tokens_per_hour = None
+    quota_obj.tokens_per_day = None
+    quota_obj.concurrent_requests = None
+    quota_obj.server_errors_per_project_per_hour = None
+
+    response = MagicMock()
+    response.property_quota = quota_obj
+
+    with structlog.testing.capture_logs() as cap:
+        src._record_quota("my-recipe", response)
+
+    event_names = [e["event"] for e in cap]
+    assert "ga4_quota_all_attrs_missing" in event_names
+
+
+# ---------------------------------------------------------------------------
+# data_loss_from_other_row warning test
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_data_loss_from_other_row_emits_warning(monkeypatch) -> None:
+    """Response with data_loss_from_other_row=True must emit a structlog warning."""
+    import structlog.testing
+
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = _make_page(
+        rows=[_row(["u1", "i1", "20260101", "purchase"], "1")],
+        row_count=1,
+        has_data_loss=True,
+    )
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    with structlog.testing.capture_logs() as cap:
+        src.fetch(_fetch_ctx())
+
+    event_names = [e["event"] for e in cap]
+    assert "ga4_data_loss_from_other_row" in event_names
+
+
+# ---------------------------------------------------------------------------
+# Lazy client construction test
+# ---------------------------------------------------------------------------
+
+
+def test_lazy_client_not_constructed_until_probe_called(monkeypatch) -> None:
+    """_client remains None after __init__; probe() triggers construction."""
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    fake_response = MagicMock(row_count=0, rows=[])
+    fake_client.run_report.return_value = fake_response
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    assert src._client is None, "Client must not be constructed in __init__"
+
+    src.probe()
+    assert src._client is not None, "Client must be constructed after probe()"
+
+
+# ---------------------------------------------------------------------------
+# Exception message includes underlying exception text (MAJOR-4)
+# ---------------------------------------------------------------------------
+
+
+def test_probe_error_message_includes_exception_text(monkeypatch) -> None:
+    """DataSourceError from probe() must include the underlying exception text."""
+    from google.api_core.exceptions import InvalidArgument
+
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    fake_client.run_report.side_effect = InvalidArgument("dimension X does not exist")
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    with pytest.raises(DataSourceError, match="dimension X does not exist"):
+        src.probe()
+
+
+def test_fetch_error_message_includes_exception_text(monkeypatch) -> None:
+    """DataSourceError from fetch() must include the underlying exception text."""
+    from google.api_core.exceptions import InvalidArgument
+
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    fake_client.run_report.side_effect = InvalidArgument("metric Y not recognized")
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    with pytest.raises(DataSourceError, match="metric Y not recognized"):
+        src.fetch(_fetch_ctx())

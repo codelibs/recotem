@@ -585,3 +585,31 @@ def test_dsn_redaction_preserves_non_credentialed_url() -> None:
     event = {"event": "ok", "url": "postgresql://db.example.com:5432/orders"}
     out = redact_sensitive_keys(None, None, event)
     assert out["url"] == "postgresql://db.example.com:5432/orders"
+
+
+# ---------------------------------------------------------------------------
+# D1 — mysql+pymysql DSN credentials scrubbed
+# ---------------------------------------------------------------------------
+
+
+def test_mysql_pymysql_dsn_credentials_scrubbed() -> None:
+    from recotem.log_redaction import _scrub_string_value
+
+    result = _scrub_string_value("mysql+pymysql://root:secret@db.internal:3306/mydb")
+    assert "root" not in result
+    assert "secret" not in result
+    # The host must be preserved.
+    assert "db.internal" in result
+
+
+# ---------------------------------------------------------------------------
+# D2 — sqlite:/// path passes through unchanged
+# ---------------------------------------------------------------------------
+
+
+def test_sqlite_path_passes_through_unchanged() -> None:
+    from recotem.log_redaction import _scrub_string_value
+
+    original = "sqlite:///local.db"
+    result = _scrub_string_value(original)
+    assert result == original

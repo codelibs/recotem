@@ -301,3 +301,124 @@ def test_fetch_max_pages_exceeded(monkeypatch) -> None:
     src = GA4Source(_cfg(max_rows=1_000_000))
     with pytest.raises(DataSourceError, match="RECOTEM_GA4_MAX_PAGES|page"):
         src.fetch(_fetch_ctx())
+
+
+# ---------------------------------------------------------------------------
+# B1 — probe wraps non-PermissionDenied GoogleAPICallError
+# ---------------------------------------------------------------------------
+
+
+def test_probe_non_permission_denied_api_error_raises(monkeypatch) -> None:
+    from google.api_core.exceptions import InvalidArgument
+
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    fake_client.run_report.side_effect = InvalidArgument("bad arg")
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    with pytest.raises(DataSourceError, match="GA4 probe failed"):
+        src.probe()
+
+
+# ---------------------------------------------------------------------------
+# B2 — fetch wraps non-PermissionDenied GoogleAPICallError on first page
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_non_permission_denied_api_error_on_first_page_raises(
+    monkeypatch,
+) -> None:
+    from google.api_core.exceptions import InvalidArgument
+
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    fake_client.run_report.side_effect = InvalidArgument("quota exceeded or bad arg")
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    with pytest.raises(DataSourceError, match="GA4 fetch failed on page 0"):
+        src.fetch(_fetch_ctx())
+
+
+# ---------------------------------------------------------------------------
+# B3 — fetch records quota when property_quota carries data
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_records_quota_remaining(monkeypatch) -> None:
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+
+    quota_obj = MagicMock()
+    quota_obj.tokens_per_hour = MagicMock(remaining=900, consumed=100)
+    quota_obj.tokens_per_day = MagicMock(remaining=99000, consumed=1000)
+    quota_obj.concurrent_requests = None
+    quota_obj.server_errors_per_project_per_hour = None
+
+    resp = MagicMock(
+        row_count=1,
+        rows=[_row(["u1", "i1", "20260101", "purchase"], "1")],
+    )
+    resp.property_quota = quota_obj
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    recorder: list[tuple[str, str, float]] = []
+
+    import recotem.datasource.ga4 as ga4_mod
+
+    monkeypatch.setattr(
+        ga4_mod,
+        "set_ga4_quota_remaining",
+        lambda recipe, quota_type, value: recorder.append((recipe, quota_type, value)),
+    )
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    src.fetch(_fetch_ctx())
+
+    quota_types_recorded = {r[1] for r in recorder}
+    assert "tokens_per_hour" in quota_types_recorded
+    assert "tokens_per_day" in quota_types_recorded
+    # Values must match the mock remaining counts.
+    per_hour = next(r for r in recorder if r[1] == "tokens_per_hour")
+    assert per_hour[2] == 900.0
+    per_day = next(r for r in recorder if r[1] == "tokens_per_day")
+    assert per_day[2] == 99000.0
+
+
+# ---------------------------------------------------------------------------
+# B4 — fetch with zero rows on first page returns empty DataFrame
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_zero_rows_returns_empty_dataframe(monkeypatch) -> None:
+    import pandas as pd
+
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = MagicMock(row_count=0, rows=[])
+    resp.property_quota = None
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    df = src.fetch(_fetch_ctx())
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 0

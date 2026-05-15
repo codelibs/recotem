@@ -291,3 +291,183 @@ def test_fetch_passes_columns_through_unchanged(monkeypatch, tmp_path) -> None:
     src = SQLSource(_make_cfg(query="SELECT user_id AS u, item_id AS i FROM events"))
     df = src.fetch(_ctx())
     assert list(df.columns) == ["u", "i"]
+
+
+# ---------------------------------------------------------------------------
+# A1 — Malformed DSN raises DataSourceError
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_dsn_raises(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "not-a-url")
+    with pytest.raises(DataSourceError, match="(?i)valid SQLAlchemy URL"):
+        SQLSource(_make_cfg())
+
+
+# ---------------------------------------------------------------------------
+# A2 — SSRF blocked for RFC1918, link-local, IPv6 ULA
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["10.0.0.1", "192.168.1.5", "172.16.0.1", "169.254.169.254", "fc00::1"],
+)
+def test_ssrf_blocked_private_hosts(monkeypatch, host) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    encoded = f"[{host}]" if ":" in host else host
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"postgresql://u:p@{encoded}/db")
+    monkeypatch.setitem(
+        __import__("sys").modules, "psycopg", __import__("sys").modules.get("psycopg")
+    )
+    with pytest.raises(DataSourceError, match="(?i)private|loopback|SSRF"):
+        SQLSource(_make_cfg())
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["10.0.0.1", "192.168.1.5", "172.16.0.1", "169.254.169.254", "fc00::1"],
+)
+def test_ssrf_allow_private_bypasses_ssrf_check(monkeypatch, host) -> None:
+    import sys
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    encoded = f"[{host}]" if ":" in host else host
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"postgresql://u:p@{encoded}/db")
+    # Stub psycopg so driver probe succeeds even if not installed.
+    import types
+
+    fake_psycopg = types.ModuleType("psycopg")
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+    # The SSRF DataSourceError specifically must not be raised.
+    try:
+        SQLSource(_make_cfg())
+    except DataSourceError as exc:
+        assert (
+            "private" not in str(exc).lower()
+            and "loopback" not in str(exc).lower()
+            and "ssrf" not in str(exc).lower()
+        ), f"SSRF error must not appear when allow_private=1, but got: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# A3 — _apply_read_only failure emits warning log
+# ---------------------------------------------------------------------------
+
+
+def test_apply_read_only_failure_emits_warning_log(monkeypatch) -> None:
+    from unittest.mock import MagicMock
+
+    import structlog.testing
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+    mock_conn = MagicMock()
+    mock_conn.execute.side_effect = Exception("boom")
+
+    with structlog.testing.capture_logs() as captured:
+        # Call with postgresql dialect so the execute path is exercised.
+        orig_dialect = src._dialect
+        src._dialect = "postgresql"
+        src._apply_read_only(mock_conn)
+        src._dialect = orig_dialect
+
+    events = [e["event"] for e in captured]
+    assert "sql_read_only_set_failed" in events
+
+
+# ---------------------------------------------------------------------------
+# A4 — _apply_statement_timeout failure emits warning log
+# ---------------------------------------------------------------------------
+
+
+def test_apply_statement_timeout_failure_emits_warning_log(monkeypatch) -> None:
+    from unittest.mock import MagicMock
+
+    import structlog.testing
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+    mock_conn = MagicMock()
+    mock_conn.execute.side_effect = Exception("boom")
+
+    with structlog.testing.capture_logs() as captured:
+        orig_dialect = src._dialect
+        src._dialect = "postgresql"
+        src._apply_statement_timeout(mock_conn)
+        src._dialect = orig_dialect
+
+    events = [e["event"] for e in captured]
+    assert "sql_statement_timeout_set_failed" in events
+
+
+# ---------------------------------------------------------------------------
+# A5 — Whitespace-only DSN raises DataSourceError
+# ---------------------------------------------------------------------------
+
+
+def test_whitespace_only_dsn_raises(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "   ")
+    with pytest.raises(DataSourceError, match="not set or is empty"):
+        SQLSource(_make_cfg())
+
+
+# ---------------------------------------------------------------------------
+# A6 — fetch with empty result set returns empty DataFrame
+# ---------------------------------------------------------------------------
+
+
+def _seed_sqlite_empty(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "empty.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE empty_events (user_id TEXT, item_id TEXT, ts TEXT);"
+    )
+    con.commit()
+    con.close()
+    return db
+
+
+def test_fetch_empty_table_returns_empty_dataframe(monkeypatch, tmp_path) -> None:
+    import pandas as pd
+
+    from recotem.datasource.sql import SQLSource
+
+    db = _seed_sqlite_empty(tmp_path)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+    src = SQLSource(_make_cfg(query="SELECT user_id, item_id, ts FROM empty_events"))
+    df = src.fetch(_ctx())
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 0
+
+
+# ---------------------------------------------------------------------------
+# A7 — _connect_args for mysql includes connect_timeout
+# ---------------------------------------------------------------------------
+
+
+def test_connect_args_mysql_has_connect_timeout(monkeypatch) -> None:
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg(connect_timeout_seconds=15))
+    # Temporarily override dialect to mysql to test branch.
+    src._dialect = "mysql"
+    args = src._connect_args()
+    assert "connect_timeout" in args
+    assert args["connect_timeout"] == 15

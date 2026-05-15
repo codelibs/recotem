@@ -677,3 +677,34 @@ def test_ga4_max_pages_clamp_high(monkeypatch) -> None:
     from recotem.config import get_ga4_max_pages
 
     assert get_ga4_max_pages() == 10_000
+
+
+# ---------------------------------------------------------------------------
+# E1 — Non-integer env value falls back to default
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "env_var,env_value,helper_name,expected_default",
+    [
+        ("RECOTEM_MAX_SQL_ROWS", "abc", "get_max_sql_rows", 50_000_000),
+        ("RECOTEM_GA4_MAX_PAGES", "xyz", "get_ga4_max_pages", 500),
+    ],
+)
+def test_non_integer_env_value_falls_back_to_default(
+    env_var: str,
+    env_value: str,
+    helper_name: str,
+    expected_default: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-integer values for numeric env vars must fall back to the documented
+    default rather than raising an unhandled exception."""
+    import recotem.config as config_mod
+
+    monkeypatch.setenv(env_var, env_value)
+    helper = getattr(config_mod, helper_name)
+    result = helper()
+    assert result == expected_default, (
+        f"{env_var}={env_value!r}: expected default {expected_default}, got {result}"
+    )

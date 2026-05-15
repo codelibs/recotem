@@ -593,13 +593,17 @@ def test_dsn_redaction_preserves_non_credentialed_url() -> None:
 
 
 def test_mysql_pymysql_dsn_credentials_scrubbed() -> None:
+    from urllib.parse import urlparse
+
     from recotem.log_redaction import _scrub_string_value
 
     result = _scrub_string_value("mysql+pymysql://root:secret@db.internal:3306/mydb")
     assert "root" not in result
     assert "secret" not in result
-    # The host must be preserved.
-    assert "db.internal" in result
+    # The host must be preserved at the URL's hostname position (not just as a
+    # substring at an arbitrary location).
+    parsed = urlparse(result)
+    assert parsed.hostname == "db.internal"
 
 
 # ---------------------------------------------------------------------------
@@ -626,13 +630,20 @@ def test_dsn_scrubber_short_circuit_does_not_break_credentialed_dsn() -> None:
     This verifies the '://' short-circuit guard doesn't accidentally skip
     DSNs that contain user credentials.
     """
+    from urllib.parse import urlparse
+
     from recotem.log_redaction import _scrub_string_value
 
     dsn = "postgresql://alice:s3cret@db.example.com:5432/orders"
     result = _scrub_string_value(dsn)
     assert "alice" not in result
     assert "s3cret" not in result
-    assert "db.example.com" in result
+    # Check the host is preserved at the URL's hostname position rather than
+    # as an arbitrary substring (defends against accidental moves of the host
+    # into userinfo / path / query and silences CodeQL py/incomplete-url-
+    # substring-sanitization).
+    parsed = urlparse(result)
+    assert parsed.hostname == "db.example.com"
 
 
 def test_dsn_scrubber_short_circuit_skips_regex_on_plain_strings() -> None:

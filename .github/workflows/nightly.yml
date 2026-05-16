@@ -36,7 +36,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies (all extras)
-        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics
+        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite --extra ga4
 
       - name: Run full test suite (including slow and fuzz)
         run: |
@@ -70,7 +70,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics
+        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite --extra ga4
 
       - name: Install recotem
         run: uv pip install --no-deps .

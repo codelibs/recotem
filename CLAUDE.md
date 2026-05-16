@@ -36,7 +36,7 @@ run on different machines. Hot-swap is file-mtime-driven and recipe-scoped.
 src/recotem/
 ├── cli.py              Typer entry; thin orchestration only
 ├── recipe/             pydantic v2 Recipe + YAML loader + env expansion
-├── datasource/         DataSource Protocol + entry_points discovery (csv / bq)
+├── datasource/         DataSource Protocol + entry_points discovery (csv / parquet / bigquery / sql / ga4)
 ├── training/           Optuna search + irspack train; per-recipe file lock
 ├── artifact/           HMAC-signed binary container with FQCN allow-list
 ├── metadata/           item metadata loader (CSV/Parquet via fsspec)
@@ -59,14 +59,14 @@ tests/
 docs/
 ├── getting-started.md  Docker / pip walkthrough → train → /predict
 ├── recipe-reference.md every recipe field, type, default, validation
-├── data-sources/       bigquery.md, csv.md
+├── data-sources/       bigquery.md, csv.md, ga4.md, sql.md
 ├── deployment/         docker.md, k8s.md, cron.md
 ├── operations.md       key rotation, recovery, sizing, troubleshooting
 ├── security.md         trust boundaries, FQCN allow-list, threat model
 └── plugin-authoring.md DataSource plugin contract walkthrough
 
 helm/recotem/           serve-only chart with optional CronJob train
-examples/               quickstart/, csv-local/, ga4-bigquery/, k8s/, plugins/echo-source/, tutorial-purchase-log/
+examples/               quickstart/, csv-local/, sql-sqlite/, ga4-bigquery/, ga4-data-api/, k8s/, plugins/echo-source/, tutorial-purchase-log/
 Dockerfile              multi-stage python:3.12-slim, appuser:1000
 compose.yaml            train one-shot + serve long-running (tutorial)
 ```
@@ -102,7 +102,7 @@ curl -X POST http://localhost:8080/predict/news_articles \
 A recipe is the single source of truth: 1 YAML = 1 model = 1 `/predict/{name}`.
 See `docs/recipe-reference.md` for the full schema. Highlights:
 
-- `source.type` is a discriminator (`csv` | `parquet` | `bigquery` | plugins).
+- `source.type` is a discriminator (`csv` | `parquet` | `bigquery` | `sql` | `ga4` | plugins).
 - Env-var expansion is restricted to `${RECOTEM_RECIPE_*}` and never applied
   inside `source.query` / `source.query_parameters` (forecloses SQL injection).
 - Path scheme: `source.path` and `item_metadata.path` accept an explicit
@@ -213,6 +213,9 @@ uv run ruff format --check src tests
 | `RECOTEM_LOCK_DIR` | (empty) | Override directory for per-recipe training lock files. Local outputs always lock at `<output_path>.lock`; remote outputs (`s3://`, `gs://`, ...) need a host-local path and fall back to `<tempdir>/recotem-locks/`. `flock` is host-local — across hosts use scheduler-level mutex (`concurrencyPolicy: Forbid`). |
 | `RECOTEM_BQ_REQUIRE_STORAGE_API` | (empty) | When truthy (`1`/`true`/`yes`/`on`), the BigQuery source raises `DataSourceError` instead of falling back to the REST path when the Storage Read API fails. Requires the service account to hold `bigquery.readSessions.create`. |
 | `RECOTEM_STARTUP_PARALLELISM` | (empty = auto) | Number of parallel threads used to load artifacts at `recotem serve` startup. Leave unset (default) for auto-sizing (`min(len(recipes), 8)`). Setting to `0` is NOT a sentinel — it clamps to 1 and emits an `env_var_clamped` warning. Clamped [1, 32]. Set to `1` to force sequential loading for debugging. |
+| `RECOTEM_MAX_SQL_ROWS` | 50_000_000 | Hard cap on rows returned by the SQL data source. Clamped [1_000, 500_000_000]. Caps **row count**, not DataFrame resident memory — see `docs/data-sources/sql.md` for the memory-bound caveat. |
+| `RECOTEM_SQL_ALLOW_PRIVATE` | (empty) | Truthy opts the SQL source into private/loopback DSN hosts (default deny, for SSRF). Covers every driver-routing form — netloc, `?host=`, `?hostaddr=`, `?service=`, `?unix_socket=`, absolute-path host, and network DSNs with no host info — all default-deny without this flag. Also disables the DNS-rebinding re-check before each probe/fetch — opting in means trusting the host end-to-end. |
+| `RECOTEM_GA4_MAX_PAGES` | 500 | Hard ceiling on GA4 Data API pagination loops. Clamped [1, 10_000]. |
 
 ## CI
 

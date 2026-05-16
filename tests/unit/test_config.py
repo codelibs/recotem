@@ -607,3 +607,161 @@ def test_apply_auth_posture_does_not_force_when_api_keys_set() -> None:
     assert cfg.host == "0.0.0.0", (
         "apply_auth_posture must not force loopback when api_keys are configured"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 2.2: RECOTEM_MAX_SQL_ROWS and RECOTEM_SQL_ALLOW_PRIVATE
+# ---------------------------------------------------------------------------
+
+
+def test_max_sql_rows_default(monkeypatch) -> None:
+    monkeypatch.delenv("RECOTEM_MAX_SQL_ROWS", raising=False)
+    from recotem.config import get_max_sql_rows
+
+    assert get_max_sql_rows() == 50_000_000
+
+
+def test_max_sql_rows_clamps_low(monkeypatch) -> None:
+    monkeypatch.setenv("RECOTEM_MAX_SQL_ROWS", "10")
+    from recotem.config import get_max_sql_rows
+
+    assert get_max_sql_rows() == 1_000
+
+
+def test_max_sql_rows_clamps_high(monkeypatch) -> None:
+    monkeypatch.setenv("RECOTEM_MAX_SQL_ROWS", "9999999999")
+    from recotem.config import get_max_sql_rows
+
+    assert get_max_sql_rows() == 500_000_000
+
+
+def test_sql_allow_private_default_false(monkeypatch) -> None:
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    from recotem.config import sql_allow_private
+
+    assert sql_allow_private() is False
+
+
+def test_sql_allow_private_truthy_values(monkeypatch) -> None:
+    from recotem.config import sql_allow_private
+
+    for v in ("1", "true", "TRUE", "yes", "on"):
+        monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", v)
+        assert sql_allow_private() is True
+    for v in ("0", "false", "no", "off", "", "anything-else"):
+        monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", v)
+        assert sql_allow_private() is False
+
+
+# ---------------------------------------------------------------------------
+# Task 3.2: RECOTEM_GA4_MAX_PAGES
+# ---------------------------------------------------------------------------
+
+
+def test_ga4_max_pages_default(monkeypatch) -> None:
+    monkeypatch.delenv("RECOTEM_GA4_MAX_PAGES", raising=False)
+    from recotem.config import get_ga4_max_pages
+
+    assert get_ga4_max_pages() == 500
+
+
+def test_ga4_max_pages_clamp_low(monkeypatch) -> None:
+    monkeypatch.setenv("RECOTEM_GA4_MAX_PAGES", "0")
+    from recotem.config import get_ga4_max_pages
+
+    assert get_ga4_max_pages() == 1
+
+
+def test_ga4_max_pages_clamp_high(monkeypatch) -> None:
+    monkeypatch.setenv("RECOTEM_GA4_MAX_PAGES", "999999")
+    from recotem.config import get_ga4_max_pages
+
+    assert get_ga4_max_pages() == 10_000
+
+
+# ---------------------------------------------------------------------------
+# E1 — Non-integer env value falls back to default
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "env_var,env_value,helper_name,expected_default",
+    [
+        ("RECOTEM_MAX_SQL_ROWS", "abc", "get_max_sql_rows", 50_000_000),
+        ("RECOTEM_GA4_MAX_PAGES", "xyz", "get_ga4_max_pages", 500),
+    ],
+)
+def test_non_integer_env_value_falls_back_to_default(
+    env_var: str,
+    env_value: str,
+    helper_name: str,
+    expected_default: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-integer values for numeric env vars must fall back to the documented
+    default rather than raising an unhandled exception."""
+    import recotem.config as config_mod
+
+    monkeypatch.setenv(env_var, env_value)
+    helper = getattr(config_mod, helper_name)
+    result = helper()
+    assert result == expected_default, (
+        f"{env_var}={env_value!r}: expected default {expected_default}, got {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MINOR-2: env_var_unparseable warning on bad numeric env vars
+# ---------------------------------------------------------------------------
+
+
+def test_max_sql_rows_non_integer_logs_env_var_unparseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_MAX_SQL_ROWS set to a non-integer must return the default AND
+    emit an 'env_var_unparseable' warning with the variable name and raw value.
+    """
+    import structlog.testing
+
+    from recotem.config import get_max_sql_rows
+
+    monkeypatch.setenv("RECOTEM_MAX_SQL_ROWS", "notanumber")
+    with structlog.testing.capture_logs() as captured:
+        result = get_max_sql_rows()
+
+    assert result == 50_000_000, f"Expected default 50_000_000, got {result}"
+    warn_events = [e for e in captured if e.get("event") == "env_var_unparseable"]
+    assert warn_events, (
+        "An 'env_var_unparseable' warning must be logged when "
+        "RECOTEM_MAX_SQL_ROWS is not a valid integer"
+    )
+    assert warn_events[0].get("log_level") == "warning"
+    assert warn_events[0].get("name") == "RECOTEM_MAX_SQL_ROWS"
+    assert warn_events[0].get("raw") == "notanumber"
+    assert warn_events[0].get("fallback") == 50_000_000
+
+
+def test_ga4_max_pages_non_integer_logs_env_var_unparseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RECOTEM_GA4_MAX_PAGES set to '5OO' (letter O typo) must return the default
+    AND emit an 'env_var_unparseable' warning with the variable name and raw value.
+    """
+    import structlog.testing
+
+    from recotem.config import get_ga4_max_pages
+
+    monkeypatch.setenv("RECOTEM_GA4_MAX_PAGES", "5OO")
+    with structlog.testing.capture_logs() as captured:
+        result = get_ga4_max_pages()
+
+    assert result == 500, f"Expected default 500, got {result}"
+    warn_events = [e for e in captured if e.get("event") == "env_var_unparseable"]
+    assert warn_events, (
+        "An 'env_var_unparseable' warning must be logged when "
+        "RECOTEM_GA4_MAX_PAGES is not a valid integer (e.g. '5OO' typo)"
+    )
+    assert warn_events[0].get("log_level") == "warning"
+    assert warn_events[0].get("name") == "RECOTEM_GA4_MAX_PAGES"
+    assert warn_events[0].get("raw") == "5OO"
+    assert warn_events[0].get("fallback") == 500

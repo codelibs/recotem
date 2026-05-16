@@ -1,0 +1,51 @@
+# examples/sql-sqlite/recipe.yaml
+#
+# Minimal recipe that trains a recommender from a local SQLite database using
+# the `sql` data source.  No cloud services required.
+#
+# Prerequisites:
+#   uv run python examples/sql-sqlite/seed.py
+#
+# Train:
+#   export RECOTEM_RECIPE_DB_DSN="sqlite:///$(pwd)/examples/sql-sqlite/events.db"
+#   uv run recotem train examples/sql-sqlite/recipe.yaml
+#
+# The trained artifact is written to ./artifacts/sql_sqlite_demo.recotem
+
+name: sql_sqlite_demo
+
+source:
+  type: sql
+  # The DSN is read from this env var; the recipe never embeds credentials.
+  dsn_env: RECOTEM_RECIPE_DB_DSN
+  query: |
+    SELECT user_id, item_id, event_at
+    FROM events
+    WHERE event_at >= :since
+  query_parameters:
+    since: "2026-01-01"
+
+schema:
+  user_column: user_id
+  item_column: item_id
+  time_column: event_at
+
+cleansing:
+  drop_null_ids: true
+  dedup: keep_last
+
+training:
+  # TopPop is parameter-free; RP3beta adds one Optuna trial for comparison.
+  algorithms: [TopPop, RP3beta]
+  metric: recall
+  # cutoff must be < n_items (10 in the seeded DB).
+  cutoff: 5
+  n_trials: 5
+  split:
+    scheme: random
+    heldout_ratio: 0.1
+    seed: 42
+
+output:
+  path: ./artifacts/sql_sqlite_demo.recotem
+  versioning: always_overwrite

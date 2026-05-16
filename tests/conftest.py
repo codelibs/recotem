@@ -111,6 +111,26 @@ def _isolate_structlog_state(monkeypatch: pytest.MonkeyPatch):
     structlog.reset_defaults()
 
 
+@pytest.fixture(autouse=True)
+def _clear_datasource_registry_cache() -> None:
+    """Clear the datasource registry LRU cache before and after every test.
+
+    ``get_source_types()`` is decorated with ``@lru_cache(maxsize=1)``.  Without
+    clearing it, a monkeypatch applied in one test would be visible to subsequent
+    tests that call ``get_source_types()`` without patching, because the cached
+    result from the first call is returned for all later calls in the same
+    process.
+
+    This fixture is function-scoped (the default) so it does not interfere with
+    session-scoped fixtures that do not touch the registry.
+    """
+    from recotem.datasource.registry import clear_registry_cache
+
+    clear_registry_cache()
+    yield
+    clear_registry_cache()
+
+
 @pytest.fixture(scope="session")
 def signing_key_bytes() -> bytes:
     """Deterministic 32-byte signing key for 'active' kid."""
@@ -297,7 +317,11 @@ def movielens_df() -> pd.DataFrame:
 
     import recotem.training._compat  # noqa: F401
 
-    dm = MovieLens100KDataManager()
+    # force_download=True bypasses irspack's interactive input() prompt,
+    # which fails under pytest output capture (OSError: reading from stdin
+    # while output is captured).  Once the cached zip exists at DEFAULT_PATH
+    # the flag is a no-op, so this does not re-download on every session.
+    dm = MovieLens100KDataManager(force_download=True)
     df = dm.read_interaction()
     rename_map = {
         "userId": "user_id",

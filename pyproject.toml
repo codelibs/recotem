@@ -35,6 +35,11 @@ s3 = ["s3fs>=2024.6,<2026"]
 gcs = ["gcsfs>=2024.6,<2026"]
 azure = ["adlfs>=2024.6,<2026"]
 metrics = ["prometheus-client>=0.20,<1"]
+postgres = ["sqlalchemy>=2,<3", "psycopg[binary]>=3.1,<4"]
+mysql = ["sqlalchemy>=2,<3", "pymysql>=1.1,<2"]
+sqlite = ["sqlalchemy>=2,<3"]
+ga4 = ["google-analytics-data>=0.18,<1", "google-auth>=2,<3"]
+all = ["recotem[bigquery,postgres,mysql,sqlite,ga4,s3,gcs,azure,metrics]"]
 
 [project.scripts]
 recotem = "recotem.cli:app"
@@ -43,6 +48,8 @@ recotem = "recotem.cli:app"
 csv = "recotem.datasource.csv:CSVSource"
 parquet = "recotem.datasource.csv:ParquetSource"
 bigquery = "recotem.datasource.bigquery:BigQuerySource"
+sql = "recotem.datasource.sql:SQLSource"
+ga4 = "recotem.datasource.ga4:GA4Source"
 
 [build-system]
 requires = ["hatchling"]

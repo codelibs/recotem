@@ -9,6 +9,8 @@ Tests:
 
 from __future__ import annotations
 
+import pytest
+
 from recotem.log_redaction import _should_redact, redact_sensitive_keys
 
 _REDACTED = "[REDACTED]"
@@ -555,3 +557,332 @@ def test_redact_internal_failure_does_not_raise() -> None:
         result = redact_sensitive_keys(None, "info", {"event": "test"})  # type: ignore[arg-type]
 
     assert isinstance(result, dict), "Result must always be a dict"
+
+
+# ---------------------------------------------------------------------------
+# DSN userinfo redaction
+# ---------------------------------------------------------------------------
+
+
+def test_dsn_userinfo_in_message_is_redacted() -> None:
+    from recotem.log_redaction import redact_sensitive_keys
+
+    event = {
+        "event": "connecting",
+        "dsn": "postgresql://alice:s3cret@db.example.com:5432/orders",
+        "message": "Tried postgresql+psycopg://bob:hunter2@10.0.0.1/orders; failed",
+    }
+    out = redact_sensitive_keys(None, None, event)
+    assert "alice" not in out["dsn"]
+    assert "s3cret" not in out["dsn"]
+    assert "bob" not in out["message"]
+    assert "hunter2" not in out["message"]
+    assert out["dsn"].startswith("postgresql://")
+    assert out["dsn"].endswith("/orders") or "host" in out["dsn"].lower()
+
+
+def test_dsn_redaction_preserves_non_credentialed_url() -> None:
+    from recotem.log_redaction import redact_sensitive_keys
+
+    event = {"event": "ok", "url": "postgresql://db.example.com:5432/orders"}
+    out = redact_sensitive_keys(None, None, event)
+    assert out["url"] == "postgresql://db.example.com:5432/orders"
+
+
+# ---------------------------------------------------------------------------
+# D1 — mysql+pymysql DSN credentials scrubbed
+# ---------------------------------------------------------------------------
+
+
+def test_mysql_pymysql_dsn_credentials_scrubbed() -> None:
+    from urllib.parse import urlparse
+
+    from recotem.log_redaction import _scrub_string_value
+
+    result = _scrub_string_value("mysql+pymysql://root:secret@db.internal:3306/mydb")
+    assert "root" not in result
+    assert "secret" not in result
+    # The host must be preserved at the URL's hostname position (not just as a
+    # substring at an arbitrary location).
+    parsed = urlparse(result)
+    assert parsed.hostname == "db.internal"
+
+
+# ---------------------------------------------------------------------------
+# D2 — sqlite:/// path passes through unchanged
+# ---------------------------------------------------------------------------
+
+
+def test_sqlite_path_passes_through_unchanged() -> None:
+    from recotem.log_redaction import _scrub_string_value
+
+    original = "sqlite:///local.db"
+    result = _scrub_string_value(original)
+    assert result == original
+
+
+def test_sqlite_uri_mode_with_query_string_passes_through_unchanged() -> None:
+    """``sqlite:///file:/tmp/db?mode=ro&uri=true`` (SQLite URI form) is not a
+    credentialed DSN; it must pass through the scrubber unchanged.
+
+    Regression guard: ``sqlite`` is intentionally absent from the DSN scheme
+    allow-list so query-string keys like ``mode=ro`` cannot trigger spurious
+    rewriting that would mangle the URI form used to pin SQLite to read-only.
+    """
+    from recotem.log_redaction import _scrub_string_value
+
+    original = "sqlite:///file:/tmp/db?mode=ro&uri=true"
+    result = _scrub_string_value(original)
+    assert result == original, (
+        f"SQLite URI-mode DSN was unexpectedly altered: {original!r} -> {result!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MINOR-1: DSN scrubber short-circuit on "://" absence
+# ---------------------------------------------------------------------------
+
+
+def test_dsn_scrubber_short_circuit_does_not_break_credentialed_dsn() -> None:
+    """Strings containing '://' with DSN credentials must still be scrubbed.
+
+    This verifies the '://' short-circuit guard doesn't accidentally skip
+    DSNs that contain user credentials.
+    """
+    from urllib.parse import urlparse
+
+    from recotem.log_redaction import _scrub_string_value
+
+    dsn = "postgresql://alice:s3cret@db.example.com:5432/orders"
+    result = _scrub_string_value(dsn)
+    assert "alice" not in result
+    assert "s3cret" not in result
+    # Check the host is preserved at the URL's hostname position rather than
+    # as an arbitrary substring (defends against accidental moves of the host
+    # into userinfo / path / query and silences CodeQL py/incomplete-url-
+    # substring-sanitization).
+    parsed = urlparse(result)
+    assert parsed.hostname == "db.example.com"
+
+
+def test_dsn_scrubber_short_circuit_skips_regex_on_plain_strings() -> None:
+    """Strings without '://' must pass through the DSN scrubber unchanged.
+
+    This validates the short-circuit: a bare hex token or log message that
+    contains no '://' must not be touched by the DSN regex.
+    """
+    from recotem.log_redaction import _scrub_string_value
+
+    # A bare hex token — no '://', so DSN regex should not run.
+    # (It may still be caught by the HEX64 pattern if long enough, but that
+    # is separate from the DSN scrubber.)
+    plain = "just a plain log message with no URL"
+    result = _scrub_string_value(plain)
+    assert result == plain
+
+    # A short hex string (< 64 chars) without a scheme — untouched.
+    short_hex = "deadbeef1234"
+    assert _scrub_string_value(short_hex) == short_hex
+
+
+# ---------------------------------------------------------------------------
+# DSN scrubber — additional coverage (m1)
+# ---------------------------------------------------------------------------
+
+
+def test_dsn_userinfo_postgresql_basic_scrubbed() -> None:
+    """postgresql://user:pass@host DSN must have userinfo replaced with ***."""
+    from urllib.parse import urlparse
+
+    from recotem.log_redaction import _scrub_string_value
+
+    result = _scrub_string_value("postgresql://user:pass@db.example.com/mydb")
+    assert "user" not in result
+    assert "pass" not in result
+    parsed = urlparse(result)
+    assert parsed.hostname == "db.example.com"
+
+
+def test_dsn_userinfo_postgresql_psycopg2_with_query_scrubbed() -> None:
+    """postgresql+psycopg2 DSN with port and query string: userinfo must be scrubbed."""
+    from urllib.parse import urlparse
+
+    from recotem.log_redaction import _scrub_string_value
+
+    dsn = "postgresql+psycopg2://u:p@host:5432/db?sslmode=require"
+    result = _scrub_string_value(dsn)
+    assert ":p@" not in result
+    assert "u:" not in result or result.startswith("postgresql+psycopg2://***@")
+    parsed = urlparse(result)
+    assert parsed.hostname == "host"
+
+
+def test_dsn_userinfo_mysql_ipv4_host_scrubbed() -> None:
+    """mysql+pymysql DSN with an IPv4 address as host: userinfo must be scrubbed."""
+    from urllib.parse import urlparse
+
+    from recotem.log_redaction import _scrub_string_value
+
+    dsn = "mysql+pymysql://root:secret@127.0.0.1/test"
+    result = _scrub_string_value(dsn)
+    assert "root" not in result
+    assert "secret" not in result
+    parsed = urlparse(result)
+    assert parsed.hostname == "127.0.0.1"
+
+
+def test_dsn_already_redacted_string_unchanged() -> None:
+    """A value starting with '[REDACTED' must not be double-processed."""
+    from recotem.log_redaction import _scrub_string_value
+
+    already = "[REDACTED]"
+    assert _scrub_string_value(already) == already
+
+
+def test_plain_https_url_without_credentials_unchanged() -> None:
+    """https://example.com/path contains no userinfo and must pass through unchanged."""
+    from recotem.log_redaction import _scrub_string_value
+
+    url = "https://example.com/path"
+    assert _scrub_string_value(url) == url
+
+
+# ---------------------------------------------------------------------------
+# I-4 — DSN with empty username (":pass@host") is also scrubbed
+# ---------------------------------------------------------------------------
+
+
+def test_dsn_userinfo_empty_username_scrubbed() -> None:
+    """``postgresql://:password@host/db`` must have the password redacted.
+
+    RFC 3986 and SQLAlchemy ``make_url`` accept an empty username with a
+    non-empty password.  The previous regex required ``+`` (one-or-more) on
+    the user character class, so this exact shape slipped through and the
+    password leaked verbatim.  The new regex uses ``*`` (zero-or-more).
+    """
+    from urllib.parse import urlparse
+
+    from recotem.log_redaction import _scrub_string_value
+
+    dsn = "postgresql://:hunter2@db.example.com:5432/orders"
+    result = _scrub_string_value(dsn)
+    assert "hunter2" not in result, f"password leaked: {result!r}"
+    parsed = urlparse(result)
+    assert parsed.hostname == "db.example.com"
+    # The scrubbed userinfo is the literal ``***``.
+    assert "***" in result
+
+
+def test_dsn_userinfo_only_password_no_user_mysql() -> None:
+    """Same shape for mysql+pymysql DSNs."""
+    from recotem.log_redaction import _scrub_string_value
+
+    result = _scrub_string_value("mysql+pymysql://:secret@h:3306/db")
+    assert "secret" not in result
+    assert result.startswith("mysql+pymysql://***@")
+
+
+# ---------------------------------------------------------------------------
+# I-6 — object-store URIs that idiomatically use @ MUST NOT be rewritten
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        # gcsfs syntax: gs://<bucket>@<project>/<key>
+        "gs://my-bucket@my-project/data.parquet",
+        # s3:// path-style URIs
+        "s3://my-bucket@us-east-1/key",
+        # Azure blob — abfs / az schemes
+        "az://container@account.dfs.core.windows.net/data",
+        "abfs://container@account.dfs.core.windows.net/data",
+        "abfss://container@account.dfs.core.windows.net/data",
+        # arbitrary non-credential-bearing scheme
+        "myorg://bucket@project/key",
+    ],
+)
+def test_object_store_uris_with_at_sign_preserved(uri) -> None:
+    """The DSN scrubber MUST NOT rewrite object-store URIs that use ``@`` for
+    non-credential purposes (e.g. gcsfs ``gs://bucket@project/key``).  Doing
+    so would silently delete the bucket name from operator logs without
+    protecting any actual secret.
+    """
+    from recotem.log_redaction import _scrub_string_value
+
+    assert _scrub_string_value(uri) == uri, (
+        f"object-store URI {uri!r} must pass through DSN scrubber unchanged"
+    )
+
+
+def test_credential_bearing_schemes_still_scrubbed() -> None:
+    """The scheme allowlist still covers all the production DSN shapes."""
+    from recotem.log_redaction import _scrub_string_value
+
+    cases = [
+        "postgresql://u:p@h/db",
+        "postgres://u:p@h/db",
+        "postgresql+psycopg://u:p@h/db",
+        "postgresql+asyncpg://u:p@h/db",
+        "mysql://u:p@h/db",
+        "mysql+pymysql://u:p@h/db",
+        "mariadb://u:p@h/db",
+        "mariadb+pymysql://u:p@h/db",
+        "mssql+pyodbc://u:p@h/db",
+        "oracle+cx_oracle://u:p@h/db",
+        "mongodb://u:p@h/db",
+        "mongodb+srv://u:p@h/db",
+        "redis://u:p@h:6379",
+        "rediss://u:p@h:6379",
+        "amqp://u:p@h:5672/",
+        "amqps://u:p@h:5672/",
+        "http://u:p@example.com/",
+        "https://u:p@example.com/",
+        "ftp://u:p@h/path",
+        "ftps://u:p@h/path",
+    ]
+    for case in cases:
+        result = _scrub_string_value(case)
+        assert ":p@" not in result, f"credentials leaked in {case!r}: {result!r}"
+        assert "***@" in result, f"scrubber did not fire on {case!r}: {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# M-6 — _redact_value recurses into tuples / sets
+# ---------------------------------------------------------------------------
+
+
+def test_redact_value_recurses_into_tuples() -> None:
+    """Strings nested in a tuple value must be scrubbed."""
+    from recotem.log_redaction import _redact_value
+
+    out = _redact_value(("plain", "postgresql://u:p@h/db", 42))
+    assert isinstance(out, tuple), "tuple identity must be preserved"
+    assert out[0] == "plain"
+    assert "***" in out[1]
+    assert "u:p" not in out[1]
+    assert out[2] == 42
+
+
+def test_redact_value_recurses_into_nested_tuple_in_dict() -> None:
+    """Tuples nested inside dict values are still scrubbed."""
+    from recotem.log_redaction import _redact_value
+
+    out = _redact_value({"paths": ("postgresql://u:p@h/db", "gs://bucket@project/k")})
+    inner = out["paths"]
+    assert isinstance(inner, tuple)
+    assert "***" in inner[0]  # DSN scrubbed
+    assert inner[1] == "gs://bucket@project/k"  # object-store URI preserved
+
+
+def test_redact_value_recurses_into_sets() -> None:
+    """Strings nested in a set value must be scrubbed (defence in depth)."""
+    from recotem.log_redaction import _redact_value
+
+    out = _redact_value({"plain", "postgresql://u:p@h/db"})
+    assert isinstance(out, set)
+    assert "plain" in out
+    # The DSN string is replaced with the scrubbed version.
+    scrubbed = [s for s in out if s.startswith("postgresql://")]
+    assert scrubbed and "***" in scrubbed[0]
+    assert all(":p@" not in s for s in out)

@@ -29,6 +29,14 @@ Environment variables:
   RECOTEM_STARTUP_PARALLELISM  Number of parallel threads used to load
                                  artifacts at startup (default min(recipes, 8);
                                  clamped 1–32)
+  RECOTEM_MAX_SQL_ROWS         Hard cap on rows returned by the SQL source
+                                 (default 50_000_000; clamped [1_000, 500_000_000])
+  RECOTEM_SQL_ALLOW_PRIVATE    Truthy (1/true/yes/on) opts the SQL source into
+                                 accepting private/loopback host addresses.
+                                 Default refuses RFC1918 / 127.0.0.0/8 to
+                                 block SSRF via crafted DSNs.
+  RECOTEM_GA4_MAX_PAGES        Hard ceiling on GA4 Data API pagination loops
+                                 (default 500; clamped [1, 10_000])
 """
 
 from __future__ import annotations
@@ -115,6 +123,12 @@ def _clamped_int_env(name: str, default: int, lo: int, hi: int) -> int:
     try:
         value = int(raw)
     except ValueError:
+        _logger.warning(
+            "env_var_unparseable",
+            name=name,
+            raw=raw,
+            fallback=default,
+        )
         return default
     clamped = max(lo, min(hi, value))
     if clamped != value:
@@ -531,3 +545,52 @@ def get_lock_dir() -> str:
     :mod:`recotem.config`.
     """
     return os.environ.get("RECOTEM_LOCK_DIR", "").strip()
+
+
+# ---------------------------------------------------------------------------
+# SQL row cap (used by datasource/sql.py)
+# ---------------------------------------------------------------------------
+
+_SQL_ROW_CAP_MIN = 1_000
+_SQL_ROW_CAP_MAX = 500_000_000
+_SQL_ROW_CAP_DEFAULT = 50_000_000
+
+
+def get_max_sql_rows() -> int:
+    """Return RECOTEM_MAX_SQL_ROWS, clamped to [1 000, 500 000 000]."""
+    return _clamped_int_env(
+        "RECOTEM_MAX_SQL_ROWS",
+        _SQL_ROW_CAP_DEFAULT,
+        _SQL_ROW_CAP_MIN,
+        _SQL_ROW_CAP_MAX,
+    )
+
+
+def sql_allow_private() -> bool:
+    """Return True if SQL sources may connect to private/loopback host addresses.
+
+    Defaults to False (secure-by-default).  Set ``RECOTEM_SQL_ALLOW_PRIVATE``
+    to ``1`` / ``true`` / ``yes`` / ``on`` to allow recipes whose SQL data
+    source host resolves to RFC1918 / loopback / link-local / reserved
+    addresses.
+    """
+    return is_truthy_env(os.environ.get("RECOTEM_SQL_ALLOW_PRIVATE"))
+
+
+# ---------------------------------------------------------------------------
+# GA4 page cap (used by datasource/ga4.py)
+# ---------------------------------------------------------------------------
+
+_GA4_MAX_PAGES_MIN = 1
+_GA4_MAX_PAGES_MAX = 10_000
+_GA4_MAX_PAGES_DEFAULT = 500
+
+
+def get_ga4_max_pages() -> int:
+    """Return RECOTEM_GA4_MAX_PAGES, clamped to [1, 10 000]."""
+    return _clamped_int_env(
+        "RECOTEM_GA4_MAX_PAGES",
+        _GA4_MAX_PAGES_DEFAULT,
+        _GA4_MAX_PAGES_MIN,
+        _GA4_MAX_PAGES_MAX,
+    )

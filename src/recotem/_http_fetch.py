@@ -182,30 +182,46 @@ def _is_address_internal(addr: ipaddress._BaseAddress) -> bool:
     )
 
 
-def assert_host_public(url: str, *, allow_private: bool) -> str | None:
-    """Raise :class:`HttpFetchError` if *url*'s host resolves to a private IP.
+def assert_host_public(url: str, *, allow_private: bool) -> list[str] | None:
+    """Resolve the host portion of ``url`` and reject private/loopback/link-local IPs.
 
-    Returns the resolved IP that the connection should be pinned to — a
-    single one of the public IPs the hostname resolved to.  Callers feed
-    this into :func:`_open_with_pinned_ip` so that the actual TCP connect
-    bypasses a second DNS lookup, foreclosing the DNS-rebinding TOCTOU
-    where the first lookup returns a public IP and the second returns a
-    private one (e.g. cloud metadata).
+    Used by:
+      - ``_http_fetch.fetch_http_bytes`` for HTTP/HTTPS source fetch (default deny;
+        opt-in via ``RECOTEM_HTTP_ALLOW_PRIVATE``).
+      - ``recotem.datasource.sql.SQLSource.__init__`` for the DB host
+        (default deny; opt-in via ``RECOTEM_SQL_ALLOW_PRIVATE``).
 
-    Returns ``None`` **only** when *allow_private* is True (no SSRF check,
-    and no pinning — the caller defers to the system resolver).
+    Callers that don't have an HTTP-shaped URL can wrap a bare host as
+    ``f"db://{host}"`` — only the scheme/host portion is inspected.
 
-    When *url*'s host is already a numeric IP literal, the address is
-    validated against the internal-address check exactly like a
-    DNS-resolved hostname.  If it passes, the IP string is returned as the
-    pinned-IP for the actual TCP connect — the same path as any hostname.
-    There is no fast-return-``None`` shortcut for numeric-IP hosts.
+    Return value
+    ------------
+    Returns the full list of resolved IP strings (IPv4 + IPv6) when every
+    address is public.  Callers that can pin a single connect IP
+    (``_open_with_pinned_ip``) use ``addrs[0]``.  Callers that have to
+    re-verify the hostname before the driver's own connect (SQL) keep the
+    whole set so a legitimately dual-stack host that resolves to both an
+    IPv4 and an IPv6 address is not mis-classified as a DNS rebinding on
+    the second lookup.  Returning the full set closes the family-mismatch
+    false-positive that occurs when the pin came from one family and the
+    re-resolution returns the other.
 
-    No-op when *allow_private* is True — operators of internal-only
-    deployments can opt in via ``RECOTEM_HTTP_ALLOW_PRIVATE=1``.
+    Returns ``None`` when ``allow_private`` is True (the caller has opted out
+    of SSRF defence and pinning is unnecessary).
 
-    Refuses when DNS resolution fails outright; callers prefer a clear
-    refusal over racing against a potentially-poisoned resolver.
+    Numeric IP literals also resolve via ``_resolve_host_addresses`` and yield
+    a single-element list — the function does NOT shortcut bare-IP inputs to
+    None.
+
+    Best-effort caveat for callers (e.g. SQL) that cannot pin the connect IP
+    directly: the returned IPs can still be used to re-verify the hostname
+    immediately before connect (catches most DNS rebinding) but the
+    library-level connect may re-resolve.  Document the caveat in the caller.
+
+    Raises ``HttpFetchError`` if (a) hostname does not resolve, or (b) any
+    resolved address is a bogon/private IP.  Callers MUST distinguish these
+    two failure modes by inspecting the error message if they want to give
+    operators a clearer message.
     """
     if allow_private:
         return None
@@ -227,12 +243,11 @@ def assert_host_public(url: str, *, allow_private: bool) -> str | None:
                 f"(resolved to {addr}). Set RECOTEM_HTTP_ALLOW_PRIVATE=1 to "
                 "allow internal HTTP origins."
             )
-    # All resolved addresses are public; pin the first one for the actual
-    # TCP connect so a follow-up DNS lookup cannot rebind the hostname to
-    # a private IP between the SSRF check and the connect (MAJOR-2 / DNS
-    # rebinding TOCTOU).  We deliberately keep this scoped to a single
-    # request — no caching is shared across requests.
-    return str(addrs[0])
+    # All resolved addresses are public; return them all so callers can pin
+    # the first for an actual TCP connect (closes DNS-rebinding TOCTOU,
+    # MAJOR-2) while callers that must re-verify across DNS families later
+    # (SQL) still recognise legitimate dual-stack responses.
+    return [str(addr) for addr in addrs]
 
 
 _COMPRESSION_MAP: dict[str, str] = {
@@ -487,15 +502,16 @@ def fetch_http_bytes(
 
         # SSRF guard: re-resolve and re-check on every hop so that a 302 to a
         # CNAME pointing into RFC1918 is refused, not just the original URL.
-        # The returned IP is pinned into the per-hop opener so urllib's own
-        # connect() does not perform a *second* DNS lookup that an attacker
-        # controlling the authoritative DNS could rebind to a private IP.
+        # The returned IP list is non-empty for the SSRF-enforced path; we pin
+        # the first into the per-hop opener so urllib's own connect() does not
+        # perform a *second* DNS lookup that an attacker controlling the
+        # authoritative DNS could rebind to a private IP.
         # See MAJOR-2: DNS rebinding TOCTOU mitigation.
-        pinned_ip = assert_host_public(current_url, allow_private=allow_private)
+        pinned_ips = assert_host_public(current_url, allow_private=allow_private)
 
         opener = (
-            _build_pinned_opener(pinned_ip)
-            if pinned_ip is not None
+            _build_pinned_opener(pinned_ips[0])
+            if pinned_ips
             else _build_no_redirect_opener()
         )
 

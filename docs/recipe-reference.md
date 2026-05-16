@@ -7,7 +7,7 @@ A recipe is a YAML file that defines what data to fetch, how to train, and where
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | yes | Endpoint name. Pattern: `^[A-Za-z0-9_-]{1,64}$`. Becomes `/predict/{name}`. |
-| `source` | object | yes | Data source config. `type` field is the discriminator (`csv`, `parquet`, `bigquery`, or any plugin). Validated in two stages: the rest of the recipe is parsed first, then the source dict is dispatched to the plugin's `Config` class. As a result, errors in `source.*` surface *after* errors elsewhere in the recipe; an unknown `source.type` raises a `DataSourceError` listing all registered type names. |
+| `source` | object | yes | Data source config. `type` field is the discriminator (`csv`, `parquet`, `bigquery`, `sql`, `ga4`, or any plugin). Validated in two stages: the rest of the recipe is parsed first, then the source dict is dispatched to the plugin's `Config` class. As a result, errors in `source.*` surface *after* errors elsewhere in the recipe; an unknown `source.type` raises a `DataSourceError` listing all registered type names. |
 | `schema` | object | yes | Column mapping. |
 | `cleansing` | object | no | Data quality gates. |
 | `item_metadata` | object | no | Metadata joined into predict responses. |
@@ -69,6 +69,66 @@ source:
 Install the extra: `pip install "recotem[bigquery]"`.
 
 Environment variable expansion is **never** performed inside `query` or `query_parameters`. Use `@param` placeholders to keep SQL injection foreclosed.
+
+### `source.type = sql`
+
+```yaml
+source:
+  type: sql
+  dsn_env: RECOTEM_RECIPE_DATABASE_DSN
+  query: |
+    SELECT user_id, item_id, created_at AS ts
+    FROM events
+    WHERE created_at >= :min_date
+  query_parameters:
+    min_date: "2026-04-01"
+  connect_timeout_seconds: 10
+  statement_timeout_seconds: 300
+```
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `dsn_env` | string | required | Environment variable name containing the SQLAlchemy connection URL. Must be a `RECOTEM_RECIPE_*` variable (e.g. `RECOTEM_RECIPE_DATABASE_DSN`). The URL can use any SQLAlchemy-supported dialect: PostgreSQL, MySQL, MariaDB, SQLite. The connection is read-only and attempts to set transaction isolation appropriately per dialect. |
+| `query` | string | required | SQL. Trusted code — not env-expanded. Use parameterized queries to pass dynamic values. Results are read in chunks (100,000 rows per chunk) and are capped by `RECOTEM_MAX_SQL_ROWS` (default configurable). |
+| `query_parameters` | map | `{}` | Named parameters bound via SQLAlchemy `text().bindparams(...)`. Use `:name` placeholders in `query`. Type values: `str`, `int`, `float`, or `bool`. |
+| `connect_timeout_seconds` | int | `10` | Connection establishment timeout in seconds. Valid range [1, 60] (out-of-range raises ValidationError). |
+| `statement_timeout_seconds` | int | `300` | Per-statement execution timeout in seconds. Valid range [1, 1800] (out-of-range raises ValidationError). |
+
+Install the extra for your SQL dialect: `pip install "recotem[postgres]"`, `recotem[mysql]`, or `recotem[sqlite]`.
+
+See [docs/data-sources/sql.md](data-sources/sql.md) for full reference and examples.
+
+### `source.type = ga4`
+
+```yaml
+source:
+  type: ga4
+  property_id: "123456789"
+  user_dimension: userPseudoId      # userId | userPseudoId
+  item_dimension: itemId             # default itemId
+  time_dimension: date               # date | dateHour | dateHourMinute
+  event_names: [purchase, add_to_cart]
+  lookback_days: 30
+  max_rows: 1000000
+  weight_column: event_count
+  api_timeout_seconds: 60
+```
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `property_id` | string | required | Google Analytics 4 property ID (numeric, as a string). |
+| `user_dimension` | string | required | User identifier dimension. One of `userId` or `userPseudoId`. |
+| `item_dimension` | string | `"itemId"` | Item identifier dimension. Custom GA4 dimension name (1–64 chars). |
+| `time_dimension` | string | `"date"` | Time bucket dimension. One of `date`, `dateHour`, or `dateHourMinute`. |
+| `event_names` | list[string] | required | Event names to include. At least one required; max 50. Each must match GA4 naming rules: `^[A-Za-z_][A-Za-z0-9_]{0,39}$`. |
+| `lookback_days` XOR `start_date` / `end_date` | int / date | (one required) | Either set `lookback_days` (1–3650 days; rolling window ending at `yesterday`, the previous complete day in the property's timezone) **or** both `start_date` and `end_date` (inclusive, YYYY-MM-DD format). Exactly one of these two approaches must be set. |
+| `max_rows` | int | required | Maximum number of rows to fetch from GA4. Valid range [1, 50,000,000] (out-of-range raises ValidationError). Query is aborted if this limit is exceeded. |
+| `weight_column` | string | `"event_count"` | Column name for the event count metric (typically `event_count`). |
+| `api_timeout_seconds` | int | `60` | API request timeout in seconds. Valid range [5, 600] (out-of-range raises ValidationError). |
+
+Install the extra: `pip install "recotem[ga4]"`. Requires Google Application Credentials (via `GOOGLE_APPLICATION_CREDENTIALS` or Workload Identity) with `roles/analytics.viewer` on the GA4 property.
+
+See [docs/data-sources/ga4.md](data-sources/ga4.md) for full reference and examples.
 
 ---
 

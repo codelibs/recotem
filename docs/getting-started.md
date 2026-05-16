@@ -167,6 +167,25 @@ curl -sX POST http://127.0.0.1:8080/predict/purchase_log \
 - The `/predict` request was authenticated by the API key allow-list and
   scored using the trained model.
 
+## Train from SQLite (zero cloud, zero Docker)
+
+The `sql` source needs only a database URL. SQLite is the smallest example:
+
+```bash
+# Seed a tiny SQLite DB.
+uv run python examples/sql-sqlite/seed.py
+
+# Point Recotem at it.
+export RECOTEM_RECIPE_DB_DSN="sqlite:///$(pwd)/examples/sql-sqlite/events.db"
+export $(uv run recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
+
+# Train. Artifact lands in examples/sql-sqlite/artifacts/.
+mkdir -p artifacts
+uv run recotem train examples/sql-sqlite/recipe.yaml
+```
+
+See `docs/data-sources/sql.md` for PostgreSQL / MySQL recipes.
+
 ## Common issues
 
 | Symptom | Cause | Fix |

@@ -60,7 +60,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies (all extras)
-        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics
+        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite --extra ga4
+
+      - name: Driver import smoke test
+        run: |
+          uv run python -c "import sqlalchemy; import psycopg; import pymysql; import sqlite3; import google.analytics.data_v1beta"
 
       - name: Run unit + integration + fuzz tests
         run: |
@@ -91,7 +95,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics
+        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite --extra ga4
 
       - name: Install recotem
         run: uv pip install --no-deps .

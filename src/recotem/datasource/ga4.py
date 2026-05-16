@@ -144,6 +144,14 @@ class GA4Source:
             self._client = BetaAnalyticsDataClient()
         except Exception as exc:
             if _exc_types and isinstance(exc, _exc_types):
+                # Emit a debug-level structured event with the exception class
+                # (no message — those can embed ADC search paths).  Operators
+                # can switch to debug logging to disambiguate ADC failure modes
+                # without the user-facing message leaking filesystem hints.
+                _log.debug(
+                    "ga4_adc_resolution_failed",
+                    error_class=type(exc).__name__,
+                )
                 raise DataSourceError(
                     "ADC is not configured for the GA4 Data API. "
                     "See docs/data-sources/ga4.md for setup."
@@ -373,7 +381,17 @@ class GA4Source:
             df = pd.DataFrame(columns=expected_columns)
 
         if self._config.weight_column in df.columns:
-            numeric = pd.to_numeric(df[self._config.weight_column], errors="raise")
+            try:
+                numeric = pd.to_numeric(df[self._config.weight_column], errors="raise")
+            except (ValueError, TypeError) as exc:
+                # pandas raises ValueError on non-numeric strings.  Surface as
+                # DataSourceError so the CLI exits 3 (_EXIT_DATASOURCE) instead
+                # of 1 (_EXIT_UNKNOWN); the GA4 SDK shouldn't emit non-numeric
+                # eventCount but a regression there should still be classified.
+                raise DataSourceError(
+                    f"GA4 eventCount could not be parsed as numeric for property "
+                    f"{self._config.property_id!r}: {type(exc).__name__}"
+                ) from exc
             if not (numeric % 1 == 0).all():
                 offender = numeric[numeric % 1 != 0].iloc[0]
                 raise DataSourceError(

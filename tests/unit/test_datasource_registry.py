@@ -559,3 +559,35 @@ def test_builtin_ep_skipped_other_eps_still_registered() -> None:
             )
         finally:
             registry.get_source_types.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# PR #92 follow-up — sql + ga4 must resolve via the fallback path
+# ---------------------------------------------------------------------------
+
+
+def test_sql_and_ga4_resolve_via_fallback_with_no_entry_points() -> None:
+    """When ``entry_points`` returns an empty group, the fallback path must
+    register sql → SQLSource and ga4 → GA4Source.
+
+    Editable installs without ``pip install -e .`` exercise this path; the
+    positive registration is the primary contract guarantee that exit-3 install
+    hints surface and not exit-1 ``KeyError`` on lookup.
+    """
+    from recotem.datasource import registry
+
+    registry.get_source_types.cache_clear()
+    try:
+        with patch("recotem.datasource.registry.entry_points", return_value=[]):
+            types = registry.get_source_types()
+
+        assert "sql" in types, (
+            "sql must resolve via _FALLBACK_BUILTINS when entry_points is empty"
+        )
+        assert types["sql"].__name__ == "SQLSource"
+        assert "ga4" in types, (
+            "ga4 must resolve via _FALLBACK_BUILTINS when entry_points is empty"
+        )
+        assert types["ga4"].__name__ == "GA4Source"
+    finally:
+        registry.get_source_types.cache_clear()

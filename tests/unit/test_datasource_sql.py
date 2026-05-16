@@ -1650,3 +1650,100 @@ def test_assert_host_public_returns_full_resolved_set(monkeypatch) -> None:
         result = assert_host_public("http://db.example.com/", allow_private=False)
 
     assert result == ["8.8.8.8", "2606:4700:4700::1111"]
+
+
+# ---------------------------------------------------------------------------
+# Coverage gap follow-up — PR #92 review:
+# (1) chunksize clamps to cap when cap < 100_000;
+# (2) full 127.0.0.0/8 + 0.0.0.0 SSRF coverage;
+# (3) IDN/punycode hostname that resolves to a private IP is rejected.
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_chunksize_clamped_to_cap_when_cap_below_100k(
+    monkeypatch, tmp_path
+) -> None:
+    """When ``RECOTEM_MAX_SQL_ROWS`` < 100_000, ``pd.read_sql`` must be invoked
+    with that smaller chunksize, not the 100_000 default.  Without the clamp,
+    SQLite's full-result materialisation would buffer up to 99× more rows than
+    the configured cap before the boundary check fires.
+    """
+    from unittest.mock import patch
+
+    import recotem.datasource.sql as sql_mod
+    from recotem.datasource.sql import SQLSource
+
+    db = _seed_sqlite(tmp_path)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+    src = SQLSource(_make_cfg(query="SELECT user_id, item_id, ts FROM events"))
+
+    monkeypatch.setattr(sql_mod, "get_max_sql_rows", lambda: 1_000)
+
+    real_read_sql = sql_mod.pd.read_sql
+    captured_chunksize: list[int | None] = []
+
+    def spy_read_sql(*args, **kwargs):
+        captured_chunksize.append(kwargs.get("chunksize"))
+        return real_read_sql(*args, **kwargs)
+
+    with patch.object(sql_mod.pd, "read_sql", side_effect=spy_read_sql):
+        src.fetch(_ctx())
+
+    assert captured_chunksize, "pd.read_sql was not invoked"
+    assert captured_chunksize[0] == 1_000, (
+        f"expected chunksize=1000 (cap), got {captured_chunksize[0]}"
+    )
+
+
+@pytest.mark.parametrize(
+    "private_ip",
+    [
+        "127.0.0.1",  # canonical loopback
+        "127.0.0.2",  # mid-range loopback (127.0.0.0/8)
+        "127.255.255.254",  # near-end loopback
+        "0.0.0.0",  # unspecified / wildcard
+    ],
+)
+def test_init_rejects_full_loopback_unspecified_range(monkeypatch, private_ip) -> None:
+    """Every address in 127.0.0.0/8 plus 0.0.0.0 must trip the SSRF guard."""
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"postgresql://u:p@{private_ip}/x")
+    with pytest.raises(
+        DataSourceError, match="(?i)private/loopback|RECOTEM_SQL_ALLOW_PRIVATE"
+    ):
+        SQLSource(_make_cfg())
+
+
+def test_init_rejects_idn_hostname_resolving_to_private_ip(monkeypatch) -> None:
+    """IDN/punycode hostnames that resolve to a private IP must trip SSRF guard.
+
+    Confirms that hostname normalisation (URL parser → ``getaddrinfo``) does
+    not bypass ``assert_host_public`` for non-ASCII hosts.  The test pins the
+    resolver output so we don't depend on real DNS for the punycode form.
+    """
+    import socket
+    import sys
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    # Punycode form of a non-ASCII hostname; SQLAlchemy's make_url will keep
+    # it as-is, and our SSRF guard re-resolves it via getaddrinfo.
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@xn--exmple-cua.test/x"
+    )
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        # Resolve any IDN host to a private RFC1918 address.
+        return [(socket.AF_INET, 0, 0, "", ("10.0.0.5", 0))]
+
+    with patch("socket.getaddrinfo", fake_getaddrinfo):
+        with pytest.raises(
+            DataSourceError, match="(?i)private/loopback|RECOTEM_SQL_ALLOW_PRIVATE"
+        ):
+            SQLSource(_make_cfg())

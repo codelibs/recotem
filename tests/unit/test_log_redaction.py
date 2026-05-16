@@ -621,6 +621,23 @@ def test_sqlite_path_passes_through_unchanged() -> None:
     assert result == original
 
 
+def test_sqlite_uri_mode_with_query_string_passes_through_unchanged() -> None:
+    """``sqlite:///file:/tmp/db?mode=ro&uri=true`` (SQLite URI form) is not a
+    credentialed DSN; it must pass through the scrubber unchanged.
+
+    Regression guard: ``sqlite`` is intentionally absent from the DSN scheme
+    allow-list so query-string keys like ``mode=ro`` cannot trigger spurious
+    rewriting that would mangle the URI form used to pin SQLite to read-only.
+    """
+    from recotem.log_redaction import _scrub_string_value
+
+    original = "sqlite:///file:/tmp/db?mode=ro&uri=true"
+    result = _scrub_string_value(original)
+    assert result == original, (
+        f"SQLite URI-mode DSN was unexpectedly altered: {original!r} -> {result!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # MINOR-1: DSN scrubber short-circuit on "://" absence
 # ---------------------------------------------------------------------------

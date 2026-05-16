@@ -88,11 +88,14 @@ def _ensure_initialized() -> None:
                 "GA4 Data API propertyQuota remaining at last response.",
                 ["recipe", "quota_type"],
             )
-        except (ValueError, RuntimeError) as exc:
+        except Exception as exc:
             # Most commonly ``ValueError("Duplicated timeseries...")`` from
-            # prometheus_client.  Roll back any partial registration by
-            # leaving the globals at None and latch INITIALIZED so we do
-            # not retry on every metric call.
+            # prometheus_client, but third-party registries can raise other
+            # types (KeyError on custom registries, ImportError from a
+            # delayed transitive dep, etc.).  Catch broadly so that *any*
+            # registration failure latches into a stable no-op rather than
+            # leaving ``_INITIALIZED=False`` and retrying on every metric
+            # call.  Roll back any partial registration.
             _PAGES = None
             _ROWS = None
             _QUOTA = None

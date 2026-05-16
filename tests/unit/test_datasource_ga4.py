@@ -396,8 +396,18 @@ def test_fetch_max_pages_exceeded(monkeypatch) -> None:
     from recotem.datasource.ga4 import GA4Source
 
     src = GA4Source(_cfg(max_rows=1_000_000))
-    with pytest.raises(DataSourceError, match="max_pages|short"):
+    with pytest.raises(DataSourceError) as exc_info:
         src.fetch(_fetch_ctx())
+    msg = str(exc_info.value)
+    # Operators must see both the cap value and the env-var name to know
+    # what to tune.  Earlier looser regex (``max_pages|short``) admitted
+    # message changes that drop the env-var name.
+    assert "RECOTEM_GA4_MAX_PAGES" in msg, (
+        f"max_pages error must name RECOTEM_GA4_MAX_PAGES, got: {msg!r}"
+    )
+    assert "max_pages=3" in msg, (
+        f"max_pages error must include the cap value, got: {msg!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1245,3 +1255,41 @@ def test_extras_required_uses_extra_name() -> None:
     from recotem.datasource.ga4 import GA4Source
 
     assert GA4Source.extras_required == ["ga4"]
+
+
+# ---------------------------------------------------------------------------
+# PR #92 follow-up — non-numeric eventCount maps to DataSourceError (exit 3),
+# not a bare ValueError that would surface as exit 1 (_EXIT_UNKNOWN).
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_weight_column_non_numeric_string_raises_datasource_error(
+    monkeypatch,
+) -> None:
+    """A non-numeric eventCount (e.g. ``"abc"``) must surface as DataSourceError.
+
+    Without the explicit wrap, ``pd.to_numeric(errors="raise")`` would emit a
+    bare ValueError that propagates through ``fetch`` and lands at exit code 1
+    (_EXIT_UNKNOWN) rather than the documented 3 (_EXIT_DATASOURCE).
+    """
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = _make_page(
+        rows=[
+            _row(["u1", "i1", "20260101", "purchase"], "abc"),
+        ],
+        row_count=1,
+    )
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    with pytest.raises(DataSourceError, match="(?i)numeric|eventCount") as exc_info:
+        src.fetch(_fetch_ctx())
+    # Cause is preserved for debug-mode tracebacks.
+    assert exc_info.value.__cause__ is not None
+    assert isinstance(exc_info.value.__cause__, (ValueError, TypeError))

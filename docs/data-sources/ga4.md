@@ -96,6 +96,16 @@ discard the weight from the other event types. irspack aggregates repeated
   paginated run.  The deadline is checked **before** and **after** every
   `run_report` call, so an unlucky page that consumes the retry budget cannot
   overshoot by another full retry cycle.
+- **Budget interaction:** the per-page `Retry(timeout=3 × api_timeout_seconds)`
+  budget can in the worst case consume the full 3× wait before raising.
+  Combined with the per-attempt `timeout=api_timeout_seconds`, a single page
+  in worst-case retry can therefore burn ~`3 × api_timeout_seconds`.  The
+  outer 10× wall-clock budget is intentionally a circuit-breaker, not a
+  generous cap: under sustained `RESOURCE_EXHAUSTED` back-pressure it will
+  abort after roughly three exhausted pages rather than letting the run
+  drift unboundedly.  Tighten the query or raise `api_timeout_seconds`
+  (which also raises the wall-clock budget linearly) if your workload
+  legitimately requires more retried pages.
 
 ## Environment variables
 

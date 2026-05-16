@@ -1137,21 +1137,22 @@ def test_fetch_http_bytes_rejects_embedded_credentials_in_url(
 def test_assert_host_public_numeric_public_ip_returns_ip_string(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """assert_host_public must return the IP string (NOT None) for a public numeric IP.
+    """assert_host_public must return the IP list (NOT None) for a public numeric IP.
 
-    The docstring previously claimed it returned None for numeric-IP hosts; the
-    actual code validates the address and returns str(addrs[0]) on the public-IP
-    fast path.  This test pins that behaviour so any regression (e.g. an
-    erroneous early-return of None) is caught immediately.
+    The function validates the address and returns the resolved IP list on the
+    public-IP fast path.  Returning None here would skip IP pinning and weaken
+    the SSRF guard.  Returning the IP list (rather than a single string) lets
+    SQL callers re-verify the host across both IPv4 and IPv6 families without
+    spurious "DNS rebinding detected" failures on dual-stack hosts.
     """
     monkeypatch.setenv("RECOTEM_HTTP_ALLOW_PRIVATE", "0")
     result = assert_host_public("http://8.8.8.8/data.csv", allow_private=False)
     assert result is not None, (
-        "assert_host_public must return the IP string for a public numeric IP, "
+        "assert_host_public must return the IP list for a public numeric IP, "
         "not None. Returning None would skip IP-pinning and weaken the SSRF guard."
     )
-    assert result == "8.8.8.8", (
-        f"assert_host_public must return '8.8.8.8' for http://8.8.8.8/data.csv; "
+    assert result == ["8.8.8.8"], (
+        f"assert_host_public must return ['8.8.8.8'] for http://8.8.8.8/data.csv; "
         f"got {result!r}"
     )
 

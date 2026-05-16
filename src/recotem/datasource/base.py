@@ -15,12 +15,23 @@ class DataSourceError(Exception):
 
     Corresponds to exit code 3 in the train error contract.
 
+    The ``code`` class attribute classifies this as a domain error, so
+    ``recotem.training.pipeline`` records ``error_code="datasource_error"`` and
+    suppresses ``exc_info`` in the ``train_error`` log event.  This prevents
+    chained driver exceptions (psycopg ``OperationalError`` etc., which can
+    embed DSN userinfo or hostnames in their ``__str__``) from being rendered
+    into the structlog ``exception`` field by ``format_exc_info`` — that
+    processor runs AFTER ``redact_sensitive_keys`` and would otherwise emit a
+    non-redacted traceback string.
+
     Parameters
     ----------
     message:
         Human-readable description.  Must not contain cloud credentials,
         API keys, or signing keys.
     """
+
+    code: ClassVar[str] = "datasource_error"
 
     def __init__(self, message: str) -> None:
         super().__init__(message)

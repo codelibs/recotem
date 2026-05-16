@@ -48,7 +48,7 @@ source:
 | `lookback_days` | XOR | — | 1–3650; rolling window ending at `yesterday` (the previous complete day in the property's timezone). |
 | `start_date` / `end_date` | XOR | — | ISO dates. Both required if either is set; `start <= end`. |
 | `max_rows` | yes | — | Hard cap on rows returned. Valid range `[1, 50_000_000]` (out-of-range raises ValidationError). |
-| `weight_column` | no | `event_count` | Output DataFrame column name for the `eventCount` metric. Must match `schema.weight_column`. |
+| `weight_column` | no | `event_count` | Output DataFrame column name for the `eventCount` metric. Must match `schema.weight_column`. Validation rejects values that collide with any of the four dimension keys (`user_dimension`, `item_dimension`, `time_dimension`, or the literal `eventName`) — a collision would silently overwrite a dimension or the metric in the per-row dict. |
 | `api_timeout_seconds` | no | 60 | Valid range `[5, 600]` (out-of-range raises ValidationError). |
 
 ## Authentication
@@ -88,8 +88,14 @@ discard the weight from the other event types. irspack aggregates repeated
 - Retries `RESOURCE_EXHAUSTED` / `UNAVAILABLE` gRPC codes via
   `google.api_core.retry.Retry` (initial 1 s, exponential backoff up to 30 s,
   total budget = 3 × `api_timeout_seconds`).
-- `PERMISSION_DENIED` / `NOT_FOUND` → immediate `DataSourceError` pointing
-  at the role / property ID.
+- `PERMISSION_DENIED` → immediate `DataSourceError` naming the role
+  (`roles/analytics.viewer`) and the property ID.
+- All other `GoogleAPICallError` subclasses (e.g. `NOT_FOUND`, `INVALID_ARGUMENT`)
+  → immediate `DataSourceError` carrying the API error class name and message.
+- A per-fetch wall-clock budget of `10 × api_timeout_seconds` bounds the entire
+  paginated run.  The deadline is checked **before** and **after** every
+  `run_report` call, so an unlucky page that consumes the retry budget cannot
+  overshoot by another full retry cycle.
 
 ## Environment variables
 

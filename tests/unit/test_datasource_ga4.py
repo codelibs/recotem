@@ -86,6 +86,46 @@ def test_ga4_date_range_fixed_order() -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# I-1 — weight_column must not collide with dimension keys
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "weight_column",
+    ["userId", "userPseudoId", "itemId", "date", "dateHour", "eventName"],
+)
+def test_ga4_weight_column_collision_rejected(weight_column) -> None:
+    """weight_column that matches any dimension key must fail validation.
+
+    Without this validator the fetch loop's dict-literal would silently
+    overwrite the dimension value with the metric (or vice versa) and the
+    resulting DataFrame would be missing a column.
+    """
+    user_dim = "userPseudoId" if weight_column == "userPseudoId" else "userId"
+    item_dim = "itemId"
+    time_dim = "dateHour" if weight_column == "dateHour" else "date"
+    with pytest.raises(ValidationError, match="(?i)collides"):
+        _cfg(
+            user_dimension=user_dim,
+            item_dimension=item_dim,
+            time_dimension=time_dim,
+            weight_column=weight_column,
+        )
+
+
+def test_ga4_weight_column_collision_custom_item_dimension() -> None:
+    """The validator also catches collisions with non-default item_dimension."""
+    with pytest.raises(ValidationError, match="(?i)collides"):
+        _cfg(item_dimension="productId", weight_column="productId")
+
+
+def test_ga4_weight_column_unique_passes() -> None:
+    """A weight_column distinct from every dimension key validates cleanly."""
+    c = _cfg(weight_column="purchase_count")
+    assert c.weight_column == "purchase_count"
+
+
 def test_ga4_max_rows_required_and_clamped() -> None:
     with pytest.raises(ValidationError):
         _cfg(max_rows=0)
@@ -645,6 +685,145 @@ def test_retry_policy_and_timeout_kwarg_passed_to_run_report(monkeypatch) -> Non
 
 
 # ---------------------------------------------------------------------------
+# C-2 — Retry predicate actually retries the right exception types
+# ---------------------------------------------------------------------------
+
+
+def test_retry_policy_predicate_retries_resource_exhausted(monkeypatch) -> None:
+    """The Retry predicate must return True for ResourceExhausted."""
+    from google.api_core.exceptions import ResourceExhausted
+
+    fake_mod = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.return_value = MagicMock()
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    predicate = src._retry_policy()._predicate
+    assert predicate(ResourceExhausted("quota exhausted")) is True
+
+
+def test_retry_policy_predicate_retries_service_unavailable(monkeypatch) -> None:
+    """The Retry predicate must return True for ServiceUnavailable."""
+    from google.api_core.exceptions import ServiceUnavailable
+
+    fake_mod = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.return_value = MagicMock()
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    predicate = src._retry_policy()._predicate
+    assert predicate(ServiceUnavailable("backend unavailable")) is True
+
+
+def test_retry_policy_predicate_does_not_retry_permission_denied(monkeypatch) -> None:
+    """PermissionDenied is a permanent IAM failure — retries are wasted budget."""
+    from google.api_core.exceptions import PermissionDenied
+
+    fake_mod = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.return_value = MagicMock()
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    predicate = src._retry_policy()._predicate
+    assert predicate(PermissionDenied("forbidden")) is False
+
+
+def test_retry_policy_predicate_does_not_retry_invalid_argument(monkeypatch) -> None:
+    """InvalidArgument (400) is a recipe authoring bug — not retriable."""
+    from google.api_core.exceptions import InvalidArgument
+
+    fake_mod = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.return_value = MagicMock()
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    predicate = src._retry_policy()._predicate
+    assert predicate(InvalidArgument("bad arg")) is False
+
+
+def test_retry_policy_predicate_does_not_retry_value_error(monkeypatch) -> None:
+    """Generic ValueError is not in the predicate set."""
+    fake_mod = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.return_value = MagicMock()
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+    predicate = src._retry_policy()._predicate
+    assert predicate(ValueError("not retryable")) is False
+
+
+# ---------------------------------------------------------------------------
+# M-7 — GA4 event_names exact-40-char boundary accepted
+# ---------------------------------------------------------------------------
+
+
+def test_ga4_event_names_at_40_char_boundary_accepted() -> None:
+    """Exactly 40 chars (1 prefix + 39 trailing) is the allowed maximum.
+
+    The regex ``^[A-Za-z_][A-Za-z0-9_]{0,39}$`` caps total length at 40.
+    """
+    c = _cfg(event_names=["a" * 40])
+    assert c.event_names == ["a" * 40]
+
+
+# ---------------------------------------------------------------------------
+# M-7 — fetch with non-default dimension keys produces the correct columns
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_non_default_dimensions_yield_correct_columns(monkeypatch) -> None:
+    """Custom user/item/time dimensions must appear as DataFrame columns.
+
+    Regression for I-1's neighbouring concern: even after the validator
+    rejects collisions, the fetch loop must still wire each dimension to
+    its configured key — not the default 'userId'/'itemId'/'date'.  A
+    copy-paste swap between the three would not be caught by tests that
+    only ever use the defaults.
+    """
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    resp = _make_page(
+        rows=[
+            _row(["pseudo_user_A", "product_42", "2026010110", "purchase"], "3"),
+            _row(["pseudo_user_B", "product_99", "2026010111", "purchase"], "1"),
+        ],
+        row_count=2,
+    )
+    fake_client.run_report.return_value = resp
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(
+        _cfg(
+            user_dimension="userPseudoId",
+            item_dimension="productId",
+            time_dimension="dateHour",
+        )
+    )
+    df = src.fetch(_fetch_ctx())
+
+    # Columns must reflect the recipe values, not the defaults.
+    assert set(df.columns) == {"userPseudoId", "productId", "dateHour", "event_count"}
+    assert df.iloc[0]["userPseudoId"] == "pseudo_user_A"
+    assert df.iloc[0]["productId"] == "product_42"
+    assert df.iloc[0]["dateHour"] == "2026010110"
+    assert df.iloc[0]["event_count"] == 3
+
+
+# ---------------------------------------------------------------------------
 # Quota all-missing warning test
 # ---------------------------------------------------------------------------
 
@@ -672,10 +851,152 @@ def test_record_quota_all_attrs_missing_emits_warning(monkeypatch) -> None:
     response.property_quota = quota_obj
 
     with structlog.testing.capture_logs() as cap:
-        src._record_quota("my-recipe", response)
+        emitted = src._record_quota("my-recipe", response)
 
     event_names = [e["event"] for e in cap]
     assert "ga4_quota_all_attrs_missing" in event_names
+    assert emitted is True, "first invocation must report it emitted the warning"
+
+
+# ---------------------------------------------------------------------------
+# M-3 — once-per-fetch suppression of ga4_quota_all_attrs_missing
+# ---------------------------------------------------------------------------
+
+
+def test_record_quota_warning_emitted_once_per_fetch(monkeypatch) -> None:
+    """When the caller passes warning_already_emitted=True, the warning is suppressed.
+
+    Long-running paginated fetches previously emitted one WARNING per page;
+    the caller now flips a flag after the first warning so subsequent pages
+    do not re-emit it.
+    """
+    import structlog.testing
+
+    fake_mod = MagicMock()
+    fake_mod.BetaAnalyticsDataClient.return_value = MagicMock()
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg())
+
+    quota_obj = MagicMock()
+    quota_obj.tokens_per_hour = None
+    quota_obj.tokens_per_day = None
+    quota_obj.concurrent_requests = None
+    quota_obj.server_errors_per_project_per_hour = None
+    response = MagicMock()
+    response.property_quota = quota_obj
+
+    with structlog.testing.capture_logs() as cap:
+        emitted = src._record_quota("r", response, warning_already_emitted=True)
+
+    event_names = [e["event"] for e in cap]
+    assert "ga4_quota_all_attrs_missing" not in event_names, (
+        "warning must be suppressed when caller has already emitted it"
+    )
+    assert emitted is False
+
+
+def test_fetch_emits_quota_warning_at_most_once_across_pages(monkeypatch) -> None:
+    """Even across many pages with empty property_quota, the warning fires once.
+
+    Regression for M-3: pre-fix, a 500-page fetch would log 500 copies of
+    ga4_quota_all_attrs_missing.
+    """
+    import structlog.testing
+
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+
+    # Three full pages with empty quota, then a short page to terminate.
+    def _empty_quota_response(rows_count, full_page):
+        page_rows = [
+            _row(["u1", f"i{i}", "20260101", "purchase"], "1")
+            for i in range(rows_count)
+        ]
+        resp = _make_page(rows=page_rows, row_count=rows_count, has_data_loss=False)
+        # Override property_quota with one that has all attrs = None.
+        empty_quota = MagicMock()
+        empty_quota.tokens_per_hour = None
+        empty_quota.tokens_per_day = None
+        empty_quota.concurrent_requests = None
+        empty_quota.server_errors_per_project_per_hour = None
+        resp.property_quota = empty_quota
+        return resp
+
+    page_size = 100_000
+    fake_client.run_report.side_effect = [
+        _empty_quota_response(page_size, full_page=True),
+        _empty_quota_response(page_size, full_page=True),
+        _empty_quota_response(1, full_page=False),  # short page → terminates
+    ]
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg(max_rows=10_000_000))
+
+    with structlog.testing.capture_logs() as cap:
+        src.fetch(_fetch_ctx())
+
+    warning_count = sum(1 for e in cap if e["event"] == "ga4_quota_all_attrs_missing")
+    assert warning_count == 1, (
+        f"expected exactly one ga4_quota_all_attrs_missing across pages, "
+        f"got {warning_count}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M-2 — post-call wall-clock deadline check
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_post_call_deadline_check_fires(monkeypatch) -> None:
+    """If retry budget within run_report exceeds the wall-clock budget, raise.
+
+    The pre-fix deadline check only ran at the top of the loop, so an
+    unlucky page where the SDK's per-call Retry(timeout=api_timeout*3)
+    burned the entire budget could let one extra page through before
+    surfacing the overrun.  The post-call check catches it immediately.
+    """
+    import time as _time
+
+    fake_mod = MagicMock()
+    fake_client = MagicMock()
+    full_page = _make_page(
+        rows=[
+            _row(["u1", f"i{i}", "20260101", "purchase"], "1") for i in range(100_000)
+        ],
+        row_count=100_000,
+        has_data_loss=False,
+    )
+    fake_client.run_report.return_value = full_page
+    fake_mod.BetaAnalyticsDataClient.return_value = fake_client
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
+    monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
+
+    from recotem.datasource.ga4 import GA4Source
+
+    src = GA4Source(_cfg(max_rows=10_000_000, api_timeout_seconds=5))
+
+    # First monotonic() call (top-of-loop, page 0) is below the deadline.
+    # Second call (post-run_report) is above the deadline → must raise.
+    start = 1_000_000.0
+    deadline_offset = float(5) * 10.0  # api_timeout_seconds=5 → 50s budget
+    calls = iter(
+        [
+            start,  # deadline_wall computation
+            start + 1.0,  # page 0, top-of-loop (below)
+            start + deadline_offset + 1.0,  # page 0, post-call (above) → raise
+        ]
+    )
+    monkeypatch.setattr(_time, "monotonic", lambda: next(calls))
+
+    with pytest.raises(DataSourceError, match="(?i)wall-clock budget.*after page 0"):
+        src.fetch(_fetch_ctx())
 
 
 # ---------------------------------------------------------------------------

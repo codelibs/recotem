@@ -65,6 +65,32 @@ class GA4Config(BaseModel):
                 raise ValueError("start_date must be <= end_date")
         return self
 
+    @model_validator(mode="after")
+    def _no_weight_column_collision(self) -> GA4Config:
+        """Reject weight_column values that collide with dimension keys.
+
+        The fetch loop builds each page record as a dict with one entry per
+        dimension (``user_dimension`` / ``item_dimension`` / ``time_dimension``
+        / the literal ``"eventName"`` key) plus the weight column.  If the
+        weight column matches any of those names, the later dict-literal entry
+        silently overwrites the earlier one — losing either a dimension value
+        or the metric.  Reject up front at config-validation time so the
+        problem surfaces as a clear ValidationError rather than as a missing
+        or wrong column at fetch time.
+        """
+        reserved = {
+            self.user_dimension,
+            self.item_dimension,
+            self.time_dimension,
+            "eventName",
+        }
+        if self.weight_column in reserved:
+            raise ValueError(
+                f"weight_column={self.weight_column!r} collides with a dimension "
+                f"name (reserved: {sorted(reserved)}); choose a different label."
+            )
+        return self
+
 
 class GA4Source:
     type_name: ClassVar[str] = "ga4"
@@ -226,6 +252,11 @@ class GA4Source:
         page_frames: list[pd.DataFrame] = []
         offset = 0
         total_rows_accumulated = 0
+        # Track whether we've already complained about an entirely-empty
+        # property_quota response.  Without this, very long fetches would
+        # emit one WARNING per page (potentially hundreds), drowning out
+        # actionable signals in the log stream.
+        quota_warning_emitted = False
 
         # Per-fetch wall-clock budget: 10× the per-attempt timeout.  At the
         # default api_timeout=60 s that is 10 minutes; the budget scales with
@@ -257,6 +288,18 @@ class GA4Source:
                     f"GA4 fetch failed on page {page_idx}: {type(exc).__name__}: {exc}"
                 ) from exc
 
+            # Re-check the wall-clock budget after the SDK's own Retry policy
+            # may have consumed several seconds on this page.  Without this
+            # post-call check, an unlucky page that exhausts the per-call
+            # ``Retry(timeout=api_timeout*3)`` budget could overshoot the
+            # outer ``deadline_wall`` by up to one full retry cycle before
+            # the next iteration's top-of-loop check fires.
+            if time.monotonic() > deadline_wall:
+                raise DataSourceError(
+                    f"GA4 fetch exceeded total wall-clock budget of "
+                    f"{self._config.api_timeout_seconds * 10}s after page {page_idx}"
+                )
+
             # Warn if the GA4 backend omitted rows due to cardinality limits.
             metadata = getattr(response, "metadata", None)
             if metadata is not None and getattr(
@@ -269,7 +312,8 @@ class GA4Source:
                 )
 
             inc_ga4_pages(ctx.recipe_name)
-            self._record_quota(ctx.recipe_name, response)
+            if self._record_quota(ctx.recipe_name, response, quota_warning_emitted):
+                quota_warning_emitted = True
 
             page_rows = list(response.rows or [])
             page_records = []
@@ -347,10 +391,21 @@ class GA4Source:
         )
         return df
 
-    def _record_quota(self, recipe: str, response: Any) -> None:
+    def _record_quota(
+        self, recipe: str, response: Any, warning_already_emitted: bool = False
+    ) -> bool:
+        """Record quota gauges; return True if an all-missing warning fired now.
+
+        ``warning_already_emitted`` lets the caller suppress repeated
+        ``ga4_quota_all_attrs_missing`` warnings on subsequent pages of the
+        same fetch — for long-running paginated fetches the warning was
+        previously emitted on every page and would drown out actionable
+        log signals.  The return value tells the caller whether *this*
+        invocation just emitted the warning, so it can flip its own flag.
+        """
         quota = getattr(response, "property_quota", None)
         if quota is None:
-            return
+            return False
         parsed_count = 0
         for attr in (
             "tokens_per_hour",
@@ -373,5 +428,7 @@ class GA4Source:
                     attr=attr,
                     error=type(exc).__name__,
                 )
-        if parsed_count == 0:
+        if parsed_count == 0 and not warning_already_emitted:
             _log.warning("ga4_quota_all_attrs_missing", recipe=recipe)
+            return True
+        return False

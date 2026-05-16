@@ -46,7 +46,7 @@ moving parts to a recipe file and a binary artifact:
 
 - **CSV / Parquet** — local files or any fsspec-reachable URL (S3, GCS, Azure, HTTPS).
 - **BigQuery** — SQL queries with Storage Read API support.
-- **SQL** (PostgreSQL / MySQL / SQLite) — via SQLAlchemy 2. See `docs/data-sources/sql.md`.
+- **SQL** (PostgreSQL / MySQL / MariaDB / SQLite) — via SQLAlchemy 2. See `docs/data-sources/sql.md`.
 - **Google Analytics 4** — direct Data API integration (no BigQuery Export needed). See `docs/data-sources/ga4.md`.
 - **Custom plugins** — implement the `DataSource` Protocol and register via `recotem.datasources` entry-points.
 

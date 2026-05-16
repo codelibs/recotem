@@ -182,7 +182,7 @@ def _is_address_internal(addr: ipaddress._BaseAddress) -> bool:
     )
 
 
-def assert_host_public(url: str, *, allow_private: bool) -> str | None:
+def assert_host_public(url: str, *, allow_private: bool) -> list[str] | None:
     """Resolve the host portion of ``url`` and reject private/loopback/link-local IPs.
 
     Used by:
@@ -196,9 +196,15 @@ def assert_host_public(url: str, *, allow_private: bool) -> str | None:
 
     Return value
     ------------
-    Returns the resolved IP string for callers that can pin the actual
-    connect to that IP (``_open_with_pinned_ip``).  This closes a
-    DNS-rebinding TOCTOU window between this check and the connect call.
+    Returns the full list of resolved IP strings (IPv4 + IPv6) when every
+    address is public.  Callers that can pin a single connect IP
+    (``_open_with_pinned_ip``) use ``addrs[0]``.  Callers that have to
+    re-verify the hostname before the driver's own connect (SQL) keep the
+    whole set so a legitimately dual-stack host that resolves to both an
+    IPv4 and an IPv6 address is not mis-classified as a DNS rebinding on
+    the second lookup.  Returning the full set closes the family-mismatch
+    false-positive that occurs when the pin came from one family and the
+    re-resolution returns the other.
 
     Returns ``None`` when ``allow_private`` is True (the caller has opted out
     of SSRF defence and pinning is unnecessary).
@@ -208,7 +214,7 @@ def assert_host_public(url: str, *, allow_private: bool) -> str | None:
     None.
 
     Best-effort caveat for callers (e.g. SQL) that cannot pin the connect IP
-    directly: the returned IP can still be used to re-verify the hostname
+    directly: the returned IPs can still be used to re-verify the hostname
     immediately before connect (catches most DNS rebinding) but the
     library-level connect may re-resolve.  Document the caveat in the caller.
 
@@ -237,12 +243,11 @@ def assert_host_public(url: str, *, allow_private: bool) -> str | None:
                 f"(resolved to {addr}). Set RECOTEM_HTTP_ALLOW_PRIVATE=1 to "
                 "allow internal HTTP origins."
             )
-    # All resolved addresses are public; pin the first one for the actual
-    # TCP connect so a follow-up DNS lookup cannot rebind the hostname to
-    # a private IP between the SSRF check and the connect (MAJOR-2 / DNS
-    # rebinding TOCTOU).  We deliberately keep this scoped to a single
-    # request — no caching is shared across requests.
-    return str(addrs[0])
+    # All resolved addresses are public; return them all so callers can pin
+    # the first for an actual TCP connect (closes DNS-rebinding TOCTOU,
+    # MAJOR-2) while callers that must re-verify across DNS families later
+    # (SQL) still recognise legitimate dual-stack responses.
+    return [str(addr) for addr in addrs]
 
 
 _COMPRESSION_MAP: dict[str, str] = {
@@ -497,15 +502,16 @@ def fetch_http_bytes(
 
         # SSRF guard: re-resolve and re-check on every hop so that a 302 to a
         # CNAME pointing into RFC1918 is refused, not just the original URL.
-        # The returned IP is pinned into the per-hop opener so urllib's own
-        # connect() does not perform a *second* DNS lookup that an attacker
-        # controlling the authoritative DNS could rebind to a private IP.
+        # The returned IP list is non-empty for the SSRF-enforced path; we pin
+        # the first into the per-hop opener so urllib's own connect() does not
+        # perform a *second* DNS lookup that an attacker controlling the
+        # authoritative DNS could rebind to a private IP.
         # See MAJOR-2: DNS rebinding TOCTOU mitigation.
-        pinned_ip = assert_host_public(current_url, allow_private=allow_private)
+        pinned_ips = assert_host_public(current_url, allow_private=allow_private)
 
         opener = (
-            _build_pinned_opener(pinned_ip)
-            if pinned_ip is not None
+            _build_pinned_opener(pinned_ips[0])
+            if pinned_ips
             else _build_no_redirect_opener()
         )
 

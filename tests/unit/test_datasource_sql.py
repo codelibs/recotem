@@ -384,7 +384,13 @@ def test_apply_read_only_raises_on_failure(monkeypatch, dialect) -> None:
         src._dialect = orig_dialect
 
 
-def test_apply_read_only_sqlite_is_noop(monkeypatch) -> None:
+def test_apply_read_only_sqlite_issues_query_only_pragma(monkeypatch) -> None:
+    """SQLite now enforces read-only via PRAGMA query_only=ON, not a no-op.
+
+    The previous silent no-op left users surprised when a Postgres-derived
+    recipe (DELETE / UPDATE) ran successfully against SQLite.  The pragma
+    rejects writes for the rest of the session.
+    """
     from unittest.mock import MagicMock
 
     from recotem.datasource.sql import SQLSource
@@ -392,11 +398,74 @@ def test_apply_read_only_sqlite_is_noop(monkeypatch) -> None:
     monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
     src = SQLSource(_make_cfg())
     mock_conn = MagicMock()
-    mock_conn.execute.side_effect = Exception("should not be called")
 
-    # Must not raise — sqlite path returns early before execute()
     src._apply_read_only(mock_conn)
-    mock_conn.execute.assert_not_called()
+
+    # Exactly one execute call, carrying the PRAGMA.
+    assert mock_conn.execute.call_count == 1, (
+        f"expected one PRAGMA execute, got {mock_conn.execute.call_count}"
+    )
+    pragma_arg = mock_conn.execute.call_args.args[0]
+    # SQLAlchemy ``text`` object — render via str() (compiled).
+    assert "PRAGMA query_only = ON" in str(pragma_arg), (
+        f"expected PRAGMA query_only=ON, got {pragma_arg!r}"
+    )
+
+
+def test_apply_read_only_sqlite_pragma_failure_raises(monkeypatch) -> None:
+    """If the PRAGMA execution itself fails, training must fail closed.
+
+    The previous SQLite path was an unconditional no-op; we now treat the
+    PRAGMA call as a hard safety control whose failure aborts the run.
+    """
+    from unittest.mock import MagicMock
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+    mock_conn = MagicMock()
+    mock_conn.execute.side_effect = Exception("perm denied")
+
+    with pytest.raises(DataSourceError, match="read-only mode on sqlite"):
+        src._apply_read_only(mock_conn)
+
+
+def test_apply_read_only_sqlite_actually_blocks_writes(monkeypatch, tmp_path) -> None:
+    """End-to-end: after PRAGMA query_only=ON, INSERT/UPDATE/DELETE are rejected.
+
+    This complements the unit-level call-count assertions with a real
+    SQLite execution to ensure the pragma is wired correctly through
+    SQLAlchemy and actually has the documented effect.
+    """
+    import sqlite3
+
+    import sqlalchemy
+    from sqlalchemy import text
+
+    from recotem.datasource.sql import SQLSource
+
+    db = tmp_path / "rw.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE events (user_id TEXT, item_id TEXT, ts TEXT)")
+    con.execute("INSERT INTO events VALUES ('u1', 'i1', '2026-01-01')")
+    con.commit()
+    con.close()
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+    src = SQLSource(_make_cfg())
+
+    engine = sqlalchemy.create_engine(str(src._url))
+    try:
+        with engine.connect() as conn:
+            src._apply_read_only(conn)
+            # PRAGMA is in effect; INSERT must be rejected at execute time.
+            with pytest.raises(sqlalchemy.exc.OperationalError):
+                conn.execute(
+                    text("INSERT INTO events VALUES ('u2', 'i2', '2026-01-02')")
+                )
+    finally:
+        engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -419,14 +488,63 @@ def test_apply_statement_timeout_raises_on_failure(monkeypatch, dialect) -> None
     orig_dialect = src._dialect
     src._dialect = dialect
     try:
-        with pytest.raises(DataSourceError, match="statement_timeout"):
+        with pytest.raises(DataSourceError, match="statement_timeout") as excinfo:
             src._apply_statement_timeout(mock_conn)
+        # Regression for I-3: the driver-supplied message must NOT be folded
+        # into the user-facing DataSourceError str(); only the exception class
+        # name and the chained __cause__ carry that detail.  This forecloses
+        # any future driver from leaking DSN userinfo / hostnames via its own
+        # __str__ implementation when SET LOCAL / SET SESSION fails.
+        assert "perm denied" not in str(excinfo.value), (
+            "DataSourceError must not include the raw driver exception message; "
+            f"got {excinfo.value!s}"
+        )
     finally:
         src._dialect = orig_dialect
 
 
-def test_apply_statement_timeout_sqlite_is_noop(monkeypatch) -> None:
+@pytest.mark.parametrize("dialect", ["postgresql", "mysql", "mariadb"])
+def test_apply_read_only_does_not_leak_driver_exc_message(monkeypatch, dialect) -> None:
+    """I-3 regression — driver exception message stays out of the wrapper.
+
+    psycopg / pymysql operational errors can include DSN userinfo or
+    hostnames in their ``__str__``.  The wrapping DataSourceError must
+    rely on the class name only.
+    """
     from unittest.mock import MagicMock
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+    mock_conn = MagicMock()
+    secret = "password authentication failed for user alice"
+    mock_conn.execute.side_effect = Exception(secret)
+
+    orig_dialect = src._dialect
+    src._dialect = dialect
+    try:
+        with pytest.raises(DataSourceError) as excinfo:
+            src._apply_read_only(mock_conn)
+        assert secret not in str(excinfo.value), (
+            f"driver-supplied detail leaked into DataSourceError: {excinfo.value!s}"
+        )
+        # But the chained __cause__ still carries the detail for debugging.
+        assert isinstance(excinfo.value.__cause__, Exception)
+        assert secret in str(excinfo.value.__cause__)
+    finally:
+        src._dialect = orig_dialect
+
+
+def test_apply_statement_timeout_sqlite_warns_and_does_not_execute(monkeypatch) -> None:
+    """SQLite still has no statement_timeout; emit a warning instead of a no-op.
+
+    The warning makes operators aware that the documented safety control is
+    not in effect on this dialect, rather than letting them assume it is.
+    """
+    from unittest.mock import MagicMock
+
+    import structlog
 
     from recotem.datasource.sql import SQLSource
 
@@ -435,9 +553,14 @@ def test_apply_statement_timeout_sqlite_is_noop(monkeypatch) -> None:
     mock_conn = MagicMock()
     mock_conn.execute.side_effect = Exception("should not be called")
 
-    # Must not raise — sqlite path returns early before execute()
-    src._apply_statement_timeout(mock_conn)
+    with structlog.testing.capture_logs() as logs:
+        src._apply_statement_timeout(mock_conn)
+
     mock_conn.execute.assert_not_called()
+    events = [r["event"] for r in logs]
+    assert "sql_statement_timeout_unsupported_on_sqlite" in events, (
+        f"expected sql_statement_timeout_unsupported_on_sqlite warning, got {events!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -541,8 +664,9 @@ def test_ipv6_public_hostname_not_blocked(monkeypatch) -> None:
     monkeypatch.setenv(
         "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
     )
-    # Patch assert_host_public to avoid real DNS lookup in CI.
-    with patch("recotem.datasource.sql.assert_host_public", return_value="203.0.113.1"):
+    # Patch assert_host_public to avoid real DNS lookup in CI.  The function
+    # now returns the full list of resolved public IPs (not a single string).
+    with patch("recotem.datasource.sql.assert_host_public", return_value=["8.8.8.8"]):
         # Must not raise DataSourceError for the SSRF check.
         src = SQLSource(_make_cfg())
     assert src._dialect == "postgresql"
@@ -841,23 +965,27 @@ def test_rebinding_different_ip_raises(monkeypatch) -> None:
         "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
     )
 
-    # During __init__, assert_host_public returns a pinned public IP.
+    # During __init__, assert_host_public returns the public IP list.  Pin
+    # one IPv4 plus one IPv6 to represent a realistic dual-stack hostname.
     with patch(
         "recotem.datasource.sql.assert_host_public",
-        return_value="203.0.113.1",
+        return_value=["8.8.8.8", "2606:4700:4700::1111"],
     ):
         src = SQLSource(_make_cfg())
 
-    assert src._pinned_ips == {"203.0.113.1"}
+    assert src._pinned_ips == {"8.8.8.8", "2606:4700:4700::1111"}
 
-    # During _check_rebinding, socket.gethostbyname_ex returns a different IP
+    # During _check_rebinding, socket.getaddrinfo returns a different IP
     # simulating a DNS rebinding attack.
-    def fake_gethostbyname_ex_rebind(host):
-        return (host, [], ["10.0.0.1"])
+    import socket
+
+    def fake_getaddrinfo_rebind(host, port, *args, **kwargs):
+        # Return only the rebound private IP — no overlap with the pinned set.
+        return [(socket.AF_INET, 0, 0, "", ("10.0.0.1", 0))]
 
     with patch(
-        "recotem.datasource.sql.socket.gethostbyname_ex",
-        side_effect=fake_gethostbyname_ex_rebind,
+        "recotem.datasource.sql.socket.getaddrinfo",
+        side_effect=fake_getaddrinfo_rebind,
     ):
         with pytest.raises(DataSourceError, match="(?i)rebind"):
             src._check_rebinding()
@@ -878,17 +1006,19 @@ def test_rebinding_skipped_for_numeric_ip(monkeypatch, ip_literal) -> None:
     monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"postgresql://u:p@{encoded}/db")
     src = SQLSource(_make_cfg())
 
-    gethostbyname_called = []
+    import socket
 
-    def fake_gethostbyname_ex(host):
-        gethostbyname_called.append(host)
-        return (host, [], ["10.0.0.1"])
+    getaddrinfo_called = []
 
-    with patch("recotem.datasource.sql.socket.gethostbyname_ex", fake_gethostbyname_ex):
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        getaddrinfo_called.append(host)
+        return [(socket.AF_INET, 0, 0, "", ("10.0.0.1", 0))]
+
+    with patch("recotem.datasource.sql.socket.getaddrinfo", fake_getaddrinfo):
         src._check_rebinding()  # must not raise
 
-    assert not gethostbyname_called, (
-        "socket.gethostbyname_ex must not be called for numeric IP literals"
+    assert not getaddrinfo_called, (
+        "socket.getaddrinfo must not be called for numeric IP literals"
     )
 
 
@@ -918,7 +1048,7 @@ def test_safe_dsn_runtimeerror_propagates(monkeypatch) -> None:
 
     with patch(
         "recotem._http_fetch._resolve_host_addresses",
-        return_value=[__import__("ipaddress").ip_address("203.0.113.1")],
+        return_value=[__import__("ipaddress").ip_address("8.8.8.8")],
     ):
         with patch(
             "sqlalchemy.engine.url.URL.create",
@@ -986,3 +1116,537 @@ def test_extras_required_are_extra_names() -> None:
     from recotem.datasource.sql import SQLSource
 
     assert SQLSource.extras_required == ["postgres", "mysql", "sqlite"]
+
+
+# ---------------------------------------------------------------------------
+# C-1 regression — IPv6 rebinding false-positive
+#
+# The previous _check_rebinding used socket.gethostbyname_ex which is
+# IPv4-only.  On a dual-stack hostname whose first resolved address (and
+# therefore the pinned IP) happened to be IPv6, the re-check would never see
+# the pinned address and would falsely raise "DNS rebinding detected" on
+# every probe/fetch.  These tests assert that the rebinding check now uses
+# getaddrinfo, sees IPv4+IPv6 records, and that any single-family overlap
+# with the pinned set is sufficient to clear the check.
+# ---------------------------------------------------------------------------
+
+
+def test_rebinding_dual_stack_ipv4_pin_ipv6_rebind_detected(monkeypatch) -> None:
+    """Pin = IPv4 only.  Re-resolve returns IPv6 only and IPv4 differs → rebind.
+
+    This is the strict-attack case where DNS legitimately produces two
+    families but the IPv4 record changed — we still detect it.
+    """
+    import socket
+    import sys
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
+    )
+
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        return_value=["8.8.8.8"],
+    ):
+        src = SQLSource(_make_cfg())
+
+    # Re-resolve returns a different IPv4 plus an IPv6 — no overlap with pin.
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [
+            (socket.AF_INET, 0, 0, "", ("1.1.1.1", 0)),
+            (socket.AF_INET6, 0, 0, "", ("2606:4700:4700::1001", 0)),
+        ]
+
+    with patch("recotem.datasource.sql.socket.getaddrinfo", fake_getaddrinfo):
+        with pytest.raises(DataSourceError, match="(?i)rebind"):
+            src._check_rebinding()
+
+
+def test_rebinding_dual_stack_ipv6_pin_ipv4_rebind_overlap_clears(monkeypatch) -> None:
+    """Pin = IPv6.  Re-resolve returns IPv4 + IPv6, IPv6 still matches → no raise.
+
+    Regression for C-1: the old gethostbyname_ex (IPv4-only) re-resolver
+    would never see the IPv6 entry and would falsely raise.  With
+    getaddrinfo, the pinned IPv6 overlaps the current set and the check
+    passes.
+    """
+    import socket
+    import sys
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
+    )
+
+    # __init__ pins both families (the full set returned by assert_host_public).
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        return_value=["2606:4700:4700::1111", "8.8.8.8"],
+    ):
+        src = SQLSource(_make_cfg())
+
+    assert src._pinned_ips == {"2606:4700:4700::1111", "8.8.8.8"}
+
+    # Re-resolve returns the same dual-stack pair (one IP unchanged is enough).
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [
+            (socket.AF_INET, 0, 0, "", ("8.8.8.8", 0)),
+            (socket.AF_INET6, 0, 0, "", ("2606:4700:4700::1111", 0)),
+        ]
+
+    with patch("recotem.datasource.sql.socket.getaddrinfo", fake_getaddrinfo):
+        src._check_rebinding()  # MUST NOT raise
+
+
+def test_rebinding_ipv6_only_pin_ipv6_only_rebind_overlap_clears(monkeypatch) -> None:
+    """Pin = IPv6 only, re-resolve returns IPv6 only → check passes.
+
+    Old code with gethostbyname_ex would return an empty IPv4 list and
+    incorrectly raise rebinding on every IPv6-only host.
+    """
+    import socket
+    import sys
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db6.example.com/orders"
+    )
+
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        return_value=["2606:4700:4700::1111"],
+    ):
+        src = SQLSource(_make_cfg())
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [(socket.AF_INET6, 0, 0, "", ("2606:4700:4700::1111", 0))]
+
+    with patch("recotem.datasource.sql.socket.getaddrinfo", fake_getaddrinfo):
+        src._check_rebinding()  # MUST NOT raise
+
+
+def test_rebinding_oserror_raises_with_clear_message(monkeypatch) -> None:
+    """When DNS re-resolution itself fails with OSError, a DataSourceError is raised.
+
+    The error message must indicate aborting to prevent SSRF rather than
+    leaking the underlying resolver error verbatim.
+    """
+    import sys
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
+    )
+
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        return_value=["8.8.8.8"],
+    ):
+        src = SQLSource(_make_cfg())
+
+    with patch(
+        "recotem.datasource.sql.socket.getaddrinfo",
+        side_effect=OSError("name resolution failure"),
+    ):
+        with pytest.raises(DataSourceError, match="(?i)DNS re-resolution"):
+            src._check_rebinding()
+
+
+# ---------------------------------------------------------------------------
+# C-3 — Postgres SET LOCAL / SET TRANSACTION exact-SQL emission
+# ---------------------------------------------------------------------------
+
+
+def test_apply_statement_timeout_postgres_uses_set_local_ms(monkeypatch) -> None:
+    """Postgres must issue ``SET LOCAL statement_timeout = <ms>`` (not SET).
+
+    Regression-pin for two distinct bugs:
+    * SET LOCAL keeps the timeout scoped to the current transaction; bare
+      SET would leak into subsequent transactions on a pooled connection.
+    * The Postgres unit is milliseconds (an integer); seconds would silently
+      yield a 1000× larger budget.
+    """
+    from unittest.mock import MagicMock
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg(statement_timeout_seconds=42))
+    mock_conn = MagicMock()
+    orig_dialect = src._dialect
+    src._dialect = "postgresql"
+    try:
+        src._apply_statement_timeout(mock_conn)
+        assert mock_conn.execute.call_count == 1
+        emitted_sql = str(mock_conn.execute.call_args.args[0])
+        assert "SET LOCAL statement_timeout = 42000" in emitted_sql, (
+            f"expected SET LOCAL statement_timeout=42000, got {emitted_sql!r}"
+        )
+        # Defensive: must NOT be the session-level SET (which would survive
+        # past the current transaction on a pooled connection).
+        assert "SET LOCAL" in emitted_sql
+        assert "SET statement_timeout" not in emitted_sql.replace("SET LOCAL", "")
+    finally:
+        src._dialect = orig_dialect
+
+
+def test_apply_read_only_postgres_uses_set_transaction(monkeypatch) -> None:
+    """Postgres must issue ``SET TRANSACTION READ ONLY`` exactly once."""
+    from unittest.mock import MagicMock
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+    mock_conn = MagicMock()
+    orig_dialect = src._dialect
+    src._dialect = "postgresql"
+    try:
+        src._apply_read_only(mock_conn)
+        assert mock_conn.execute.call_count == 1
+        emitted_sql = str(mock_conn.execute.call_args.args[0])
+        assert emitted_sql == "SET TRANSACTION READ ONLY", (
+            f"expected exact 'SET TRANSACTION READ ONLY', got {emitted_sql!r}"
+        )
+    finally:
+        src._dialect = orig_dialect
+
+
+def test_apply_read_only_mysql_uses_set_session_transaction(monkeypatch) -> None:
+    """MySQL/MariaDB must issue ``SET SESSION TRANSACTION READ ONLY`` exactly once.
+
+    Distinguishes from the Postgres branch — the SESSION keyword is required
+    on MySQL family because the dialect treats unqualified SET TRANSACTION
+    as next-transaction-only (the MySQL semantics are not the same as PG).
+    """
+    from unittest.mock import MagicMock
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+    mock_conn = MagicMock()
+    orig_dialect = src._dialect
+    for dialect in ("mysql", "mariadb"):
+        mock_conn.reset_mock()
+        src._dialect = dialect
+        try:
+            src._apply_read_only(mock_conn)
+            assert mock_conn.execute.call_count == 1
+            emitted_sql = str(mock_conn.execute.call_args.args[0])
+            assert emitted_sql == "SET SESSION TRANSACTION READ ONLY", (
+                f"{dialect}: expected 'SET SESSION TRANSACTION READ ONLY', "
+                f"got {emitted_sql!r}"
+            )
+        finally:
+            src._dialect = orig_dialect
+
+
+# ---------------------------------------------------------------------------
+# I-8 — DSN with URL-encoded password special characters
+# ---------------------------------------------------------------------------
+
+
+def test_dsn_password_with_url_encoded_at_sign(monkeypatch) -> None:
+    """Password containing an encoded @ (``%40``) must not break DSN parsing.
+
+    SQLAlchemy ``make_url`` accepts percent-encoded credentials; the source
+    must round-trip these through ``safe_dsn`` rendering, the SSRF host
+    parser, and the log-line emission without crashing or leaking the
+    cleartext credential.
+    """
+    import sys
+    import types
+
+    import structlog
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    # Password is ``p@ss:word!`` percent-encoded as ``p%40ss%3Aword%21``.
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        "postgresql://alice:p%40ss%3Aword%21@db.example.com:5432/orders",
+    )
+    with structlog.testing.capture_logs() as logs:
+        src = SQLSource(_make_cfg())
+
+    # Source initialised successfully.
+    assert src._dialect == "postgresql"
+    # No log line carries the cleartext password.
+    flat = " ".join(repr(r) for r in logs)
+    assert "p@ss:word!" not in flat
+    assert "p%40ss%3Aword%21" not in flat
+
+
+def test_dsn_password_with_colons_does_not_confuse_ipv6_bracket_logic(
+    monkeypatch,
+) -> None:
+    """A password containing colons must not be mistaken for an IPv6 host.
+
+    The bracket-wrap logic in __init__ wraps ``url.host`` (not the userinfo)
+    when the host literal contains a colon; passing in a colon-rich password
+    must not trip the heuristic.
+    """
+    import sys
+    import types
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        # Password = "a:b:c:d" (encoded colons)
+        "postgresql://alice:a%3Ab%3Ac%3Ad@db.example.com:5432/orders",
+    )
+    src = SQLSource(_make_cfg())
+    assert src._dialect == "postgresql"
+    assert src._url.host == "db.example.com"
+
+
+def test_dsn_with_url_encoded_password_special_chars_via_log_redaction() -> None:
+    """End-to-end: encoded special-char passwords are scrubbed by log_redaction.
+
+    The DSN userinfo regex must also handle the percent-encoded form, not
+    just the cleartext form.
+    """
+    from urllib.parse import urlparse
+
+    from recotem.log_redaction import _scrub_string_value
+
+    dsn = "postgresql://alice:p%40ss%3Aword%21@db.example.com:5432/orders"
+    out = _scrub_string_value(dsn)
+    assert "p%40ss%3Aword%21" not in out
+    assert "alice" not in out
+    parsed = urlparse(out)
+    assert parsed.hostname == "db.example.com"
+
+
+# ---------------------------------------------------------------------------
+# M-7 — query_parameters bind correctly for non-string types
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_with_int_float_bool_parameters_bind_correctly(monkeypatch, tmp_path):
+    """SQLAlchemy bindparams must round-trip int / float / bool values."""
+    import sqlite3
+
+    from recotem.datasource.base import FetchContext
+    from recotem.datasource.sql import SQLConfig, SQLSource
+
+    db = tmp_path / "params.db"
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE events (user_id TEXT, item_id TEXT, ts TEXT, score REAL, sold INT)"
+    )
+    con.executemany(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        [
+            ("u1", "i1", "2026-01-01", 3.14, 1),
+            ("u2", "i2", "2026-01-02", 1.0, 0),
+        ],
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+    cfg = SQLConfig(
+        type="sql",
+        dsn_env="RECOTEM_RECIPE_DB_DSN",
+        query=(
+            "SELECT user_id, item_id, ts FROM events "
+            "WHERE score >= :min_score AND sold = :sold AND user_id != :exclude_user"
+        ),
+        query_parameters={
+            "min_score": 1.5,  # float
+            "sold": True,  # bool
+            "exclude_user": "u2",  # str
+        },
+    )
+    src = SQLSource(cfg)
+    df = src.fetch(FetchContext(recipe_name="t", run_id="r"))
+    assert list(df["user_id"]) == ["u1"]
+
+
+# ---------------------------------------------------------------------------
+# I-10 — TLS advisory warning
+# ---------------------------------------------------------------------------
+
+
+def test_tls_warning_postgres_without_sslmode(monkeypatch) -> None:
+    """Postgres DSN without sslmode emits sql_dsn_tls_not_configured."""
+    import sys
+    import types
+
+    import structlog
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        SQLSource(_make_cfg())
+
+    events = [r for r in logs if r["event"] == "sql_dsn_tls_not_configured"]
+    assert events, f"expected sql_dsn_tls_not_configured warning, got {logs!r}"
+    assert events[0]["detected_sslmode"] == "(absent)"
+
+
+@pytest.mark.parametrize("sslmode", ["disable", "allow", "prefer"])
+def test_tls_warning_postgres_with_weak_sslmode(monkeypatch, sslmode) -> None:
+    """sslmode=disable/allow/prefer also warns — they permit plaintext."""
+    import sys
+    import types
+
+    import structlog
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        f"postgresql://u:p@db.example.com/orders?sslmode={sslmode}",
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        SQLSource(_make_cfg())
+
+    events = [r for r in logs if r["event"] == "sql_dsn_tls_not_configured"]
+    assert events, f"expected warning for sslmode={sslmode}"
+    assert events[0]["detected_sslmode"] == sslmode
+
+
+@pytest.mark.parametrize("sslmode", ["require", "verify-ca", "verify-full"])
+def test_tls_warning_postgres_silent_with_strong_sslmode(monkeypatch, sslmode) -> None:
+    """sslmode=require/verify-* is sufficient — no warning is emitted."""
+    import sys
+    import types
+
+    import structlog
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        f"postgresql://u:p@db.example.com/orders?sslmode={sslmode}",
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        SQLSource(_make_cfg())
+
+    events = [r for r in logs if r["event"] == "sql_dsn_tls_not_configured"]
+    assert not events, f"expected no TLS warning for sslmode={sslmode}, got {events!r}"
+
+
+def test_tls_warning_mysql_without_ssl(monkeypatch) -> None:
+    """MySQL DSN without ssl query param emits the TLS warning."""
+    import sys
+    import types
+
+    import structlog
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "pymysql", types.ModuleType("pymysql"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "mysql+pymysql://u:p@db.example.com/orders"
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        SQLSource(_make_cfg())
+
+    events = [r for r in logs if r["event"] == "sql_dsn_tls_not_configured"]
+    assert events, f"expected sql_dsn_tls_not_configured warning, got {logs!r}"
+
+
+def test_tls_warning_mysql_silent_with_ssl_true(monkeypatch) -> None:
+    """MySQL DSN with ssl=true does not warn."""
+    import sys
+    import types
+
+    import structlog
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "pymysql", types.ModuleType("pymysql"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        "mysql+pymysql://u:p@db.example.com/orders?ssl=true",
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        SQLSource(_make_cfg())
+
+    events = [r for r in logs if r["event"] == "sql_dsn_tls_not_configured"]
+    assert not events
+
+
+def test_tls_warning_silent_for_sqlite(monkeypatch) -> None:
+    """SQLite has no network leg — no warning ever."""
+    import structlog
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+
+    with structlog.testing.capture_logs() as logs:
+        SQLSource(_make_cfg())
+
+    events = [r for r in logs if r["event"] == "sql_dsn_tls_not_configured"]
+    assert not events
+
+
+def test_assert_host_public_returns_full_resolved_set(monkeypatch) -> None:
+    """assert_host_public returns the entire resolved IP list, not just the first.
+
+    Pre-fix this returned a single string and the SQL caller mis-classified
+    legitimate dual-stack hostnames as rebinding attacks.
+    """
+    import socket
+    from unittest.mock import patch
+
+    from recotem._http_fetch import assert_host_public
+
+    monkeypatch.delenv("RECOTEM_HTTP_ALLOW_PRIVATE", raising=False)
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [
+            (socket.AF_INET, 0, 0, "", ("8.8.8.8", 0)),
+            (socket.AF_INET6, 0, 0, "", ("2606:4700:4700::1111", 0)),
+        ]
+
+    with patch("socket.getaddrinfo", fake_getaddrinfo):
+        result = assert_host_public("http://db.example.com/", allow_private=False)
+
+    assert result == ["8.8.8.8", "2606:4700:4700::1111"]

@@ -118,12 +118,34 @@ _REDACTED_HEX64 = "[REDACTED-HEX64]"
 _B64URL43_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43,}(?![A-Za-z0-9_-])")
 _REDACTED_B64URL43 = "[REDACTED-B64URL43]"
 
-# DSN / connection-URL userinfo scrubbing.  Matches any scheme://user[:pass]@host
-# pattern and replaces the userinfo with ***.  Applied before hex/base64 passes
-# so that passwords containing high-entropy hex/base64 chars are still removed.
+# DSN / connection-URL userinfo scrubbing.  Matches *credential-bearing*
+# scheme://user[:pass]@host patterns and replaces the userinfo with ***.
+#
+# Schemes are explicitly enumerated rather than accepting "any scheme" because
+# several object-store URI shapes idiomatically use ``@`` for non-credential
+# purposes (e.g. ``gs://<bucket>@<project>/<key>`` for gcsfs, ``s3://...`` with
+# vendor-specific extensions).  Rewriting those would silently delete useful
+# information from operator logs without protecting any actual secret.
+#
+# The user part is ``*`` (not ``+``) so URLs of the form ``scheme://:pass@host``
+# — a valid RFC 3986 / SQLAlchemy form with an empty username — are also
+# scrubbed, instead of leaving the password visible.
+#
+# Applied before hex/base64 passes so that passwords containing high-entropy
+# hex/base64 chars are still removed.
 _DSN_USERINFO_RE = re.compile(
-    r"(?P<scheme>[A-Za-z][A-Za-z0-9+\-.]*\+?[A-Za-z0-9]*)://"
-    r"(?:[^/@\s:]+(?::[^/@\s]*)?@)"
+    r"(?P<scheme>"
+    # HTTP family
+    r"https?|ftps?"
+    # SQL drivers (with optional SQLAlchemy +driver suffix)
+    r"|postgresql(?:\+[A-Za-z0-9_]+)?|postgres(?:\+[A-Za-z0-9_]+)?"
+    r"|mysql(?:\+[A-Za-z0-9_]+)?|mariadb(?:\+[A-Za-z0-9_]+)?"
+    r"|mssql(?:\+[A-Za-z0-9_]+)?|oracle(?:\+[A-Za-z0-9_]+)?"
+    # Other credential-bearing protocols
+    r"|mongodb(?:\+srv)?|redis|rediss|amqp|amqps"
+    r")"
+    r"://"
+    r"(?:[^/@\s:]*(?::[^/@\s]*)?@)"
     r"(?P<host>[^/?#\s]+)"
 )
 
@@ -190,7 +212,14 @@ def _redact_bytes_value(value: bytes | bytearray) -> Any:
 
 
 def _redact_value(value: Any) -> Any:
-    """Recursively walk dicts/lists and redact matched keys; scrub string values."""
+    """Recursively walk dicts/lists/tuples and redact matched keys; scrub strings.
+
+    Tuples are recursed into and returned as tuples — without this branch a
+    log call like ``logger.info("evt", coords=("user", "pass"))`` would leave
+    the tuple's contents untouched even if a contained string matched a
+    high-entropy pattern.  ``set`` / ``frozenset`` are also covered for
+    defence in depth.
+    """
     if isinstance(value, dict):
         return {
             k: _REDACTED if _should_redact(str(k)) else _redact_value(v)
@@ -198,6 +227,14 @@ def _redact_value(value: Any) -> Any:
         }
     if isinstance(value, list):
         return [_redact_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        # ``set`` cannot hold unhashable elements; ``_redact_value`` only ever
+        # returns hashables when given hashables (str/bytes/numbers).  Return
+        # the same container type so downstream rendering is unchanged.
+        scrubbed = {_redact_value(item) for item in value}
+        return frozenset(scrubbed) if isinstance(value, frozenset) else scrubbed
     if isinstance(value, str):
         return _scrub_string_value(value)
     if isinstance(value, (bytes, bytearray)):

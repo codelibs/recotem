@@ -6,12 +6,20 @@ import pytest
 
 
 def test_no_op_when_prometheus_missing(monkeypatch) -> None:
+    """When prometheus_client is unimportable, all helpers degrade to no-ops.
+
+    Uses ``importlib.reload`` (not ``del sys.modules + import``) because the
+    latter does not actually re-execute the module body when the parent
+    package still references it as an attribute.
+    """
+    import importlib
     import sys
 
     monkeypatch.setitem(sys.modules, "prometheus_client", None)
-    if "recotem._metrics_ga4" in sys.modules:
-        del sys.modules["recotem._metrics_ga4"]
+
     from recotem import _metrics_ga4
+
+    importlib.reload(_metrics_ga4)
 
     # All increments must be safe when prometheus_client isn't importable.
     _metrics_ga4.inc_ga4_pages("recipe-x")
@@ -20,11 +28,11 @@ def test_no_op_when_prometheus_missing(monkeypatch) -> None:
 
 
 def test_counters_initialize_when_prometheus_available() -> None:
-    import sys
+    import importlib
 
-    if "recotem._metrics_ga4" in sys.modules:
-        del sys.modules["recotem._metrics_ga4"]
     from recotem import _metrics_ga4
+
+    importlib.reload(_metrics_ga4)
 
     _metrics_ga4.inc_ga4_pages("recipe-y")
     _metrics_ga4.inc_ga4_rows("recipe-y", 42)
@@ -40,13 +48,15 @@ def test_counters_initialize_when_prometheus_available() -> None:
 def test_idempotent_initialization_across_multiple_calls() -> None:
     """Calling the metric functions multiple times must not raise ValueError
     about duplicated timeseries (prometheus_client raises this if Counter or
-    Gauge is registered twice with the same name under the same registry)."""
-    import sys
+    Gauge is registered twice with the same name under the same registry).
 
-    # Reload the module from scratch so _INITIALIZED is False.
-    if "recotem._metrics_ga4" in sys.modules:
-        del sys.modules["recotem._metrics_ga4"]
+    Uses ``importlib.reload`` so ``_INITIALIZED`` actually starts at False.
+    """
+    import importlib
+
     from recotem import _metrics_ga4
+
+    importlib.reload(_metrics_ga4)
 
     # Call each function twice; idempotent guard must prevent double-register.
     _metrics_ga4.inc_ga4_pages("idempotent-recipe")
@@ -87,22 +97,22 @@ def _reset_metrics_module() -> None:
 
 
 def test_counter_value_incremented_correctly() -> None:
-    """inc_ga4_pages and inc_ga4_rows must actually change the counter values."""
-    import sys
+    """inc_ga4_pages and inc_ga4_rows must actually change the counter values.
 
-    # Reload with a fresh registry to avoid collision with metrics registered
-    # by other tests that share the same default registry.
-    for key in list(sys.modules):
-        if key == "recotem._metrics_ga4":
-            del sys.modules[key]
+    Uses ``importlib.reload`` (NOT the ``del sys.modules + import`` pattern)
+    because the latter does not actually re-execute the module body — the
+    parent package still references the original module object as an
+    attribute, so the import system returns it unchanged.  Reload also
+    ensures the module's ``_PROMETHEUS_AVAILABLE`` reflects the current
+    test environment, recovering from any earlier test that polluted state.
+    """
+    import importlib
 
-    import prometheus_client as pc
-
-    fresh_registry = pc.CollectorRegistry()
-
-    # Patch the Counter/Gauge constructors to use our fresh registry.
     import prometheus_client
 
+    fresh_registry = prometheus_client.CollectorRegistry()
+
+    # Patch the Counter/Gauge constructors to use our fresh registry.
     orig_counter = prometheus_client.Counter
     orig_gauge = prometheus_client.Gauge
 
@@ -116,9 +126,9 @@ def test_counter_value_incremented_correctly() -> None:
     prometheus_client.Gauge = patched_gauge
 
     try:
-        if "recotem._metrics_ga4" in sys.modules:
-            del sys.modules["recotem._metrics_ga4"]
         from recotem import _metrics_ga4
+
+        importlib.reload(_metrics_ga4)
 
         recipe = "counter-test-recipe"
         _metrics_ga4.inc_ga4_pages(recipe)
@@ -143,8 +153,12 @@ def test_counter_value_incremented_correctly() -> None:
 
 def test_concurrent_init_no_duplicate_timeseries() -> None:
     """Four threads each calling _ensure_initialized() concurrently must not
-    raise ValueError: Duplicated timeseries from prometheus_client."""
-    import sys
+    raise ValueError: Duplicated timeseries from prometheus_client.
+
+    Uses ``importlib.reload`` (see ``test_counter_value_incremented_correctly``
+    for rationale) so the module starts with ``_INITIALIZED=False``.
+    """
+    import importlib
 
     import prometheus_client
 
@@ -164,10 +178,9 @@ def test_concurrent_init_no_duplicate_timeseries() -> None:
     prometheus_client.Gauge = patched_gauge
 
     try:
-        # Reload to get a fresh _INITIALIZED = False state.
-        if "recotem._metrics_ga4" in sys.modules:
-            del sys.modules["recotem._metrics_ga4"]
         from recotem import _metrics_ga4
+
+        importlib.reload(_metrics_ga4)
 
         errors: list[Exception] = []
         barrier = threading.Barrier(4)
@@ -196,3 +209,84 @@ def test_concurrent_init_no_duplicate_timeseries() -> None:
     finally:
         prometheus_client.Counter = orig_counter
         prometheus_client.Gauge = orig_gauge
+
+
+# ---------------------------------------------------------------------------
+# M-1 — partial-init failure leaves the module in a stable no-op state
+# ---------------------------------------------------------------------------
+
+
+def test_partial_init_failure_degrades_to_noop_and_logs(monkeypatch) -> None:
+    """If the second Counter raises during init, all three globals stay None.
+
+    Without the rollback, the first Counter would remain registered while
+    ``_INITIALIZED`` stayed False — and the *next* call would retry the same
+    registration and raise ``Duplicated timeseries`` indefinitely, breaking
+    every subsequent GA4 fetch.  The new implementation latches into a
+    no-op state on failure.
+
+    Implementation note: ``del sys.modules['recotem._metrics_ga4']`` does
+    *not* actually reload the module (the parent package still references
+    it as an attribute), so the previous tests' ``Counter`` import remains
+    cached.  We patch the module's own ``Counter`` symbol directly and
+    reset the state flags so the next ``_ensure_initialized`` call runs
+    against our fake.
+    """
+    import prometheus_client
+    import structlog.testing
+
+    from recotem import _metrics_ga4 as _mg
+
+    # Capture the real Counter (the test fixture may run after test 1, which
+    # leaves ``_PROMETHEUS_AVAILABLE = False`` and may not have imported
+    # ``Counter`` into the module namespace at all — so we go directly to
+    # prometheus_client).
+    real_counter = prometheus_client.Counter
+
+    call_count = {"n": 0}
+
+    class _FakeCounter:
+        def __init__(self, name, doc, labels, **kw):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise ValueError(
+                    f"Duplicated timeseries in CollectorRegistry: {{'{name}'}}"
+                )
+            # First call: register into an isolated registry so it is genuinely
+            # usable, demonstrating the rollback isn't accidental.
+            self._real = real_counter(
+                name,
+                doc,
+                labels,
+                registry=prometheus_client.CollectorRegistry(),
+            )
+
+        def labels(self, **kw):
+            return self._real.labels(**kw)
+
+    # Inject Counter into the module namespace whether or not the previous
+    # tests left it there.
+    monkeypatch.setattr(_mg, "Counter", _FakeCounter, raising=False)
+    # Force a fresh init path even if a previous test already initialised.
+    monkeypatch.setattr(_mg, "_INITIALIZED", False)
+    monkeypatch.setattr(_mg, "_PAGES", None)
+    monkeypatch.setattr(_mg, "_ROWS", None)
+    monkeypatch.setattr(_mg, "_QUOTA", None)
+    monkeypatch.setattr(_mg, "_PROMETHEUS_AVAILABLE", True)
+
+    with structlog.testing.capture_logs() as logs:
+        _mg.inc_ga4_pages("any")  # triggers _ensure_initialized()
+
+    assert _mg._INITIALIZED is True, "should latch to True even on failure"
+    assert _mg._PAGES is None, "first Counter must be rolled back to None"
+    assert _mg._ROWS is None
+    assert _mg._QUOTA is None
+
+    events = [r for r in logs if r["event"] == "ga4_metrics_init_failed"]
+    assert events, f"expected ga4_metrics_init_failed warning, got {logs!r}"
+    assert events[0]["error_class"] == "ValueError"
+
+    # Subsequent calls must remain no-ops; specifically they must NOT raise
+    # Duplicated timeseries by trying to register again.
+    _mg.inc_ga4_rows("any", 10)  # no exception
+    _mg.set_ga4_quota_remaining("any", "tokens_per_hour", 0)  # no exception

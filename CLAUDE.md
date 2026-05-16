@@ -213,8 +213,8 @@ uv run ruff format --check src tests
 | `RECOTEM_LOCK_DIR` | (empty) | Override directory for per-recipe training lock files. Local outputs always lock at `<output_path>.lock`; remote outputs (`s3://`, `gs://`, ...) need a host-local path and fall back to `<tempdir>/recotem-locks/`. `flock` is host-local — across hosts use scheduler-level mutex (`concurrencyPolicy: Forbid`). |
 | `RECOTEM_BQ_REQUIRE_STORAGE_API` | (empty) | When truthy (`1`/`true`/`yes`/`on`), the BigQuery source raises `DataSourceError` instead of falling back to the REST path when the Storage Read API fails. Requires the service account to hold `bigquery.readSessions.create`. |
 | `RECOTEM_STARTUP_PARALLELISM` | (empty = auto) | Number of parallel threads used to load artifacts at `recotem serve` startup. Leave unset (default) for auto-sizing (`min(len(recipes), 8)`). Setting to `0` is NOT a sentinel — it clamps to 1 and emits an `env_var_clamped` warning. Clamped [1, 32]. Set to `1` to force sequential loading for debugging. |
-| `RECOTEM_MAX_SQL_ROWS` | 50_000_000 | Hard cap on rows returned by the SQL data source. Clamped [1_000, 500_000_000]. |
-| `RECOTEM_SQL_ALLOW_PRIVATE` | (empty) | Truthy opts the SQL source into private/loopback DSN hosts (default deny, for SSRF). |
+| `RECOTEM_MAX_SQL_ROWS` | 50_000_000 | Hard cap on rows returned by the SQL data source. Clamped [1_000, 500_000_000]. Caps **row count**, not DataFrame resident memory — see `docs/data-sources/sql.md` for the memory-bound caveat. |
+| `RECOTEM_SQL_ALLOW_PRIVATE` | (empty) | Truthy opts the SQL source into private/loopback DSN hosts (default deny, for SSRF). Also disables the DNS-rebinding re-check before each probe/fetch — opting in means trusting the host end-to-end. |
 | `RECOTEM_GA4_MAX_PAGES` | 500 | Hard ceiling on GA4 Data API pagination loops. Clamped [1, 10_000]. |
 
 ## CI

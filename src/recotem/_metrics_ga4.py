@@ -50,6 +50,16 @@ def _ensure_initialized() -> None:
 
     Thread-safe: all three metrics are created inside ``_INIT_LOCK`` so that
     concurrent callers cannot each register the same timeseries name.
+
+    Partial-failure safety: if registration of any of the three metrics
+    raises (e.g. ``ValueError: Duplicated timeseries`` when another module or
+    a previous import cycle already registered the same metric name in the
+    default registry), the previously-constructed objects are rolled back
+    so that subsequent calls do not re-attempt registration of names that
+    were already accepted in this run.  We deliberately latch
+    ``_INITIALIZED = True`` even on the failure path so the function
+    degrades to a stable no-op rather than oscillating between partial
+    states.  The failure is recorded as a structured warning.
     """
     global _INITIALIZED, _PAGES, _ROWS, _QUOTA
 
@@ -62,21 +72,43 @@ def _ensure_initialized() -> None:
         if _INITIALIZED:
             return
 
-        _PAGES = Counter(
-            "recotem_ga4_pages_fetched_total",
-            "GA4 Data API pages fetched during training.",
-            ["recipe"],
-        )
-        _ROWS = Counter(
-            "recotem_ga4_rows_fetched_total",
-            "GA4 Data API rows fetched during training.",
-            ["recipe"],
-        )
-        _QUOTA = Gauge(
-            "recotem_ga4_quota_remaining",
-            "GA4 Data API propertyQuota remaining at last response.",
-            ["recipe", "quota_type"],
-        )
+        try:
+            pages = Counter(
+                "recotem_ga4_pages_fetched_total",
+                "GA4 Data API pages fetched during training.",
+                ["recipe"],
+            )
+            rows = Counter(
+                "recotem_ga4_rows_fetched_total",
+                "GA4 Data API rows fetched during training.",
+                ["recipe"],
+            )
+            quota = Gauge(
+                "recotem_ga4_quota_remaining",
+                "GA4 Data API propertyQuota remaining at last response.",
+                ["recipe", "quota_type"],
+            )
+        except (ValueError, RuntimeError) as exc:
+            # Most commonly ``ValueError("Duplicated timeseries...")`` from
+            # prometheus_client.  Roll back any partial registration by
+            # leaving the globals at None and latch INITIALIZED so we do
+            # not retry on every metric call.
+            _PAGES = None
+            _ROWS = None
+            _QUOTA = None
+            _INITIALIZED = True
+            import structlog as _sl  # local import; logging.py owns config
+
+            _sl.get_logger(__name__).warning(
+                "ga4_metrics_init_failed",
+                error_class=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
+            return
+
+        _PAGES = pages
+        _ROWS = rows
+        _QUOTA = quota
         _INITIALIZED = True
 
 

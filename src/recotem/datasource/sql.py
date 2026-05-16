@@ -30,6 +30,59 @@ _DIALECT_DRIVER_PROBE = {
 
 _log = structlog.get_logger(__name__)
 
+# PostgreSQL sslmode values that do NOT guarantee a TLS connection.  ``prefer``
+# is psycopg's default — it attempts TLS but falls back to plaintext silently,
+# which is exactly the failure mode operators forget about.  ``allow`` is
+# similarly opportunistic.  Anything stricter (``require``, ``verify-ca``,
+# ``verify-full``) is treated as TLS-configured.
+_PG_PLAINTEXT_SSLMODES: frozenset[str] = frozenset({"disable", "allow", "prefer"})
+
+
+def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
+    """Emit a structured warning when the DSN does not configure TLS.
+
+    Heuristic check intended as an advisory, not an enforcement:
+
+    * postgres / postgresql: warns if ``sslmode`` is absent or one of
+      ``disable`` / ``allow`` / ``prefer`` (the modes that permit plaintext).
+    * mysql / mariadb: warns if no ``ssl`` / ``ssl_*`` query parameter is
+      present (driver default is plaintext).
+    * sqlite: not network-bearing; no check.
+
+    Driver-specific TLS flags vary; the heuristic deliberately under-detects
+    rather than misclassify.  Operators can silence the warning by adding the
+    explicit TLS query parameter to the DSN.
+    """
+    if dialect.startswith("postgres"):
+        sslmode = (query.get("sslmode") or "").lower()
+        if sslmode in _PG_PLAINTEXT_SSLMODES or sslmode == "":
+            _log.warning(
+                "sql_dsn_tls_not_configured",
+                dialect=dialect,
+                detected_sslmode=sslmode or "(absent)",
+                hint=(
+                    "Add ?sslmode=require (or verify-ca / verify-full) to the "
+                    "DSN to force TLS.  Plaintext connections to postgres are "
+                    "subject to credential interception on the wire."
+                ),
+            )
+    elif dialect in {"mysql", "mariadb"}:
+        # pymysql + drivers use one of these keys to indicate TLS.
+        ssl_keys = {"ssl", "ssl_ca", "ssl_cert", "ssl_key", "ssl_verify_cert"}
+        has_ssl = any(k in query for k in ssl_keys) and any(
+            (query.get(k) or "").lower() not in {"false", "0", ""} for k in ssl_keys
+        )
+        if not has_ssl:
+            _log.warning(
+                "sql_dsn_tls_not_configured",
+                dialect=dialect,
+                hint=(
+                    "Add ?ssl=true (or ssl_ca=...) to the DSN to force TLS.  "
+                    "Plaintext connections to mysql/mariadb are subject to "
+                    "credential interception on the wire."
+                ),
+            )
+
 
 class SQLConfig(BaseModel):
     type: Literal["sql"]
@@ -100,8 +153,12 @@ class SQLSource:
                 ) from exc
 
         # SSRF guard: reject private/loopback/link-local hosts unless opted in.
-        # The resolved IP is pinned so that a DNS rebinding attack between
-        # __init__ and the actual connect can be detected in fetch()/probe().
+        # The full resolved IP set (IPv4 + IPv6) is pinned so that a DNS
+        # rebinding attack between __init__ and the actual connect can be
+        # detected in fetch()/probe().  Storing the full set rather than the
+        # first address is critical for dual-stack hosts: getaddrinfo on the
+        # re-check may legitimately return a different family, and a single-
+        # IP pin would mis-classify that as a rebind.
         self._pinned_ips: set[str] = set()
         if url.host and not sql_allow_private():
             # Wrap IPv6 literals in brackets so urlparse inside assert_host_public
@@ -111,7 +168,7 @@ class SQLSource:
             if ":" in host_for_check and not host_for_check.startswith("["):
                 host_for_check = f"[{host_for_check}]"
             try:
-                pinned_ip = assert_host_public(
+                pinned_ips = assert_host_public(
                     f"db://{host_for_check}", allow_private=False
                 )
             except HttpFetchError as exc:
@@ -127,12 +184,20 @@ class SQLSource:
                     "set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in (intended for "
                     "in-cluster or compose service-name destinations)"
                 ) from exc
-            if pinned_ip is not None:
-                self._pinned_ips = {pinned_ip}
+            if pinned_ips:
+                self._pinned_ips = set(pinned_ips)
 
         self._config = config
         self._url = url
         self._dialect = backend
+
+        # Advisory TLS check: warn (do not refuse) when the DSN points at a
+        # plaintext connection.  We do not enforce TLS by default because
+        # operators frequently use service-mesh or in-cluster destinations
+        # where TLS is layered below the SQL driver; refusing plaintext
+        # outright would break those deployments.  The warning is opt-out by
+        # configuring sslmode (PG) / ssl (MySQL/MariaDB) in the DSN.
+        _warn_if_tls_not_configured(backend, dict(url.query))
 
         # Redact userinfo from DSN before logging.  Build a credential-free
         # URL using URL.create (SQLAlchemy 2.x) so username and password are
@@ -188,15 +253,24 @@ class SQLSource:
         except ValueError:
             pass  # hostname, not a literal IP
 
+        # Use getaddrinfo (not gethostbyname_ex, which is IPv4-only) so the
+        # re-check resolves both IPv4 and IPv6 records — matching the family
+        # coverage of the original pin in ``__init__`` and avoiding false-
+        # positive "DNS rebinding detected" errors on legitimate dual-stack
+        # or IPv6-only hosts.
         try:
-            _, _, addrs = socket.gethostbyname_ex(host)
+            infos = socket.getaddrinfo(host, None)
         except OSError as exc:
             # DNS resolution failed on re-check; treat as a changed/gone address.
             raise DataSourceError(
                 f"DNS re-resolution of {host!r} failed before connect; "
                 "aborting to prevent SSRF via DNS rebinding"
             ) from exc
-        current_ips = set(addrs)
+        current_ips: set[str] = set()
+        for fam, _socktype, _proto, _canon, sockaddr in infos:
+            if fam not in (socket.AF_INET, socket.AF_INET6):
+                continue
+            current_ips.add(sockaddr[0])
         if not current_ips.intersection(self._pinned_ips):
             raise DataSourceError(
                 f"DNS rebinding detected for host {host!r}: "
@@ -301,7 +375,19 @@ class SQLSource:
         from sqlalchemy import text
 
         if self._dialect == "sqlite":
-            # SQLite has no transactional READ ONLY mode; intentional no-op.
+            # SQLite has no transactional READ ONLY, but `PRAGMA query_only=ON`
+            # rejects writes for the rest of the connection session.  Fail
+            # closed if the pragma cannot be issued — silently degrading to a
+            # writable session for an SSRF-trusted recipe is exactly the
+            # surprise we want to avoid for users following the SQLite tutorial
+            # examples.
+            try:
+                conn.execute(text("PRAGMA query_only = ON"))
+            except Exception as exc:
+                raise DataSourceError(
+                    "failed to enforce read-only mode on sqlite "
+                    f"({type(exc).__name__}); refusing to run the query"
+                ) from exc
             return
         try:
             if self._dialect.startswith("postgres"):
@@ -309,16 +395,25 @@ class SQLSource:
             elif self._dialect in {"mysql", "mariadb"}:
                 conn.execute(text("SET SESSION TRANSACTION READ ONLY"))
         except Exception as exc:
+            # Do not interpolate ``str(exc)`` — driver exceptions can embed
+            # DSN userinfo / hostnames in their ``__str__``.  The class name
+            # plus the chained ``__cause__`` give operators enough context.
             raise DataSourceError(
                 f"failed to enforce READ ONLY transaction on {self._dialect!r}: "
-                f"{type(exc).__name__}: {exc}; refusing to run the query"
+                f"{type(exc).__name__}; refusing to run the query"
             ) from exc
 
     def _apply_statement_timeout(self, conn) -> None:
         from sqlalchemy import text
 
         if self._dialect == "sqlite":
-            # SQLite has no statement_timeout; intentional no-op.
+            # SQLite has no server-side statement timeout.  Surface this as a
+            # warning rather than a silent no-op so operators understand that
+            # the documented safety control is not in effect on this dialect.
+            _log.warning(
+                "sql_statement_timeout_unsupported_on_sqlite",
+                requested_seconds=self._config.statement_timeout_seconds,
+            )
             return
         ms = self._config.statement_timeout_seconds * 1000
         try:
@@ -331,7 +426,10 @@ class SQLSource:
             elif self._dialect == "mysql":
                 conn.execute(text(f"SET SESSION MAX_EXECUTION_TIME = {ms}"))
         except Exception as exc:
+            # Drop ``str(exc)`` — driver error messages can include DSN
+            # userinfo / hostnames.  ``from exc`` preserves the chain for
+            # debug-mode tracebacks.
             raise DataSourceError(
                 f"failed to enforce statement_timeout on {self._dialect!r}: "
-                f"{type(exc).__name__}: {exc}; refusing to run the query"
+                f"{type(exc).__name__}; refusing to run the query"
             ) from exc

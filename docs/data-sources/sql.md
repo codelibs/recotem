@@ -44,7 +44,7 @@ source:
 | `query` | yes | — | Raw SQL. Never subject to `${...}` expansion (SQL injection foreclosure). |
 | `query_parameters` | no | `{}` | Bound via SQLAlchemy `text().bindparams(...)`. Subject to `${RECOTEM_RECIPE_*}` expansion. |
 | `connect_timeout_seconds` | no | 10 | Valid range `[1, 60]` (out-of-range raises ValidationError). Passed as `connect_timeout` (PG/MySQL) or `timeout` (SQLite). |
-| `statement_timeout_seconds` | no | 300 | Valid range `[1, 1800]` (out-of-range raises ValidationError). PG: `SET LOCAL statement_timeout`. MySQL/MariaDB: `SET SESSION MAX_EXECUTION_TIME`. Failure aborts training on PG/MySQL/MariaDB. SQLite: no-op (no server-side timeout). |
+| `statement_timeout_seconds` | no | 300 | Valid range `[1, 1800]` (out-of-range raises ValidationError). PG: `SET LOCAL statement_timeout = <ms>`. MySQL: `SET SESSION MAX_EXECUTION_TIME = <ms>`. MariaDB: `SET SESSION max_statement_time = <seconds>` (different unit and variable from MySQL). Failure aborts training on PG/MySQL/MariaDB. SQLite: not enforced (no server-side timeout primitive); a `sql_statement_timeout_unsupported_on_sqlite` warning is logged so operators know the documented safety control is not in effect. |
 
 ## DSN examples
 
@@ -80,17 +80,31 @@ source:
 - The DSN must come from an env var whose name matches `^RECOTEM_RECIPE_[A-Z0-9_]+$`; it is
   **never** written to the recipe. Any userinfo in the DSN is stripped before it reaches log
   lines by `recotem.log_redaction`.
-- TLS is strongly recommended in production. Always set `sslmode=require` (PG) or `ssl=true`
-  (MySQL). Recotem does not inspect or enforce DSN flags.
+- TLS is strongly recommended in production. Always set `sslmode=require` (or stricter:
+  `verify-ca`, `verify-full`) on PostgreSQL, or `ssl=true` (or specify a CA bundle via
+  `ssl_ca=...`) on MySQL/MariaDB. Recotem does not enforce TLS — but the source emits a
+  `sql_dsn_tls_not_configured` structlog warning at init when the DSN appears plaintext
+  (PG without `sslmode`, or with `disable`/`allow`/`prefer`; MySQL/MariaDB without any
+  `ssl*` query parameter). Operators with deployment-level TLS (service mesh, sidecar)
+  can silence the warning by adding the explicit DSN flag.
 - The DB user should have `SELECT` only on the relevant tables. Recotem issues
-  `SET TRANSACTION READ ONLY` (PG) or `SET SESSION TRANSACTION READ ONLY` (MySQL/MariaDB)
-  before running the query. If this command fails (e.g. insufficient privilege), training
-  is aborted with `DataSourceError`; it is not silently skipped. SQLite has no transactional
-  READ ONLY mechanism and the call is a no-op there. The authoritative boundary is still your
-  grant model — never rely solely on the session flag.
+  `SET TRANSACTION READ ONLY` (PG), `SET SESSION TRANSACTION READ ONLY` (MySQL/MariaDB),
+  or `PRAGMA query_only = ON` (SQLite) before running the query. If this command fails
+  (e.g. insufficient privilege, or the SQLite pragma cannot be set), training is aborted
+  with `DataSourceError`; it is not silently skipped. The authoritative boundary is still
+  your grant model — never rely solely on the session flag.
 - SSRF: by default, DSN hosts that resolve to private / loopback / link-local IPs are
   rejected. Set `RECOTEM_SQL_ALLOW_PRIVATE=1` to opt in (intended for Docker Compose /
-  Kubernetes service-name destinations).
+  Kubernetes service-name destinations). Note that this env var **also disables the
+  DNS-rebinding re-check** before each probe/fetch — opting in means trusting the host
+  end-to-end.
+- DNS rebinding TOCTOU: the SSRF check pins the **full set of resolved public IPs**
+  (IPv4 + IPv6) at init.  Before each probe/fetch the host is re-resolved via
+  `socket.getaddrinfo`; if no address overlaps the pinned set, the run is aborted.
+  This is a best-effort defence — the SQL driver does its own resolution at connect
+  time, so a sufficiently fast attacker controlling DNS can still rebind between our
+  check and the driver's resolution.  Use platform controls (private network access,
+  VPC peering, firewalls) as the authoritative boundary.
 
 ## Environment variables
 
@@ -122,10 +136,22 @@ included in the stderr JSON line.
 - Query results are read in chunks to bound memory usage during streaming. The chunk size is
   `min(100_000, RECOTEM_MAX_SQL_ROWS)` so the row cap is enforced before the first chunk is
   fully loaded.
+- **Memory bound caveat:** `RECOTEM_MAX_SQL_ROWS` caps the total **row count**, not the
+  resulting DataFrame's resident memory.  Chunks are accumulated into a list and concatenated
+  at the end, so peak RAM is approximately `total_rows × bytes_per_row`.  Trainers with
+  default cap (50 M rows) should expect ~2.5–5 GiB resident under wide-result queries;
+  with the upper clamp (500 M rows) the same query can require 25 GiB+ of RAM.  Tighten
+  the cap or the query columns if you need a memory bound, not just a row bound.  Server-
+  side streaming via `stream_results=True` controls only the **wire-level** cursor;
+  the row cap is the right knob for the consumer-side bound.
 - `source.query` and `source.dsn_env` are unconditionally exempt from `${...}` expansion
   regardless of variable name; only `query_parameters` values are expanded.
-- SQLite `statement_timeout_seconds` is accepted by the recipe schema but is a no-op —
-  SQLite has no server-side query timeout mechanism. On PostgreSQL and MySQL/MariaDB,
+- SQLite `statement_timeout_seconds` is accepted by the recipe schema but is **not
+  enforced** at the server level — SQLite has no equivalent of Postgres'
+  `statement_timeout` or MySQL's `MAX_EXECUTION_TIME`. A `sql_statement_timeout_unsupported_on_sqlite`
+  warning is emitted so operators know the documented safety control is not in effect on
+  this dialect. (Read-only enforcement on SQLite uses `PRAGMA query_only = ON`, which IS
+  effective — failure to set that pragma aborts training.) On PostgreSQL and MySQL/MariaDB,
   failure to set the timeout aborts training with `DataSourceError`.
 - `flock` is host-local; across hosts use scheduler-level mutex (`concurrencyPolicy: Forbid`
   in Kubernetes CronJobs).

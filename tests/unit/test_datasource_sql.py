@@ -639,6 +639,7 @@ def test_ssrf_query_host_private_blocked_even_with_public_netloc(monkeypatch) ->
     import sys
     import types
     from unittest.mock import patch
+    from urllib.parse import urlparse
 
     from recotem.datasource.sql import SQLSource
 
@@ -651,13 +652,19 @@ def test_ssrf_query_host_private_blocked_even_with_public_netloc(monkeypatch) ->
     # The netloc lookup must succeed (so we reach the query-host check).
     # The patched assert_host_public passes public.example.com but real IP
     # logic must still trigger on 10.0.0.5; we delegate to the unpatched
-    # function for that case.
+    # function for that case.  Use ``urlparse(...).hostname`` rather than
+    # an ``in url`` substring match — CodeQL flags the latter as
+    # ``py/incomplete-url-substring-sanitization`` because a substring
+    # check can match against userinfo / path / query as well as the
+    # host.  In this test the input set is controlled, but the project
+    # convention (commit 8096bc50) is to use position-aware host
+    # comparison everywhere.
     real_assert_host_public = __import__(
         "recotem._http_fetch", fromlist=["assert_host_public"]
     ).assert_host_public
 
     def selective_assert_host_public(url, *, allow_private):
-        if "public.example.com" in url:
+        if urlparse(url).hostname == "public.example.com":
             return ["8.8.8.8"]
         return real_assert_host_public(url, allow_private=allow_private)
 

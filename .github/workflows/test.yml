@@ -46,11 +46,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # NOTE: irspack 0.4.0 ships a C extension `_core_evaluator` only for
-        # Python 3.12.  3.13 wheels do not yet exist; pip falls back to source
-        # build which is not packaged.  Revisit when irspack publishes 3.13
-        # wheels (track in CHANGELOG).
-        python-version: ["3.12"]
+        # irspack 0.4.2 ships abi3 (stable ABI) wheels tagged cp312-abi3 that
+        # also satisfy Python 3.13 and 3.14 (non-free-threaded), plus dedicated
+        # cp314t wheels for free-threaded builds.  Matrix below covers the
+        # supported GIL builds.
+        python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
 

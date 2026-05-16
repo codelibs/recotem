@@ -94,17 +94,38 @@ source:
   with `DataSourceError`; it is not silently skipped. The authoritative boundary is still
   your grant model — never rely solely on the session flag.
 - SSRF: by default, DSN hosts that resolve to private / loopback / link-local IPs are
-  rejected. Set `RECOTEM_SQL_ALLOW_PRIVATE=1` to opt in (intended for Docker Compose /
-  Kubernetes service-name destinations). Note that this env var **also disables the
-  DNS-rebinding re-check** before each probe/fetch — opting in means trusting the host
-  end-to-end.
+  rejected. The guard inspects every routing form the libpq / PyMySQL drivers honour,
+  not just the URL netloc:
+  - `url.host` (the netloc, e.g. `postgresql://u:p@host/db`)
+  - `?host=name` (libpq for PostgreSQL, PyMySQL for MySQL/MariaDB) — when set,
+    SQLAlchemy's `make_url` leaves `url.host` empty but the driver still routes the
+    TCP connect to the query value
+  - `?hostaddr=ip` (libpq) — the actual TCP target IP; if both `host` and `hostaddr`
+    are set, libpq uses `hostaddr` for the connect and `host` only for SNI / TLS
+    certificate validation
+  Three routing forms are refused outright because they cannot be resolved to a TCP
+  target the SSRF check can validate and all amount to local pivots:
+  - `?service=` (PostgreSQL) — libpq looks up parameters in `pg_service.conf`
+  - `?unix_socket=` (MySQL/MariaDB) — connects to a local Unix domain socket
+  - `?host=/abs/path` (PostgreSQL) — libpq treats absolute-path values as a
+    Unix-socket directory
+  Network-dialect DSNs that contain *no* host information at all (e.g.
+  `postgresql:///db`) are also refused, because libpq / PyMySQL would otherwise
+  default to the local socket / `127.0.0.1`.
+  Set `RECOTEM_SQL_ALLOW_PRIVATE=1` to opt in to any of the above (intended for
+  Docker Compose / Kubernetes service-name destinations, Unix-socket connections,
+  or libpq service files). Note that this env var **also disables the
+  DNS-rebinding re-check** before each probe/fetch — opting in means trusting the
+  host end-to-end.
 - DNS rebinding TOCTOU: the SSRF check pins the **full set of resolved public IPs**
-  (IPv4 + IPv6) at init.  Before each probe/fetch the host is re-resolved via
-  `socket.getaddrinfo`; if no address overlaps the pinned set, the run is aborted.
-  This is a best-effort defence — the SQL driver does its own resolution at connect
-  time, so a sufficiently fast attacker controlling DNS can still rebind between our
-  check and the driver's resolution.  Use platform controls (private network access,
-  VPC peering, firewalls) as the authoritative boundary.
+  (IPv4 + IPv6) at init across every candidate routing host.  Before each probe/fetch
+  the effective TCP target (libpq: `hostaddr` > query `host` > netloc; PyMySQL: query
+  `host` > netloc) is re-resolved via `socket.getaddrinfo`; if no address overlaps the
+  pinned set, the run is aborted. This is a best-effort defence — the SQL driver does
+  its own resolution at connect time, so a sufficiently fast attacker controlling DNS
+  can still rebind between our check and the driver's resolution.  Use platform
+  controls (private network access, VPC peering, firewalls) as the authoritative
+  boundary.
 
 ## Environment variables
 
@@ -123,6 +144,10 @@ source:
 | Missing driver for dialect | 3 | `DataSourceError: psycopg driver is required for dialect 'postgresql'. Install it with: pip install 'recotem[postgres]'` |
 | Query exceeds row cap | 3 | `DataSourceError: query result exceeds RECOTEM_MAX_SQL_ROWS=50000000 rows; tighten the query or raise the cap` |
 | Private/loopback host refused | 3 | `DataSourceError: refusing to connect to private/loopback host '10.0.0.5'; set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in (intended for in-cluster or compose service-name destinations)` |
+| libpq service-file routing refused | 3 | `DataSourceError: DSN routes via libpq service file (?service=...); this bypasses the network SSRF guard. Set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
+| MySQL Unix-socket routing refused | 3 | `DataSourceError: DSN routes via Unix socket (?unix_socket=...); this bypasses the network SSRF guard. Set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
+| Absolute-path host refused | 3 | `DataSourceError: DSN host is an absolute path (libpq Unix-socket form); this bypasses the network SSRF guard. Set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
+| Network DSN with no host refused | 3 | `DataSourceError: DSN for dialect 'postgresql' does not specify a host; the driver would default to the local socket / 127.0.0.1 which is rejected by the SSRF guard. Specify a host explicitly or set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
 | sqlalchemy not installed | 3 | `DataSourceError: sqlalchemy is required for SQLSource. Install one of: recotem[postgres], recotem[mysql], recotem[sqlite].` |
 | Column missing after query | 2 | `RecipeError: column 'item_id' not found in query result` |
 

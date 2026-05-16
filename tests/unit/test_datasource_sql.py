@@ -359,6 +359,317 @@ def test_ssrf_allow_private_bypasses_ssrf_check(monkeypatch, host) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A2b — SSRF guard covers driver-specific routing keys beyond URL netloc
+# ---------------------------------------------------------------------------
+#
+# SQLAlchemy's ``make_url`` only populates ``url.host`` from the netloc.
+# When the destination is supplied via a URL query parameter (e.g.
+# ``postgresql:///db?host=169.254.169.254``), libpq / PyMySQL still route
+# the TCP connect to the query value while ``url.host`` is empty.  Without
+# inspecting those keys the SSRF guard would be silently bypassed.  The
+# tests below cover every routing form recotem supports.
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        # libpq: ``host=`` query parameter pivots the TCP connect.
+        "postgresql+psycopg:///db?host=169.254.169.254&port=80",
+        "postgresql+psycopg:///db?host=10.0.0.5",
+        # libpq: ``hostaddr=`` is the actual TCP target IP.
+        "postgresql+psycopg:///db?hostaddr=10.0.0.5",
+        "postgresql+psycopg:///db?hostaddr=127.0.0.1",
+        # PyMySQL: ``host=`` query parameter pivots the TCP connect.
+        "mysql+pymysql:///db?host=10.0.0.5",
+        "mariadb+pymysql:///db?host=127.0.0.1",
+    ],
+)
+def test_ssrf_blocked_via_query_host_param(monkeypatch, dsn) -> None:
+    """Query-parameter routing must be subject to the SSRF guard.
+
+    A DSN like ``postgresql:///db?host=169.254.169.254`` leaves
+    ``url.host`` empty (SQLAlchemy only populates it from the netloc) but
+    libpq still pivots the TCP connect to the query value.  Without this
+    check the cloud metadata service / RFC1918 destinations would be
+    reachable despite ``RECOTEM_SQL_ALLOW_PRIVATE`` being unset.
+    """
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", dsn)
+    with pytest.raises(DataSourceError, match="(?i)private|loopback|SSRF"):
+        SQLSource(_make_cfg())
+
+
+@pytest.mark.parametrize(
+    "dsn,expected_error_fragment",
+    [
+        # libpq service file: resolves params from pg_service.conf, outside
+        # the guard's reach.  Reject outright.
+        (
+            "postgresql+psycopg:///db?service=myservice",
+            "(?i)service file",
+        ),
+        # MySQL Unix socket: local pivot, defeats the network-scope guard.
+        (
+            "mysql+pymysql:///db?unix_socket=/var/run/mysqld/mysqld.sock",
+            "(?i)unix socket",
+        ),
+        # libpq absolute-path host: treated as a Unix-socket directory.
+        (
+            "postgresql+psycopg:///db?host=/var/run/postgresql",
+            "(?i)unix-socket|absolute path",
+        ),
+    ],
+)
+def test_ssrf_rejects_local_pivot_routing_forms(
+    monkeypatch, dsn, expected_error_fragment
+) -> None:
+    """DSN forms that bypass the network guard by construction are refused.
+
+    These routing keys all amount to local pivots that cannot be resolved
+    to a TCP destination the SSRF check can validate, so they must be
+    refused unless the operator has explicitly set RECOTEM_SQL_ALLOW_PRIVATE.
+    """
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", dsn)
+    with pytest.raises(DataSourceError, match=expected_error_fragment):
+        SQLSource(_make_cfg())
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        # libpq without any host info defaults to /var/run/postgresql (UDS).
+        "postgresql+psycopg:///db",
+        # PyMySQL without any host info defaults to 127.0.0.1.
+        "mysql+pymysql:///db",
+        "mariadb+pymysql:///db",
+    ],
+)
+def test_ssrf_rejects_network_dsn_with_no_host(monkeypatch, dsn) -> None:
+    """A network-dialect DSN with no host info routes to a local default.
+
+    libpq with no ``host=`` falls back to the local Unix socket or 127.0.0.1;
+    PyMySQL falls back to 127.0.0.1.  Both are local pivots that defeat the
+    SSRF guard, so the guard refuses such DSNs unless the operator opts in.
+    """
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", dsn)
+    with pytest.raises(DataSourceError, match="(?i)does not specify a host"):
+        SQLSource(_make_cfg())
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "postgresql+psycopg:///db?host=169.254.169.254&port=80",
+        "postgresql+psycopg:///db?hostaddr=10.0.0.5",
+        "postgresql+psycopg:///db?service=myservice",
+        "postgresql+psycopg:///db?host=/var/run/postgresql",
+        "postgresql+psycopg:///db",
+        "mysql+pymysql:///db?host=10.0.0.5",
+        "mysql+pymysql:///db?unix_socket=/tmp/mysql.sock",
+        "mysql+pymysql:///db",
+    ],
+)
+def test_ssrf_allow_private_bypasses_query_host_checks(monkeypatch, dsn) -> None:
+    """RECOTEM_SQL_ALLOW_PRIVATE=1 must skip every new guard branch.
+
+    Operators who have explicitly opted into private/local connectivity
+    (in-cluster service names, compose, Unix-socket destinations) must not
+    be blocked by the expanded SSRF checks.
+    """
+    import sys
+    import types
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", dsn)
+    # Stub driver imports so __init__ does not fail on missing drivers.
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setitem(sys.modules, "pymysql", types.ModuleType("pymysql"))
+    SQLSource(_make_cfg())  # must not raise
+
+
+def test_ssrf_query_host_public_hostname_accepted(monkeypatch) -> None:
+    """``?host=public-hostname`` must pass the SSRF check and be pinned.
+
+    The rebinding host attribute is the query-parameter value because
+    ``url.host`` is empty for this DSN form — that is what libpq actually
+    uses for the TCP connect.
+    """
+    import sys
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg:///db?host=public.example.com"
+    )
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        return_value=["8.8.8.8"],
+    ):
+        src = SQLSource(_make_cfg())
+
+    assert src._pinned_ips == {"8.8.8.8"}
+    assert src._rebinding_host == "public.example.com"
+
+
+def test_ssrf_query_host_rebinding_check_uses_query_param(monkeypatch) -> None:
+    """``_check_rebinding`` must re-resolve the query-parameter host.
+
+    Regression: when ``url.host`` is empty and routing comes from
+    ``?host=public.example.com``, the rebinding check used to short-circuit
+    on ``not self._url.host``.  After the fix, ``self._rebinding_host`` is
+    the query value and is the host that gets re-resolved.
+    """
+    import socket
+    import sys
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg:///db?host=public.example.com"
+    )
+
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        return_value=["8.8.8.8"],
+    ):
+        src = SQLSource(_make_cfg())
+
+    # Simulate a rebind to a private IP.
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [(socket.AF_INET, 0, 0, "", ("10.0.0.1", 0))]
+
+    with patch(
+        "recotem.datasource.sql.socket.getaddrinfo",
+        side_effect=fake_getaddrinfo,
+    ):
+        with pytest.raises(DataSourceError, match="(?i)rebind"):
+            src._check_rebinding()
+
+
+def test_ssrf_hostaddr_numeric_skips_rebinding(monkeypatch) -> None:
+    """``?hostaddr=numeric-IP`` skips DNS re-resolution (no DNS involved)."""
+    import socket
+    import sys
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg:///db?hostaddr=8.8.8.8"
+    )
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        return_value=["8.8.8.8"],
+    ):
+        src = SQLSource(_make_cfg())
+
+    assert src._rebinding_host == "8.8.8.8"
+
+    getaddrinfo_calls: list[str] = []
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        getaddrinfo_calls.append(host)
+        return [(socket.AF_INET, 0, 0, "", ("10.0.0.1", 0))]
+
+    with patch("recotem.datasource.sql.socket.getaddrinfo", fake_getaddrinfo):
+        src._check_rebinding()  # must not raise
+
+    assert not getaddrinfo_calls, "getaddrinfo must not be called for numeric hostaddr"
+
+
+def test_ssrf_hostaddr_overrides_host_for_rebinding(monkeypatch) -> None:
+    """When both ``?host=`` and ``?hostaddr=`` are set, ``hostaddr`` wins.
+
+    libpq uses ``hostaddr`` for the TCP connect and ``host`` only for SNI
+    / certificate verification, so ``_rebinding_host`` reflects libpq's
+    precedence: ``hostaddr`` > query ``host`` > netloc.  Both candidates
+    must still pass the init-time SSRF check (defence in depth — a sneaky
+    DSN could put a public host and a private hostaddr).
+    """
+    import sys
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        "postgresql+psycopg:///db?host=public.example.com&hostaddr=8.8.8.8",
+    )
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        return_value=["8.8.8.8"],
+    ):
+        src = SQLSource(_make_cfg())
+
+    # hostaddr is the TCP target → it is the rebinding host.
+    assert src._rebinding_host == "8.8.8.8"
+
+
+def test_ssrf_query_host_private_blocked_even_with_public_netloc(monkeypatch) -> None:
+    """A DSN with a public netloc *and* a private ``?host=`` is rejected.
+
+    The query parameter takes precedence at the driver level — a recipe
+    author trying to bypass the netloc check by burying the real target
+    in ``?host=`` must still trip the guard.
+    """
+    import sys
+    import types
+    from unittest.mock import patch
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        "postgresql+psycopg://u:p@public.example.com/db?host=10.0.0.5",
+    )
+    # The netloc lookup must succeed (so we reach the query-host check).
+    # The patched assert_host_public passes public.example.com but real IP
+    # logic must still trigger on 10.0.0.5; we delegate to the unpatched
+    # function for that case.
+    real_assert_host_public = __import__(
+        "recotem._http_fetch", fromlist=["assert_host_public"]
+    ).assert_host_public
+
+    def selective_assert_host_public(url, *, allow_private):
+        if "public.example.com" in url:
+            return ["8.8.8.8"]
+        return real_assert_host_public(url, allow_private=allow_private)
+
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        side_effect=selective_assert_host_public,
+    ):
+        with pytest.raises(DataSourceError, match="(?i)private|loopback"):
+            SQLSource(_make_cfg())
+
+
+# ---------------------------------------------------------------------------
 # A3 — _apply_read_only raises DataSourceError on failure (pg/mysql/mariadb)
 #       SQLite is a silent no-op.
 # ---------------------------------------------------------------------------

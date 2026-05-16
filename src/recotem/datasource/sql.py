@@ -159,33 +159,137 @@ class SQLSource:
         # first address is critical for dual-stack hosts: getaddrinfo on the
         # re-check may legitimately return a different family, and a single-
         # IP pin would mis-classify that as a rebind.
+        #
+        # The guard inspects every routing form the libpq / PyMySQL drivers
+        # honour, not just ``url.host``.  SQLAlchemy's ``make_url`` only
+        # populates ``url.host`` from the netloc; when the destination is
+        # supplied via a URL query parameter (e.g.
+        # ``postgresql:///db?host=169.254.169.254``), ``url.host`` is empty
+        # and the driver still routes the TCP connect to the query value.
+        # The checks therefore cover:
+        #
+        # * Routing forms that *can* be resolved to a TCP IP and are
+        #   validated against the public/private IP allow-list:
+        #     - ``url.host``                      (netloc)
+        #     - ``?host=name`` (postgres, mysql)  (libpq / PyMySQL routing)
+        #     - ``?hostaddr=ip`` (postgres)       (libpq TCP target IP)
+        # * Routing forms that are refused outright because they cannot be
+        #   resolved to a TCP target the guard can validate and amount to
+        #   local pivots:
+        #     - ``?service=`` (postgres)          (pg_service.conf lookup)
+        #     - ``?unix_socket=`` (mysql)         (local UDS)
+        #     - ``?host=/abs/path`` (postgres)    (libpq Unix-socket dir)
+        # * Network dialects whose DSN contains *no* host information at
+        #   all are refused: libpq / PyMySQL default to the local socket
+        #   or 127.0.0.1, which is exactly the local-pivot the guard
+        #   exists to prevent.
+        #
+        # All of the above are reachable via the recipe-author-controlled
+        # DSN env var, so each must be gated to honour the
+        # ``RECOTEM_SQL_ALLOW_PRIVATE`` opt-in.  SQLite is exempt: there is
+        # no network connect (``url.database`` is a filesystem path).
         self._pinned_ips: set[str] = set()
-        if url.host and not sql_allow_private():
-            # Wrap IPv6 literals in brackets so urlparse inside assert_host_public
-            # correctly identifies the full address (e.g. "fe80::1" not just "fe80").
-            # SQLAlchemy's make_url strips the brackets from "[::1]" and returns "::1".
-            host_for_check = url.host
-            if ":" in host_for_check and not host_for_check.startswith("["):
-                host_for_check = f"[{host_for_check}]"
-            try:
-                pinned_ips = assert_host_public(
-                    f"db://{host_for_check}", allow_private=False
-                )
-            except HttpFetchError as exc:
-                msg = str(exc)
-                if "does not resolve" in msg:
-                    raise DataSourceError(
-                        f"hostname {url.host!r} does not resolve; "
-                        "verify the DSN host or set RECOTEM_SQL_ALLOW_PRIVATE=1 "
-                        "to bypass for offline tests"
-                    ) from exc
+        self._rebinding_host: str | None = None
+        if backend != "sqlite" and not sql_allow_private():
+            q = url.query
+
+            # Refuse routing forms that bypass the network guard by design.
+            if backend.startswith("postgres") and q.get("service"):
                 raise DataSourceError(
-                    f"refusing to connect to private/loopback host {url.host!r}; "
-                    "set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in (intended for "
-                    "in-cluster or compose service-name destinations)"
-                ) from exc
-            if pinned_ips:
-                self._pinned_ips = set(pinned_ips)
+                    "DSN routes via libpq service file (?service=...); "
+                    "this bypasses the network SSRF guard. "
+                    "Set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in."
+                )
+            if backend in {"mysql", "mariadb"} and q.get("unix_socket"):
+                raise DataSourceError(
+                    "DSN routes via Unix socket (?unix_socket=...); "
+                    "this bypasses the network SSRF guard. "
+                    "Set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in."
+                )
+
+            # Collect every candidate TCP-target host the driver could use.
+            candidates: list[str] = []
+            if url.host:
+                candidates.append(url.host)
+            if backend.startswith("postgres"):
+                for key in ("hostaddr", "host"):
+                    v = q.get(key)
+                    if v:
+                        candidates.append(v)
+            elif backend in {"mysql", "mariadb"}:
+                v = q.get("host")
+                if v:
+                    candidates.append(v)
+
+            # libpq treats an absolute-path ``host=`` value as a Unix-socket
+            # directory.  Refuse it for the same reason as ?unix_socket=.
+            for c in candidates:
+                if c.startswith("/"):
+                    raise DataSourceError(
+                        "DSN host is an absolute path (libpq Unix-socket "
+                        "form); this bypasses the network SSRF guard. "
+                        "Set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in."
+                    )
+
+            # No host info at all → driver-default localhost / local socket.
+            if not candidates:
+                raise DataSourceError(
+                    f"DSN for dialect {backend!r} does not specify a host; "
+                    "the driver would default to the local socket / 127.0.0.1 "
+                    "which is rejected by the SSRF guard. Specify a host "
+                    "explicitly or set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in."
+                )
+
+            # Deduplicate while preserving order.  A DSN like
+            # ``postgresql:///db?host=foo`` produces a single candidate;
+            # a DSN like ``postgresql://x:y@h/db?host=h`` produces two
+            # copies of the same host and only needs one SSRF lookup.
+            seen: set[str] = set()
+            deduped_candidates: list[str] = []
+            for c in candidates:
+                if c not in seen:
+                    seen.add(c)
+                    deduped_candidates.append(c)
+
+            # Run the SSRF check on every candidate.  Pin the union of
+            # resolved public IPs so the rebinding re-check has the full
+            # dual-stack set to intersect against.
+            for host in deduped_candidates:
+                host_for_check = host
+                # Wrap IPv6 literals in brackets so urlparse inside
+                # assert_host_public identifies the full address (e.g.
+                # "fe80::1" not just "fe80").  SQLAlchemy's make_url
+                # strips the brackets from "[::1]" and returns "::1".
+                if ":" in host_for_check and not host_for_check.startswith("["):
+                    host_for_check = f"[{host_for_check}]"
+                try:
+                    pinned_ips = assert_host_public(
+                        f"db://{host_for_check}", allow_private=False
+                    )
+                except HttpFetchError as exc:
+                    msg = str(exc)
+                    if "does not resolve" in msg:
+                        raise DataSourceError(
+                            f"hostname {host!r} does not resolve; "
+                            "verify the DSN host or set RECOTEM_SQL_ALLOW_PRIVATE=1 "
+                            "to bypass for offline tests"
+                        ) from exc
+                    raise DataSourceError(
+                        f"refusing to connect to private/loopback host {host!r}; "
+                        "set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in (intended for "
+                        "in-cluster or compose service-name destinations)"
+                    ) from exc
+                if pinned_ips:
+                    self._pinned_ips.update(pinned_ips)
+
+            # The TCP target that the driver actually connects to is the
+            # one we re-resolve in _check_rebinding.  libpq's precedence
+            # is ``hostaddr`` > ``host`` (query) > netloc; PyMySQL uses
+            # the query ``host`` if set, otherwise the netloc.
+            if backend.startswith("postgres"):
+                self._rebinding_host = q.get("hostaddr") or q.get("host") or url.host
+            elif backend in {"mysql", "mariadb"}:
+                self._rebinding_host = q.get("host") or url.host
 
         self._config = config
         self._url = url
@@ -237,13 +341,20 @@ class SQLSource:
         and the actual TCP connect in fetch()/probe().  We re-verify that the
         current resolution still intersects the pinned set.
 
+        The host re-checked is :attr:`_rebinding_host`, which reflects the
+        driver's connect-routing precedence (libpq: ``hostaddr`` > query
+        ``host`` > netloc; PyMySQL: query ``host`` > netloc).  ``url.host``
+        alone is not authoritative when the DSN uses query-parameter routing
+        (e.g. ``postgresql:///db?host=...``).
+
         Skipped when:
-        - no pinned IPs were recorded (allow_private mode, no host, or SQLite)
-        - url.host is already a numeric IP literal (no DNS involved)
+        - no pinned IPs were recorded (allow_private mode or SQLite)
+        - the rebinding host is unset (allow_private mode or SQLite)
+        - the rebinding host is already a numeric IP literal (no DNS involved)
         """
         if not self._pinned_ips:
             return
-        host = self._url.host
+        host = self._rebinding_host
         if not host:
             return
         # Skip re-check for numeric IP literals — there is no DNS rebinding risk.

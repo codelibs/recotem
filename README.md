@@ -73,13 +73,11 @@ artifact directory all in one place. Train a TopPop recommender from a
 60-user CSV in under a minute.
 
 ```bash
-# 1. Generate keys (once per machine). Copy the values into the exports below.
-recotem keygen --type signing --kid dev
-recotem keygen --type api     --kid dev
-
-export RECOTEM_SIGNING_KEYS="dev:<signing-plaintext>"   # used by train + serve
-export RECOTEM_API_KEYS="dev:sha256:<api-hash>"         # used by serve
-export RECOTEM_API_PLAINTEXT="<api-plaintext>"          # used by curl below
+# 1. Set demo keys. DEMO ONLY — for production, generate fresh keys with
+#    `recotem keygen --type signing` and `recotem keygen --type api`.
+export RECOTEM_SIGNING_KEYS="dev:0000000000000000000000000000000000000000000000000000000000000000"
+export RECOTEM_API_PLAINTEXT="recotem-quickstart"
+export RECOTEM_API_KEYS="dev:sha256:921281c95ab79adecf21d410f8c93d38d74b0c3c267c221c8291771de8e7c359"
 
 # 2. Train, serve
 recotem train examples/quickstart/recipe.yaml

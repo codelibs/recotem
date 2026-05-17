@@ -76,8 +76,8 @@ artifact directory all in one place. Train a TopPop recommender from a
 # 1. Set demo keys. DEMO ONLY — for production, generate fresh keys with
 #    `recotem keygen --type signing` and `recotem keygen --type api`.
 export RECOTEM_SIGNING_KEYS="dev:0000000000000000000000000000000000000000000000000000000000000000"
-export RECOTEM_API_PLAINTEXT="recotem-quickstart"
-export RECOTEM_API_KEYS="dev:sha256:921281c95ab79adecf21d410f8c93d38d74b0c3c267c221c8291771de8e7c359"
+export RECOTEM_API_PLAINTEXT="recotem-quickstart-demo-key-0000"
+export RECOTEM_API_KEYS="dev:sha256:21be5c3be85b8d68123df9f9b6a26d8e307db30350ea8bcc844883e22ebcf125"
 
 # 2. Train, serve
 recotem train examples/quickstart/recipe.yaml

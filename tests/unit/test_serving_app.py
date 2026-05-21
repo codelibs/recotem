@@ -1594,6 +1594,98 @@ output:
     )
 
 
+def test_try_load_artifact_populates_loaded_at_unix(tmp_path: Path) -> None:
+    """Regression: startup-scan path must populate v1 fields.
+
+    Bug-for-bug parallel to the watcher's _build_entry fix in Task 3 of
+    the v1 API overhaul plan.  Without this, recipes loaded at startup
+    report ``loaded_at: 1970-01-01T00:00:00Z`` from GET /v1/recipes until
+    a hot-swap occurs.
+
+    Invariant: any ModelEntry returned with ``loaded=True`` must carry
+    ``loaded_at_unix > 0`` and an ``algorithms`` list / ``config_digest``
+    string sourced from the header.
+    """
+    import time as _time
+
+    from recotem.artifact.signing import KeyRing
+    from recotem.config import ServeConfig
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving.app import _try_load_artifact
+    from tests.conftest import ACTIVE_KEY_HEX, build_raw_artifact
+
+    # build_raw_artifact provides a safe default payload (a small builtin
+    # dict pickled via SafeUnpickler's allow-list); we only override the
+    # header to carry the v1 fields we want to assert on.
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(
+        build_raw_artifact(
+            kid="active",
+            key_hex=ACTIVE_KEY_HEX,
+            header_dict={
+                "recipe_name": "loaded_at_test",
+                "best_class": "TopPop",
+                "trained_at": "2026-01-01T00:00:00Z",
+                "config_digest": "deadbeef",
+                "algorithms": ["TopPop", "IALS"],
+            },
+        )
+    )
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    yaml_path = recipes_dir / "loaded_at_test.yaml"
+    yaml_path.write_text(
+        f"""\
+name: loaded_at_test
+source:
+  type: csv
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {artifact_path}
+"""
+    )
+
+    recipe = load_recipe(yaml_path)
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = f"active:{ACTIVE_KEY_HEX}"
+    cfg.max_artifact_bytes = 100 * 1024 * 1024
+    cfg.max_payload_bytes = 50 * 1024 * 1024
+    cfg.metadata_field_deny = []
+
+    key_ring = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    before = _time.time()
+    entry = _try_load_artifact(recipe, key_ring, cfg)
+    after = _time.time()
+
+    assert entry.loaded, (
+        f"_try_load_artifact must return loaded=True for a valid artifact; "
+        f"error={entry.last_load_error!r}"
+    )
+    assert entry.loaded_at_unix > 0, (
+        f"startup-scan path must populate loaded_at_unix (regression: was 0.0); "
+        f"got {entry.loaded_at_unix!r}"
+    )
+    assert before <= entry.loaded_at_unix <= after, (
+        f"loaded_at_unix must fall within the load window "
+        f"[{before}, {after}]; got {entry.loaded_at_unix}"
+    )
+    assert entry.config_digest == "deadbeef", (
+        f"config_digest must be sourced from header; got {entry.config_digest!r}"
+    )
+    assert entry.algorithms == ["TopPop", "IALS"], (
+        f"algorithms must be sourced from header; got {entry.algorithms!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # N-15: startup_parallelism — true parallel execution verified via thread IDs
 # ---------------------------------------------------------------------------

@@ -643,6 +643,9 @@ def _try_load_artifact(
         last_load_error=None,
         artifact_path=artifact_path,
         _loaded_marker=(marker, sha256),
+        loaded_at_unix=time.time(),
+        config_digest=header_dict.get("config_digest", "") or "",
+        algorithms=header_dict.get("algorithms", []) or [],
     )
 
     logger.info(

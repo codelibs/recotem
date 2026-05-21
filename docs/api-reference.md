@@ -81,9 +81,9 @@ Prometheus exposition.  Excluded from OpenAPI.  Requires
 - `X-Recotem-Model-Version` — present on every successful recommend
   response; mirrors `model_version` in the body.
 - `X-Recotem-Metadata-Degraded` — `"1"` when a per-item metadata lookup
-  failed during the request.  *(Currently emitted only by legacy code
-  paths; v1 single endpoints reuse the same helper but do not surface
-  this header — see CHANGELOG.)*
+  failed during the request.  **Currently reserved**: no v1 endpoint
+  emits this header today.  Server-side metadata-lookup errors are
+  still recorded in the `recotem_metadata_lookup_errors_total` metric.
 
 ## Error Code Table
 

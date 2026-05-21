@@ -1,8 +1,8 @@
-"""Integration test: in-process train + serve + httpx /predict call.
+"""Integration test: in-process train + serve + v1 recommend call.
 
 Uses FastAPI TestClient for synchronous testing without a real server.
 Trains a TopPop model on synthetic data, writes a signed artifact,
-then serves it and calls /predict.
+then serves it and calls the v1 recommend endpoints.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from recotem.config import ApiKeyEntry
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.routes import make_router
+from recotem.serving.v1_router import make_v1_router
 
 ACTIVE_KEY_HEX = "aa" * 32
 
@@ -30,7 +30,16 @@ def _make_mock_recommender(users: list[str], items: list[str]):
             return [(iid, 1.0 - i * 0.1) for i, iid in enumerate(items[:cutoff])]
         raise KeyError(f"Unknown user: {user_id}")
 
+    def _get_rec_new_user(seed_items, cutoff=10):
+        # Return a deterministic ranking of *items* that excludes the seeds —
+        # mimics irspack's get_recommendation_for_new_user contract closely
+        # enough for the v1 :recommend-related endpoint contract test.
+        seed_set = set(seed_items)
+        ranked = [iid for iid in items if iid not in seed_set]
+        return [(iid, 1.0 - i * 0.1) for i, iid in enumerate(ranked[:cutoff])]
+
     rec.get_recommendation_for_known_user_id.side_effect = _get_rec
+    rec.get_recommendation_for_new_user.side_effect = _get_rec_new_user
     return rec
 
 
@@ -54,7 +63,7 @@ def _make_api_entry(plaintext: str, kid: str = "api-key") -> ApiKeyEntry:
 
 
 def test_serve_predict_e2e_in_process() -> None:
-    """Train-like mock → serve → /predict returns valid response."""
+    """Train-like mock → serve → v1 :recommend returns valid response."""
     users = [f"user{i}" for i in range(10)]
     items = [f"item{i}" for i in range(20)]
 
@@ -68,6 +77,9 @@ def test_serve_predict_e2e_in_process() -> None:
             "recipe_name": "test_model",
         },
         kid="active",
+        # _loaded_marker[1] is the artifact sha that backs model_version.
+        _loaded_marker=(None, "deadbeef"),
+        loaded_at_unix=1.0,
     )
 
     registry = ModelRegistry()
@@ -75,14 +87,14 @@ def test_serve_predict_e2e_in_process() -> None:
 
     plaintext = "integration_test_api_key_32bytes"
     api_entry = _make_api_entry(plaintext)
-    router = make_router(registry=registry, api_keys=[api_entry])
+    router = make_v1_router(registry=registry, api_keys=[api_entry])
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(router, prefix="/v1")
     client = TestClient(app)
 
     response = client.post(
-        "/predict/test_model",
-        json={"user_id": "user0", "cutoff": 5},
+        "/v1/recipes/test_model:recommend",
+        json={"user_id": "user0", "limit": 5},
         headers={"x-api-key": plaintext},
     )
     assert response.status_code == 200
@@ -90,9 +102,55 @@ def test_serve_predict_e2e_in_process() -> None:
     assert "items" in data
     assert len(data["items"]) == 5
     assert data["items"][0]["item_id"] == "item0"
-    assert "model" in data
-    assert data["model"]["kid"] == "active"
+    assert data["recipe"] == "test_model"
+    assert data["model_version"].startswith("sha256:")
     assert "request_id" in data
+
+
+def test_v1_related_endpoint_returns_items() -> None:
+    """v1 :recommend-related returns items for a known seed item."""
+    users = [f"user{i}" for i in range(10)]
+    items = [f"item{i}" for i in range(20)]
+
+    rec = _make_mock_recommender(users, items)
+    entry = ModelEntry(
+        name="test_model",
+        recommender=rec,
+        header={
+            "best_class": "TopPopRecommender",
+            "trained_at": "2026-01-01T00:00:00Z",
+            "recipe_name": "test_model",
+        },
+        kid="active",
+        _loaded_marker=(None, "deadbeef"),
+        loaded_at_unix=1.0,
+    )
+
+    registry = ModelRegistry()
+    registry.replace("test_model", entry)
+
+    plaintext = "integration_test_api_key_32bytes"
+    api_entry = _make_api_entry(plaintext)
+    router = make_v1_router(registry=registry, api_keys=[api_entry])
+    app = FastAPI()
+    app.include_router(router, prefix="/v1")
+    client = TestClient(app)
+
+    # "item0" is a known item id produced by _make_mock_recommender; using it
+    # as the seed exercises the new-user (item-based) recommend path.
+    response = client.post(
+        "/v1/recipes/test_model:recommend-related",
+        json={"seed_items": ["item0"], "limit": 5},
+        headers={"x-api-key": plaintext},
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["recipe"] == "test_model"
+    assert data["model_version"].startswith("sha256:")
+    assert "items" in data
+    assert len(data["items"]) >= 1
+    # The seed item itself must not appear in the related results.
+    assert all(it["item_id"] != "item0" for it in data["items"])
 
 
 def test_serve_predict_e2e_unknown_user_404() -> None:
@@ -103,17 +161,19 @@ def test_serve_predict_e2e_unknown_user_404() -> None:
         recommender=rec,
         header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
         kid="active",
+        _loaded_marker=(None, "deadbeef"),
+        loaded_at_unix=1.0,
     )
     registry = ModelRegistry()
     registry.replace("model2", entry)
 
-    router = make_router(registry=registry, api_keys=[])
+    router = make_v1_router(registry=registry, api_keys=[])
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(router, prefix="/v1")
     client = TestClient(app, raise_server_exceptions=False)
 
     response = client.post(
-        "/predict/model2",
+        "/v1/recipes/model2:recommend",
         json={"user_id": "total_stranger"},
     )
     assert response.status_code == 404
@@ -122,40 +182,45 @@ def test_serve_predict_e2e_unknown_user_404() -> None:
 def test_serve_predict_e2e_missing_recipe_503() -> None:
     """Recipe not in registry returns 503."""
     registry = ModelRegistry()
-    router = make_router(registry=registry, api_keys=[])
+    router = make_v1_router(registry=registry, api_keys=[])
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(router, prefix="/v1")
     client = TestClient(app, raise_server_exceptions=False)
 
-    response = client.post("/predict/does_not_exist", json={"user_id": "user1"})
+    response = client.post(
+        "/v1/recipes/does_not_exist:recommend",
+        json={"user_id": "user1"},
+    )
     assert response.status_code == 503
 
 
 def test_serve_health_endpoint_ok_with_loaded_model() -> None:
-    """GET /health returns ok when a model is loaded."""
+    """GET /v1/health returns ok when a model is loaded."""
     rec = _make_mock_recommender(["u1"], ["i1"])
     entry = ModelEntry(
         name="healthy_recipe",
         recommender=rec,
         header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
         kid="k1",
+        _loaded_marker=(None, "deadbeef"),
+        loaded_at_unix=1.0,
     )
     registry = ModelRegistry()
     registry.replace("healthy_recipe", entry)
 
-    router = make_router(registry=registry, api_keys=[])
+    router = make_v1_router(registry=registry, api_keys=[])
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(router, prefix="/v1")
     client = TestClient(app)
 
-    response = client.get("/health")
+    response = client.get("/v1/health")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
     assert data["total"] == 1
     assert data["loaded"] == 1
 
-    details_resp = client.get("/health/details")
+    details_resp = client.get("/v1/health/details")
     assert details_resp.status_code == 200
     details = details_resp.json()
     assert "healthy_recipe" in details["recipes"]
@@ -398,24 +463,24 @@ def test_broken_yaml_does_not_abort_serve_other_recipes_still_serve(
     app = create_app(cfg)
     client = TestClient(app)
 
-    # /health must be 503 because both recipes are degraded
-    health_resp = client.get("/health")
+    # /v1/health must be 503 because both recipes are degraded
+    health_resp = client.get("/v1/health")
     assert health_resp.status_code == 503
     body = health_resp.json()
     assert body["status"] == "degraded"
     assert body["loaded"] == 0
     assert body["total"] == 2
 
-    # Per-recipe detail moved to /health/details (auth-gated path).
-    # In this test, insecure_no_auth=True, so /health/details is reachable
+    # Per-recipe detail moved to /v1/health/details (auth-gated path).
+    # In this test, insecure_no_auth=True, so /v1/health/details is reachable
     # without API keys.
-    details_resp = client.get("/health/details")
+    details_resp = client.get("/v1/health/details")
     assert details_resp.status_code == 503
     details = details_resp.json()
 
     # Broken recipe must appear with loaded=false and error info.
     assert "broken_recipe" in details["recipes"], (
-        f"broken_recipe must appear in /health/details; "
+        f"broken_recipe must appear in /v1/health/details; "
         f"got: {list(details['recipes'].keys())}"
     )
     broken_entry = details["recipes"]["broken_recipe"]
@@ -423,7 +488,7 @@ def test_broken_yaml_does_not_abort_serve_other_recipes_still_serve(
         f"broken YAML recipe must have loaded=false; got {broken_entry!r}"
     )
     assert broken_entry.get("error"), (
-        "broken YAML recipe must have an error string in /health/details"
+        "broken YAML recipe must have an error string in /v1/health/details"
     )
     assert "YAML parse failed" in (broken_entry.get("error") or ""), (
         f"error must mention YAML parse failed; got {broken_entry.get('error')!r}"
@@ -431,19 +496,22 @@ def test_broken_yaml_does_not_abort_serve_other_recipes_still_serve(
 
     # Good recipe must also appear (as missing-artifact stub)
     assert "good_recipe" in details["recipes"], (
-        "good_recipe must appear in /health/details even when artifact is missing"
+        "good_recipe must appear in /v1/health/details even when artifact is missing"
     )
 
-    # /predict for the broken recipe must return 503
+    # v1 :recommend for the broken recipe must return 503
     predict_broken = client.post(
-        "/predict/broken_recipe", json={"user_id": "u1", "cutoff": 5}
+        "/v1/recipes/broken_recipe:recommend",
+        json={"user_id": "u1", "limit": 5},
     )
     assert predict_broken.status_code == 503, (
-        f"broken recipe /predict must return 503; got {predict_broken.status_code}"
+        f"broken recipe :recommend must return 503; "
+        f"got {predict_broken.status_code}"
     )
 
-    # /predict for the good (missing artifact) recipe must also return 503
+    # v1 :recommend for the good (missing artifact) recipe must also return 503
     predict_good = client.post(
-        "/predict/good_recipe", json={"user_id": "u1", "cutoff": 5}
+        "/v1/recipes/good_recipe:recommend",
+        json={"user_id": "u1", "limit": 5},
     )
     assert predict_good.status_code == 503

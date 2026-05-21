@@ -244,7 +244,7 @@ def build_metadata_index(
         Optional set of **lowercase** field names to strip from every
         per-item dict.  Filtering is applied here once rather than on
         every request.  Pass ``frozenset(s.lower() for s in deny_list)``
-        (the same normalisation used in :func:`~recotem.serving.v1_router.make_v1_router`).
+        (the same normalisation used in :func:`~recotem.serving.routes.make_router`).
 
     Returns
     -------

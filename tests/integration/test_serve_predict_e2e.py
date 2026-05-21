@@ -8,6 +8,7 @@ then serves it and calls the v1 recommend endpoints.
 from __future__ import annotations
 
 import hashlib
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -16,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from recotem.config import ApiKeyEntry
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.v1_router import make_v1_router
+from recotem.serving.routes import make_router
 
 ACTIVE_KEY_HEX = "aa" * 32
 
@@ -87,7 +88,7 @@ def test_serve_predict_e2e_in_process() -> None:
 
     plaintext = "integration_test_api_key_32bytes"
     api_entry = _make_api_entry(plaintext)
-    router = make_v1_router(registry=registry, api_keys=[api_entry])
+    router = make_router(registry=registry, api_keys=[api_entry])
     app = FastAPI()
     app.include_router(router, prefix="/v1")
     client = TestClient(app)
@@ -131,7 +132,7 @@ def test_v1_related_endpoint_returns_items() -> None:
 
     plaintext = "integration_test_api_key_32bytes"
     api_entry = _make_api_entry(plaintext)
-    router = make_v1_router(registry=registry, api_keys=[api_entry])
+    router = make_router(registry=registry, api_keys=[api_entry])
     app = FastAPI()
     app.include_router(router, prefix="/v1")
     client = TestClient(app)
@@ -167,7 +168,7 @@ def test_serve_predict_e2e_unknown_user_404() -> None:
     registry = ModelRegistry()
     registry.replace("model2", entry)
 
-    router = make_v1_router(registry=registry, api_keys=[])
+    router = make_router(registry=registry, api_keys=[])
     app = FastAPI()
     app.include_router(router, prefix="/v1")
     client = TestClient(app, raise_server_exceptions=False)
@@ -182,7 +183,7 @@ def test_serve_predict_e2e_unknown_user_404() -> None:
 def test_serve_predict_e2e_missing_recipe_404() -> None:
     """Recipe not in registry returns 404 (not found)."""
     registry = ModelRegistry()
-    router = make_v1_router(registry=registry, api_keys=[])
+    router = make_router(registry=registry, api_keys=[])
     app = FastAPI()
     app.include_router(router, prefix="/v1")
     client = TestClient(app, raise_server_exceptions=False)
@@ -208,7 +209,7 @@ def test_serve_health_endpoint_ok_with_loaded_model() -> None:
     registry = ModelRegistry()
     registry.replace("healthy_recipe", entry)
 
-    router = make_v1_router(registry=registry, api_keys=[])
+    router = make_router(registry=registry, api_keys=[])
     app = FastAPI()
     app.include_router(router, prefix="/v1")
     client = TestClient(app)
@@ -514,3 +515,251 @@ def test_broken_yaml_does_not_abort_serve_other_recipes_still_serve(
         json={"user_id": "u1", "limit": 5},
     )
     assert predict_good.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Shared setup helper for new v1-surface integration tests
+# ---------------------------------------------------------------------------
+
+
+def _make_registry_and_client(
+    users: list[str],
+    items: list[str],
+    recipe_name: str = "test_model",
+    plaintext: str = "integration_test_api_key_32bytes",
+    algorithms: list[str] | None = None,
+    config_digest: str = "sha256:abc123",
+) -> tuple[ModelRegistry, TestClient, str]:
+    """Build a populated registry, a FastAPI TestClient, and the auth key.
+
+    Returns (registry, client, plaintext_api_key).
+    Used by at least two test functions — extracted to avoid duplication.
+    """
+    rec = _make_mock_recommender(users, items)
+    entry = ModelEntry(
+        name=recipe_name,
+        recommender=rec,
+        header={
+            "best_class": "TopPopRecommender",
+            "trained_at": "2026-01-01T00:00:00Z",
+            "recipe_name": recipe_name,
+        },
+        kid="active",
+        _loaded_marker=(None, "deadbeef1234"),
+        loaded_at_unix=time.time(),
+        algorithms=algorithms or ["TopPopRecommender"],
+        config_digest=config_digest,
+    )
+    registry = ModelRegistry()
+    registry.replace(recipe_name, entry)
+
+    api_entry = _make_api_entry(plaintext)
+    router = make_router(registry=registry, api_keys=[api_entry])
+    app = FastAPI()
+    app.include_router(router, prefix="/v1")
+    client = TestClient(app)
+    return registry, client, plaintext
+
+
+# ---------------------------------------------------------------------------
+# New integration tests: batch-recommend, batch-recommend-related, discovery
+# ---------------------------------------------------------------------------
+
+
+def test_batch_recommend_train_serve_call() -> None:
+    """POST :batch-recommend returns per-request results for known and unknown users."""
+    users = [f"user{i}" for i in range(5)]
+    items = [f"item{i}" for i in range(10)]
+
+    _, client, plaintext = _make_registry_and_client(users, items)
+
+    # Three requests: two known users, one unknown user.
+    response = client.post(
+        "/v1/recipes/test_model:batch-recommend",
+        json={
+            "requests": [
+                {"user_id": "user0", "limit": 3},
+                {"user_id": "user2", "limit": 3},
+                {"user_id": "totally_unknown_user", "limit": 3},
+            ]
+        },
+        headers={"x-api-key": plaintext},
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+
+    # Top-level envelope fields.
+    assert "results" in data
+    assert "recipe" in data
+    assert "model_version" in data
+    assert "request_id" in data
+    assert data["recipe"] == "test_model"
+    assert data["model_version"].startswith("sha256:")
+
+    results = data["results"]
+    assert len(results) == 3
+
+    # Index 0: known user — must succeed with items.
+    r0 = results[0]
+    assert r0["index"] == 0
+    assert r0["status"] == "ok"
+    assert isinstance(r0["items"], list)
+    assert len(r0["items"]) == 3
+    assert r0["items"][0]["item_id"] == "item0"
+
+    # Index 1: another known user — must also succeed.
+    r1 = results[1]
+    assert r1["index"] == 1
+    assert r1["status"] == "ok"
+    assert isinstance(r1["items"], list)
+
+    # Index 2: unknown user — must carry UNKNOWN_USER error, no items.
+    r2 = results[2]
+    assert r2["index"] == 2
+    assert r2["status"] == "error"
+    assert r2["items"] is None
+    assert r2["error"] is not None
+    assert r2["error"]["code"] == "UNKNOWN_USER"
+
+
+def test_batch_recommend_related_train_serve_call() -> None:
+    """POST :batch-recommend-related handles known seed items and unknown seeds."""
+    users = [f"user{i}" for i in range(5)]
+    items = [f"item{i}" for i in range(10)]
+
+    _, client, plaintext = _make_registry_and_client(users, items)
+
+    # Two requests: one with a partial seed (returns results), one where all
+    # known items are seeds (mock returns empty list → UNKNOWN_SEED_ITEMS error).
+    all_item_seeds = [f"item{i}" for i in range(10)]
+    response = client.post(
+        "/v1/recipes/test_model:batch-recommend-related",
+        json={
+            "requests": [
+                {"seed_items": ["item0"], "limit": 3},
+                # Seed with every item in the corpus: nothing left to recommend.
+                {"seed_items": all_item_seeds, "limit": 3},
+            ]
+        },
+        headers={"x-api-key": plaintext},
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+
+    # Top-level envelope.
+    assert "results" in data
+    assert "recipe" in data
+    assert "model_version" in data
+    assert "request_id" in data
+    assert data["recipe"] == "test_model"
+    assert data["model_version"].startswith("sha256:")
+
+    results = data["results"]
+    assert len(results) == 2
+
+    # Index 0: known seed item — returns items, seed excluded.
+    r0 = results[0]
+    assert r0["index"] == 0
+    assert r0["status"] == "ok"
+    assert isinstance(r0["items"], list)
+    assert len(r0["items"]) >= 1
+    # The seed "item0" must not appear in the related results.
+    assert all(it["item_id"] != "item0" for it in r0["items"])
+
+    # Index 1: seed returns empty list from mock — UNKNOWN_SEED_ITEMS error.
+    r1 = results[1]
+    assert r1["index"] == 1
+    assert r1["status"] == "error"
+    assert r1["items"] is None
+    assert r1["error"] is not None
+    assert r1["error"]["code"] == "UNKNOWN_SEED_ITEMS"
+
+
+def test_recipes_discovery_list_and_detail() -> None:
+    """GET /v1/recipes and /v1/recipes/{name} return full schema after model load."""
+    users = [f"user{i}" for i in range(5)]
+    items = [f"item{i}" for i in range(10)]
+
+    _, client, plaintext = _make_registry_and_client(
+        users,
+        items,
+        recipe_name="discovery_model",
+        algorithms=["TopPopRecommender"],
+        config_digest="sha256:cafebabe",
+    )
+
+    # --- GET /v1/recipes (list) ---
+    list_resp = client.get(
+        "/v1/recipes",
+        headers={"x-api-key": plaintext},
+    )
+    assert list_resp.status_code == 200, list_resp.text
+    list_data = list_resp.json()
+
+    assert "recipes" in list_data
+    assert isinstance(list_data["recipes"], list)
+    names = [r["name"] for r in list_data["recipes"]]
+    assert "discovery_model" in names
+
+    # Validate RecipeSummary shape in the list entry.
+    summary = next(r for r in list_data["recipes"] if r["name"] == "discovery_model")
+    assert "model_version" in summary
+    assert summary["model_version"].startswith("sha256:")
+    assert "loaded_at" in summary
+    # loaded_at must be a non-empty ISO-8601 UTC string.
+    assert summary["loaded_at"].endswith("Z")
+    assert "kind" in summary
+    assert summary["kind"] == "user-item"
+    assert "supported_verbs" in summary
+    assert isinstance(summary["supported_verbs"], list)
+    expected_verbs = {
+        "recommend",
+        "recommend-related",
+        "batch-recommend",
+        "batch-recommend-related",
+    }
+    assert set(summary["supported_verbs"]) == expected_verbs
+
+    # --- GET /v1/recipes/{name} (detail) ---
+    detail_resp = client.get(
+        "/v1/recipes/discovery_model",
+        headers={"x-api-key": plaintext},
+    )
+    assert detail_resp.status_code == 200, detail_resp.text
+    detail = detail_resp.json()
+
+    # RecipeDetailResponse extends RecipeSummary with config_digest, algorithms,
+    # and best_algorithm.
+    for field in (
+        "name",
+        "model_version",
+        "loaded_at",
+        "kind",
+        "supported_verbs",
+        "config_digest",
+        "algorithms",
+        "best_algorithm",
+    ):
+        assert field in detail, f"Missing field '{field}' in detail response"
+
+    assert detail["name"] == "discovery_model"
+    assert detail["model_version"].startswith("sha256:")
+    assert detail["loaded_at"].endswith("Z")
+    assert detail["kind"] == "user-item"
+    assert isinstance(detail["supported_verbs"], list)
+    assert set(detail["supported_verbs"]) == expected_verbs
+
+    # Config digest and algorithms must match what was set in ModelEntry.
+    assert detail["config_digest"] == "sha256:cafebabe"
+    assert isinstance(detail["algorithms"], list)
+    assert "TopPopRecommender" in detail["algorithms"]
+
+    # best_algorithm is derived from header["best_class"].
+    assert detail["best_algorithm"] == "TopPopRecommender"
+
+    # --- GET /v1/recipes/{name} for a non-existent recipe returns 404 ---
+    missing_resp = client.get(
+        "/v1/recipes/no_such_recipe",
+        headers={"x-api-key": plaintext},
+    )
+    assert missing_resp.status_code == 404

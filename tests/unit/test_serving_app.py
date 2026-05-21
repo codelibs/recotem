@@ -178,7 +178,7 @@ def test_insecure_no_auth_overrides_configured_api_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When ``insecure_no_auth=True`` and ``api_keys`` is non-empty,
-    ``create_app`` must pass ``api_keys=[]`` to ``make_v1_router`` so the
+    ``create_app`` must pass ``api_keys=[]`` to ``make_router`` so the
     X-API-Key header is not enforced. Otherwise the flag is documented
     but silently ineffective whenever ``RECOTEM_API_KEYS`` is still set
     in the environment."""
@@ -194,13 +194,13 @@ def test_insecure_no_auth_overrides_configured_api_keys(
     ]
 
     captured: dict = {}
-    real_make_v1_router = app_module.make_v1_router
+    real_make_router = app_module.make_router
 
     def _spy(*args, **kwargs):
         captured["api_keys"] = kwargs.get("api_keys")
-        return real_make_v1_router(*args, **kwargs)
+        return real_make_router(*args, **kwargs)
 
-    monkeypatch.setattr(app_module, "make_v1_router", _spy)
+    monkeypatch.setattr(app_module, "make_router", _spy)
     app_module.create_app(cfg)
 
     assert captured["api_keys"] == [], (
@@ -256,13 +256,13 @@ def test_normal_mode_passes_configured_api_keys_to_router(
     cfg.api_keys = [entry]
 
     captured: dict = {}
-    real_make_v1_router = app_module.make_v1_router
+    real_make_router = app_module.make_router
 
     def _spy(*args, **kwargs):
         captured["api_keys"] = kwargs.get("api_keys")
-        return real_make_v1_router(*args, **kwargs)
+        return real_make_router(*args, **kwargs)
 
-    monkeypatch.setattr(app_module, "make_v1_router", _spy)
+    monkeypatch.setattr(app_module, "make_router", _spy)
     app_module.create_app(cfg)
 
     assert captured["api_keys"] == [entry]

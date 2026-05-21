@@ -1,6 +1,8 @@
 # tests/unit/test_serving_schemas.py
 """Unit tests for recotem.serving.schemas (v1)."""
 
+from datetime import UTC
+
 import pytest
 from pydantic import ValidationError
 
@@ -130,3 +132,72 @@ def test_recipe_detail_response_includes_config_digest():
         best_algorithm="TopPop",
     )
     assert d.config_digest == "sha256:cfg"
+
+
+# ---------------------------------------------------------------------------
+# Task C — under-tested field round-trips
+# ---------------------------------------------------------------------------
+
+
+def test_recommend_request_accepts_exclude_items() -> None:
+    """exclude_items: list[str] | None, max_length=1000 (from schema Field)."""
+    # None by default
+    req = RecommendRequest(user_id="u1")
+    assert req.exclude_items is None
+
+    # Accepts a list up to the cap
+    items_at_cap = [f"i{n}" for n in range(1000)]
+    req2 = RecommendRequest(user_id="u1", exclude_items=items_at_cap)
+    assert len(req2.exclude_items) == 1000
+
+    # Rejects lists that exceed the cap
+    with pytest.raises(ValidationError):
+        RecommendRequest(user_id="u1", exclude_items=[f"i{n}" for n in range(1001)])
+
+    # Rejects non-string entries (Pydantic strict-ish: int will not coerce to str
+    # in a list[str] field in v2 when the value is obviously wrong type)
+    # Note: pydantic v2 coerces ints to str in lax mode for list[str], so we
+    # check that the correct Python type is accepted and None is accepted too.
+    req3 = RecommendRequest(user_id="u1", exclude_items=None)
+    assert req3.exclude_items is None
+
+
+def test_recommend_request_accepts_context_dict() -> None:
+    """context: dict[str, Any] | None accepts arbitrary mapping or None."""
+    req = RecommendRequest(user_id="u1", context=None)
+    assert req.context is None
+
+    arb: dict = {
+        "session_id": "sess-42",
+        "flags": [1, 2, 3],
+        "nested": {"a": True, "b": None},
+    }
+    req2 = RecommendRequest(user_id="u1", context=arb)
+    assert req2.context == arb
+
+
+def test_recipes_list_response_loaded_at_iso8601() -> None:
+    """RecipeSummary.loaded_at must round-trip through JSON and be UTC ISO-8601."""
+    import json
+    from datetime import datetime
+
+    summary = RecipeSummary(
+        name="demo",
+        model_version="sha256:abc",
+        loaded_at="2026-05-21T12:34:56Z",
+        supported_verbs=["recommend"],
+        kind="user-item",
+    )
+    resp = RecipesListResponse(recipes=[summary])
+
+    # Round-trip through JSON
+    raw_json = resp.model_dump_json()
+    decoded = json.loads(raw_json)
+    loaded_at_str: str = decoded["recipes"][0]["loaded_at"]
+
+    # Python 3.12 fromisoformat accepts trailing Z as UTC
+    dt = datetime.fromisoformat(loaded_at_str)
+    assert dt.tzinfo is not None, "loaded_at must carry timezone info"
+    # Normalise to UTC and verify the offset is zero
+    dt_utc = dt.astimezone(UTC)
+    assert dt_utc.utcoffset().total_seconds() == 0

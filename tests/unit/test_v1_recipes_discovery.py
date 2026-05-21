@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.v1_router import make_v1_router
+from recotem.serving.routes import make_router
 
 
 def _client_with_entries(entries: list[ModelEntry]) -> TestClient:
@@ -13,7 +13,7 @@ def _client_with_entries(entries: list[ModelEntry]) -> TestClient:
     for e in entries:
         registry.replace(e.name, e)
     app = FastAPI()
-    app.include_router(make_v1_router(registry, []), prefix="/v1")
+    app.include_router(make_router(registry, []), prefix="/v1")
     return TestClient(app)
 
 

@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.v1_router import make_v1_router
+from recotem.serving.routes import make_router
 
 
 def _client_with_recommender(rec) -> TestClient:
@@ -27,7 +27,7 @@ def _client_with_recommender(rec) -> TestClient:
     registry = ModelRegistry()
     registry.replace("demo", entry)
     app = FastAPI()
-    app.include_router(make_v1_router(registry, []), prefix="/v1")
+    app.include_router(make_router(registry, []), prefix="/v1")
     return TestClient(app)
 
 
@@ -85,10 +85,23 @@ def test_related_503_when_recipe_stub_not_loaded():
     registry = ModelRegistry()
     registry.replace("demo", stub)
     app = FastAPI()
-    app.include_router(make_v1_router(registry, []), prefix="/v1")
+    app.include_router(make_router(registry, []), prefix="/v1")
     r = TestClient(app).post(
         "/v1/recipes/demo:recommend-related",
         json={"seed_items": ["i1"]},
     )
     assert r.status_code == 503
     assert r.json()["detail"]["code"] == "RECIPE_UNAVAILABLE"
+
+
+def test_recommend_related_sets_model_version_response_header():
+    rec = MagicMock()
+    rec.get_recommendation_for_new_user.return_value = [("i9", 0.7)]
+    r = _client_with_recommender(rec).post(
+        "/v1/recipes/demo:recommend-related",
+        json={"seed_items": ["seed1"], "limit": 1},
+    )
+    assert r.status_code == 200, r.text
+    header_val = r.headers.get("x-recotem-model-version")
+    assert header_val, "X-Recotem-Model-Version header must be present and non-empty"
+    assert header_val == r.json()["model_version"]

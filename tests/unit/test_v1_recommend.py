@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.v1_router import make_v1_router
+from recotem.serving.routes import make_router
 
 
 def _entry_with_recommender(recommender) -> ModelEntry:
@@ -36,7 +36,7 @@ def _app_with_entry(entry: ModelEntry) -> TestClient:
     registry.replace("demo", entry)
     app = FastAPI()
     app.include_router(
-        make_v1_router(registry=registry, api_keys=[]),
+        make_router(registry=registry, api_keys=[]),
         prefix="/v1",
     )
     return TestClient(app)
@@ -93,3 +93,14 @@ def test_recommend_404_when_recipe_missing_from_registry():
     r = client.post("/v1/recipes/unknown:recommend", json={"user_id": "u1"})
     assert r.status_code == 404
     assert r.json()["detail"]["code"] == "RECIPE_NOT_FOUND"
+
+
+def test_recommend_sets_model_version_response_header():
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    client = _app_with_entry(_entry_with_recommender(rec))
+    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1", "limit": 1})
+    assert r.status_code == 200, r.text
+    header_val = r.headers.get("x-recotem-model-version")
+    assert header_val, "X-Recotem-Model-Version header must be present and non-empty"
+    assert header_val == r.json()["model_version"]

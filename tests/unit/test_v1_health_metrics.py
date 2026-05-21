@@ -10,12 +10,12 @@ from fastapi.testclient import TestClient
 
 from recotem.config import ApiKeyEntry
 from recotem.serving.registry import ModelRegistry
-from recotem.serving.v1_router import make_v1_router
+from recotem.serving.routes import make_router
 
 
 def _client(api_keys: list[ApiKeyEntry] | None = None) -> TestClient:
     registry = ModelRegistry()
-    router = make_v1_router(registry=registry, api_keys=api_keys or [])
+    router = make_router(registry=registry, api_keys=api_keys or [])
     app = FastAPI()
     app.include_router(router, prefix="/v1")
     return TestClient(app)

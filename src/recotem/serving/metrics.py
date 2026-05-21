@@ -223,7 +223,7 @@ def _ensure_v1_initialized() -> None:
     """Lazily create the v1 counter/histogram families.
 
     Called from record_v1_request and observe_batch_size.  Mirrors the
-    pattern used by _ensure_initialized() for the legacy metrics.
+    pattern used by _ensure_initialized() for the operational metrics.
     """
     global _V1_REQUEST_COUNTER, _V1_REQUEST_LATENCY, _V1_BATCH_SIZE
     if _V1_REQUEST_COUNTER is not None:

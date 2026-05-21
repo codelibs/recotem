@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.v1_router import make_v1_router
+from recotem.serving.routes import make_router
 
 
 def _client(rec) -> TestClient:
@@ -27,7 +27,7 @@ def _client(rec) -> TestClient:
     registry = ModelRegistry()
     registry.replace("demo", entry)
     app = FastAPI()
-    app.include_router(make_v1_router(registry, []), prefix="/v1")
+    app.include_router(make_router(registry, []), prefix="/v1")
     return TestClient(app)
 
 
@@ -75,7 +75,7 @@ def test_batch_recommend_503_when_recipe_unavailable():
     registry = ModelRegistry()
     registry.replace("demo", stub)
     app = FastAPI()
-    app.include_router(make_v1_router(registry, []), prefix="/v1")
+    app.include_router(make_router(registry, []), prefix="/v1")
     client = TestClient(app)
     r = client.post(
         "/v1/recipes/demo:batch-recommend",
@@ -101,3 +101,33 @@ def test_batch_recommend_422_on_too_many_requests():
         json={"requests": [{"user_id": f"u{i}"} for i in range(257)]},
     )
     assert r.status_code == 422
+
+
+def test_batch_recommend_sets_model_version_response_header():
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    r = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend",
+        json={"requests": [{"user_id": "u1"}]},
+    )
+    assert r.status_code == 200, r.text
+    header_val = r.headers.get("x-recotem-model-version")
+    assert header_val, "X-Recotem-Model-Version header must be present and non-empty"
+    assert header_val == r.json()["model_version"]
+
+
+def test_batch_recommend_per_request_limit_validation():
+    rec = MagicMock()
+    # limit=0 is below the minimum of 1
+    r_zero = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend",
+        json={"requests": [{"user_id": "u1", "limit": 0}]},
+    )
+    assert r_zero.status_code == 422
+
+    # limit=1001 exceeds the maximum of 1000
+    r_over = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend",
+        json={"requests": [{"user_id": "u1", "limit": 1001}]},
+    )
+    assert r_over.status_code == 422

@@ -147,9 +147,9 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
   `pyproject.toml`.
 - pytest 8 + hypothesis 6. `@pytest.mark.slow` deselected by default.
 - `from __future__ import annotations` is used everywhere, including the
-  v1 serving router. FastAPI dependency arguments are written as
+  serving router. FastAPI dependency arguments are written as
   `kid: str = Depends(_require_auth)` (not `Annotated[...]`) in
-  `serving/v1_router.py` so that `Depends` is resolved as a runtime
+  `serving/routes.py` so that `Depends` is resolved as a runtime
   default rather than a stringified annotation.
 - structlog logger per module; the redaction processor in
   `recotem.log_redaction` is first in the chain and strips API keys, signing

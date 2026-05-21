@@ -1,6 +1,6 @@
 """Temporary POC: confirm FastAPI accepts AIP-136 colon-verb paths.
 
-Deleted in Task 13 once the real v1 endpoints replace it.
+Deleted in Task 12 once the legacy router is retired.
 """
 
 from fastapi import APIRouter, FastAPI

@@ -26,7 +26,7 @@
 ## Task 1: Branch + baseline + colon-path POC
 
 **Files:**
-- Test: `tests/unit/test_v1_colon_path_poc.py` (Create — temporary; deleted in Task 13)
+- Test: `tests/unit/test_v1_colon_path_poc.py` (Create — temporary; deleted in Task 12)
 
 **Goal:** Confirm FastAPI/Starlette accept `:`-suffix paths and OpenAPI publishes them. If not, the plan switches to `/recommend` slash-form fallback (covered in §"Risks" of the spec) — but proceed only after verifying.
 

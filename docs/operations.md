@@ -636,20 +636,28 @@ All Optuna trials scored 0.0. Common causes:
 ### 503 on `/v1/recipes/{name}:recommend` (or any sibling verb)
 
 The recipe is unhealthy (`loaded: false`) — response body carries
-`{"error": {"code": "RECIPE_UNAVAILABLE", ...}}`. See `/v1/health/details`
-for the underlying error. Usually a signing mismatch or corrupt artifact.
+`{"detail": "...", "code": "RECIPE_UNAVAILABLE"}`. See
+`/v1/health/details` for the underlying error. Usually a signing
+mismatch or corrupt artifact.
 
 ### 404 on `/v1/recipes/{name}:recommend`
 
-Response body carries `{"error": {"code": "UNKNOWN_USER", ...}}` — the
+Response body carries `{"detail": "...", "code": "UNKNOWN_USER"}` — the
 `user_id` was not present in training data. This is expected for new
 users; handle it in your application layer (fall back to popularity-based
 recommendations, for example).
 
 ### 404 on `/v1/recipes/{name}:recommend-related`
 
-Response body carries `{"error": {"code": "UNKNOWN_SEED_ITEMS", ...}}` —
+Response body carries `{"detail": "...", "code": "UNKNOWN_SEED_ITEMS"}` —
 none of the supplied `seed_items` are known to the trained model.
+
+### 422 on any `/v1/recipes/{name}:*` verb
+
+Request validation failed before the handler executed. The body is
+`{"detail": "Request validation failed", "code": "VALIDATION_ERROR",
+"errors": [...]}` and the request is counted as `status="validation_error"`
+in `recotem_v1_requests_total`.
 
 ### Partial failure in `/v1/recipes/{name}:batch-recommend` / `:batch-recommend-related`
 

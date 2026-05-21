@@ -25,7 +25,7 @@ Single-user recommendation.
 
 **Response body:** see `RecommendResponse` in `src/recotem/serving/schemas.py`.
 
-**Status codes:** 200, 401, 403, 404 (`UNKNOWN_USER`), 422, 503 (`RECIPE_UNAVAILABLE`).
+**Status codes:** 200, 401, 404 (`UNKNOWN_USER` | `RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
 
 ### `POST /v1/recipes/{name}:recommend-related`
 Seed-item → items.
@@ -39,13 +39,15 @@ Seed-item → items.
 | `exclude_items` | string[] \| null | no | null |  |
 | `context` | object \| null | no | null |  |
 
-**Status codes:** 200, 401, 403, 404 (`UNKNOWN_SEED_ITEMS`), 422, 503.
+**Status codes:** 200, 401, 404 (`UNKNOWN_SEED_ITEMS` | `RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
 
 ### `POST /v1/recipes/{name}:batch-recommend`
 Multi-user batch.  Body: `{ "requests": RecommendRequest[] }` (1..256).
 Response: `BatchRecommendResponse`.  Per-element `status` ∈ {ok, error}.
 HTTP 200 on partial failure; HTTP 503 only when the recipe itself is
 unavailable.
+
+**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
 
 > **Note:** batch endpoints (`:batch-recommend` and
 > `:batch-recommend-related`) return items as `{item_id, score}` only —
@@ -57,12 +59,16 @@ unavailable.
 ### `POST /v1/recipes/{name}:batch-recommend-related`
 Multi-seed batch.  Body: `{ "requests": RecommendRelatedRequest[] }` (1..256).
 
+**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
+
 ### `GET /v1/recipes`
 Authenticated.  Returns `RecipesListResponse` with one entry per loaded
 recipe.
 
 ### `GET /v1/recipes/{name}`
 Authenticated.  Returns `RecipeDetailResponse` or 404 (`RECIPE_NOT_FOUND`).
+
+**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 503 (`RECIPE_UNAVAILABLE`).
 
 ### `GET /v1/health`
 Unauthenticated.  Returns `{status, total, loaded}`.
@@ -76,14 +82,50 @@ Prometheus exposition.  Excluded from OpenAPI.  Requires
 
 ## Headers
 
-- `X-Request-ID` — accepted (regex `^[A-Za-z0-9_-]{1,64}$`) or generated;
-  always echoed in the response.
+- `X-Request-ID` — accepted (regex `^[A-Za-z0-9_-]{1,128}$`) or generated;
+  always echoed in the response.  When missing or invalid the server
+  substitutes a 12-char hex string.  Handlers read the validated value
+  from `request.state.request_id`, so the body field and response header
+  always agree.
 - `X-Recotem-Model-Version` — present on every successful recommend
   response; mirrors `model_version` in the body.
 - `X-Recotem-Metadata-Degraded` — `"1"` when a per-item metadata lookup
   failed during the request.  **Currently reserved**: no v1 endpoint
   emits this header today.  Server-side metadata-lookup errors are
   still recorded in the `recotem_metadata_lookup_errors_total` metric.
+
+## Error body shape
+
+All v1 error responses share a flat envelope at the top of the body:
+
+```json
+{"detail": "<human-readable message>", "code": "<MACHINE_CODE>"}
+```
+
+There is no nested `{"detail": {"detail": ..., "code": ...}}` form —
+clients parse `body["detail"]` and `body["code"]` directly.
+
+**422 validation errors** add a per-field breakdown from FastAPI /
+Pydantic and include the request ID so the body is correlatable with the
+`X-Request-ID` response header:
+
+```json
+{
+  "request_id": "<id matching X-Request-ID>",
+  "detail": "Request validation failed",
+  "code": "VALIDATION_ERROR",
+  "errors": [{"loc": ["body", "limit"], "msg": "...", "type": "..."}]
+}
+```
+
+**500 unhandled errors** flatten to:
+
+```json
+{"detail": "internal error", "code": "internal_error"}
+```
+
+Each endpoint above lists the status codes it can emit; the body shape
+in every error case is one of the three forms above.
 
 ## Error Code Table
 
@@ -94,3 +136,6 @@ Prometheus exposition.  Excluded from OpenAPI.  Requires
 | `UNKNOWN_USER`       | 404 | user not in idmap |
 | `UNKNOWN_SEED_ITEMS` | 404 | none of seed_items known to model |
 | `VALIDATION_ERROR`   | 422 | Pydantic schema rejected |
+| `missing_api_key`    | 401 | `X-API-Key` header missing |
+| `invalid_api_key`    | 401 | `X-API-Key` header present but did not match any configured digest |
+| `internal_error`     | 500 | unhandled server-side exception |

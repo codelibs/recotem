@@ -30,10 +30,10 @@ recotem train examples/quickstart/recipe.yaml
 recotem serve --recipes examples/quickstart/
 
 # 4. Predict (in another terminal)
-curl -X POST http://localhost:8080/predict/top_picks \
+curl -X POST http://localhost:8080/v1/recipes/top_picks:recommend \
   -H "X-API-Key: $RECOTEM_API_PLAINTEXT" \
   -H "Content-Type: application/json" \
-  -d '{"user_id": "u01", "cutoff": 5}'
+  -d '{"user_id": "u01", "limit": 10}'
 ```
 
 ## What's next

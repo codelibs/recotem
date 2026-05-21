@@ -5,11 +5,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.routes import make_router
+from tests.conftest import build_v1_app
 
 
 def _client(rec) -> TestClient:
@@ -26,9 +25,7 @@ def _client(rec) -> TestClient:
     )
     registry = ModelRegistry()
     registry.replace("demo", entry)
-    app = FastAPI()
-    app.include_router(make_router(registry, []), prefix="/v1")
-    return TestClient(app)
+    return TestClient(build_v1_app(registry))
 
 
 def test_batch_related_mixed_success_and_failure():
@@ -61,7 +58,9 @@ def test_batch_related_404_when_recipe_missing_from_registry():
         json={"requests": [{"seed_items": ["i1"]}]},
     )
     assert r.status_code == 404
-    assert r.json()["detail"]["code"] == "RECIPE_NOT_FOUND"
+    body = r.json()
+    assert body["code"] == "RECIPE_NOT_FOUND"
+    assert isinstance(body["detail"], str)
 
 
 def test_batch_related_503_when_recipe_stub_not_loaded():
@@ -74,14 +73,14 @@ def test_batch_related_503_when_recipe_stub_not_loaded():
     )
     registry = ModelRegistry()
     registry.replace("demo", stub)
-    app = FastAPI()
-    app.include_router(make_router(registry, []), prefix="/v1")
-    r = TestClient(app).post(
+    r = TestClient(build_v1_app(registry)).post(
         "/v1/recipes/demo:batch-recommend-related",
         json={"requests": [{"seed_items": ["i1"]}]},
     )
     assert r.status_code == 503
-    assert r.json()["detail"]["code"] == "RECIPE_UNAVAILABLE"
+    body = r.json()
+    assert body["code"] == "RECIPE_UNAVAILABLE"
+    assert isinstance(body["detail"], str)
 
 
 def test_batch_related_422_on_empty_seed_in_one_entry():

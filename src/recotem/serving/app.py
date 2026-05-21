@@ -32,7 +32,7 @@ from typing import Any
 import structlog
 import structlog.contextvars
 from fastapi import FastAPI, Request
-from fastapi.exceptions import HTTPException
+from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
@@ -60,6 +60,30 @@ logger = structlog.get_logger(__name__)
 
 # Allowed characters and length for echoing a client-supplied X-Request-ID.
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
+
+# Pattern matching v1 inference verbs on the request path.  Used by the
+# RequestValidationError handler to record a ``validation_error`` metric for
+# the appropriate (recipe, verb) tuple when 422 is returned for a malformed
+# inference body.
+_V1_VERB_PATH_RE = re.compile(
+    r"^/v1/recipes/(?P<name>[A-Za-z0-9_-]{1,64}):"
+    r"(?P<verb>recommend|recommend-related|batch-recommend|batch-recommend-related)$"
+)
+
+# Default ``detail`` strings used by the HTTPException handler when callers
+# raise ``HTTPException(detail={...})`` with a dict that omits a ``detail``
+# key.  Keeps the response body well-formed (every error body has a string
+# ``detail`` field) even if a handler forgets to set one.
+_DEFAULT_DETAIL_FOR: dict[int, str] = {
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    422: "Unprocessable Entity",
+    500: "Internal Server Error",
+    503: "Service Unavailable",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +235,8 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # On successful load we insert a fully populated ModelEntry; on failure
     # we still insert a stub (loaded=False, last_load_error=<reason>) so
     # /health returns degraded and operators can see which recipes are not
-    # serving.  /predict checks  and returns 503 for stubs.
+    # serving.  The v1 inference endpoints check ``entry.loaded`` and return
+    # 503 for stubs.
     #
     # Loads are parallelised via a ThreadPoolExecutor so startup time is
     # bounded by the slowest single artifact rather than the sum of all
@@ -378,22 +403,94 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         openapi_url=_openapi_url,
     )
 
-    # 9. Structured exception handler for unhandled non-HTTP exceptions.
+    # 9a. Flat-body HTTPException handler.
+    # Handlers raise ``HTTPException(detail={"detail": "...", "code": "..."})``
+    # so callers can attach a machine-readable code alongside the human
+    # message.  FastAPI's default would wrap that into
+    # ``{"detail": {"detail": "...", "code": "..."}}`` (double-detail).  We
+    # flatten dict-shaped details to the top level so the response body is
+    # a single flat object — ``{"detail": "...", "code": "..."}`` — while
+    # string-shaped details fall through to FastAPI's default shape.
+    @app.exception_handler(HTTPException)
+    async def _http_exception_handler(
+        request: Request, exc: HTTPException
+    ) -> JSONResponse:
+        headers = getattr(exc, "headers", None)
+        if isinstance(exc.detail, dict):
+            content: dict[str, Any] = dict(exc.detail)
+            # Defensive: if a handler raised HTTPException(detail={...})
+            # without including a "detail" key, fill in a sensible default
+            # so the response body always has a string ``detail`` field.
+            content.setdefault(
+                "detail", _DEFAULT_DETAIL_FOR.get(exc.status_code, "Error")
+            )
+        else:
+            content = {"detail": exc.detail}
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=content,
+            headers=headers,
+        )
+
+    # 9b. Flat-body RequestValidationError handler.
+    # FastAPI's default 422 body is ``{"detail": [errors...]}`` which clashes
+    # with our flat error shape.  Wrap it in our standard ``{"detail",
+    # "code", "errors"}`` envelope, and record a ``validation_error`` metric
+    # for the matching (recipe, verb) tuple when the request path is a v1
+    # inference verb.  If the path does not match (e.g. /v1/recipes listing
+    # with bad query), the metric is skipped but the 422 body is still
+    # returned.
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        match = _V1_VERB_PATH_RE.match(request.url.path)
+        if match is not None:
+            _metrics.record_v1_request(
+                recipe=match.group("name"),
+                verb=match.group("verb"),
+                status="validation_error",
+                latency_seconds=0.0,
+            )
+        # Include request_id so 422 responses are correlatable with the
+        # X-Request-ID header set by RequestIDMiddleware.  If the middleware
+        # was bypassed (e.g. in a stripped-down test app), fall back to "".
+        request_id = getattr(request.state, "request_id", "")
+        return JSONResponse(
+            status_code=422,
+            content={
+                "request_id": request_id,
+                "detail": "Request validation failed",
+                "code": "VALIDATION_ERROR",
+                "errors": exc.errors(),
+            },
+        )
+
+    # 9c. Structured exception handler for unhandled non-HTTP exceptions.
     # FastAPI's default 500 response is a plain text "Internal Server Error"
     # string which leaks no details.  We register our own handler to ensure
     # the response is JSON-formatted with a stable structure that clients can
     # parse, while still NOT leaking stack traces.  HTTPException is
-    # intentionally excluded so FastAPI's own handler keeps it.
+    # intentionally excluded so the dedicated HTTPException handler above
+    # keeps responsibility for it.
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(
         request: Request, exc: Exception
     ) -> JSONResponse:
         if isinstance(exc, HTTPException):
-            # Let FastAPI's built-in HTTPException handler deal with it.
+            # Let the dedicated HTTPException handler deal with it.
             raise exc
+        # Starlette's ServerErrorMiddleware sits OUTSIDE RequestIDMiddleware,
+        # so the middleware's normal X-Request-ID injection does not run for
+        # 500 responses produced here.  Read the value our middleware already
+        # stashed on ``request.state`` and re-attach it so every error
+        # response — including 500s — carries a correlatable ID.
+        request_id = getattr(request.state, "request_id", "")
+        headers = {"X-Request-ID": request_id} if request_id else None
         return JSONResponse(
             status_code=500,
             content={"detail": "internal error", "code": "internal_error"},
+            headers=headers,
         )
 
     # 10. Middlewares.

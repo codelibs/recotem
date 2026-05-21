@@ -8,7 +8,7 @@ Recotem is a single Python package with two execution modes:
 
 - `recotem train recipe.yaml` — fetch → train → write a signed artifact.
 - `recotem serve --recipes <dir>` — FastAPI server that watches the dir and
-  serves `/predict/{name}` for every loaded recipe.
+  serves `/v1/recipes/{name}:*` for every loaded recipe.
 
 The two modes communicate only via the signed artifact file format, so the
 trainer and the server can run on completely separate hosts.

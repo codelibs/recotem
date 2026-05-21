@@ -116,7 +116,8 @@ def _ensure_initialized() -> None:
     )
     _METADATA_LOOKUP_ERRORS = Counter(
         "recotem_metadata_lookup_errors_total",
-        "Metadata lookup errors during /predict response enrichment.",
+        "Metadata lookup errors during the v1 `:recommend` / "
+        "`:recommend-related` metadata join.",
         ["recipe"],
     )
     _RECIPE_RESCAN_ERRORS = Counter(
@@ -187,7 +188,8 @@ def inc_metadata_lookup_error(recipe: str) -> None:
     """Increment the per-recipe metadata-lookup-errors counter.
 
     Called when ``_lookup_metadata`` encounters an unexpected error (not a
-    plain ``KeyError`` / missing-item) during ``/predict`` response enrichment
+    plain ``KeyError`` / missing-item) during the v1 ``:recommend`` /
+    ``:recommend-related`` response enrichment
     — e.g. ``AttributeError`` from a non-unique index returning a DataFrame
     instead of a Series, or ``TypeError`` from a non-string column name.
     """

@@ -206,7 +206,7 @@ class Recipe(BaseModel, extra="forbid"):
     """Top-level recipe model.
 
     Represents a single training + serving unit.  One recipe → one model →
-    one ``/predict/{name}`` endpoint.
+    one ``/v1/recipes/{name}:*`` set of endpoints.
     """
 
     name: Annotated[

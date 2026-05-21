@@ -1,12 +1,12 @@
 # Recipe Reference
 
-A recipe is a YAML file that defines what data to fetch, how to train, and where to write the artifact. One recipe produces one model and one `/predict/{name}` endpoint.
+A recipe is a YAML file that defines what data to fetch, how to train, and where to write the artifact. One recipe produces one model and one set of `/v1/recipes/{name}:*` endpoints.
 
 ## Top-level fields
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | yes | Endpoint name. Pattern: `^[A-Za-z0-9_-]{1,64}$`. Becomes `/predict/{name}`. |
+| `name` | string | yes | Endpoint name. Pattern: `^[A-Za-z0-9_-]{1,64}$`. Becomes `/v1/recipes/{name}:*`. |
 | `source` | object | yes | Data source config. `type` field is the discriminator (`csv`, `parquet`, `bigquery`, `sql`, `ga4`, or any plugin). Validated in two stages: the rest of the recipe is parsed first, then the source dict is dispatched to the plugin's `Config` class. As a result, errors in `source.*` surface *after* errors elsewhere in the recipe; an unknown `source.type` raises a `DataSourceError` listing all registered type names. |
 | `schema` | object | yes | Column mapping. |
 | `cleansing` | object | no | Data quality gates. |

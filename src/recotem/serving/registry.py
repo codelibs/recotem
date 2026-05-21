@@ -36,7 +36,7 @@ class ModelEntry:
     Attributes
     ----------
     name:
-        Recipe name (matches ``/predict/{name}``).
+        Recipe name (matches the path parameter in ``/v1/recipes/{name}:*`` endpoints).
     recommender:
         The deserialized ``IDMappedRecommender`` instance.
     header:
@@ -53,7 +53,8 @@ class ModelEntry:
         columns — no large numeric arrays are duplicated.
     metadata_index:
         Pre-flattened ``dict[str, dict[str, Any]]`` keyed by item_id for
-        O(1) per-item lookups during ``/predict``.  Built once at model-load
+        O(1) per-item lookups during ``:recommend`` / ``:recommend-related``
+        response metadata join.  Built once at model-load
         time by :func:`~recotem.metadata.loader.build_metadata_index` with
         NaN→None normalisation and deny-list filtering already applied.
         ``None`` when no item_metadata is configured for this recipe.
@@ -67,8 +68,9 @@ class ModelEntry:
         ``True`` when ``recommender`` is a usable model.  ``False`` for stub
         entries inserted at startup when the artifact failed to load — these
         entries appear in ``/health`` as ``loaded=false`` so operators can see
-        which recipes are not serving, and ``/predict`` should reject them
-        with 503.
+        which recipes are not serving, and the v1 inference endpoints
+        (``:recommend``, ``:recommend-related``, ``:batch-recommend``,
+        ``:batch-recommend-related``) should reject them with 503.
     """
 
     name: str
@@ -341,7 +343,7 @@ class ModelRegistry:
         """
         with self._lock:
             items = list(self._entries.items())
-        # Build the dict outside the lock so /health cannot block /predict
+        # Build the dict outside the lock so /health cannot block `:recommend`
         # threads waiting to acquire the lock.
         return {name: entry.health_dict() for name, entry in items}
 

@@ -24,11 +24,10 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pandas as pd
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.routes import make_router
+from tests.conftest import build_v1_app
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,16 +40,9 @@ def _make_client(
 ) -> TestClient:
     registry = ModelRegistry()
     registry.replace(entry.name, entry)
-    app = FastAPI()
-    app.include_router(
-        make_router(
-            registry=registry,
-            api_keys=[],
-            metadata_field_deny=metadata_field_deny,
-        ),
-        prefix="/v1",
+    return TestClient(
+        build_v1_app(registry, metadata_field_deny=metadata_field_deny),
     )
-    return TestClient(app)
 
 
 def _entry_with_metadata_index(

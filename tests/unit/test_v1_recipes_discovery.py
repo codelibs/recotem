@@ -1,20 +1,17 @@
 # tests/unit/test_v1_recipes_discovery.py
 """GET /v1/recipes and GET /v1/recipes/{name} discovery endpoints."""
 
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.routes import make_router
+from tests.conftest import build_v1_app
 
 
 def _client_with_entries(entries: list[ModelEntry]) -> TestClient:
     registry = ModelRegistry()
     for e in entries:
         registry.replace(e.name, e)
-    app = FastAPI()
-    app.include_router(make_router(registry, []), prefix="/v1")
-    return TestClient(app)
+    return TestClient(build_v1_app(registry))
 
 
 def _stub(name: str) -> ModelEntry:
@@ -46,7 +43,9 @@ def test_recipes_list_returns_summaries():
 def test_recipe_detail_returns_404_for_unknown():
     r = _client_with_entries([_stub("a")]).get("/v1/recipes/unknown")
     assert r.status_code == 404
-    assert r.json()["detail"]["code"] == "RECIPE_NOT_FOUND"
+    body = r.json()
+    assert body["code"] == "RECIPE_NOT_FOUND"
+    assert isinstance(body["detail"], str)
 
 
 def test_recipe_detail_returns_503_for_stub_not_loaded():
@@ -59,7 +58,9 @@ def test_recipe_detail_returns_503_for_stub_not_loaded():
     )
     r = _client_with_entries([unloaded]).get("/v1/recipes/broken")
     assert r.status_code == 503
-    assert r.json()["detail"]["code"] == "RECIPE_UNAVAILABLE"
+    body = r.json()
+    assert body["code"] == "RECIPE_UNAVAILABLE"
+    assert isinstance(body["detail"], str)
 
 
 def test_recipe_detail_returns_full_summary_for_known():

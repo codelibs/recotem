@@ -18,8 +18,9 @@ scheme allow-list, and userinfo redaction in logs. See
 
 ``build_metadata_index`` converts a loaded DataFrame into a
 ``dict[str, dict[str, Any]]`` keyed by item_id for O(1) per-item lookups
-during ``/predict`` — NaN values are converted to ``None`` for JSON safety
-and deny-listed fields are stripped once at build time.
+during ``/v1/recipes/{name}:recommend`` and ``:recommend-related`` — NaN
+values are converted to ``None`` for JSON safety and deny-listed fields are
+stripped once at build time.
 """
 
 from __future__ import annotations
@@ -231,9 +232,10 @@ def build_metadata_index(
     """Convert a metadata DataFrame into a pre-flattened dict for O(1) lookups.
 
     This function is called once at model-load time (in the watcher's
-    ``_build_entry``) so that ``/predict`` can perform an O(1) dict ``.get()``
-    per recommended item rather than an O(n) DataFrame index lookup followed by
-    row serialisation.
+    ``_build_entry``) so that ``/v1/recipes/{name}:recommend`` and
+    ``:recommend-related`` can perform an O(1) dict ``.get()`` per recommended
+    item rather than an O(n) DataFrame index lookup followed by row
+    serialisation.
 
     Parameters
     ----------

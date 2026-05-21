@@ -5,20 +5,16 @@ their legacy counterparts but mounted under /v1.
 
 import hashlib
 
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from recotem.config import ApiKeyEntry
 from recotem.serving.registry import ModelRegistry
-from recotem.serving.routes import make_router
+from tests.conftest import build_v1_app
 
 
 def _client(api_keys: list[ApiKeyEntry] | None = None) -> TestClient:
     registry = ModelRegistry()
-    router = make_router(registry=registry, api_keys=api_keys or [])
-    app = FastAPI()
-    app.include_router(router, prefix="/v1")
-    return TestClient(app)
+    return TestClient(build_v1_app(registry, api_keys=api_keys or []))
 
 
 def _entry() -> ApiKeyEntry:

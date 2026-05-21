@@ -11,19 +11,16 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.routes import make_router
+from tests.conftest import build_v1_app
 
 
 def _client_with_entry(entry: ModelEntry) -> TestClient:
     registry = ModelRegistry()
     registry.replace(entry.name, entry)
-    app = FastAPI()
-    app.include_router(make_router(registry=registry, api_keys=[]), prefix="/v1")
-    return TestClient(app)
+    return TestClient(build_v1_app(registry))
 
 
 def _loaded_entry(name: str = "demo") -> ModelEntry:
@@ -44,11 +41,7 @@ def _loaded_entry(name: str = "demo") -> ModelEntry:
 
 def test_make_router_returns_routable_apiroute_factory():
     registry = ModelRegistry()
-    router = make_router(registry=registry, api_keys=[])
-    app = FastAPI()
-    app.include_router(router, prefix="/v1")
-
-    client = TestClient(app)
+    client = TestClient(build_v1_app(registry))
     # An entirely unknown verb on the recipes path must return 404,
     # confirming the router rejects undefined verbs (rather than e.g.
     # routing through a catch-all).  A GET request is used so we are not

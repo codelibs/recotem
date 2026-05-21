@@ -5,11 +5,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.routes import make_router
+from tests.conftest import build_v1_app
 
 
 def _entry_with_recommender(recommender) -> ModelEntry:
@@ -34,12 +33,7 @@ def _entry_with_recommender(recommender) -> ModelEntry:
 def _app_with_entry(entry: ModelEntry) -> TestClient:
     registry = ModelRegistry()
     registry.replace("demo", entry)
-    app = FastAPI()
-    app.include_router(
-        make_router(registry=registry, api_keys=[]),
-        prefix="/v1",
-    )
-    return TestClient(app)
+    return TestClient(build_v1_app(registry))
 
 
 def test_recommend_returns_items_and_envelope():
@@ -63,7 +57,9 @@ def test_recommend_404_when_user_unknown():
     r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
     assert r.status_code == 404
     body = r.json()
-    assert body["detail"]["code"] == "UNKNOWN_USER"
+    # Flat error body: top-level "code" and "detail" (string).
+    assert body["code"] == "UNKNOWN_USER"
+    assert isinstance(body["detail"], str)
 
 
 def test_recommend_503_when_recipe_not_loaded():
@@ -77,7 +73,9 @@ def test_recommend_503_when_recipe_not_loaded():
     client = _app_with_entry(stub)
     r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
     assert r.status_code == 503
-    assert r.json()["detail"]["code"] == "RECIPE_UNAVAILABLE"
+    body = r.json()
+    assert body["code"] == "RECIPE_UNAVAILABLE"
+    assert isinstance(body["detail"], str)
 
 
 def test_recommend_422_on_empty_user_id():
@@ -92,7 +90,9 @@ def test_recommend_404_when_recipe_missing_from_registry():
     client = _app_with_entry(_entry_with_recommender(rec))
     r = client.post("/v1/recipes/unknown:recommend", json={"user_id": "u1"})
     assert r.status_code == 404
-    assert r.json()["detail"]["code"] == "RECIPE_NOT_FOUND"
+    body = r.json()
+    assert body["code"] == "RECIPE_NOT_FOUND"
+    assert isinstance(body["detail"], str)
 
 
 def test_recommend_sets_model_version_response_header():

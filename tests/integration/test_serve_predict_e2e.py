@@ -12,12 +12,11 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from recotem.config import ApiKeyEntry
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.routes import make_router
+from tests.conftest import build_v1_app
 
 ACTIVE_KEY_HEX = "aa" * 32
 
@@ -88,9 +87,7 @@ def test_serve_predict_e2e_in_process() -> None:
 
     plaintext = "integration_test_api_key_32bytes"
     api_entry = _make_api_entry(plaintext)
-    router = make_router(registry=registry, api_keys=[api_entry])
-    app = FastAPI()
-    app.include_router(router, prefix="/v1")
+    app = build_v1_app(registry, api_keys=[api_entry])
     client = TestClient(app)
 
     response = client.post(
@@ -132,9 +129,7 @@ def test_v1_related_endpoint_returns_items() -> None:
 
     plaintext = "integration_test_api_key_32bytes"
     api_entry = _make_api_entry(plaintext)
-    router = make_router(registry=registry, api_keys=[api_entry])
-    app = FastAPI()
-    app.include_router(router, prefix="/v1")
+    app = build_v1_app(registry, api_keys=[api_entry])
     client = TestClient(app)
 
     # "item0" is a known item id produced by _make_mock_recommender; using it
@@ -168,9 +163,7 @@ def test_serve_predict_e2e_unknown_user_404() -> None:
     registry = ModelRegistry()
     registry.replace("model2", entry)
 
-    router = make_router(registry=registry, api_keys=[])
-    app = FastAPI()
-    app.include_router(router, prefix="/v1")
+    app = build_v1_app(registry)
     client = TestClient(app, raise_server_exceptions=False)
 
     response = client.post(
@@ -183,9 +176,7 @@ def test_serve_predict_e2e_unknown_user_404() -> None:
 def test_serve_predict_e2e_missing_recipe_404() -> None:
     """Recipe not in registry returns 404 (not found)."""
     registry = ModelRegistry()
-    router = make_router(registry=registry, api_keys=[])
-    app = FastAPI()
-    app.include_router(router, prefix="/v1")
+    app = build_v1_app(registry)
     client = TestClient(app, raise_server_exceptions=False)
 
     response = client.post(
@@ -209,9 +200,7 @@ def test_serve_health_endpoint_ok_with_loaded_model() -> None:
     registry = ModelRegistry()
     registry.replace("healthy_recipe", entry)
 
-    router = make_router(registry=registry, api_keys=[])
-    app = FastAPI()
-    app.include_router(router, prefix="/v1")
+    app = build_v1_app(registry)
     client = TestClient(app)
 
     response = client.get("/v1/health")
@@ -554,9 +543,7 @@ def _make_registry_and_client(
     registry.replace(recipe_name, entry)
 
     api_entry = _make_api_entry(plaintext)
-    router = make_router(registry=registry, api_keys=[api_entry])
-    app = FastAPI()
-    app.include_router(router, prefix="/v1")
+    app = build_v1_app(registry, api_keys=[api_entry])
     client = TestClient(app)
     return registry, client, plaintext
 

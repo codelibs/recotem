@@ -9,9 +9,7 @@ The router is mounted at ``/v1`` by ``serving/app.py`` and exposes the
 from __future__ import annotations
 
 import math
-import re
 import time
-import uuid
 from typing import Annotated, Any
 
 import structlog
@@ -35,9 +33,6 @@ from recotem.serving.schemas import (
 )
 
 logger = structlog.get_logger(__name__)
-
-# Allowed characters for the X-Request-ID echo.
-_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -182,16 +177,23 @@ def make_router(
         request: Request,
         kid: str = Depends(_require_auth),
     ) -> Any:
-        raw_rid = request.headers.get("x-request-id", "")
-        request_id = raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
+        request_id = request.state.request_id
         start = time.monotonic()
         status = "error"
         verb = "recommend"
+        structlog.contextvars.bind_contextvars(recipe=name, kid=kid)
 
         try:
             entry = registry.get(name)
             if entry is None:
                 status = "unavailable"
+                logger.warning(
+                    "recipe_unavailable",
+                    name=name,
+                    reason="not_found",
+                    request_id=request_id,
+                    kid=kid,
+                )
                 raise HTTPException(
                     status_code=404,
                     detail={
@@ -201,6 +203,13 @@ def make_router(
                 )
             if not entry.loaded or entry.recommender is None:
                 status = "unavailable"
+                logger.warning(
+                    "recipe_unavailable",
+                    name=name,
+                    reason="not_loaded",
+                    request_id=request_id,
+                    kid=kid,
+                )
                 raise HTTPException(
                     status_code=503,
                     detail={
@@ -254,16 +263,20 @@ def make_router(
             )
         except HTTPException:
             raise
-        except Exception:
+        except (MemoryError, RecursionError):
+            raise
+        except Exception as exc:
             logger.exception(
                 "recommend_unexpected_error",
                 name=name,
                 request_id=request_id,
                 kid=kid,
+                error_class=type(exc).__name__,
             )
             raise
         finally:
             _metrics.record_v1_request(name, verb, status, time.monotonic() - start)
+            structlog.contextvars.unbind_contextvars("recipe", "kid")
 
     @router.post(
         "/recipes/{name}:recommend-related",
@@ -276,16 +289,23 @@ def make_router(
         request: Request,
         kid: str = Depends(_require_auth),
     ) -> Any:
-        raw_rid = request.headers.get("x-request-id", "")
-        request_id = raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
+        request_id = request.state.request_id
         start = time.monotonic()
         status = "error"
         verb = "recommend-related"
+        structlog.contextvars.bind_contextvars(recipe=name, kid=kid)
 
         try:
             entry = registry.get(name)
             if entry is None:
                 status = "unavailable"
+                logger.warning(
+                    "recipe_unavailable",
+                    name=name,
+                    reason="not_found",
+                    request_id=request_id,
+                    kid=kid,
+                )
                 raise HTTPException(
                     status_code=404,
                     detail={
@@ -295,6 +315,13 @@ def make_router(
                 )
             if not entry.loaded or entry.recommender is None:
                 status = "unavailable"
+                logger.warning(
+                    "recipe_unavailable",
+                    name=name,
+                    reason="not_loaded",
+                    request_id=request_id,
+                    kid=kid,
+                )
                 raise HTTPException(
                     status_code=503,
                     detail={
@@ -347,16 +374,20 @@ def make_router(
             )
         except HTTPException:
             raise
-        except Exception:
+        except (MemoryError, RecursionError):
+            raise
+        except Exception as exc:
             logger.exception(
                 "recommend_related_unexpected_error",
                 name=name,
                 request_id=request_id,
                 kid=kid,
+                error_class=type(exc).__name__,
             )
             raise
         finally:
             _metrics.record_v1_request(name, verb, status, time.monotonic() - start)
+            structlog.contextvars.unbind_contextvars("recipe", "kid")
 
     @router.post(
         "/recipes/{name}:batch-recommend",
@@ -369,16 +400,23 @@ def make_router(
         request: Request,
         kid: str = Depends(_require_auth),
     ) -> Any:
-        raw_rid = request.headers.get("x-request-id", "")
-        request_id = raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
+        request_id = request.state.request_id
         start = time.monotonic()
         status = "error"
         verb = "batch-recommend"
+        structlog.contextvars.bind_contextvars(recipe=name, kid=kid)
 
         try:
             entry = registry.get(name)
             if entry is None:
                 status = "unavailable"
+                logger.warning(
+                    "recipe_unavailable",
+                    name=name,
+                    reason="not_found",
+                    request_id=request_id,
+                    kid=kid,
+                )
                 raise HTTPException(
                     status_code=404,
                     detail={
@@ -388,6 +426,13 @@ def make_router(
                 )
             if not entry.loaded or entry.recommender is None:
                 status = "unavailable"
+                logger.warning(
+                    "recipe_unavailable",
+                    name=name,
+                    reason="not_loaded",
+                    request_id=request_id,
+                    kid=kid,
+                )
                 raise HTTPException(
                     status_code=503,
                     detail={
@@ -446,16 +491,20 @@ def make_router(
             )
         except HTTPException:
             raise
-        except Exception:
+        except (MemoryError, RecursionError):
+            raise
+        except Exception as exc:
             logger.exception(
                 "batch_recommend_unexpected_error",
                 name=name,
                 request_id=request_id,
                 kid=kid,
+                error_class=type(exc).__name__,
             )
             raise
         finally:
             _metrics.record_v1_request(name, verb, status, time.monotonic() - start)
+            structlog.contextvars.unbind_contextvars("recipe", "kid")
 
     @router.post(
         "/recipes/{name}:batch-recommend-related",
@@ -468,16 +517,23 @@ def make_router(
         request: Request,
         kid: str = Depends(_require_auth),
     ) -> Any:
-        raw_rid = request.headers.get("x-request-id", "")
-        request_id = raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
+        request_id = request.state.request_id
         start = time.monotonic()
         status = "error"
         verb = "batch-recommend-related"
+        structlog.contextvars.bind_contextvars(recipe=name, kid=kid)
 
         try:
             entry = registry.get(name)
             if entry is None:
                 status = "unavailable"
+                logger.warning(
+                    "recipe_unavailable",
+                    name=name,
+                    reason="not_found",
+                    request_id=request_id,
+                    kid=kid,
+                )
                 raise HTTPException(
                     status_code=404,
                     detail={
@@ -487,6 +543,13 @@ def make_router(
                 )
             if not entry.loaded or entry.recommender is None:
                 status = "unavailable"
+                logger.warning(
+                    "recipe_unavailable",
+                    name=name,
+                    reason="not_loaded",
+                    request_id=request_id,
+                    kid=kid,
+                )
                 raise HTTPException(
                     status_code=503,
                     detail={
@@ -545,16 +608,20 @@ def make_router(
             )
         except HTTPException:
             raise
-        except Exception:
+        except (MemoryError, RecursionError):
+            raise
+        except Exception as exc:
             logger.exception(
                 "batch_recommend_related_unexpected_error",
                 name=name,
                 request_id=request_id,
                 kid=kid,
+                error_class=type(exc).__name__,
             )
             raise
         finally:
             _metrics.record_v1_request(name, verb, status, time.monotonic() - start)
+            structlog.contextvars.unbind_contextvars("recipe", "kid")
 
     @router.get(
         "/recipes",
@@ -584,34 +651,64 @@ def make_router(
     )
     def recipe_detail(
         name: Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")],
+        request: Request,
         kid: str = Depends(_require_auth),
     ) -> dict[str, Any]:
-        e = registry.get(name)
-        if e is None:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "detail": f"Recipe '{name}' not found",
-                    "code": "RECIPE_NOT_FOUND",
-                },
+        request_id = request.state.request_id
+        try:
+            e = registry.get(name)
+            if e is None:
+                logger.warning(
+                    "recipe_unavailable",
+                    name=name,
+                    reason="not_found",
+                    request_id=request_id,
+                    kid=kid,
+                )
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "detail": f"Recipe '{name}' not found",
+                        "code": "RECIPE_NOT_FOUND",
+                    },
+                )
+            if not e.loaded:
+                logger.warning(
+                    "recipe_unavailable",
+                    name=name,
+                    reason="not_loaded",
+                    request_id=request_id,
+                    kid=kid,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "detail": f"Recipe '{name}' is registered but not loaded",
+                        "code": "RECIPE_UNAVAILABLE",
+                    },
+                )
+            return {
+                "name": e.name,
+                "model_version": e.model_version,
+                "loaded_at": e.loaded_at,
+                "supported_verbs": e.supported_verbs,
+                "kind": e.kind,
+                "config_digest": e.config_digest or "",
+                "algorithms": e.algorithms or [],
+                "best_algorithm": e.best_class or "",
+            }
+        except HTTPException:
+            raise
+        except (MemoryError, RecursionError):
+            raise
+        except Exception as exc:
+            logger.exception(
+                "recipe_detail_unexpected_error",
+                name=name,
+                request_id=request_id,
+                kid=kid,
+                error_class=type(exc).__name__,
             )
-        if not e.loaded:
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "detail": f"Recipe '{name}' is registered but not loaded",
-                    "code": "RECIPE_UNAVAILABLE",
-                },
-            )
-        return {
-            "name": e.name,
-            "model_version": e.model_version,
-            "loaded_at": e.loaded_at,
-            "supported_verbs": e.supported_verbs,
-            "kind": e.kind,
-            "config_digest": e.config_digest or "",
-            "algorithms": e.algorithms or [],
-            "best_algorithm": e.best_class or "",
-        }
+            raise
 
     return router

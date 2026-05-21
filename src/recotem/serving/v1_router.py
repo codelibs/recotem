@@ -22,6 +22,7 @@ from recotem.serving.auth import verify_api_key
 from recotem.serving.registry import ModelRegistry
 from recotem.serving.routes import _lookup_metadata  # reused legacy helper
 from recotem.serving.schemas import (
+    RecommendRelatedRequest,
     RecommendRequest,
     RecommendResponse,
 )
@@ -179,6 +180,95 @@ def make_v1_router(
         except Exception:
             logger.exception(
                 "v1_recommend_unexpected_error",
+                name=name,
+                request_id=request_id,
+                kid=kid,
+            )
+            raise
+        finally:
+            _metrics.record_v1_request(name, verb, status, time.monotonic() - start)
+
+    @router.post(
+        "/recipes/{name}:recommend-related",
+        response_model=RecommendResponse,
+        summary="Recommend items related to a seed list",
+    )
+    def recommend_related(
+        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")],
+        body: RecommendRelatedRequest,
+        request: Request,
+        kid: str = Depends(_require_auth),
+    ) -> Any:
+        raw_rid = request.headers.get("x-request-id", "")
+        request_id = (
+            raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
+        )
+        start = time.monotonic()
+        status = "error"
+        verb = "recommend-related"
+
+        try:
+            entry = registry.get(name)
+            if entry is None or not entry.loaded or entry.recommender is None:
+                status = "unavailable"
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "detail": f"Recipe '{name}' is not loaded or unhealthy",
+                        "code": "RECIPE_UNAVAILABLE",
+                    },
+                )
+
+            raw_results = entry.recommender.get_recommendation_for_new_user(
+                body.seed_items, body.limit
+            )
+
+            if not raw_results:
+                status = "unknown_seed_items"
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "detail": (
+                            f"None of the seed_items {body.seed_items!r} "
+                            "were known to the model"
+                        ),
+                        "code": "UNKNOWN_SEED_ITEMS",
+                    },
+                )
+
+            items: list[dict[str, Any]] = []
+            meta_index = entry.metadata_index
+            meta_df = entry.metadata_df if meta_index is None else None
+            for item_id, score in raw_results:
+                fields: dict[str, Any] = {}
+                if meta_index is not None:
+                    fields.update(meta_index.get(item_id, {}))
+                elif meta_df is not None:
+                    fields.update(
+                        _lookup_metadata(meta_df, item_id, _deny_set, name)
+                    )
+                fields["item_id"] = item_id
+                fields["score"] = float(score)
+                items.append(fields)
+
+            status = "ok"
+            return JSONResponse(
+                content={
+                    "request_id": request_id,
+                    "recipe": name,
+                    "model_version": entry.model_version,
+                    "items": items,
+                },
+                headers={
+                    "X-Request-ID": request_id,
+                    "X-Recotem-Model-Version": entry.model_version,
+                },
+            )
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception(
+                "v1_recommend_related_unexpected_error",
                 name=name,
                 request_id=request_id,
                 kid=kid,

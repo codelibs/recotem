@@ -22,7 +22,11 @@ ACTIVE_KEY_HEX = "aa" * 32
 
 
 def _make_mock_recommender(users: list[str], items: list[str]):
-    """Build a MagicMock recommender that returns fixed recommendations."""
+    """Build a MagicMock recommender that returns fixed recommendations.
+
+    Sets up ``_mapper.item_id_to_index`` so the v1 ``:recommend-related``
+    seed-known pre-check (added in M-4) finds the seed items.
+    """
     rec = MagicMock()
 
     def _get_rec(user_id, cutoff=10):
@@ -40,6 +44,7 @@ def _make_mock_recommender(users: list[str], items: list[str]):
 
     rec.get_recommendation_for_known_user_id.side_effect = _get_rec
     rec.get_recommendation_for_new_user.side_effect = _get_rec_new_user
+    rec._mapper.item_id_to_index = {iid: i for i, iid in enumerate(items)}
     return rec
 
 
@@ -616,16 +621,19 @@ def test_batch_recommend_related_train_serve_call() -> None:
 
     _, client, plaintext = _make_registry_and_client(users, items)
 
-    # Two requests: one with a partial seed (returns results), one where all
-    # known items are seeds (mock returns empty list → UNKNOWN_SEED_ITEMS error).
+    # Three requests, each exercising a distinct error branch:
+    # - index 0: known seed → status=ok
+    # - index 1: every item is a seed → ranker returns [] (NO_CANDIDATES,
+    #   the seeds are all known to the id-map but nothing is left to rank)
+    # - index 2: seed with no member in the id-map → UNKNOWN_SEED_ITEMS
     all_item_seeds = [f"item{i}" for i in range(10)]
     response = client.post(
         "/v1/recipes/test_model:batch-recommend-related",
         json={
             "requests": [
                 {"seed_items": ["item0"], "limit": 3},
-                # Seed with every item in the corpus: nothing left to recommend.
                 {"seed_items": all_item_seeds, "limit": 3},
+                {"seed_items": ["unknown-stranger"], "limit": 3},
             ]
         },
         headers={"x-api-key": plaintext},
@@ -642,7 +650,7 @@ def test_batch_recommend_related_train_serve_call() -> None:
     assert data["model_version"].startswith("sha256:")
 
     results = data["results"]
-    assert len(results) == 2
+    assert len(results) == 3
 
     # Index 0: known seed item — returns items, seed excluded.
     r0 = results[0]
@@ -653,13 +661,19 @@ def test_batch_recommend_related_train_serve_call() -> None:
     # The seed "item0" must not appear in the related results.
     assert all(it["item_id"] != "item0" for it in r0["items"])
 
-    # Index 1: seed returns empty list from mock — UNKNOWN_SEED_ITEMS error.
+    # Index 1: seeds known but ranker returns [] → NO_CANDIDATES.
     r1 = results[1]
     assert r1["index"] == 1
     assert r1["status"] == "error"
     assert r1["items"] is None
     assert r1["error"] is not None
-    assert r1["error"]["code"] == "UNKNOWN_SEED_ITEMS"
+    assert r1["error"]["code"] == "NO_CANDIDATES"
+
+    # Index 2: seed not in id-map → UNKNOWN_SEED_ITEMS.
+    r2 = results[2]
+    assert r2["index"] == 2
+    assert r2["status"] == "error"
+    assert r2["error"]["code"] == "UNKNOWN_SEED_ITEMS"
 
 
 def test_recipes_discovery_list_and_detail() -> None:

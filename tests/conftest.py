@@ -463,7 +463,7 @@ def build_v1_app(
         headers = {"X-Request-ID": request_id} if request_id else None
         return JSONResponse(
             status_code=500,
-            content={"detail": "internal error", "code": "internal_error"},
+            content={"detail": "internal error", "code": "INTERNAL_ERROR"},
             headers=headers,
         )
 

@@ -105,11 +105,16 @@ def test_request_id_echoed_when_valid_long_value() -> None:
     assert body["request_id"] == r.headers["X-Request-ID"]
 
 
-def test_request_id_regenerated_when_over_64_chars() -> None:
-    """An X-Request-ID over 64 characters is rejected by the regex and the
-    server generates a fresh ID instead."""
+def test_request_id_regenerated_when_over_128_chars() -> None:
+    """An X-Request-ID over 128 characters is rejected by the regex and the
+    server generates a fresh ID instead.
+
+    Updated for the {1,128} regex.  A 65-char ID is now accepted verbatim
+    (was rejected under the old {1,64} rule), so the test sends 129 chars
+    to verify the upper bound.
+    """
     client = _client_with(_loaded_entry())
-    sent = "a" * 65
+    sent = "a" * 129
 
     r = client.post(
         "/v1/recipes/demo:recommend",
@@ -121,6 +126,20 @@ def test_request_id_regenerated_when_over_64_chars() -> None:
     assert body["request_id"] != sent
     assert r.headers["X-Request-ID"] != sent
     assert body["request_id"] == r.headers["X-Request-ID"]
+
+
+def test_request_id_accepts_128_chars() -> None:
+    """A 128-char ID is at the cap and must be echoed verbatim."""
+    client = _client_with(_loaded_entry())
+    sent = "a" * 128
+
+    r = client.post(
+        "/v1/recipes/demo:recommend",
+        json={"user_id": "u1", "limit": 1},
+        headers={"X-Request-ID": sent},
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["X-Request-ID"] == sent
 
 
 def test_request_id_fallback_when_header_absent() -> None:
@@ -179,7 +198,7 @@ def test_flat_error_body_missing_api_key() -> None:
     r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
     assert r.status_code == 401
     body = r.json()
-    assert body["code"] == "missing_api_key"
+    assert body["code"] == "MISSING_API_KEY"
     assert isinstance(body["detail"], str)
     assert body["detail"]
     # No legacy nested shape.
@@ -201,7 +220,7 @@ def test_flat_error_body_invalid_api_key() -> None:
     )
     assert r.status_code == 401
     body = r.json()
-    assert body["code"] == "invalid_api_key"
+    assert body["code"] == "INVALID_API_KEY"
     assert isinstance(body["detail"], str)
     assert not isinstance(body.get("detail"), dict)
 
@@ -381,9 +400,9 @@ def test_recipe_unavailable_log_on_get_recipe_detail_not_found() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_error_class_in_recommend_unexpected_error_log() -> None:
+def test_exc_type_in_recommend_unexpected_error_log() -> None:
     """When the recommender raises a non-KeyError, the recommend handler logs
-    ``recommend_unexpected_error`` with ``error_class`` matching the exception
+    ``recommend_unexpected_error`` with ``exc_type`` matching the exception
     type name."""
     rec = MagicMock()
     rec.get_recommendation_for_known_user_id.side_effect = RuntimeError("boom")
@@ -398,8 +417,8 @@ def test_error_class_in_recommend_unexpected_error_log() -> None:
     assert r.status_code == 500
     events = [e for e in cap if e.get("event") == "recommend_unexpected_error"]
     assert events, f"Expected recommend_unexpected_error to be emitted; got: {cap!r}"
-    assert events[0].get("error_class") == "RuntimeError", (
-        f"error_class must be 'RuntimeError'; got {events[0].get('error_class')!r}"
+    assert events[0].get("exc_type") == "RuntimeError", (
+        f"exc_type must be 'RuntimeError'; got {events[0].get('exc_type')!r}"
     )
 
 
@@ -516,7 +535,7 @@ def test_500_body_shape_on_unhandled_runtime_error() -> None:
 
     r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
     assert r.status_code == 500
-    assert r.json() == {"detail": "internal error", "code": "internal_error"}
+    assert r.json() == {"detail": "internal error", "code": "INTERNAL_ERROR"}
     assert r.headers["Content-Type"].startswith("application/json")
 
 

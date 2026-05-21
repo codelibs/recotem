@@ -12,7 +12,8 @@ All endpoints except `/v1/health` require the `X-API-Key` header.  See
 ### `POST /v1/recipes/{name}:recommend`
 Single-user recommendation.
 
-**Path parameters:** `name` matches `^[A-Za-z0-9_-]{1,64}$`.
+**Path parameters:** `name` matches `^[A-Za-z0-9_-]{1,64}$` (same as the
+recipe-name constraint enforced by the recipe loader).
 
 **Request body:**
 
@@ -39,7 +40,13 @@ Seed-item → items.
 | `exclude_items` | string[] \| null | no | null |  |
 | `context` | object \| null | no | null |  |
 
-**Status codes:** 200, 401, 404 (`UNKNOWN_SEED_ITEMS` | `RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
+**Status codes:** 200, 401, 404 (`UNKNOWN_SEED_ITEMS` | `NO_CANDIDATES` | `RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
+
+`UNKNOWN_SEED_ITEMS` means none of the supplied `seed_items` were known
+to the model id-map (typically a client-side data issue).
+`NO_CANDIDATES` means at least one seed was known but the ranker did not
+produce any survivors after its internal filtering — typically a data
+distribution issue rather than a client mistake.
 
 ### `POST /v1/recipes/{name}:batch-recommend`
 Multi-user batch.  Body: `{ "requests": RecommendRequest[] }` (1..256).
@@ -47,19 +54,28 @@ Response: `BatchRecommendResponse`.  Per-element `status` ∈ {ok, error}.
 HTTP 200 on partial failure; HTTP 503 only when the recipe itself is
 unavailable.
 
-**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
+The aggregate `sum(requests[].limit)` must not exceed **5000**.  When a
+sub-request would push the running aggregate over the cap, that element
+surfaces as `status=error, code=VALIDATION_ERROR` and processing of
+subsequent elements continues — earlier elements are unaffected.  The
+list size cap (1..256) is enforced at the schema level (whole-request
+422 if violated); per-element schema failures are surfaced per-element
+so a single bad entry never 422s the whole batch.
+
+**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR` — only for whole-request shape, e.g. missing `requests` key, list too large), 503 (`RECIPE_UNAVAILABLE`).
 
 > **Note:** batch endpoints (`:batch-recommend` and
 > `:batch-recommend-related`) return items as `{item_id, score}` only —
 > they do **not** include the per-item metadata fields that single
-> recommendations join via `metadata_index` / `metadata_df`.  If you
-> need enriched items, call the single-recommendation endpoint per
-> user/seed.
+> recommendations join via `metadata_index`.  If you need enriched
+> items, call the single-recommendation endpoint per user/seed.
 
 ### `POST /v1/recipes/{name}:batch-recommend-related`
 Multi-seed batch.  Body: `{ "requests": RecommendRelatedRequest[] }` (1..256).
+Same aggregate-limit and per-element validation rules as
+`:batch-recommend`.
 
-**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
+**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR` — only for whole-request shape), 503 (`RECIPE_UNAVAILABLE`).
 
 ### `GET /v1/recipes`
 Authenticated.  Returns `RecipesListResponse` with one entry per loaded
@@ -71,10 +87,16 @@ Authenticated.  Returns `RecipeDetailResponse` or 404 (`RECIPE_NOT_FOUND`).
 **Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 503 (`RECIPE_UNAVAILABLE`).
 
 ### `GET /v1/health`
-Unauthenticated.  Returns `{status, total, loaded}`.
+Unauthenticated.  Returns `{status, total, loaded}`.  Body status is
+`"ok"` when every registered recipe is loaded, `"degraded"` otherwise.
+The HTTP response code mirrors body status: **200 OK** when ok, **503
+Service Unavailable** when degraded — so K8s readiness probes pointing
+at this endpoint mark the pod NotReady whenever any recipe is
+unloaded.
 
 ### `GET /v1/health/details`
-Authenticated.  Returns `{status, recipes: {name: health}}`.
+Authenticated.  Returns `{status, recipes: {name: health}}`.  Same 200
+/ 503 status-code rule as `/v1/health`.
 
 ### `GET /v1/metrics`
 Prometheus exposition.  Excluded from OpenAPI.  Requires
@@ -89,10 +111,6 @@ Prometheus exposition.  Excluded from OpenAPI.  Requires
   always agree.
 - `X-Recotem-Model-Version` — present on every successful recommend
   response; mirrors `model_version` in the body.
-- `X-Recotem-Metadata-Degraded` — `"1"` when a per-item metadata lookup
-  failed during the request.  **Currently reserved**: no v1 endpoint
-  emits this header today.  Server-side metadata-lookup errors are
-  still recorded in the `recotem_metadata_lookup_errors_total` metric.
 
 ## Error body shape
 
@@ -121,7 +139,7 @@ Pydantic and include the request ID so the body is correlatable with the
 **500 unhandled errors** flatten to:
 
 ```json
-{"detail": "internal error", "code": "internal_error"}
+{"detail": "internal error", "code": "INTERNAL_ERROR"}
 ```
 
 Each endpoint above lists the status codes it can emit; the body shape
@@ -135,7 +153,10 @@ in every error case is one of the three forms above.
 | `RECIPE_NOT_FOUND`   | 404 | no such recipe in registry |
 | `UNKNOWN_USER`       | 404 | user not in idmap |
 | `UNKNOWN_SEED_ITEMS` | 404 | none of seed_items known to model |
-| `VALIDATION_ERROR`   | 422 | Pydantic schema rejected |
-| `missing_api_key`    | 401 | `X-API-Key` header missing |
-| `invalid_api_key`    | 401 | `X-API-Key` header present but did not match any configured digest |
-| `internal_error`     | 500 | unhandled server-side exception |
+| `NO_CANDIDATES`      | 404 | seeds known, but ranker produced no survivors |
+| `VALIDATION_ERROR`   | 422 | Pydantic schema rejected the request (also used per-element inside batch responses) |
+| `MISSING_API_KEY`    | 401 | `X-API-Key` header missing |
+| `INVALID_API_KEY`    | 401 | `X-API-Key` header present but did not match any configured digest (also covers short-key / oversize-key rejections so callers cannot fingerprint the guard) |
+| `INTERNAL_ERROR`     | 500 / batch | unhandled server-side exception (status=500 on single endpoints; per-element `status=error` inside batch responses) |
+
+All v1 codes use `UPPER_SNAKE_CASE`.

@@ -607,10 +607,10 @@ def test_artifact_disappearance_sets_last_load_error_and_increments_metric(
     failure_count: list[int] = [0]
     original_inc = _metrics.inc_artifact_load_failure
 
-    def _counting_inc(name: str) -> None:
+    def _counting_inc(name: str, reason: str = "unexpected") -> None:
         if name == "vanishing":
             failure_count[0] += 1
-        original_inc(name)
+        original_inc(name, reason=reason)
 
     with patch.object(_metrics, "inc_artifact_load_failure", side_effect=_counting_inc):
         watcher = ArtifactWatcher(
@@ -2719,10 +2719,10 @@ def test_hot_swap_corrupt_artifact_preserves_stale_entry_real_registry(
     failure_count: list[int] = [0]
     original_inc = _metrics.inc_artifact_load_failure
 
-    def _counting_inc(name: str) -> None:
+    def _counting_inc(name: str, reason: str = "unexpected") -> None:
         if name == "stale_real":
             failure_count[0] += 1
-        original_inc(name)
+        original_inc(name, reason=reason)
 
     # Replace the artifact with corrupt content
     artifact_path.write_bytes(b"THIS IS CORRUPT AND WILL FAIL VERIFICATION")

@@ -64,27 +64,71 @@ def test_batch_recommend_request_requires_at_least_one():
 
 
 def test_batch_recommend_request_caps_at_256():
-    BatchRecommendRequest(
-        requests=[RecommendRequest(user_id=f"u{i}") for i in range(256)]
-    )
+    BatchRecommendRequest(requests=[{"user_id": f"u{i}"} for i in range(256)])
     with pytest.raises(ValidationError):
-        BatchRecommendRequest(
-            requests=[RecommendRequest(user_id=f"u{i}") for i in range(257)]
-        )
+        BatchRecommendRequest(requests=[{"user_id": f"u{i}"} for i in range(257)])
 
 
 def test_batch_recommend_related_request_caps_at_256():
-    seeds = [RecommendRelatedRequest(seed_items=[f"i{i}"]) for i in range(256)]
+    seeds = [{"seed_items": [f"i{i}"]} for i in range(256)]
     BatchRecommendRelatedRequest(requests=seeds)
     with pytest.raises(ValidationError):
         BatchRecommendRelatedRequest(requests=seeds + [seeds[0]])
 
 
+def test_batch_recommend_request_accepts_arbitrary_dict_for_runtime_validation():
+    """Per-element schema validation is deferred to the handler: malformed
+    entries must NOT cause a whole-batch 422 at the wrapper level."""
+    # Whole-request schema accepts a malformed sub-entry; the handler will
+    # surface it as status=error, code=VALIDATION_ERROR per-element.
+    BatchRecommendRequest(requests=[{"user_id": "u1"}, {"limit": 9999}])
+
+
 def test_batch_result_entry_status_enum():
     BatchResultEntry(index=0, status="ok", items=[])
-    BatchResultEntry(index=0, status="error", error=ErrorDetail(code="X", message="m"))
+    BatchResultEntry(
+        index=0,
+        status="error",
+        error=ErrorDetail(code="VALIDATION_ERROR", message="m"),
+    )
     with pytest.raises(ValidationError):
         BatchResultEntry(index=0, status="invalid")  # type: ignore[arg-type]
+
+
+def test_batch_result_entry_rejects_unknown_error_code():
+    with pytest.raises(ValidationError):
+        ErrorDetail(code="NOT_A_REAL_CODE", message="m")  # type: ignore[arg-type]
+
+
+def test_batch_result_entry_invariant_ok_requires_items():
+    """status=ok must carry items and must not carry an error."""
+    with pytest.raises(ValidationError):
+        BatchResultEntry(index=0, status="ok", items=None)
+    with pytest.raises(ValidationError):
+        BatchResultEntry(
+            index=0,
+            status="ok",
+            items=[],
+            error=ErrorDetail(code="INTERNAL_ERROR", message="m"),
+        )
+
+
+def test_batch_result_entry_invariant_error_requires_error():
+    """status=error must carry an error and must not carry items."""
+    with pytest.raises(ValidationError):
+        BatchResultEntry(index=0, status="error", error=None)
+    with pytest.raises(ValidationError):
+        BatchResultEntry(
+            index=0,
+            status="error",
+            items=[],
+            error=ErrorDetail(code="INTERNAL_ERROR", message="m"),
+        )
+
+
+def test_batch_result_entry_rejects_negative_index():
+    with pytest.raises(ValidationError):
+        BatchResultEntry(index=-1, status="ok", items=[])
 
 
 def test_recommend_response_round_trip():
@@ -113,11 +157,23 @@ def test_recipes_list_response_is_serialisable():
         name="r",
         model_version="v1",
         loaded_at="2026-05-21T00:00:00Z",
-        supported_verbs=[],
+        supported_verbs=["recommend"],
         kind="user-item",
     )
     payload = RecipesListResponse(recipes=[s]).model_dump()
     assert payload["recipes"][0]["name"] == "r"
+
+
+def test_recipe_summary_rejects_empty_supported_verbs():
+    """A loaded recipe must advertise at least one verb."""
+    with pytest.raises(ValidationError):
+        RecipeSummary(
+            name="r",
+            model_version="v1",
+            loaded_at="2026-05-21T00:00:00Z",
+            supported_verbs=[],
+            kind="user-item",
+        )
 
 
 def test_recipe_detail_response_includes_config_digest():
@@ -125,7 +181,7 @@ def test_recipe_detail_response_includes_config_digest():
         name="r",
         model_version="v1",
         loaded_at="2026-05-21T00:00:00Z",
-        supported_verbs=[],
+        supported_verbs=["recommend"],
         kind="user-item",
         config_digest="sha256:cfg",
         algorithms=["TopPop"],

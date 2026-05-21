@@ -102,20 +102,27 @@ def test_recipe_detail_rejects_invalid_recipe_name(bad_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# J. Path regex — leading hyphen/underscore rejection (PR #103 change)
+# J. Path regex — must accept every valid recipe name
 # ---------------------------------------------------------------------------
+# The router path regex must mirror ``Recipe.name`` (^[A-Za-z0-9_-]{1,64}$)
+# so any recipe accepted at load time is also routable.  Recipes with a
+# leading "_" or "-" are valid per the recipe loader, so the router must
+# NOT 422 on those — instead they get a normal 404 when the registry is
+# empty (the name passes the path regex; the registry has no entry).
 
 
-def test_recipe_path_rejects_leading_hyphen() -> None:
-    client = _client_with_entry(_loaded_entry())
+def test_recipe_path_accepts_leading_hyphen() -> None:
+    client = _client_with_entry(_loaded_entry("-bad"))
     r = client.post("/v1/recipes/-bad:recommend", json={"user_id": "u1"})
-    assert r.status_code == 422
+    # 422 (regex rejection) would be a regression; 200/404 both indicate
+    # the regex accepted the name and the request reached the handler.
+    assert r.status_code != 422
 
 
-def test_recipe_path_rejects_leading_underscore() -> None:
-    client = _client_with_entry(_loaded_entry())
+def test_recipe_path_accepts_leading_underscore() -> None:
+    client = _client_with_entry(_loaded_entry("_bad"))
     r = client.post("/v1/recipes/_bad:recommend", json={"user_id": "u1"})
-    assert r.status_code == 422
+    assert r.status_code != 422
 
 
 def test_recipe_path_accepts_alphanumeric_first_char() -> None:

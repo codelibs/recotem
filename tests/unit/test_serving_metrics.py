@@ -183,6 +183,7 @@ def reset_metrics_registry(monkeypatch: pytest.MonkeyPatch):
             "recotem_v1_requests",
             "recotem_v1_request_latency_seconds",
             "recotem_v1_batch_size",
+            "recotem_v1_batch_element_errors",
         }
         for collector in list(REGISTRY._names_to_collectors.values()):
             describe = getattr(collector, "describe", None)
@@ -199,7 +200,12 @@ def reset_metrics_registry(monkeypatch: pytest.MonkeyPatch):
                     except (KeyError, ValueError):
                         pass
                     break
-        for attr in ("_V1_REQUEST_COUNTER", "_V1_REQUEST_LATENCY", "_V1_BATCH_SIZE"):
+        for attr in (
+            "_V1_REQUEST_COUNTER",
+            "_V1_REQUEST_LATENCY",
+            "_V1_BATCH_SIZE",
+            "_V1_BATCH_ELEMENT_ERRORS",
+        ):
             setattr(_m, attr, None)
 
     _teardown()

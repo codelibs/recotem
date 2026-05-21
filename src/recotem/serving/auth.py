@@ -197,7 +197,7 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
         _hash_api_key("\x00" * _API_KEY_MAX_LEN)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
-            detail={"detail": "X-API-Key header required", "code": "missing_api_key"},
+            detail={"detail": "X-API-Key header required", "code": "MISSING_API_KEY"},
         )
 
     # Reject oversized headers BEFORE invoking the scrypt KDF on the real
@@ -217,7 +217,7 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
         _hash_api_key("\x00" * _API_KEY_MAX_LEN)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
-            detail={"detail": "Invalid API key", "code": "invalid_api_key"},
+            detail={"detail": "Invalid API key", "code": "INVALID_API_KEY"},
         )
 
     # Reject plaintexts shorter than _API_KEY_MIN_LEN.
@@ -241,7 +241,7 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
         _hash_api_key("\x00" * _API_KEY_MAX_LEN)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
-            detail={"detail": "Invalid API key", "code": "invalid_api_key"},
+            detail={"detail": "Invalid API key", "code": "INVALID_API_KEY"},
         )
 
     # No stripping — whitespace is part of the key.
@@ -273,5 +273,5 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
     logger.warning("auth_invalid_key", path=request.url.path)
     raise HTTPException(
         status_code=401,
-        detail={"detail": "Invalid API key", "code": "invalid_api_key"},
+        detail={"detail": "Invalid API key", "code": "INVALID_API_KEY"},
     )

@@ -1571,12 +1571,13 @@ output:
 
     key_ring = KeyRing(f"active:{ACTIVE_KEY_HEX}")
 
-    entry = _try_load_artifact(recipe, key_ring, cfg)
+    entry, reason = _try_load_artifact(recipe, key_ring, cfg)
 
     assert entry.loaded, (
         f"_try_load_artifact must return loaded=True for a valid artifact + metadata; "
-        f"error={entry.last_load_error!r}"
+        f"error={entry.last_load_error!r}; reason={reason!r}"
     )
+    assert reason == "ok"
     assert entry.metadata_index is not None, (
         "metadata_index must be populated (not None) when item_metadata is present"
     )
@@ -1663,13 +1664,14 @@ output:
     key_ring = KeyRing(f"active:{ACTIVE_KEY_HEX}")
 
     before = _time.time()
-    entry = _try_load_artifact(recipe, key_ring, cfg)
+    entry, reason = _try_load_artifact(recipe, key_ring, cfg)
     after = _time.time()
 
     assert entry.loaded, (
         f"_try_load_artifact must return loaded=True for a valid artifact; "
-        f"error={entry.last_load_error!r}"
+        f"error={entry.last_load_error!r}; reason={reason!r}"
     )
+    assert reason == "ok"
     assert entry.loaded_at_unix > 0, (
         f"startup-scan path must populate loaded_at_unix (regression: was 0.0); "
         f"got {entry.loaded_at_unix!r}"
@@ -2090,7 +2092,7 @@ def test_security_posture_signing_key_status_dev_allow_unsigned(
 
 def test_unhandled_exception_returns_structured_json_500(tmp_path: Path) -> None:
     """I-1: An unexpected Exception from a route handler must return HTTP 500
-    with body {detail: 'internal error', code: 'internal_error'} rather than
+    with body {detail: 'internal error', code: 'INTERNAL_ERROR'} rather than
     a plain-text FastAPI default or an unhandled traceback.
     """
     from fastapi.testclient import TestClient
@@ -2115,8 +2117,8 @@ def test_unhandled_exception_returns_structured_json_500(tmp_path: Path) -> None
     assert data.get("detail") == "internal error", (
         f"Expected detail='internal error'; got {data!r}"
     )
-    assert data.get("code") == "internal_error", (
-        f"Expected code='internal_error'; got {data!r}"
+    assert data.get("code") == "INTERNAL_ERROR", (
+        f"Expected code='INTERNAL_ERROR'; got {data!r}"
     )
 
 

@@ -59,14 +59,19 @@ from recotem.version import __version__
 logger = structlog.get_logger(__name__)
 
 # Allowed characters and length for echoing a client-supplied X-Request-ID.
-_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+# 128 chars matches common tracing-vendor IDs (e.g. W3C traceparent excluding
+# hyphens, Datadog dd-trace UUIDs).
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
 
 # Pattern matching v1 inference verbs on the request path.  Used by the
 # RequestValidationError handler to record a ``validation_error`` metric for
 # the appropriate (recipe, verb) tuple when 422 is returned for a malformed
-# inference body.
+# inference body. The name character class must mirror the recipe-name
+# regex in ``recotem.recipe.models`` so a YAML recipe whose name starts with
+# ``_`` or ``-`` still produces (recipe, verb)-labelled validation_error
+# metrics rather than falling through to the unlabelled path.
 _V1_VERB_PATH_RE = re.compile(
-    r"^/v1/recipes/(?P<name>[A-Za-z0-9][A-Za-z0-9_-]{0,63}):"
+    r"^/v1/recipes/(?P<name>[A-Za-z0-9_-]{1,64}):"
     r"(?P<verb>recommend|recommend-related|batch-recommend|batch-recommend-related)$"
 )
 
@@ -95,8 +100,8 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
     """Attach a request-scoped ID to every response.
 
     - Reads ``X-Request-ID`` from the incoming request.  If the value passes
-      the allow-list (``[A-Za-z0-9_-]``, 1–128 chars) it is echoed back;
-      otherwise a server-generated 12-hex-char ID is used.
+      the allow-list (``[A-Za-z0-9_-]``, 1–128 chars) it is echoed back
+      verbatim; otherwise a server-generated 12-hex-char ID is used.
     - Binds ``request_id`` into structlog's context-var store so all log
       records emitted during the request carry the ID automatically.
     - Writes ``X-Request-ID`` onto the response regardless of status code,
@@ -248,7 +253,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # Register YAML-parse-failed stubs first so they appear in /health.
     for stub in yaml_failed_stubs:
         registry.replace(stub.name, stub)
-        _metrics.inc_artifact_load_failure(stub.name)
+        _metrics.inc_artifact_load_failure(stub.name, reason="yaml")
         _metrics.set_model_loaded(stub.name, False)
 
     n_recipes = len(recipes)
@@ -287,7 +292,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
                 # _try_load_artifact never raises (it catches internally and
                 # returns a stub), but guard defensively.
                 try:
-                    entry = future.result()
+                    entry, load_reason = future.result()
                 except Exception as exc:  # pragma: no cover — defensive only
                     logger.error(
                         "recipe_load_future_error",
@@ -295,19 +300,21 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
                         error=str(exc),
                         exc_info=True,
                     )
-                    _metrics.inc_artifact_load_failure(recipe.name)
+                    _metrics.inc_artifact_load_failure(recipe.name, reason="unexpected")
                     entry = _failed_entry(recipe, f"unexpected error: {exc}")
+                    load_reason = "unexpected"
 
                 registry.replace(recipe.name, entry)
                 _metrics.set_model_loaded(recipe.name, entry.loaded)
                 if entry.loaded:
                     loaded_entries[recipe.name] = entry
                 else:
-                    _metrics.inc_artifact_load_failure(recipe.name)
+                    _metrics.inc_artifact_load_failure(recipe.name, reason=load_reason)
                     logger.warning(
                         "recipe_not_loaded_at_startup",
                         name=recipe.name,
                         error=entry.last_load_error,
+                        reason=load_reason,
                     )
 
         _wall_seconds = time.perf_counter() - _startup_t0
@@ -464,6 +471,18 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             {k: v for k, v in err.items() if k not in ("input", "ctx")}
             for err in exc.errors()
         ]
+        # Always emit a structured WARN log so non-v1-verb paths (e.g. a
+        # malformed query string on ``/v1/recipes``) still produce an
+        # operational signal — the v1 metric counter only covers paths that
+        # match _V1_VERB_PATH_RE.
+        logger.warning(
+            "validation_failed",
+            path=request.url.path,
+            method=request.method,
+            request_id=request_id,
+            error_count=len(sanitized_errors),
+            matched_v1_verb=match is not None,
+        )
         return JSONResponse(
             status_code=422,
             content={
@@ -499,7 +518,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             status_code=500,
             content={
                 "detail": "internal error",
-                "code": "internal_error",
+                "code": "INTERNAL_ERROR",
                 "request_id": request_id,
             },
             headers=headers,
@@ -696,12 +715,13 @@ def _try_load_artifact(
     recipe: Any,
     key_ring: KeyRing | None,
     serve_config: ServeConfig,
-) -> ModelEntry:
+) -> tuple[ModelEntry, str]:
     """Attempt to load the artifact for *recipe* at startup.
 
-    Returns a fully-populated ModelEntry on success, or a stub entry with
-    ``loaded=False`` and ``last_load_error`` set on any failure.  Either way
-    the caller registers the entry so ``/health`` reports the recipe.
+    Returns ``(entry, reason)``. On success *reason* is ``"ok"`` and *entry*
+    is fully populated. On failure *reason* is the load-failure category
+    and *entry* is a stub with ``loaded=False`` and ``last_load_error`` set.
+    Either way the caller registers the entry so ``/health`` reports the recipe.
     """
     artifact_path = recipe.output.path
     max_artifact_bytes = serve_config.max_artifact_bytes
@@ -711,12 +731,12 @@ def _try_load_artifact(
         data = read_artifact_bytes(artifact_path, max_artifact_bytes)
     except ArtifactError as exc:
         logger.warning("initial_artifact_read_failed", name=recipe.name, error=str(exc))
-        return _failed_entry(recipe, f"read failed: {exc}")
+        return _failed_entry(recipe, f"read failed: {exc}"), "read"
     except (MemoryError, RecursionError):
         raise
     except Exception as exc:
         logger.warning("initial_artifact_read_error", name=recipe.name, error=str(exc))
-        return _failed_entry(recipe, f"read error: {exc}")
+        return _failed_entry(recipe, f"read error: {exc}"), "read"
 
     sha256 = sha256_bytes(data)
 
@@ -729,7 +749,7 @@ def _try_load_artifact(
         logger.warning(
             "initial_artifact_parse_failed", name=recipe.name, error=str(exc)
         )
-        return _failed_entry(recipe, f"parse failed: {exc}")
+        return _failed_entry(recipe, f"parse failed: {exc}"), "parse"
 
     payload_bytes = data[hdr.payload_offset :]
 
@@ -744,13 +764,18 @@ def _try_load_artifact(
                 hdr.hmac_digest,
             )
         except ArtifactError as exc:
-            logger.warning(
+            # HMAC failure is a security signal (wrong key, tampered artifact);
+            # log at ERROR with traceback so SIEM rules filtering on level
+            # >= ERROR fire. Other startup failure modes stay at WARNING since
+            # they are operational rather than security.
+            logger.error(
                 "initial_artifact_hmac_failed",
                 name=recipe.name,
                 kid=hdr.kid,
                 error=str(exc),
+                exc_info=True,
             )
-            return _failed_entry(recipe, f"HMAC verify failed: {exc}")
+            return _failed_entry(recipe, f"HMAC verify failed: {exc}"), "hmac"
     else:
         logger.warning(
             "initial_artifact_hmac_skipped_dev",
@@ -771,7 +796,10 @@ def _try_load_artifact(
             kid=hdr.kid,
             error=str(exc),
         )
-        return _failed_entry(recipe, f"header JSON decode failed: {exc}")
+        return (
+            _failed_entry(recipe, f"header JSON decode failed: {exc}"),
+            "header_json",
+        )
 
     try:
         recommender = unpickle_payload(payload_bytes)
@@ -782,7 +810,7 @@ def _try_load_artifact(
             kid=hdr.kid,
             error=str(exc),
         )
-        return _failed_entry(recipe, f"deserialize failed: {exc}")
+        return _failed_entry(recipe, f"deserialize failed: {exc}"), "deserialize"
 
     metadata_df = None
     metadata_index = None
@@ -803,7 +831,7 @@ def _try_load_artifact(
                 name=recipe.name,
                 error=str(exc),
             )
-            return _failed_entry(recipe, f"metadata load failed: {exc}")
+            return _failed_entry(recipe, f"metadata load failed: {exc}"), "metadata"
 
     marker = stat_marker(artifact_path)
     entry = ModelEntry(
@@ -828,4 +856,4 @@ def _try_load_artifact(
         trained_at=header_dict.get("trained_at"),
         best_class=header_dict.get("best_class"),
     )
-    return entry
+    return entry, "ok"

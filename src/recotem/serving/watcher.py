@@ -438,7 +438,7 @@ class ArtifactWatcher(threading.Thread):
             loaded=False,
         )
         self._registry.replace(stub_name, stub)
-        _metrics.inc_artifact_load_failure(stub_name)
+        _metrics.inc_artifact_load_failure(stub_name, reason="yaml")
         _metrics.set_model_loaded(stub_name, False)
 
         # Create a minimal _RecipeWatchState using a sentinel recipe object.
@@ -796,7 +796,7 @@ class ArtifactWatcher(threading.Thread):
                 if entry is not None and entry.last_load_error is None:
                     logger.warning("artifact_disappeared", name=name)
             self._registry.set_load_error(name, error_msg)
-            _metrics.inc_artifact_load_failure(name)
+            _metrics.inc_artifact_load_failure(name, reason="read")
             return
 
         # Successful stat — clear the error-class tracker (OBS-1).
@@ -892,11 +892,12 @@ class ArtifactWatcher(threading.Thread):
                     reason=kid_reason,
                     kid=kid_log,
                 )
-            # Distinguish post-HMAC deserialization failures from other
-            # ArtifactErrors by message prefix.  This prefix is set by
-            # unpickle_payload in artifact/signing.py.
+            # Classify the failure step from the error message prefix so the
+            # recotem_artifact_load_failures_total counter can be partitioned
+            # by reason (read/parse/hmac/header_json/deserialize/metadata).
             _err_str = str(exc)
-            if _err_str.startswith("deserialization failed:"):
+            reason = _classify_artifact_error(_err_str)
+            if reason == "deserialize":
                 streak = self._post_hmac_failure_streak.get(name, 0) + 1
                 self._post_hmac_failure_streak[name] = streak
                 logger.error(
@@ -919,8 +920,9 @@ class ArtifactWatcher(threading.Thread):
                 name=name,
                 kid=kid_log,
                 error=_err_str,
+                reason=reason,
             )
-            self._record_load_failure(name, _err_str)
+            self._record_load_failure(name, _err_str, reason=reason)
             return
         except (MemoryError, RecursionError):
             # Never swallow OOM / stack-exhaustion in a long-running thread:
@@ -935,7 +937,9 @@ class ArtifactWatcher(threading.Thread):
                 exc_type=type(exc).__name__,
                 error=str(exc),
             )
-            self._record_load_failure(name, f"{type(exc).__name__}: {exc}")
+            self._record_load_failure(
+                name, f"{type(exc).__name__}: {exc}", reason="unexpected"
+            )
             return
 
         new_marker = (
@@ -1010,13 +1014,20 @@ class ArtifactWatcher(threading.Thread):
         metadata_df = None
         metadata_index = None
         if recipe.item_metadata is not None:
-            metadata_df = _load_metadata(recipe, name)
-            from recotem.metadata.loader import build_metadata_index
+            try:
+                metadata_df = _load_metadata(recipe, name)
+                from recotem.metadata.loader import build_metadata_index
 
-            deny_set: frozenset[str] = frozenset(
-                s.lower() for s in (self._config.metadata_field_deny or [])
-            )
-            metadata_index = build_metadata_index(metadata_df, deny_set)
+                deny_set: frozenset[str] = frozenset(
+                    s.lower() for s in (self._config.metadata_field_deny or [])
+                )
+                metadata_index = build_metadata_index(metadata_df, deny_set)
+            except (MemoryError, RecursionError):
+                raise
+            except ArtifactError as exc:
+                raise ArtifactError(f"metadata load failed: {exc}") from exc
+            except Exception as exc:
+                raise ArtifactError(f"metadata load failed: {exc}") from exc
 
         return ModelEntry(
             name=name,
@@ -1053,10 +1064,15 @@ class ArtifactWatcher(threading.Thread):
                 error=error,
             )
 
-    def _record_load_failure(self, name: str, error: str) -> None:
-        """Mark the entry's load error and increment the failure metrics."""
+    def _record_load_failure(
+        self, name: str, error: str, reason: str = "unexpected"
+    ) -> None:
+        """Mark the entry's load error and increment the failure metrics.
+
+        *reason* labels the failure step for ``recotem_artifact_load_failures_total``.
+        """
         self._mark_error(name, error)
-        _metrics.inc_artifact_load_failure(name)
+        _metrics.inc_artifact_load_failure(name, reason=reason)
         _metrics.record_swap(name, ok=False)
 
 
@@ -1070,6 +1086,40 @@ class ArtifactWatcher(threading.Thread):
 # The _KID_LOG_MAX_LEN constant is kept here as a local alias for any tests
 # or internal code that reference it directly.
 _KID_LOG_MAX_LEN: int = 64
+
+
+def _classify_artifact_error(err_msg: str) -> str:
+    """Map an ``ArtifactError`` message to the load-failure reason label.
+
+    The reason label is used as a Prometheus metric label on
+    ``recotem_artifact_load_failures_total`` so operators can distinguish
+    bad-signature, corrupt-payload, missing-metadata, and similar failure
+    modes for alerting (e.g. an HMAC spike is a security signal; a metadata
+    spike is a data-pipeline signal). Classification is deliberately
+    message-prefix based to match the stable wording chosen at each
+    ArtifactError raise site in ``artifact/format.py`` and
+    ``artifact/signing.py``.
+    """
+    lower = err_msg.lower()
+    if lower.startswith("deserialization failed:"):
+        return "deserialize"
+    if lower.startswith("metadata load failed:"):
+        return "metadata"
+    if lower.startswith("header json"):
+        return "header_json"
+    if "hmac verification failed" in lower or "unknown kid" in lower:
+        return "hmac"
+    if (
+        "artifact too short" in lower
+        or "magic" in lower
+        or "reserved bytes" in lower
+        or "kid is not valid" in lower
+        or "header json is not valid" in lower
+        or "header_len" in lower
+        or "version" in lower
+    ):
+        return "parse"
+    return "parse"
 
 
 def _extract_kid_safe(data: bytes) -> tuple[str, str | None]:

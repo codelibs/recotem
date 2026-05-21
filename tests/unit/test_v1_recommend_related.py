@@ -11,7 +11,16 @@ from recotem.serving.registry import ModelEntry, ModelRegistry
 from tests.conftest import build_v1_app
 
 
-def _client_with_recommender(rec) -> TestClient:
+def _client_with_recommender(rec, known_items: list[str] | None = None) -> TestClient:
+    """Wrap *rec* in a ModelEntry whose id-map advertises *known_items*.
+
+    The router pre-checks ``entry.recommender._mapper.item_id_to_index``
+    to distinguish ``UNKNOWN_SEED_ITEMS`` from ``NO_CANDIDATES``; tests
+    that exercise the happy path need at least one seed in the map.
+    """
+    # MagicMock auto-creates ``_mapper`` if not preset; explicitly set
+    # ``item_id_to_index`` so ``"in"`` works as a dict membership test.
+    rec._mapper.item_id_to_index = {iid: i for i, iid in enumerate(known_items or [])}
     entry = ModelEntry(
         name="demo",
         recommender=rec,
@@ -31,7 +40,7 @@ def _client_with_recommender(rec) -> TestClient:
 def test_related_returns_items():
     rec = MagicMock()
     rec.get_recommendation_for_new_user.return_value = [("i9", 0.7), ("i8", 0.6)]
-    r = _client_with_recommender(rec).post(
+    r = _client_with_recommender(rec, known_items=["7203"]).post(
         "/v1/recipes/demo:recommend-related",
         json={"seed_items": ["7203"], "limit": 5},
     )
@@ -51,9 +60,11 @@ def test_related_422_on_empty_seed_items():
 
 
 def test_related_404_when_all_seeds_unknown_returns_empty():
+    """No seed in id_map → UNKNOWN_SEED_ITEMS (router pre-check, ranker
+    never called)."""
     rec = MagicMock()
     rec.get_recommendation_for_new_user.return_value = []
-    r = _client_with_recommender(rec).post(
+    r = _client_with_recommender(rec, known_items=[]).post(
         "/v1/recipes/demo:recommend-related",
         json={"seed_items": ["zzz"]},
     )
@@ -61,6 +72,19 @@ def test_related_404_when_all_seeds_unknown_returns_empty():
     body = r.json()
     assert body["code"] == "UNKNOWN_SEED_ITEMS"
     assert isinstance(body["detail"], str)
+
+
+def test_related_404_when_seeds_known_but_ranker_empty():
+    """Seed in id_map but ranker returns [] → NO_CANDIDATES."""
+    rec = MagicMock()
+    rec.get_recommendation_for_new_user.return_value = []
+    r = _client_with_recommender(rec, known_items=["i1"]).post(
+        "/v1/recipes/demo:recommend-related",
+        json={"seed_items": ["i1"]},
+    )
+    assert r.status_code == 404
+    body = r.json()
+    assert body["code"] == "NO_CANDIDATES"
 
 
 def test_related_404_when_recipe_missing_from_registry():
@@ -109,7 +133,7 @@ def test_recommend_related_excludes_items() -> None:
         ("i4", 0.6),
         ("i5", 0.5),
     ]
-    r = _client_with_recommender(rec).post(
+    r = _client_with_recommender(rec, known_items=["s1"]).post(
         "/v1/recipes/demo:recommend-related",
         json={"seed_items": ["s1"], "limit": 5, "exclude_items": ["i2", "i4"]},
     )
@@ -133,7 +157,7 @@ def test_recommend_related_rejects_oversized_seed_item() -> None:
 def test_recommend_related_sets_model_version_response_header():
     rec = MagicMock()
     rec.get_recommendation_for_new_user.return_value = [("i9", 0.7)]
-    r = _client_with_recommender(rec).post(
+    r = _client_with_recommender(rec, known_items=["seed1"]).post(
         "/v1/recipes/demo:recommend-related",
         json={"seed_items": ["seed1"], "limit": 1},
     )

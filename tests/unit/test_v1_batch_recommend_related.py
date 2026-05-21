@@ -11,7 +11,14 @@ from recotem.serving.registry import ModelEntry, ModelRegistry
 from tests.conftest import build_v1_app
 
 
-def _client(rec) -> TestClient:
+def _client(rec, known_items: list[str] | None = None) -> TestClient:
+    """Wrap *rec* in a ModelEntry whose id-map advertises *known_items*.
+
+    The router pre-checks ``entry.recommender._mapper.item_id_to_index``
+    to distinguish ``UNKNOWN_SEED_ITEMS`` from ``NO_CANDIDATES``; tests
+    that exercise the happy path need at least one seed in the map.
+    """
+    rec._mapper.item_id_to_index = {iid: i for i, iid in enumerate(known_items or [])}
     entry = ModelEntry(
         name="demo",
         recommender=rec,
@@ -29,18 +36,19 @@ def _client(rec) -> TestClient:
 
 
 def test_batch_related_mixed_success_and_failure():
+    """Mix known + unknown seeds: known seeds → ok, fully-unknown → UNKNOWN_SEED_ITEMS."""
     rec = MagicMock()
-    rec.get_recommendation_for_new_user.side_effect = [
-        [("i9", 0.7)],
-        [],  # all-unknown seeds
-        [("i3", 0.5)],
-    ]
-    r = _client(rec).post(
+
+    def _side_effect(seed_items, limit):
+        return [("i9", 0.7)] if "7203" in seed_items or "9984" in seed_items else []
+
+    rec.get_recommendation_for_new_user.side_effect = _side_effect
+    r = _client(rec, known_items=["7203", "9984"]).post(
         "/v1/recipes/demo:batch-recommend-related",
         json={
             "requests": [
                 {"seed_items": ["7203"]},
-                {"seed_items": ["zzz"]},
+                {"seed_items": ["zzz"]},  # unknown — UNKNOWN_SEED_ITEMS
                 {"seed_items": ["9984"]},
             ]
         },
@@ -83,15 +91,22 @@ def test_batch_related_503_when_recipe_stub_not_loaded():
     assert isinstance(body["detail"], str)
 
 
-def test_batch_related_422_on_empty_seed_in_one_entry():
+def test_batch_related_empty_seed_in_one_entry_is_per_element_error():
+    """Empty seed list fails the sub-schema; under per-element validation
+    this surfaces as ``status=error, code=VALIDATION_ERROR`` rather than
+    a whole-batch 422 (was 422 in the all-or-nothing mode)."""
     rec = MagicMock()
+    rec.get_recommendation_for_new_user.return_value = []
     r = _client(rec).post(
         "/v1/recipes/demo:batch-recommend-related",
         json={
             "requests": [{"seed_items": []}],
         },
     )
-    assert r.status_code == 422
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    assert results[0]["status"] == "error"
+    assert results[0]["error"]["code"] == "VALIDATION_ERROR"
 
 
 # ---------------------------------------------------------------------------
@@ -100,15 +115,11 @@ def test_batch_related_422_on_empty_seed_in_one_entry():
 
 
 def test_batch_related_element_unknown_seeds_yields_error() -> None:
+    """A seed_items list with no known id-map members → UNKNOWN_SEED_ITEMS."""
     rec = MagicMock()
+    rec.get_recommendation_for_new_user.return_value = [("i1", 0.9)]
 
-    def _side_effect(seed_items, limit):
-        if seed_items == ["unknown-seed"]:
-            return []
-        return [("i1", 0.9)]
-
-    rec.get_recommendation_for_new_user.side_effect = _side_effect
-    r = _client(rec).post(
+    r = _client(rec, known_items=["good-seed", "good-seed2"]).post(
         "/v1/recipes/demo:batch-recommend-related",
         json={
             "requests": [
@@ -135,7 +146,7 @@ def test_batch_related_element_runtime_error_yields_internal_error() -> None:
         return [("i1", 0.9)]
 
     rec.get_recommendation_for_new_user.side_effect = _side_effect
-    r = _client(rec).post(
+    r = _client(rec, known_items=["ok-seed", "bad-seed"]).post(
         "/v1/recipes/demo:batch-recommend-related",
         json={
             "requests": [
@@ -152,18 +163,25 @@ def test_batch_related_element_runtime_error_yields_internal_error() -> None:
 
 
 def test_batch_related_aggregate_limit_cap_exceeded() -> None:
+    """Aggregate cap is enforced per-element; element 10 (running sum 5010 > 5000)
+    surfaces as VALIDATION_ERROR while earlier elements succeed."""
     rec = MagicMock()
-    r = _client(rec).post(
+    rec.get_recommendation_for_new_user.return_value = [("i1", 0.9)]
+    r = _client(rec, known_items=["s1"]).post(
         "/v1/recipes/demo:batch-recommend-related",
         json={"requests": [{"seed_items": ["s1"], "limit": 501} for _ in range(10)]},
     )
-    assert r.status_code == 422
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    assert results[0]["status"] == "ok"
+    assert results[-1]["status"] == "error"
+    assert results[-1]["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_batch_recommend_related_sets_model_version_response_header():
     rec = MagicMock()
     rec.get_recommendation_for_new_user.return_value = [("i9", 0.7)]
-    r = _client(rec).post(
+    r = _client(rec, known_items=["seed1"]).post(
         "/v1/recipes/demo:batch-recommend-related",
         json={"requests": [{"seed_items": ["seed1"]}]},
     )

@@ -8,8 +8,6 @@ The router is mounted at ``/v1`` by ``serving/app.py`` and exposes the
 
 from __future__ import annotations
 
-import collections
-import math
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -17,12 +15,14 @@ from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
+from pydantic import ValidationError
 
 from recotem.config import ApiKeyEntry
 from recotem.serving import metrics as _metrics
 from recotem.serving.auth import verify_api_key
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from recotem.serving.schemas import (
+    BATCH_AGGREGATE_LIMIT,
     BatchRecommendRelatedRequest,
     BatchRecommendRequest,
     BatchRecommendResponse,
@@ -38,70 +38,35 @@ from recotem.serving.schemas import (
 
 logger = structlog.get_logger(__name__)
 
-_METADATA_WARN_LIMIT = 10
-_metadata_warn_counter: collections.Counter[tuple[str, str]] = collections.Counter()
-
-
-def _lookup_metadata(
-    meta_df: Any,
-    item_id: str,
-    deny_set: frozenset[str],
-    recipe_name: str = "",
-) -> tuple[dict[str, Any], bool]:
-    if item_id not in meta_df.index:
-        return {}, False
-    try:
-        row = meta_df.loc[item_id]
-    except KeyError:
-        key = (recipe_name, "unexpected_keyerror")
-        if _metadata_warn_counter[key] < _METADATA_WARN_LIMIT:
-            logger.warning(
-                "metadata_lookup_unexpected_keyerror",
-                recipe=recipe_name,
-                item_id=str(item_id)[:64],
-            )
-        _metadata_warn_counter[key] += 1
-        _metrics.inc_metadata_lookup_error(recipe_name)
-        return {}, True
-    try:
-        out: dict[str, Any] = {}
-        for k, v in row.to_dict().items():
-            if not isinstance(k, str):
-                continue
-            if k.lower() in deny_set:
-                continue
-            out[k] = None if isinstance(v, float) and math.isnan(v) else v
-        return out, False
-    except (AttributeError, TypeError, ValueError) as exc:
-        key = (recipe_name, "lookup_failed")
-        if _metadata_warn_counter[key] < _METADATA_WARN_LIMIT:
-            logger.warning(
-                "metadata_lookup_failed",
-                recipe=recipe_name,
-                item_id=str(item_id)[:64],
-                error_class=type(exc).__name__,
-            )
-        _metadata_warn_counter[key] += 1
-        _metrics.inc_metadata_lookup_error(recipe_name)
-        return {}, True
+# Path regex shared across every endpoint that names a recipe. Must mirror
+# ``recotem.recipe.models.Recipe.name`` so that any recipe accepted at load
+# time is also routable. The regex is intentionally permissive of leading
+# ``_``/``-`` characters because the recipe loader already accepts them.
+_RECIPE_NAME_RE = r"^[A-Za-z0-9_-]{1,64}$"
+_RecipeName = Annotated[str, Path(pattern=_RECIPE_NAME_RE)]
 
 
 def make_router(
     registry: ModelRegistry,
     api_keys: list[ApiKeyEntry],
-    metadata_field_deny: list[str] | None = None,
+    metadata_field_deny: list[str] | None = None,  # noqa: ARG001
 ) -> APIRouter:
     router = APIRouter()
-    _deny_set: frozenset[str] = frozenset(
-        s.lower() for s in (metadata_field_deny or [])
-    )
+    # metadata_field_deny is consumed at artifact-load time when the
+    # per-recipe ``metadata_index`` is built (see watcher / app.py). The
+    # router no longer carries a runtime fallback path, so the parameter
+    # is preserved only for signature compatibility with the existing
+    # ``create_app`` wiring.
 
     def _require_auth(request: Request) -> str:
         return verify_api_key(request, api_keys)
 
-    def _resolve_entry(name: str, request_id: str, kid: str) -> ModelEntry:
+    def _resolve_entry(
+        name: str, request_id: str, kid: str, status_holder: list[str]
+    ) -> ModelEntry:
         entry = registry.get(name)
         if entry is None:
+            status_holder[0] = "recipe_not_found"
             logger.warning(
                 "recipe_unavailable",
                 name=name,
@@ -117,6 +82,7 @@ def make_router(
                 },
             )
         if not entry.loaded or entry.recommender is None:
+            status_holder[0] = "unavailable"
             logger.warning(
                 "recipe_unavailable",
                 name=name,
@@ -145,6 +111,40 @@ def make_router(
                 recipe, verb, status_holder[0], time.monotonic() - start
             )
             structlog.contextvars.unbind_contextvars("recipe", "kid")
+
+    def _build_items(
+        raw_results: list[tuple[str, float]],
+        exclude: frozenset[str],
+        meta_index: dict[str, Any] | None,
+    ) -> list[RecommendItem]:
+        items: list[RecommendItem] = []
+        for item_id, score in raw_results:
+            if item_id in exclude:
+                continue
+            fields: dict[str, Any] = {}
+            if meta_index is not None:
+                fields.update(meta_index.get(item_id, {}))
+            fields["item_id"] = item_id
+            fields["score"] = float(score)
+            items.append(RecommendItem.model_validate(fields))
+        return items
+
+    def _any_seed_known(entry: ModelEntry, seed_items: list[str]) -> bool:
+        """Return True if at least one seed is known to the model id-map.
+
+        Used to distinguish ``UNKNOWN_SEED_ITEMS`` (no seed in id-map) from
+        ``NO_CANDIDATES`` (some seeds known but the ranker produced no
+        survivors after its own filtering / score-thresholding).
+        """
+        try:
+            mapper = entry.recommender._mapper
+            id_map = mapper.item_id_to_index
+        except AttributeError:
+            # Defensive: if the recommender layout ever changes we fall
+            # back to the conservative "treat as unknown" branch rather
+            # than mis-attributing the failure.
+            return False
+        return any(str(s) in id_map for s in seed_items)
 
     @router.get("/health", summary="Overall health status (probe-safe)")
     def health(response: Response) -> dict[str, Any]:
@@ -199,7 +199,7 @@ def make_router(
         summary="Recommend items for a single user",
     )
     def recommend(
-        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")],
+        name: _RecipeName,
         body: RecommendRequest,
         request: Request,
         response: Response,
@@ -210,7 +210,7 @@ def make_router(
 
         with _request_metrics(name, verb, kid) as status_holder:
             try:
-                entry = _resolve_entry(name, request_id, kid)
+                entry = _resolve_entry(name, request_id, kid, status_holder)
 
                 try:
                     raw_results: list[tuple[str, float]] = (
@@ -231,32 +231,10 @@ def make_router(
                 exclude = (
                     frozenset(body.exclude_items) if body.exclude_items else frozenset()
                 )
-                meta_index = entry.metadata_index
-                meta_df = entry.metadata_df if meta_index is None else None
-                items: list[RecommendItem] = []
-                metadata_degraded = False
-
-                for item_id, score in raw_results:
-                    if item_id in exclude:
-                        continue
-                    fields: dict[str, Any] = {}
-                    if meta_index is not None:
-                        fields.update(meta_index.get(item_id, {}))
-                    elif meta_df is not None:
-                        meta_fields, degraded = _lookup_metadata(
-                            meta_df, item_id, _deny_set, name
-                        )
-                        fields.update(meta_fields)
-                        if degraded:
-                            metadata_degraded = True
-                    fields["item_id"] = item_id
-                    fields["score"] = float(score)
-                    items.append(RecommendItem.model_validate(fields))
+                items = _build_items(raw_results, exclude, entry.metadata_index)
 
                 status_holder[0] = "ok"
                 response.headers["X-Recotem-Model-Version"] = entry.model_version
-                if metadata_degraded:
-                    response.headers["X-Recotem-Metadata-Degraded"] = "1"
                 return RecommendResponse(
                     request_id=request_id,
                     recipe=name,
@@ -273,7 +251,7 @@ def make_router(
                     name=name,
                     request_id=request_id,
                     kid=kid,
-                    error_class=type(exc).__name__,
+                    exc_type=type(exc).__name__,
                 )
                 raise
 
@@ -283,7 +261,7 @@ def make_router(
         summary="Recommend items related to a seed list",
     )
     def recommend_related(
-        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")],
+        name: _RecipeName,
         body: RecommendRelatedRequest,
         request: Request,
         response: Response,
@@ -294,13 +272,9 @@ def make_router(
 
         with _request_metrics(name, verb, kid) as status_holder:
             try:
-                entry = _resolve_entry(name, request_id, kid)
+                entry = _resolve_entry(name, request_id, kid, status_holder)
 
-                raw_results = entry.recommender.get_recommendation_for_new_user(
-                    body.seed_items, body.limit
-                )
-
-                if not raw_results:
+                if not _any_seed_known(entry, body.seed_items):
                     status_holder[0] = "unknown_seed_items"
                     raise HTTPException(
                         status_code=404,
@@ -310,35 +284,27 @@ def make_router(
                         },
                     )
 
+                raw_results = entry.recommender.get_recommendation_for_new_user(
+                    body.seed_items, body.limit
+                )
+
+                if not raw_results:
+                    status_holder[0] = "no_candidates"
+                    raise HTTPException(
+                        status_code=404,
+                        detail={
+                            "detail": "no candidates produced by ranker",
+                            "code": "NO_CANDIDATES",
+                        },
+                    )
+
                 exclude = (
                     frozenset(body.exclude_items) if body.exclude_items else frozenset()
                 )
-                meta_index = entry.metadata_index
-                meta_df = entry.metadata_df if meta_index is None else None
-                items: list[RecommendItem] = []
-                metadata_degraded = False
-
-                for item_id, score in raw_results:
-                    if item_id in exclude:
-                        continue
-                    fields: dict[str, Any] = {}
-                    if meta_index is not None:
-                        fields.update(meta_index.get(item_id, {}))
-                    elif meta_df is not None:
-                        meta_fields, degraded = _lookup_metadata(
-                            meta_df, item_id, _deny_set, name
-                        )
-                        fields.update(meta_fields)
-                        if degraded:
-                            metadata_degraded = True
-                    fields["item_id"] = item_id
-                    fields["score"] = float(score)
-                    items.append(RecommendItem.model_validate(fields))
+                items = _build_items(raw_results, exclude, entry.metadata_index)
 
                 status_holder[0] = "ok"
                 response.headers["X-Recotem-Model-Version"] = entry.model_version
-                if metadata_degraded:
-                    response.headers["X-Recotem-Metadata-Degraded"] = "1"
                 return RecommendResponse(
                     request_id=request_id,
                     recipe=name,
@@ -355,7 +321,7 @@ def make_router(
                     name=name,
                     request_id=request_id,
                     kid=kid,
-                    error_class=type(exc).__name__,
+                    exc_type=type(exc).__name__,
                 )
                 raise
 
@@ -365,7 +331,7 @@ def make_router(
         summary="Recommend items for multiple users",
     )
     def batch_recommend(
-        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")],
+        name: _RecipeName,
         body: BatchRecommendRequest,
         request: Request,
         response: Response,
@@ -376,20 +342,55 @@ def make_router(
 
         with _request_metrics(name, verb, kid) as status_holder:
             try:
-                entry = _resolve_entry(name, request_id, kid)
+                entry = _resolve_entry(name, request_id, kid, status_holder)
 
                 _metrics.observe_batch_size(name, verb, len(body.requests))
 
                 results: list[BatchResultEntry] = []
-                for idx, single in enumerate(body.requests):
-                    try:
-                        raw = entry.recommender.get_recommendation_for_known_user_id(
-                            single.user_id, single.limit
+                aggregate_limit = 0
+                for idx, raw in enumerate(body.requests):
+                    if not isinstance(raw, dict):
+                        results.append(
+                            _batch_error_entry(
+                                idx, "VALIDATION_ERROR", "request must be an object"
+                            )
                         )
-                        items = [
-                            RecommendItem(item_id=item_id, score=float(score))
-                            for item_id, score in raw
-                        ]
+                        _metrics.inc_batch_element_error(name, verb, "VALIDATION_ERROR")
+                        continue
+                    try:
+                        single = RecommendRequest.model_validate(raw)
+                    except ValidationError:
+                        results.append(
+                            _batch_error_entry(
+                                idx, "VALIDATION_ERROR", "validation failed"
+                            )
+                        )
+                        _metrics.inc_batch_element_error(name, verb, "VALIDATION_ERROR")
+                        continue
+                    if aggregate_limit + single.limit > BATCH_AGGREGATE_LIMIT:
+                        results.append(
+                            _batch_error_entry(
+                                idx,
+                                "VALIDATION_ERROR",
+                                f"aggregate limit cap exceeded: "
+                                f"{BATCH_AGGREGATE_LIMIT}",
+                            )
+                        )
+                        _metrics.inc_batch_element_error(name, verb, "VALIDATION_ERROR")
+                        continue
+                    aggregate_limit += single.limit
+                    try:
+                        raw_results = (
+                            entry.recommender.get_recommendation_for_known_user_id(
+                                single.user_id, single.limit
+                            )
+                        )
+                        exclude = (
+                            frozenset(single.exclude_items)
+                            if single.exclude_items
+                            else frozenset()
+                        )
+                        items = _build_items(raw_results, exclude, None)
                         results.append(
                             BatchResultEntry(
                                 index=idx,
@@ -400,36 +401,28 @@ def make_router(
                         )
                     except KeyError:
                         results.append(
-                            BatchResultEntry(
-                                index=idx,
-                                status="error",
-                                items=None,
-                                error=ErrorDetail(
-                                    code="UNKNOWN_USER",
-                                    message="user not seen during training",
-                                ),
+                            _batch_error_entry(
+                                idx, "UNKNOWN_USER", "user not seen during training"
                             )
                         )
+                        _metrics.inc_batch_element_error(name, verb, "UNKNOWN_USER")
                     except (MemoryError, RecursionError):
                         raise
-                    except Exception:
-                        logger.warning(
+                    except Exception as exc:
+                        logger.exception(
                             "batch_element_error",
                             recipe=name,
+                            verb=verb,
                             idx=idx,
-                            exc_type="Exception",
+                            request_id=request_id,
+                            kid=kid,
+                            exc_type=type(exc).__name__,
+                            exc_module=type(exc).__module__,
                         )
                         results.append(
-                            BatchResultEntry(
-                                index=idx,
-                                status="error",
-                                items=None,
-                                error=ErrorDetail(
-                                    code="INTERNAL_ERROR",
-                                    message="internal error",
-                                ),
-                            )
+                            _batch_error_entry(idx, "INTERNAL_ERROR", "internal error")
                         )
+                        _metrics.inc_batch_element_error(name, verb, "INTERNAL_ERROR")
 
                 status_holder[0] = "ok"
                 response.headers["X-Recotem-Model-Version"] = entry.model_version
@@ -449,7 +442,7 @@ def make_router(
                     name=name,
                     request_id=request_id,
                     kid=kid,
-                    error_class=type(exc).__name__,
+                    exc_type=type(exc).__name__,
                 )
                 raise
 
@@ -459,7 +452,7 @@ def make_router(
         summary="Recommend items related to multiple seed lists",
     )
     def batch_recommend_related(
-        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")],
+        name: _RecipeName,
         body: BatchRecommendRelatedRequest,
         request: Request,
         response: Response,
@@ -470,33 +463,77 @@ def make_router(
 
         with _request_metrics(name, verb, kid) as status_holder:
             try:
-                entry = _resolve_entry(name, request_id, kid)
+                entry = _resolve_entry(name, request_id, kid, status_holder)
 
                 _metrics.observe_batch_size(name, verb, len(body.requests))
 
                 results: list[BatchResultEntry] = []
-                for idx, single in enumerate(body.requests):
-                    try:
-                        raw = entry.recommender.get_recommendation_for_new_user(
-                            single.seed_items, single.limit
+                aggregate_limit = 0
+                for idx, raw in enumerate(body.requests):
+                    if not isinstance(raw, dict):
+                        results.append(
+                            _batch_error_entry(
+                                idx, "VALIDATION_ERROR", "request must be an object"
+                            )
                         )
-                        if not raw:
+                        _metrics.inc_batch_element_error(name, verb, "VALIDATION_ERROR")
+                        continue
+                    try:
+                        single = RecommendRelatedRequest.model_validate(raw)
+                    except ValidationError:
+                        results.append(
+                            _batch_error_entry(
+                                idx, "VALIDATION_ERROR", "validation failed"
+                            )
+                        )
+                        _metrics.inc_batch_element_error(name, verb, "VALIDATION_ERROR")
+                        continue
+                    if aggregate_limit + single.limit > BATCH_AGGREGATE_LIMIT:
+                        results.append(
+                            _batch_error_entry(
+                                idx,
+                                "VALIDATION_ERROR",
+                                f"aggregate limit cap exceeded: "
+                                f"{BATCH_AGGREGATE_LIMIT}",
+                            )
+                        )
+                        _metrics.inc_batch_element_error(name, verb, "VALIDATION_ERROR")
+                        continue
+                    aggregate_limit += single.limit
+                    try:
+                        if not _any_seed_known(entry, single.seed_items):
                             results.append(
-                                BatchResultEntry(
-                                    index=idx,
-                                    status="error",
-                                    items=None,
-                                    error=ErrorDetail(
-                                        code="UNKNOWN_SEED_ITEMS",
-                                        message="no known seed_items",
-                                    ),
+                                _batch_error_entry(
+                                    idx,
+                                    "UNKNOWN_SEED_ITEMS",
+                                    "no known seed_items",
                                 )
                             )
+                            _metrics.inc_batch_element_error(
+                                name, verb, "UNKNOWN_SEED_ITEMS"
+                            )
                             continue
-                        items = [
-                            RecommendItem(item_id=item_id, score=float(score))
-                            for item_id, score in raw
-                        ]
+                        raw_results = entry.recommender.get_recommendation_for_new_user(
+                            single.seed_items, single.limit
+                        )
+                        if not raw_results:
+                            results.append(
+                                _batch_error_entry(
+                                    idx,
+                                    "NO_CANDIDATES",
+                                    "no candidates produced by ranker",
+                                )
+                            )
+                            _metrics.inc_batch_element_error(
+                                name, verb, "NO_CANDIDATES"
+                            )
+                            continue
+                        exclude = (
+                            frozenset(single.exclude_items)
+                            if single.exclude_items
+                            else frozenset()
+                        )
+                        items = _build_items(raw_results, exclude, None)
                         results.append(
                             BatchResultEntry(
                                 index=idx,
@@ -507,36 +544,30 @@ def make_router(
                         )
                     except KeyError:
                         results.append(
-                            BatchResultEntry(
-                                index=idx,
-                                status="error",
-                                items=None,
-                                error=ErrorDetail(
-                                    code="UNKNOWN_SEED_ITEMS",
-                                    message="no known seed_items",
-                                ),
+                            _batch_error_entry(
+                                idx, "UNKNOWN_SEED_ITEMS", "no known seed_items"
                             )
+                        )
+                        _metrics.inc_batch_element_error(
+                            name, verb, "UNKNOWN_SEED_ITEMS"
                         )
                     except (MemoryError, RecursionError):
                         raise
-                    except Exception:
-                        logger.warning(
+                    except Exception as exc:
+                        logger.exception(
                             "batch_element_error",
                             recipe=name,
+                            verb=verb,
                             idx=idx,
-                            exc_type="Exception",
+                            request_id=request_id,
+                            kid=kid,
+                            exc_type=type(exc).__name__,
+                            exc_module=type(exc).__module__,
                         )
                         results.append(
-                            BatchResultEntry(
-                                index=idx,
-                                status="error",
-                                items=None,
-                                error=ErrorDetail(
-                                    code="INTERNAL_ERROR",
-                                    message="internal error",
-                                ),
-                            )
+                            _batch_error_entry(idx, "INTERNAL_ERROR", "internal error")
                         )
+                        _metrics.inc_batch_element_error(name, verb, "INTERNAL_ERROR")
 
                 status_holder[0] = "ok"
                 response.headers["X-Recotem-Model-Version"] = entry.model_version
@@ -556,7 +587,7 @@ def make_router(
                     name=name,
                     request_id=request_id,
                     kid=kid,
-                    error_class=type(exc).__name__,
+                    exc_type=type(exc).__name__,
                 )
                 raise
 
@@ -591,7 +622,7 @@ def make_router(
         summary="Get recipe detail",
     )
     def recipe_detail(
-        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")],
+        name: _RecipeName,
         request: Request,
         kid: str = Depends(_require_auth),
     ) -> dict[str, Any]:
@@ -661,10 +692,19 @@ def make_router(
                 name=name,
                 request_id=request_id,
                 kid=kid,
-                error_class=type(exc).__name__,
+                exc_type=type(exc).__name__,
             )
             raise
         finally:
             structlog.contextvars.unbind_contextvars("kid")
 
     return router
+
+
+def _batch_error_entry(idx: int, code: str, message: str) -> BatchResultEntry:
+    return BatchResultEntry(
+        index=idx,
+        status="error",
+        items=None,
+        error=ErrorDetail(code=code, message=message),  # type: ignore[arg-type]
+    )

@@ -1,22 +1,12 @@
 # tests/unit/test_v1_metadata_enrichment.py
 """Verify that item metadata is included in :recommend responses.
 
-Two enrichment paths exist in routes.py:
-
-1. ``metadata_index`` path — when ``entry.metadata_index`` is not None the
-   router calls ``meta_index.get(item_id, {})`` directly.  The deny-set has
-   already been applied by ``build_metadata_index`` at load time, so it is
-   NOT re-applied at serve time.
-
-2. ``metadata_df`` path — when only ``entry.metadata_df`` is set the router
-   delegates to ``_lookup_metadata(meta_df, item_id, _deny_set, name)``,
-   which applies the deny-set at query time.
-
-These tests cover:
-- metadata fields appear in response items when a populated ``metadata_index``
-  is provided.
-- denied fields are stripped when using the ``metadata_df`` path (where the
-  ``metadata_field_deny`` parameter to ``make_router`` is active).
+Production serving builds ``entry.metadata_index`` at artifact load time
+(see ``app.py:_try_load_artifact`` and ``watcher.py:_build_entry``) and
+the router reads from it via ``meta_index.get(item_id, {})``.  The
+deny-set is already applied by ``build_metadata_index`` at load time, so
+the router does NOT re-apply it at serve time.  Deny-set semantics are
+covered separately in ``tests/unit/test_metadata_loader.py``.
 """
 
 from __future__ import annotations
@@ -63,18 +53,28 @@ def _entry_with_metadata_index(
     )
 
 
-def _entry_with_metadata_df(
-    meta_df: pd.DataFrame,
+def _entry_with_loaded_metadata(
+    df: pd.DataFrame,
     recommender: MagicMock,
+    metadata_field_deny: list[str] | None = None,
 ) -> ModelEntry:
-    """Return a loaded entry that uses the DataFrame metadata path."""
+    """Return a loaded entry whose ``metadata_index`` is built from *df*.
+
+    Mirrors production behaviour where the index is built at load time by
+    ``build_metadata_index`` (deny-set applied), so tests that set up an
+    entry-with-metadata path go through the same code as serving does.
+    """
+    from recotem.metadata.loader import build_metadata_index
+
+    deny_set: frozenset[str] = frozenset(s.lower() for s in (metadata_field_deny or []))
+    index = build_metadata_index(df, deny_set=deny_set)
     return ModelEntry(
         name="demo",
         recommender=recommender,
         header={},
         kid="test",
-        metadata_df=meta_df,
-        metadata_index=None,
+        metadata_df=None,
+        metadata_index=index,
         loaded=True,
         _loaded_marker=(None, "abc123"),
         loaded_at_unix=1747800000.0,
@@ -129,17 +129,20 @@ def test_recommend_item_without_metadata_entry_has_no_extra_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task D.2 — metadata_df path: denied fields are stripped at serve time
+# Task D.2 — load-time deny-set: denied fields are stripped at serve time
 # ---------------------------------------------------------------------------
+# The deny-set is applied by ``build_metadata_index`` at artifact-load
+# time; the router only reads the pre-flattened index.  These tests
+# pre-build an index with the deny-set applied to mirror the production
+# load path.  Lower-level deny-set semantics (case-insensitivity, NaN
+# handling) are covered in ``tests/unit/test_metadata_loader.py``.
 
 
-def test_recommend_strips_denied_fields_from_metadata_df() -> None:
-    """metadata_field_deny causes the matching columns to be absent from items."""
-    # Build a minimal pandas DataFrame indexed by item_id (string index).
+def test_recommend_strips_denied_fields_pre_built_into_index() -> None:
     df = pd.DataFrame(
         {
             "title": ["Widget A", "Widget B"],
-            "internal_score": [99.0, 88.0],  # this field will be denied
+            "internal_score": [99.0, 88.0],
             "category": ["tools", "home"],
         },
         index=pd.Index(["i1", "i2"], name="item_id"),
@@ -147,27 +150,19 @@ def test_recommend_strips_denied_fields_from_metadata_df() -> None:
     rec = MagicMock()
     rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9), ("i2", 0.5)]
 
-    # Deny "internal_score" via the make_router parameter.
     client = _make_client(
-        _entry_with_metadata_df(df, rec),
-        metadata_field_deny=["internal_score"],
+        _entry_with_loaded_metadata(df, rec, metadata_field_deny=["internal_score"]),
     )
     r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1", "limit": 2})
 
     assert r.status_code == 200, r.text
-    items = r.json()["items"]
-
-    for item in items:
-        assert "internal_score" not in item, (
-            "Denied field 'internal_score' must not appear in response"
-        )
-        # Non-denied fields must still be present
+    for item in r.json()["items"]:
+        assert "internal_score" not in item
         assert "title" in item
         assert "category" in item
 
 
-def test_recommend_deny_is_case_insensitive_via_metadata_df() -> None:
-    """The deny-set comparison is case-insensitive (stored as lowercase)."""
+def test_recommend_deny_is_case_insensitive_pre_built() -> None:
     df = pd.DataFrame(
         {"Secret": ["s1", "s2"], "name": ["n1", "n2"]},
         index=pd.Index(["i1", "i2"], name="item_id"),
@@ -175,10 +170,8 @@ def test_recommend_deny_is_case_insensitive_via_metadata_df() -> None:
     rec = MagicMock()
     rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
 
-    # Pass the deny entry in a different case than the column name.
     client = _make_client(
-        _entry_with_metadata_df(df, rec),
-        metadata_field_deny=["SECRET"],  # uppercase — should still match "Secret"
+        _entry_with_loaded_metadata(df, rec, metadata_field_deny=["SECRET"]),
     )
     r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
 
@@ -189,70 +182,8 @@ def test_recommend_deny_is_case_insensitive_via_metadata_df() -> None:
 
 
 # ---------------------------------------------------------------------------
-# H. metadata-degraded header, score/item_id precedence, extra fields
+# H. score/item_id precedence, extra fields
 # ---------------------------------------------------------------------------
-
-
-class _CorruptIndex(pd.Index):
-    """An index subclass whose .loc accessor raises TypeError on to_dict."""
-
-
-def _entry_with_broken_meta_df(rec: MagicMock) -> ModelEntry:
-    """Return a loaded entry whose metadata_df.loc raises on to_dict."""
-    row_mock = MagicMock()
-    row_mock.to_dict.side_effect = TypeError("corrupt metadata")
-    df_mock = MagicMock(spec=pd.DataFrame)
-    df_mock.index = pd.Index(["i1"], name="item_id")
-    df_mock.__contains__ = lambda self, item: item == "i1"
-    df_mock.loc.__getitem__ = MagicMock(return_value=row_mock)
-    return ModelEntry(
-        name="demo",
-        recommender=rec,
-        header={},
-        kid="test",
-        metadata_df=df_mock,
-        metadata_index=None,
-        loaded=True,
-        _loaded_marker=(None, "abc123"),
-        loaded_at_unix=1747800000.0,
-    )
-
-
-def test_metadata_degraded_header_set_on_lookup_failure() -> None:
-    rec = MagicMock()
-    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
-    entry = _entry_with_broken_meta_df(rec)
-    client = _make_client(entry)
-    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
-    assert r.status_code == 200, r.text
-    assert r.headers.get("x-recotem-metadata-degraded") == "1"
-
-
-def test_metadata_degraded_header_absent_when_lookup_succeeds() -> None:
-    df = pd.DataFrame(
-        {"title": ["Widget A"]},
-        index=pd.Index(["i1"], name="item_id"),
-    )
-    rec = MagicMock()
-    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
-    entry = _entry_with_metadata_df(df, rec)
-    client = _make_client(entry)
-    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
-    assert r.status_code == 200, r.text
-    assert "x-recotem-metadata-degraded" not in r.headers
-
-
-def test_metadata_degraded_header_not_emitted_on_batch() -> None:
-    rec = MagicMock()
-    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
-    entry = _entry_with_broken_meta_df(rec)
-    client = _make_client(entry)
-    r = client.post(
-        "/v1/recipes/demo:batch-recommend",
-        json={"requests": [{"user_id": "u1"}]},
-    )
-    assert r.status_code == 200, r.text
-    assert "x-recotem-metadata-degraded" not in r.headers
 
 
 def test_recommender_score_wins_over_metadata_score() -> None:

@@ -444,11 +444,12 @@ Available metrics:
 
 | Metric | Type | Labels | Purpose |
 |--------|------|--------|---------|
-| `recotem_v1_requests_total` | Counter | `recipe`, `verb`, `status` | v1 request volume; `status` ∈ {`ok`, `unknown_user`, `unknown_seed_items`, `unavailable`, `validation_error`, `error`} |
+| `recotem_v1_requests_total` | Counter | `recipe`, `verb`, `status` | v1 request volume; `status` ∈ {`ok`, `unknown_user`, `unknown_seed_items`, `no_candidates`, `recipe_not_found`, `unavailable`, `validation_error`, `error`} |
 | `recotem_v1_request_latency_seconds` | Histogram | `recipe`, `verb` | per-verb end-to-end latency |
 | `recotem_v1_batch_size` | Histogram | `recipe`, `verb` | observed batch fan-out (only for `batch-recommend` / `batch-recommend-related`) |
+| `recotem_v1_batch_element_errors_total` | Counter | `recipe`, `verb`, `code` | per-element errors inside batch HTTP-200 responses; `code` ∈ {`UNKNOWN_USER`, `UNKNOWN_SEED_ITEMS`, `NO_CANDIDATES`, `VALIDATION_ERROR`, `INTERNAL_ERROR`} |
 | `recotem_model_loaded` | Gauge | `recipe` | 1 if the recipe is currently loaded |
-| `recotem_artifact_load_failures_total` | Counter | `recipe` | artifact-load failures since process start |
+| `recotem_artifact_load_failures_total` | Counter | `recipe`, `reason` | artifact-load failures since process start; `reason` ∈ {`read`, `parse`, `hmac`, `header_json`, `deserialize`, `metadata`, `yaml`, `unexpected`} |
 | `recotem_active_recipes` | Gauge | — | total recipes in the registry |
 | `recotem_swap_total` | Counter | `recipe`, `result` | hot-swap attempts (`ok` / `error`) |
 | `recotem_artifact_stat_failures_total` | Counter | `recipe` | watcher stat() failures |
@@ -537,6 +538,8 @@ The high-signal metrics for production alerting:
 | Recipe is unloaded | `recotem_model_loaded{recipe=...} == 0` for > `RECOTEM_WATCH_INTERVAL × 3` | page on-call |
 | Hot-swap failures | `rate(recotem_swap_total{result="error"}[5m]) > 0` | warn |
 | Artifact load failures since restart | `recotem_artifact_load_failures_total{recipe=...}` increase | warn (often paired with the unloaded alert above) |
+| HMAC verification failures | `rate(recotem_artifact_load_failures_total{reason="hmac"}[5m])` | page — security signal (wrong key or tampered artifact) |
+| Batch per-element error rate | `rate(recotem_v1_batch_element_errors_total[5m]) / rate(recotem_v1_requests_total{verb=~"batch-.*"}[5m])` | warn at sustained > 1% per recipe |
 | Artifact stat failures (watcher poll) | `recotem_artifact_stat_failures_total{recipe=...}` increase | warn |
 | Watcher unhandled errors | `recotem_watcher_unhandled_errors_total` increase | warn |
 | Recommend error rate | `rate(recotem_v1_requests_total{status="error"}[5m]) / rate(recotem_v1_requests_total[5m])` | warn at 1%, page at 10% |

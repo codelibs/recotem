@@ -15,21 +15,26 @@ and the datasource-layer metrics defined in ``recotem._metrics_bigquery``
 
 Metric inventory (matches docs/operations.md):
 
-| Name                                           | Type       | Labels              |
-|------------------------------------------------|------------|---------------------|
-| ``recotem_v1_requests_total``                  | Counter    | recipe, verb, status|
-| ``recotem_v1_request_latency_seconds``         | Histogram  | recipe, verb        |
-| ``recotem_v1_batch_size``                      | Histogram  | recipe, verb        |
-| ``recotem_model_loaded``                       | Gauge      | recipe              |
-| ``recotem_artifact_load_failures_total``       | Counter    | recipe              |
-| ``recotem_active_recipes``                     | Gauge      | —                   |
-| ``recotem_swap_total``                         | Counter    | recipe, result      |
-| ``recotem_artifact_stat_failures_total``       | Counter    | recipe              |
-| ``recotem_watcher_unhandled_errors_total``     | Counter    | —                   |
-| ``recotem_metadata_lookup_errors_total``       | Counter    | recipe              |
-| ``recotem_recipe_rescan_errors_total``         | Counter    | recipe              |
-| ``recotem_bigquery_storage_fallback_total``    | Counter    | reason              |
-| ``recotem_recipes_dir_scan_failures_total``    | Counter    | error_class         |
+| Name                                           | Type       | Labels                  |
+|------------------------------------------------|------------|-------------------------|
+| ``recotem_v1_requests_total``                  | Counter    | recipe, verb, status    |
+| ``recotem_v1_request_latency_seconds``         | Histogram  | recipe, verb            |
+| ``recotem_v1_batch_size``                      | Histogram  | recipe, verb            |
+| ``recotem_v1_batch_element_errors_total``      | Counter    | recipe, verb, code      |
+| ``recotem_model_loaded``                       | Gauge      | recipe                  |
+| ``recotem_artifact_load_failures_total``       | Counter    | recipe, reason          |
+| ``recotem_active_recipes``                     | Gauge      | —                       |
+| ``recotem_swap_total``                         | Counter    | recipe, result          |
+| ``recotem_artifact_stat_failures_total``       | Counter    | recipe                  |
+| ``recotem_watcher_unhandled_errors_total``     | Counter    | —                       |
+| ``recotem_metadata_lookup_errors_total``       | Counter    | recipe                  |
+| ``recotem_recipe_rescan_errors_total``         | Counter    | recipe                  |
+| ``recotem_bigquery_storage_fallback_total``    | Counter    | reason                  |
+| ``recotem_recipes_dir_scan_failures_total``    | Counter    | error_class             |
+
+Artifact-load reason taxonomy (``recotem_artifact_load_failures_total``):
+``read``, ``parse``, ``hmac``, ``header_json``, ``deserialize``, ``metadata``,
+``yaml``, ``unexpected``.
 """
 
 from __future__ import annotations
@@ -91,8 +96,10 @@ def _ensure_initialized() -> None:
     )
     _ARTIFACT_LOAD_FAILURES = Counter(
         "recotem_artifact_load_failures_total",
-        "Total artifact load failures (initial load and watcher reloads).",
-        ["recipe"],
+        "Total artifact load failures (initial load and watcher reloads). "
+        "reason ∈ {read, parse, hmac, header_json, deserialize, metadata, "
+        "yaml, unexpected}.",
+        ["recipe", "reason"],
     )
     _ACTIVE_RECIPES = Gauge(
         "recotem_active_recipes",
@@ -136,12 +143,32 @@ def set_model_loaded(recipe: str, loaded: bool) -> None:
     _MODEL_LOADED.labels(recipe=recipe).set(1 if loaded else 0)
 
 
-def inc_artifact_load_failure(recipe: str) -> None:
-    """Increment the per-recipe artifact-load-failures counter."""
+_LOAD_FAILURE_REASONS: frozenset[str] = frozenset(
+    {
+        "read",
+        "parse",
+        "hmac",
+        "header_json",
+        "deserialize",
+        "metadata",
+        "yaml",
+        "unexpected",
+    }
+)
+
+
+def inc_artifact_load_failure(recipe: str, reason: str = "unexpected") -> None:
+    """Increment the per-recipe artifact-load-failures counter.
+
+    *reason* must be one of the values in ``_LOAD_FAILURE_REASONS``; any
+    other value is silently coerced to ``"unexpected"`` so callers cannot
+    accidentally explode the cardinality of the label.
+    """
     _ensure_initialized()
     if _ARTIFACT_LOAD_FAILURES is None:
         return
-    _ARTIFACT_LOAD_FAILURES.labels(recipe=recipe).inc()
+    label = reason if reason in _LOAD_FAILURE_REASONS else "unexpected"
+    _ARTIFACT_LOAD_FAILURES.labels(recipe=recipe, reason=label).inc()
 
 
 def set_active_recipes(count: int) -> None:
@@ -187,11 +214,13 @@ def inc_watcher_unhandled_error() -> None:
 def inc_metadata_lookup_error(recipe: str) -> None:
     """Increment the per-recipe metadata-lookup-errors counter.
 
-    Called when ``_lookup_metadata`` encounters an unexpected error (not a
-    plain ``KeyError`` / missing-item) during the v1 ``:recommend`` /
-    ``:recommend-related`` response enrichment
-    — e.g. ``AttributeError`` from a non-unique index returning a DataFrame
-    instead of a Series, or ``TypeError`` from a non-string column name.
+    Called at artifact-load time when ``build_metadata_index`` encounters
+    a row that cannot be flattened — e.g. ``AttributeError`` from a
+    non-unique index returning a DataFrame instead of a Series, or
+    ``TypeError`` from a non-string column name. The v1 router itself no
+    longer performs runtime metadata lookups (the index is pre-flattened
+    at load time), so this counter surfaces load-side metadata issues
+    rather than per-request ones.
     """
     _ensure_initialized()
     if _METADATA_LOOKUP_ERRORS is None:
@@ -219,6 +248,7 @@ def inc_recipe_rescan_error(recipe: str) -> None:
 _V1_REQUEST_COUNTER: Any = None
 _V1_REQUEST_LATENCY: Any = None
 _V1_BATCH_SIZE: Any = None
+_V1_BATCH_ELEMENT_ERRORS: Any = None
 
 
 def _ensure_v1_initialized() -> None:
@@ -228,6 +258,7 @@ def _ensure_v1_initialized() -> None:
     pattern used by _ensure_initialized() for the operational metrics.
     """
     global _V1_REQUEST_COUNTER, _V1_REQUEST_LATENCY, _V1_BATCH_SIZE
+    global _V1_BATCH_ELEMENT_ERRORS
     if _V1_REQUEST_COUNTER is not None:
         return
     if not metrics_enabled():
@@ -249,6 +280,14 @@ def _ensure_v1_initialized() -> None:
         ["recipe", "verb"],
         buckets=(1, 2, 4, 8, 16, 32, 64, 128, 256),
     )
+    _V1_BATCH_ELEMENT_ERRORS = Counter(
+        "recotem_v1_batch_element_errors_total",
+        "Per-element errors inside batch v1 responses, partitioned by code. "
+        'An outer ``recotem_v1_requests_total{status="ok"}`` increment '
+        "still records the HTTP-200 response — this counter surfaces the "
+        "per-element failures that the outer counter would otherwise hide.",
+        ["recipe", "verb", "code"],
+    )
 
 
 def record_v1_request(
@@ -258,7 +297,8 @@ def record_v1_request(
 
     *verb* ∈ {"recommend", "recommend-related", "batch-recommend",
     "batch-recommend-related"}.  *status* ∈ {"ok", "unknown_user",
-    "unknown_seed_items", "unavailable", "validation_error", "error"}.
+    "unknown_seed_items", "no_candidates", "unavailable",
+    "recipe_not_found", "validation_error", "error"}.
     """
     _ensure_v1_initialized()
     if _V1_REQUEST_COUNTER is None:
@@ -273,6 +313,20 @@ def observe_batch_size(recipe: str, verb: str, size: int) -> None:
     if _V1_BATCH_SIZE is None:
         return
     _V1_BATCH_SIZE.labels(recipe=recipe, verb=verb).observe(size)
+
+
+def inc_batch_element_error(recipe: str, verb: str, code: str) -> None:
+    """Increment the per-element batch-error counter.
+
+    Called once per element that produces ``status="error"`` inside a
+    ``:batch-recommend`` or ``:batch-recommend-related`` response so
+    operators can alert on per-element failures even though the outer
+    HTTP response is still 200.
+    """
+    _ensure_v1_initialized()
+    if _V1_BATCH_ELEMENT_ERRORS is None:
+        return
+    _V1_BATCH_ELEMENT_ERRORS.labels(recipe=recipe, verb=verb, code=code).inc()
 
 
 def generate_latest() -> tuple[bytes, str]:

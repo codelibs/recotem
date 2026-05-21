@@ -8,6 +8,26 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# Aggregate ``limit`` cap across all sub-requests in a single batch call.
+# Documented in docs/api-reference.md. Bounds total candidate work per HTTP
+# request so a 256-element batch cannot demand 256_000 items in one go.
+BATCH_AGGREGATE_LIMIT = 5000
+
+# Machine-readable error codes emitted by the v1 API. Kept as a Literal
+# union so OpenAPI / SDK generation produces an exhaustive enum and any
+# new code added in routes/auth/app fails type-check until listed here.
+ErrorCode = Literal[
+    "RECIPE_NOT_FOUND",
+    "RECIPE_UNAVAILABLE",
+    "UNKNOWN_USER",
+    "UNKNOWN_SEED_ITEMS",
+    "NO_CANDIDATES",
+    "VALIDATION_ERROR",
+    "MISSING_API_KEY",
+    "INVALID_API_KEY",
+    "INTERNAL_ERROR",
+]
+
 # ---------------------------------------------------------------------------
 # Single-request inputs
 # ---------------------------------------------------------------------------
@@ -61,46 +81,37 @@ class RecommendRelatedRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Batch-request inputs
 # ---------------------------------------------------------------------------
-
-_BATCH_AGGREGATE_LIMIT = 5000
+#
+# Per-element schema validation is deferred to the handler so a single bad
+# entry does not 422 the whole batch — instead the bad entry surfaces as
+# ``BatchResultEntry(status="error", code="VALIDATION_ERROR")``. The
+# ``list[dict]`` typing here only enforces the list-level invariants
+# (1..256 elements). Aggregate ``limit`` is checked in the handler after
+# per-element parsing.
 
 
 class BatchRecommendRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     requests: Annotated[
-        list[RecommendRequest],
+        list[dict[str, Any]],
         Field(
             min_length=1, max_length=256, description="Individual recommend requests"
         ),
     ]
-
-    @model_validator(mode="after")
-    def _check_aggregate_limit(self) -> BatchRecommendRequest:
-        total = sum(r.limit for r in self.requests)
-        if total > _BATCH_AGGREGATE_LIMIT:
-            raise ValueError(f"aggregate limit cap exceeded: {_BATCH_AGGREGATE_LIMIT}")
-        return self
 
 
 class BatchRecommendRelatedRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     requests: Annotated[
-        list[RecommendRelatedRequest],
+        list[dict[str, Any]],
         Field(
             min_length=1,
             max_length=256,
             description="Individual recommend-related requests",
         ),
     ]
-
-    @model_validator(mode="after")
-    def _check_aggregate_limit(self) -> BatchRecommendRelatedRequest:
-        total = sum(r.limit for r in self.requests)
-        if total > _BATCH_AGGREGATE_LIMIT:
-            raise ValueError(f"aggregate limit cap exceeded: {_BATCH_AGGREGATE_LIMIT}")
-        return self
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +130,7 @@ class RecommendItem(BaseModel):
 class ErrorDetail(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    code: Annotated[str, Field(min_length=1, description="Machine-readable error code")]
+    code: Annotated[ErrorCode, Field(description="Machine-readable error code")]
     message: Annotated[
         str, Field(min_length=1, description="Human-readable error message")
     ]
@@ -144,7 +155,8 @@ class BatchResultEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     index: Annotated[
-        int, Field(description="Zero-based index of the original sub-request")
+        int,
+        Field(ge=0, description="Zero-based index of the original sub-request"),
     ]
     status: Annotated[Literal["ok", "error"], Field(description="Sub-request outcome")]
     items: Annotated[
@@ -153,6 +165,20 @@ class BatchResultEntry(BaseModel):
     error: Annotated[
         ErrorDetail | None, Field(description="Error detail (error only)")
     ] = None
+
+    @model_validator(mode="after")
+    def _check_status_invariant(self) -> BatchResultEntry:
+        if self.status == "ok":
+            if self.items is None or self.error is not None:
+                raise ValueError(
+                    "ok results must carry items and must not carry an error"
+                )
+        else:
+            if self.error is None or self.items is not None:
+                raise ValueError(
+                    "error results must carry an error and must not carry items"
+                )
+        return self
 
 
 class BatchRecommendResponse(BaseModel):
@@ -202,7 +228,7 @@ class RecipeSummary(BaseModel):
                 "batch-recommend-related",
             ]
         ],
-        Field(description="HTTP verbs available for this recipe"),
+        Field(min_length=1, description="HTTP verbs available for this recipe"),
     ]
     kind: Annotated[
         Literal["user-item", "item-item"], Field(description="Recommendation kind")
@@ -220,30 +246,7 @@ class RecipesListResponse(BaseModel):
     recipes: Annotated[list[RecipeSummary], Field(description="All loaded recipes")]
 
 
-class RecipeDetailResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: Annotated[str, Field(min_length=1, description="Recipe name")]
-    model_version: Annotated[
-        str, Field(min_length=1, description="Artifact SHA-256 digest")
-    ]
-    loaded_at: Annotated[
-        str, Field(min_length=1, description="ISO-8601 UTC timestamp of last hot-swap")
-    ]
-    supported_verbs: Annotated[
-        list[
-            Literal[
-                "recommend",
-                "recommend-related",
-                "batch-recommend",
-                "batch-recommend-related",
-            ]
-        ],
-        Field(description="HTTP verbs available for this recipe"),
-    ]
-    kind: Annotated[
-        Literal["user-item", "item-item"], Field(description="Recommendation kind")
-    ]
+class RecipeDetailResponse(RecipeSummary):
     config_digest: Annotated[str, Field(description="SHA-256 digest of recipe config")]
     algorithms: Annotated[
         list[str], Field(description="Algorithms evaluated during training")
@@ -260,8 +263,3 @@ class RecipeDetailResponse(BaseModel):
     recotem_version: str | None = None
     irspack_version: str | None = None
     recipe_hash: str | None = None
-
-    @field_validator("loaded_at", mode="before")
-    @classmethod
-    def _validate_loaded_at(cls, v: str) -> str:
-        return _parse_loaded_at(v)

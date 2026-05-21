@@ -202,8 +202,8 @@ def load_item_metadata(
     # -----------------------------------------------------------------------
     df = df[[item_id_col, *fields]].copy()
     # Drop duplicate item-ids before set_index — a non-unique index turns
-    # df.loc[item_id] from a Series into a DataFrame slice, which silently
-    # zeros out the metadata join in routes._lookup_metadata.
+    # df.loc[item_id] from a Series into a DataFrame slice, which would
+    # silently corrupt the metadata index built later by build_metadata_index.
     dup_count = int(df[item_id_col].duplicated().sum())
     if dup_count > 0:
         logger.warning(
@@ -261,8 +261,7 @@ def build_metadata_index(
           safe to pass directly to ``json.dumps`` or Pydantic's
           ``model_construct``.
         - Fields whose lowercased name appears in *deny_set* are omitted.
-        - Non-string column names are omitted (same guard as
-          :func:`~recotem.serving.routes._lookup_metadata`).
+        - Non-string column names are omitted defensively.
     """
     _deny: frozenset[str] = deny_set or frozenset()
 

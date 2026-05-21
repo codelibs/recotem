@@ -121,12 +121,23 @@ def test_batch_recommend_sets_model_version_response_header():
 
 
 def test_batch_aggregate_limit_cap_exceeded() -> None:
+    """Aggregate limit cap is now enforced per-element rather than at the
+    schema level: 10 × 501 = 5010 > 5000, so the LAST element (and only the
+    last) is rejected with VALIDATION_ERROR. Earlier elements still execute."""
     rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = []
     r = _client(rec).post(
         "/v1/recipes/demo:batch-recommend",
         json={"requests": [{"user_id": f"u{i}", "limit": 501} for i in range(10)]},
     )
-    assert r.status_code == 422
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    # First 9 elements (sum = 9*501 = 4509) succeed; the 10th would push
+    # the running aggregate to 5010, so it is rejected with
+    # VALIDATION_ERROR.
+    assert results[0]["status"] == "ok"
+    assert results[-1]["status"] == "error"
+    assert results[-1]["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_batch_aggregate_limit_cap_boundary() -> None:
@@ -168,26 +179,46 @@ def test_batch_element_runtime_error_yields_internal_error() -> None:
 
 
 def test_batch_rejects_extra_field_on_request_element() -> None:
+    """A bad sub-element now becomes status=error, code=VALIDATION_ERROR
+    rather than 422'ing the whole batch — that's the contract documented
+    for ``:batch-recommend``."""
     rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = []
     r = _client(rec).post(
         "/v1/recipes/demo:batch-recommend",
         json={"requests": [{"user_id": "u1", "extra_field": "boom"}]},
     )
-    assert r.status_code == 422
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    assert results[0]["status"] == "error"
+    assert results[0]["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_batch_recommend_per_request_limit_validation():
+    """Per-element schema violations surface as VALIDATION_ERROR in the
+    individual result entry; valid siblings continue to be processed."""
     rec = MagicMock()
-    # limit=0 is below the minimum of 1
+    rec.get_recommendation_for_known_user_id.return_value = []
+
     r_zero = _client(rec).post(
         "/v1/recipes/demo:batch-recommend",
-        json={"requests": [{"user_id": "u1", "limit": 0}]},
+        json={
+            "requests": [
+                {"user_id": "u-good"},
+                {"user_id": "u1", "limit": 0},  # below the floor
+            ]
+        },
     )
-    assert r_zero.status_code == 422
+    assert r_zero.status_code == 200, r_zero.text
+    rs = r_zero.json()["results"]
+    assert rs[0]["status"] == "ok"
+    assert rs[1]["status"] == "error"
+    assert rs[1]["error"]["code"] == "VALIDATION_ERROR"
 
-    # limit=1001 exceeds the maximum of 1000
     r_over = _client(rec).post(
         "/v1/recipes/demo:batch-recommend",
-        json={"requests": [{"user_id": "u1", "limit": 1001}]},
+        json={"requests": [{"user_id": "u1", "limit": 1001}]},  # above ceiling
     )
-    assert r_over.status_code == 422
+    assert r_over.status_code == 200, r_over.text
+    assert r_over.json()["results"][0]["status"] == "error"
+    assert r_over.json()["results"][0]["error"]["code"] == "VALIDATION_ERROR"

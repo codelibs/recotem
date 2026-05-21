@@ -22,6 +22,8 @@ from recotem.serving.auth import verify_api_key
 from recotem.serving.registry import ModelRegistry
 from recotem.serving.routes import _lookup_metadata  # reused legacy helper
 from recotem.serving.schemas import (
+    BatchRecommendRequest,
+    BatchRecommendResponse,
     RecommendRelatedRequest,
     RecommendRequest,
     RecommendResponse,
@@ -269,6 +271,95 @@ def make_v1_router(
         except Exception:
             logger.exception(
                 "v1_recommend_related_unexpected_error",
+                name=name,
+                request_id=request_id,
+                kid=kid,
+            )
+            raise
+        finally:
+            _metrics.record_v1_request(name, verb, status, time.monotonic() - start)
+
+    @router.post(
+        "/recipes/{name}:batch-recommend",
+        response_model=BatchRecommendResponse,
+        summary="Recommend items for multiple users",
+    )
+    def batch_recommend(
+        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")],
+        body: BatchRecommendRequest,
+        request: Request,
+        kid: str = Depends(_require_auth),
+    ) -> Any:
+        raw_rid = request.headers.get("x-request-id", "")
+        request_id = (
+            raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
+        )
+        start = time.monotonic()
+        status = "error"
+        verb = "batch-recommend"
+
+        try:
+            entry = registry.get(name)
+            if entry is None or not entry.loaded or entry.recommender is None:
+                status = "unavailable"
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "detail": f"Recipe '{name}' is not loaded or unhealthy",
+                        "code": "RECIPE_UNAVAILABLE",
+                    },
+                )
+
+            _metrics.observe_batch_size(name, verb, len(body.requests))
+
+            results: list[dict[str, Any]] = []
+            for idx, single in enumerate(body.requests):
+                try:
+                    raw = entry.recommender.get_recommendation_for_known_user_id(
+                        single.user_id, single.limit
+                    )
+                    items = [
+                        {"item_id": item_id, "score": float(score)}
+                        for item_id, score in raw
+                    ]
+                    results.append({
+                        "index": idx,
+                        "status": "ok",
+                        "items": items,
+                        "error": None,
+                    })
+                except KeyError:
+                    results.append({
+                        "index": idx,
+                        "status": "error",
+                        "items": None,
+                        "error": {
+                            "code": "UNKNOWN_USER",
+                            "message": (
+                                f"User '{single.user_id}' "
+                                "was not seen during training"
+                            ),
+                        },
+                    })
+
+            status = "ok"
+            return JSONResponse(
+                content={
+                    "request_id": request_id,
+                    "recipe": name,
+                    "model_version": entry.model_version,
+                    "results": results,
+                },
+                headers={
+                    "X-Request-ID": request_id,
+                    "X-Recotem-Model-Version": entry.model_version,
+                },
+            )
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception(
+                "v1_batch_recommend_unexpected_error",
                 name=name,
                 request_id=request_id,
                 kid=kid,

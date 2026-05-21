@@ -99,3 +99,62 @@ def test_recipe_detail_rejects_invalid_recipe_name(bad_name: str) -> None:
     assert r.status_code in {404, 422}, (
         f"Expected 404 or 422 for invalid name {bad_name!r}, got {r.status_code}"
     )
+
+
+# ---------------------------------------------------------------------------
+# J. Path regex — leading hyphen/underscore rejection (PR #103 change)
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_path_rejects_leading_hyphen() -> None:
+    client = _client_with_entry(_loaded_entry())
+    r = client.post("/v1/recipes/-bad:recommend", json={"user_id": "u1"})
+    assert r.status_code == 422
+
+
+def test_recipe_path_rejects_leading_underscore() -> None:
+    client = _client_with_entry(_loaded_entry())
+    r = client.post("/v1/recipes/_bad:recommend", json={"user_id": "u1"})
+    assert r.status_code == 422
+
+
+def test_recipe_path_accepts_alphanumeric_first_char() -> None:
+    client = _client_with_entry(_loaded_entry("abc"))
+    r = client.post("/v1/recipes/abc:recommend", json={"user_id": "u1"})
+    assert r.status_code != 422
+
+
+# ---------------------------------------------------------------------------
+# L. kid contextvar binding on recipe_detail
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_detail_binds_kid_to_logs() -> None:
+    import structlog
+    import structlog.testing
+
+    captured_kwargs: list[dict] = []
+
+    def _spy(logger, name, event_dict):
+        captured_kwargs.append(dict(event_dict))
+        return event_dict
+
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            _spy,
+            structlog.processors.KeyValueRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(0),
+        cache_logger_on_first_use=False,
+    )
+
+    entry = _loaded_entry("kidtest")
+    client = _client_with_entry(entry)
+    client.get("/v1/recipes/noexist")
+
+    has_kid = any("kid" in e for e in captured_kwargs)
+    assert has_kid, (
+        "Expected at least one log event with a 'kid' key bound via contextvars "
+        f"during /v1/recipes/{{name}}; captured events: {captured_kwargs!r}"
+    )

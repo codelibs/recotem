@@ -431,13 +431,17 @@ def build_v1_app(
                 latency_seconds=0.0,
             )
         request_id = getattr(request.state, "request_id", "")
+        sanitized_errors = [
+            {k: v for k, v in err.items() if k not in ("input", "ctx")}
+            for err in exc.errors()
+        ]
         return JSONResponse(
             status_code=422,
             content={
                 "request_id": request_id,
                 "detail": "Request validation failed",
                 "code": "VALIDATION_ERROR",
-                "errors": exc.errors(),
+                "errors": sanitized_errors,
             },
         )
 

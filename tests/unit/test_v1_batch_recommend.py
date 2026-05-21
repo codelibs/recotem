@@ -115,6 +115,67 @@ def test_batch_recommend_sets_model_version_response_header():
     assert header_val == r.json()["model_version"]
 
 
+# ---------------------------------------------------------------------------
+# F. Aggregate cap, non-KeyError handling, extra field
+# ---------------------------------------------------------------------------
+
+
+def test_batch_aggregate_limit_cap_exceeded() -> None:
+    rec = MagicMock()
+    r = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend",
+        json={"requests": [{"user_id": f"u{i}", "limit": 501} for i in range(10)]},
+    )
+    assert r.status_code == 422
+
+
+def test_batch_aggregate_limit_cap_boundary() -> None:
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = []
+    r = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend",
+        json={"requests": [{"user_id": f"u{i}", "limit": 500} for i in range(10)]},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_batch_element_runtime_error_yields_internal_error() -> None:
+    rec = MagicMock()
+
+    def _side_effect(user_id, limit):
+        if user_id == "bad-user":
+            raise RuntimeError("exploded")
+        return [("i1", 0.9)]
+
+    rec.get_recommendation_for_known_user_id.side_effect = _side_effect
+    r = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend",
+        json={
+            "requests": [
+                {"user_id": "ok-user"},
+                {"user_id": "bad-user"},
+                {"user_id": "ok-user2"},
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    assert results[0]["status"] == "ok"
+    assert results[1]["status"] == "error"
+    assert results[1]["error"]["code"] == "INTERNAL_ERROR"
+    assert "bad-user" not in results[1]["error"].get("message", "")
+    assert results[2]["status"] == "ok"
+
+
+def test_batch_rejects_extra_field_on_request_element() -> None:
+    rec = MagicMock()
+    r = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend",
+        json={"requests": [{"user_id": "u1", "extra_field": "boom"}]},
+    )
+    assert r.status_code == 422
+
+
 def test_batch_recommend_per_request_limit_validation():
     rec = MagicMock()
     # limit=0 is below the minimum of 1

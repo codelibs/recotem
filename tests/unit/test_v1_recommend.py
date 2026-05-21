@@ -95,6 +95,66 @@ def test_recommend_404_when_recipe_missing_from_registry():
     assert isinstance(body["detail"], str)
 
 
+# ---------------------------------------------------------------------------
+# D. exclude_items + extra="forbid"
+# ---------------------------------------------------------------------------
+
+
+def test_recommend_excludes_items() -> None:
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [
+        ("i1", 0.9),
+        ("i2", 0.8),
+        ("i3", 0.7),
+        ("i4", 0.6),
+        ("i5", 0.5),
+    ]
+    client = _app_with_entry(_entry_with_recommender(rec))
+    r = client.post(
+        "/v1/recipes/demo:recommend",
+        json={"user_id": "u1", "limit": 5, "exclude_items": ["i2", "i4"]},
+    )
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    ids = [i["item_id"] for i in items]
+    assert "i2" not in ids
+    assert "i4" not in ids
+    assert len(ids) == 3
+
+
+def test_recommend_context_is_noop() -> None:
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    client = _app_with_entry(_entry_with_recommender(rec))
+    r = client.post(
+        "/v1/recipes/demo:recommend",
+        json={"user_id": "u1", "limit": 1, "context": {"foo": "bar"}},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["items"][0]["item_id"] == "i1"
+
+
+def test_recommend_rejects_extra_field() -> None:
+    rec = MagicMock()
+    client = _app_with_entry(_entry_with_recommender(rec))
+    r = client.post(
+        "/v1/recipes/demo:recommend",
+        json={"user_id": "u1", "limit": 1, "unknown_field": "x"},
+    )
+    assert r.status_code == 422
+
+
+def test_recommend_rejects_oversized_user_id() -> None:
+    rec = MagicMock()
+    client = _app_with_entry(_entry_with_recommender(rec))
+    r = client.post(
+        "/v1/recipes/demo:recommend",
+        json={"user_id": "a" * 257, "limit": 1},
+    )
+    assert r.status_code == 422
+
+
 def test_recommend_sets_model_version_response_header():
     rec = MagicMock()
     rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]

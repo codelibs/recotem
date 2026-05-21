@@ -817,6 +817,121 @@ def test_structlog_contextvars_do_not_leak_between_requests() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# C. Additional auth / error coverage (new)
+# ---------------------------------------------------------------------------
+
+
+def test_recommend_related_requires_auth() -> None:
+    plaintext = "auth_test_api_key_32_bytes_pad!!"
+    api_entry = _make_api_entry(plaintext)
+    registry = ModelRegistry()
+    registry.replace("demo", _loaded_entry())
+    client = TestClient(build_v1_app(registry, api_keys=[api_entry]))
+    r = client.post(
+        "/v1/recipes/demo:recommend-related",
+        json={"seed_items": ["i1"]},
+    )
+    assert r.status_code == 401
+
+
+def test_batch_recommend_requires_auth() -> None:
+    plaintext = "auth_test_api_key_32_bytes_pad!!"
+    api_entry = _make_api_entry(plaintext)
+    registry = ModelRegistry()
+    registry.replace("demo", _loaded_entry())
+    client = TestClient(build_v1_app(registry, api_keys=[api_entry]))
+    r = client.post(
+        "/v1/recipes/demo:batch-recommend",
+        json={"requests": [{"user_id": "u1"}]},
+    )
+    assert r.status_code == 401
+
+
+def test_batch_recommend_related_requires_auth() -> None:
+    plaintext = "auth_test_api_key_32_bytes_pad!!"
+    api_entry = _make_api_entry(plaintext)
+    registry = ModelRegistry()
+    registry.replace("demo", _loaded_entry())
+    client = TestClient(build_v1_app(registry, api_keys=[api_entry]))
+    r = client.post(
+        "/v1/recipes/demo:batch-recommend-related",
+        json={"requests": [{"seed_items": ["i1"]}]},
+    )
+    assert r.status_code == 401
+
+
+def test_422_body_echoes_client_request_id() -> None:
+    client = _client_with(_loaded_entry())
+    r = client.post(
+        "/v1/recipes/demo:recommend",
+        json={},
+        headers={"X-Request-ID": "client-abc"},
+    )
+    assert r.status_code == 422
+    body = r.json()
+    assert body["request_id"] == "client-abc"
+
+
+def test_500_body_includes_request_id() -> None:
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.side_effect = RuntimeError("boom")
+    registry = ModelRegistry()
+    registry.replace("demo", _loaded_entry(rec))
+    client = TestClient(build_v1_app(registry), raise_server_exceptions=False)
+    r = client.post(
+        "/v1/recipes/demo:recommend",
+        json={"user_id": "u1"},
+        headers={"X-Request-ID": "traceme-1"},
+    )
+    assert r.status_code == 500
+    assert r.headers.get("X-Request-ID") == "traceme-1"
+
+
+def test_422_body_strips_input_and_ctx() -> None:
+    client = _client_with(_loaded_entry())
+    r = client.post(
+        "/v1/recipes/demo:recommend",
+        json={"user_id": "u1", "limit": 999999},
+    )
+    assert r.status_code == 422
+    body = r.json()
+    for err in body["errors"]:
+        assert "input" not in err, f"'input' must not appear in error dict; got {err!r}"
+        assert "ctx" not in err, f"'ctx' must not appear in error dict; got {err!r}"
+        assert "loc" in err
+        assert "msg" in err
+        assert "type" in err
+
+
+def test_error_message_does_not_echo_user_id() -> None:
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.side_effect = KeyError("secret-user-id")
+    client = _client_with(_loaded_entry(rec))
+    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "secret-user-id"})
+    assert r.status_code == 404
+    body = r.json()
+    assert body["code"] == "UNKNOWN_USER"
+    assert "secret-user-id" not in body.get("message", "")
+    assert "secret-user-id" not in body.get("detail", "")
+
+
+def test_error_message_does_not_echo_seed_items() -> None:
+    rec = MagicMock()
+    rec.get_recommendation_for_new_user.return_value = []
+    client = _client_with(_loaded_entry(rec))
+    secret_seed = "super-secret-seed-item"
+    r = client.post(
+        "/v1/recipes/demo:recommend-related",
+        json={"seed_items": [secret_seed]},
+    )
+    assert r.status_code == 404
+    body = r.json()
+    assert body["code"] == "UNKNOWN_SEED_ITEMS"
+    assert secret_seed not in body.get("message", "")
+    assert secret_seed not in body.get("detail", "")
+
+
 def test_build_v1_app_registers_all_three_exception_handlers() -> None:
     """``build_v1_app`` (used by the unit-test suite) must register the same
     three exception handlers as ``create_app`` in production: HTTPException,

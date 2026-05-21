@@ -908,3 +908,26 @@ def test_model_entry_loaded_at_iso8601_utc():
     e = _stub_entry()
     parsed = datetime.fromisoformat(e.loaded_at.replace("Z", "+00:00"))
     assert parsed.tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# K. last_load_error sanitization (PR #103)
+# ---------------------------------------------------------------------------
+
+
+def test_last_load_error_redacts_uri_paths() -> None:
+    from recotem.serving.app import _sanitize_error
+
+    reason = "read failed: s3://my-bucket/secret-models/foo.bin not accessible"
+    sanitized = _sanitize_error(reason)
+    assert "<redacted-uri>" in sanitized
+    assert "my-bucket" not in sanitized
+    assert "secret-models" not in sanitized
+
+
+def test_last_load_error_truncated_to_200_chars() -> None:
+    from recotem.serving.app import _sanitize_error
+
+    long_reason = "x" * 500
+    sanitized = _sanitize_error(long_reason)
+    assert len(sanitized) <= 200

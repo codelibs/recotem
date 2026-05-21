@@ -94,6 +94,72 @@ def test_batch_related_422_on_empty_seed_in_one_entry():
     assert r.status_code == 422
 
 
+# ---------------------------------------------------------------------------
+# G. Partial failure parity (I1)
+# ---------------------------------------------------------------------------
+
+
+def test_batch_related_element_unknown_seeds_yields_error() -> None:
+    rec = MagicMock()
+
+    def _side_effect(seed_items, limit):
+        if seed_items == ["unknown-seed"]:
+            return []
+        return [("i1", 0.9)]
+
+    rec.get_recommendation_for_new_user.side_effect = _side_effect
+    r = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend-related",
+        json={
+            "requests": [
+                {"seed_items": ["good-seed"]},
+                {"seed_items": ["unknown-seed"]},
+                {"seed_items": ["good-seed2"]},
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    assert results[0]["status"] == "ok"
+    assert results[1]["status"] == "error"
+    assert results[1]["error"]["code"] == "UNKNOWN_SEED_ITEMS"
+    assert results[2]["status"] == "ok"
+
+
+def test_batch_related_element_runtime_error_yields_internal_error() -> None:
+    rec = MagicMock()
+
+    def _side_effect(seed_items, limit):
+        if seed_items == ["bad-seed"]:
+            raise RuntimeError("exploded")
+        return [("i1", 0.9)]
+
+    rec.get_recommendation_for_new_user.side_effect = _side_effect
+    r = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend-related",
+        json={
+            "requests": [
+                {"seed_items": ["ok-seed"]},
+                {"seed_items": ["bad-seed"]},
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    assert results[0]["status"] == "ok"
+    assert results[1]["status"] == "error"
+    assert results[1]["error"]["code"] == "INTERNAL_ERROR"
+
+
+def test_batch_related_aggregate_limit_cap_exceeded() -> None:
+    rec = MagicMock()
+    r = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend-related",
+        json={"requests": [{"seed_items": ["s1"], "limit": 501} for _ in range(10)]},
+    )
+    assert r.status_code == 422
+
+
 def test_batch_recommend_related_sets_model_version_response_header():
     rec = MagicMock()
     rec.get_recommendation_for_new_user.return_value = [("i9", 0.7)]

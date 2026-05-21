@@ -186,3 +186,99 @@ def test_recommend_deny_is_case_insensitive_via_metadata_df() -> None:
     item = r.json()["items"][0]
     assert "Secret" not in item
     assert "name" in item
+
+
+# ---------------------------------------------------------------------------
+# H. metadata-degraded header, score/item_id precedence, extra fields
+# ---------------------------------------------------------------------------
+
+
+class _CorruptIndex(pd.Index):
+    """An index subclass whose .loc accessor raises TypeError on to_dict."""
+
+
+def _entry_with_broken_meta_df(rec: MagicMock) -> ModelEntry:
+    """Return a loaded entry whose metadata_df.loc raises on to_dict."""
+    row_mock = MagicMock()
+    row_mock.to_dict.side_effect = TypeError("corrupt metadata")
+    df_mock = MagicMock(spec=pd.DataFrame)
+    df_mock.index = pd.Index(["i1"], name="item_id")
+    df_mock.__contains__ = lambda self, item: item == "i1"
+    df_mock.loc.__getitem__ = MagicMock(return_value=row_mock)
+    return ModelEntry(
+        name="demo",
+        recommender=rec,
+        header={},
+        kid="test",
+        metadata_df=df_mock,
+        metadata_index=None,
+        loaded=True,
+        _loaded_marker=(None, "abc123"),
+        loaded_at_unix=1747800000.0,
+    )
+
+
+def test_metadata_degraded_header_set_on_lookup_failure() -> None:
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    entry = _entry_with_broken_meta_df(rec)
+    client = _make_client(entry)
+    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
+    assert r.status_code == 200, r.text
+    assert r.headers.get("x-recotem-metadata-degraded") == "1"
+
+
+def test_metadata_degraded_header_absent_when_lookup_succeeds() -> None:
+    df = pd.DataFrame(
+        {"title": ["Widget A"]},
+        index=pd.Index(["i1"], name="item_id"),
+    )
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    entry = _entry_with_metadata_df(df, rec)
+    client = _make_client(entry)
+    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
+    assert r.status_code == 200, r.text
+    assert "x-recotem-metadata-degraded" not in r.headers
+
+
+def test_metadata_degraded_header_not_emitted_on_batch() -> None:
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    entry = _entry_with_broken_meta_df(rec)
+    client = _make_client(entry)
+    r = client.post(
+        "/v1/recipes/demo:batch-recommend",
+        json={"requests": [{"user_id": "u1"}]},
+    )
+    assert r.status_code == 200, r.text
+    assert "x-recotem-metadata-degraded" not in r.headers
+
+
+def test_recommender_score_wins_over_metadata_score() -> None:
+    meta_index = {
+        "i1": {"item_id": "WRONG", "score": 999.0, "title": "Widget A"},
+    }
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    entry = _entry_with_metadata_index(meta_index, rec)
+    client = _make_client(entry)
+    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
+    assert r.status_code == 200, r.text
+    item = r.json()["items"][0]
+    assert item["item_id"] == "i1"
+    assert item["score"] == 0.9
+
+
+def test_response_preserves_extra_metadata_through_pydantic_roundtrip() -> None:
+    meta_index = {
+        "i1": {"foo bar": "extra-value", "title": "Widget"},
+    }
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    entry = _entry_with_metadata_index(meta_index, rec)
+    client = _make_client(entry)
+    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
+    assert r.status_code == 200, r.text
+    item = r.json()["items"][0]
+    assert item.get("foo bar") == "extra-value"

@@ -7,7 +7,7 @@
 4. Attempts initial artifact load for each recipe.
 5. Builds the ``ModelRegistry``.
 6. Registers FastAPI middlewares (TrustedHost, CORS).
-7. Registers routes (via ``make_router``).
+7. Registers routes (via ``make_v1_router`` mounted at ``/v1``).
 8. Wires the app lifespan to start the ``ArtifactWatcher`` and stop it
    gracefully on shutdown.
 
@@ -40,7 +40,7 @@ from recotem.config import ConfigError, ServeConfig
 from recotem.recipe.loader import load_recipes_directory_lenient
 from recotem.serving import metrics as _metrics
 from recotem.serving.registry import ModelEntry, ModelRegistry
-from recotem.serving.routes import make_router
+from recotem.serving.v1_router import make_v1_router
 from recotem.serving.watcher import (
     ArtifactWatcher,
     build_initial_states,
@@ -371,12 +371,12 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # ``RECOTEM_API_KEYS`` is still set in the environment, otherwise the flag
     # is documented but silently ineffective.
     router_api_keys = [] if serve_config.insecure_no_auth else serve_config.api_keys
-    router = make_router(
+    v1_router = make_v1_router(
         registry=registry,
         api_keys=router_api_keys,
         metadata_field_deny=serve_config.metadata_field_deny,
     )
-    app.include_router(router)
+    app.include_router(v1_router, prefix="/v1")
 
     return app
 

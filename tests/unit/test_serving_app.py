@@ -178,7 +178,7 @@ def test_insecure_no_auth_overrides_configured_api_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When ``insecure_no_auth=True`` and ``api_keys`` is non-empty,
-    ``create_app`` must pass ``api_keys=[]`` to ``make_router`` so the
+    ``create_app`` must pass ``api_keys=[]`` to ``make_v1_router`` so the
     X-API-Key header is not enforced. Otherwise the flag is documented
     but silently ineffective whenever ``RECOTEM_API_KEYS`` is still set
     in the environment."""
@@ -194,13 +194,13 @@ def test_insecure_no_auth_overrides_configured_api_keys(
     ]
 
     captured: dict = {}
-    real_make_router = app_module.make_router
+    real_make_v1_router = app_module.make_v1_router
 
     def _spy(*args, **kwargs):
         captured["api_keys"] = kwargs.get("api_keys")
-        return real_make_router(*args, **kwargs)
+        return real_make_v1_router(*args, **kwargs)
 
-    monkeypatch.setattr(app_module, "make_router", _spy)
+    monkeypatch.setattr(app_module, "make_v1_router", _spy)
     app_module.create_app(cfg)
 
     assert captured["api_keys"] == [], (
@@ -256,13 +256,13 @@ def test_normal_mode_passes_configured_api_keys_to_router(
     cfg.api_keys = [entry]
 
     captured: dict = {}
-    real_make_router = app_module.make_router
+    real_make_v1_router = app_module.make_v1_router
 
     def _spy(*args, **kwargs):
         captured["api_keys"] = kwargs.get("api_keys")
-        return real_make_router(*args, **kwargs)
+        return real_make_v1_router(*args, **kwargs)
 
-    monkeypatch.setattr(app_module, "make_router", _spy)
+    monkeypatch.setattr(app_module, "make_v1_router", _spy)
     app_module.create_app(cfg)
 
     assert captured["api_keys"] == [entry]
@@ -311,7 +311,7 @@ def test_TrustedHost_blocks_unrecognized_host(tmp_path: Path) -> None:
     cfg.allowed_hosts = ["allowed.example.com"]
     app = create_app(cfg)
     client = TestClient(app, raise_server_exceptions=False)
-    response = client.get("/health", headers={"host": "evil.attacker.com"})
+    response = client.get("/v1/health", headers={"host": "evil.attacker.com"})
     assert response.status_code in (400, 403, 422)
 
 
@@ -325,7 +325,7 @@ def test_TrustedHost_allows_configured_host(tmp_path: Path) -> None:
     cfg.allowed_hosts = ["testserver"]
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.get("/health")
+    response = client.get("/v1/health")
     assert response.status_code == 200
 
 
@@ -345,7 +345,7 @@ def test_CORS_blocks_unconfigured_origin(tmp_path: Path) -> None:
     app = create_app(cfg)
     client = TestClient(app)
     response = client.options(
-        "/health",
+        "/v1/health",
         headers={
             "origin": "https://evil.example.com",
             "access-control-request-method": "GET",
@@ -365,7 +365,7 @@ def test_CORS_allows_configured_origin(tmp_path: Path) -> None:
     app = create_app(cfg)
     client = TestClient(app)
     response = client.options(
-        "/health",
+        "/v1/health",
         headers={
             "origin": "https://app.example.com",
             "access-control-request-method": "GET",
@@ -494,7 +494,7 @@ def test_failed_initial_load_inserts_stub_with_loaded_false(tmp_path: Path) -> N
     app = create_app(cfg)
     client = TestClient(app)
     # /health (probe-safe) must return 503 when degraded
-    response = client.get("/health")
+    response = client.get("/v1/health")
     assert response.status_code == 503
     body = response.json()
     assert body["status"] == "degraded", (
@@ -502,7 +502,7 @@ def test_failed_initial_load_inserts_stub_with_loaded_false(tmp_path: Path) -> N
     )
 
     # /health/details carries the per-recipe info (auth passed via insecure_no_auth)
-    response_details = client.get("/health/details")
+    response_details = client.get("/v1/health/details")
     assert response_details.status_code == 503
     details = response_details.json()
     assert "missing_recipe" in details["recipes"]
@@ -514,8 +514,8 @@ def test_failed_initial_load_inserts_stub_with_loaded_false(tmp_path: Path) -> N
 
 
 def test_failed_load_recipe_returns_503_on_predict(tmp_path: Path) -> None:
-    """/predict against a recipe whose artifact failed to load returns 503,
-    not 200 or 500."""
+    """POST /v1/recipes/{name}:recommend against a recipe whose artifact failed
+    to load returns 503, not 200 or 500."""
     from fastapi.testclient import TestClient
 
     from recotem.serving.app import create_app
@@ -527,7 +527,10 @@ def test_failed_load_recipe_returns_503_on_predict(tmp_path: Path) -> None:
 
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.post("/predict/broken", json={"user_id": "u1", "cutoff": 5})
+    response = client.post(
+        "/v1/recipes/broken:recommend",
+        json={"user_id": "u1", "limit": 5},
+    )
     assert response.status_code == 503
 
 
@@ -591,7 +594,7 @@ output:
 
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.get("/health")
+    response = client.get("/v1/health")
     # Same B-2 contract: a stub recipe (loaded=False) makes the overall
     # status degraded, which now surfaces as HTTP 503.
     assert response.status_code == 503
@@ -599,7 +602,7 @@ output:
     assert body["status"] == "degraded"
 
     # Per-recipe detail only available via /health/details (I-3).
-    response_details = client.get("/health/details")
+    response_details = client.get("/v1/health/details")
     assert response_details.status_code == 503
     details = response_details.json()
     assert "with_bad_metadata" in details["recipes"]
@@ -611,8 +614,8 @@ output:
 
 
 def test_failed_load_recipe_excluded_from_models_listing(tmp_path: Path) -> None:
-    """/models lists only successfully loaded recipes; stubs are hidden
-    (operators see them via /health instead)."""
+    """/v1/recipes lists only successfully loaded recipes; stubs are hidden
+    (operators see them via /v1/health/details instead)."""
     from fastapi.testclient import TestClient
 
     from recotem.serving.app import create_app
@@ -624,9 +627,9 @@ def test_failed_load_recipe_excluded_from_models_listing(tmp_path: Path) -> None
 
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.get("/models")
+    response = client.get("/v1/recipes")
     assert response.status_code == 200
-    names = [m.get("name") for m in response.json()]
+    names = [r.get("name") for r in response.json().get("recipes", [])]
     assert "broken" not in names
 
 
@@ -947,7 +950,7 @@ def test_corrupt_header_json_returns_failed_entry_not_crash(tmp_path: Path) -> N
 
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.get("/health")
+    response = client.get("/v1/health")
     # Same B-2 contract: a stub recipe (loaded=False) makes overall
     # status degraded → HTTP 503.
     assert response.status_code == 503
@@ -955,7 +958,7 @@ def test_corrupt_header_json_returns_failed_entry_not_crash(tmp_path: Path) -> N
     assert body["status"] == "degraded"
 
     # Per-recipe detail only available via /health/details (I-3).
-    response_details = client.get("/health/details")
+    response_details = client.get("/v1/health/details")
     assert response_details.status_code == 503
     details = response_details.json()
     assert "corrupt_header" in details["recipes"], (
@@ -996,7 +999,7 @@ def test_CORS_preflight_returns_success_for_configured_origin(tmp_path: Path) ->
     app = create_app(cfg)
     client = TestClient(app)
     response = client.options(
-        "/predict/some_model",
+        "/v1/recipes/some_model:recommend",
         headers={
             "origin": "https://app.example.com",
             "access-control-request-method": "POST",
@@ -1032,7 +1035,7 @@ def test_CORS_allow_credentials_header_not_sent_for_configured_origin(
     app = create_app(cfg)
     client = TestClient(app)
     response = client.options(
-        "/health",
+        "/v1/health",
         headers={
             "origin": "https://app.example.com",
             "access-control-request-method": "GET",
@@ -1216,7 +1219,7 @@ def test_insecure_no_auth_http_request_without_key_returns_200(
     app = create_app(cfg)
     client = TestClient(app)
     # No X-API-Key header — must still pass with insecure_no_auth=True
-    response = client.get("/health")
+    response = client.get("/v1/health")
     assert response.status_code == 200, (
         f"insecure_no_auth=True must allow unauthenticated requests; "
         f"got {response.status_code}"
@@ -1378,9 +1381,9 @@ def test_startup_one_failed_load_does_not_block_others(
 
     app = create_app(cfg)
     with TestClient(app) as client:
-        response = client.get("/health")
+        response = client.get("/v1/health")
         # /health/details shows per-recipe breakdown (I-3); auth skipped (insecure_no_auth)
-        response_details = client.get("/health/details")
+        response_details = client.get("/v1/health/details")
 
     # /health aggregate
     body = response.json()
@@ -2069,7 +2072,7 @@ def test_health_returns_only_aggregate_counts(tmp_path: Path) -> None:
     cfg = _minimal_config(tmp_path)
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.get("/health")
+    response = client.get("/v1/health")
 
     assert response.status_code == 200
     body = response.json()
@@ -2113,7 +2116,7 @@ def test_health_details_requires_auth_when_keys_configured(tmp_path: Path) -> No
 
     app = create_app(cfg)
     client = TestClient(app, raise_server_exceptions=False)
-    response = client.get("/health/details")
+    response = client.get("/v1/health/details")
     assert response.status_code == 401, (
         f"/health/details must return 401 when auth is configured; got {response.status_code}"
     )
@@ -2136,7 +2139,7 @@ def test_health_details_returns_per_recipe_data_when_auth_passes(
 
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.get("/health/details")
+    response = client.get("/v1/health/details")
 
     # Degraded because artifact is missing.
     assert response.status_code == 503

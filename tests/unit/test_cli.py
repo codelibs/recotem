@@ -637,7 +637,7 @@ def test_serve_smoke_starts_and_responds_to_health(tmp_path: Path, monkeypatch) 
 
     app_instance = create_app(cfg)
     client = TestClient(app_instance)
-    response = client.get("/health")
+    response = client.get("/v1/health")
     assert response.status_code == 200
 
 
@@ -906,7 +906,7 @@ def test_serve_dev_allow_unsigned_allowed_in_development_env(
 
     app_instance = create_app(cfg)
     client = TestClient(app_instance)
-    response = client.get("/health")
+    response = client.get("/v1/health")
     assert response.status_code == 200
 
 

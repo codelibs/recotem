@@ -25,6 +25,9 @@ from recotem.serving.schemas import (
     BatchRecommendRelatedRequest,
     BatchRecommendRequest,
     BatchRecommendResponse,
+    RecipeDetailResponse,
+    RecipesListResponse,
+    RecipeSummary,  # noqa: F401  # re-exported for clarity
     RecommendRelatedRequest,
     RecommendRequest,
     RecommendResponse,
@@ -457,5 +460,53 @@ def make_v1_router(
             raise
         finally:
             _metrics.record_v1_request(name, verb, status, time.monotonic() - start)
+
+    @router.get(
+        "/recipes",
+        response_model=RecipesListResponse,
+        summary="List loaded recipes",
+    )
+    def list_recipes(kid: str = Depends(_require_auth)) -> dict[str, Any]:
+        summaries: list[dict[str, Any]] = []
+        for e in registry.list():
+            if not e.loaded:
+                continue
+            summaries.append({
+                "name": e.name,
+                "model_version": e.model_version,
+                "loaded_at": e.loaded_at,
+                "supported_verbs": e.supported_verbs,
+                "kind": e.kind,
+            })
+        return {"recipes": summaries}
+
+    @router.get(
+        "/recipes/{name}",
+        response_model=RecipeDetailResponse,
+        summary="Get recipe detail",
+    )
+    def recipe_detail(
+        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")],
+        kid: str = Depends(_require_auth),
+    ) -> dict[str, Any]:
+        e = registry.get(name)
+        if e is None or not e.loaded:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "detail": f"Recipe '{name}' is not loaded",
+                    "code": "RECIPE_NOT_FOUND",
+                },
+            )
+        return {
+            "name": e.name,
+            "model_version": e.model_version,
+            "loaded_at": e.loaded_at,
+            "supported_verbs": e.supported_verbs,
+            "kind": e.kind,
+            "config_digest": e.config_digest or "",
+            "algorithms": e.algorithms or [],
+            "best_algorithm": e.best_class or "",
+        }
 
     return router

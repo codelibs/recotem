@@ -110,6 +110,11 @@ jobs:
           format: sarif
           output: trivy-results.sarif
           severity: "CRITICAL,HIGH"
+          # Without this, `format: sarif` causes trivy-action to override
+          # TRIVY_SEVERITY to include all severities ("Building SARIF report
+          # with all severities"), which makes `exit-code: 1` fire on
+          # MEDIUM/LOW findings too — defeating the `severity` filter.
+          limit-severities-for-sarif: true
           # Skip CVEs without an upstream fix.  Slim base images frequently
           # carry HIGH OS CVEs (libcap2, ncurses-bin, libudev1, ...) that
           # have no fixed Debian version yet — gating CI on these would mean

@@ -81,6 +81,65 @@ class ModelEntry:
     loaded: bool = True
     # Internal watcher state: (mtime_or_etag, sha256_hex)
     _loaded_marker: tuple[Any, str] = field(default_factory=lambda: (None, ""))
+    # v1 additions. The watcher sets loaded_at_unix on every successful
+    # (re-)load.  Stays at 0.0 for stub entries that never loaded.
+    loaded_at_unix: float = 0.0
+    # Optional artifact-derived metadata used by /v1/recipes/{name}.
+    config_digest: str = ""
+    algorithms: list[str] = field(default_factory=list)
+
+    # --- v1 API additions ---
+    @property
+    def artifact_sha256(self) -> str:
+        """SHA-256 of the artifact bytes (hex, no prefix).
+
+        Derived from ``_loaded_marker[1]`` which the watcher populates
+        at every successful (re-)load.  Empty for stub entries.
+        """
+        return self._loaded_marker[1] if self._loaded_marker else ""
+
+    @property
+    def model_version(self) -> str:
+        """Deterministic artifact identifier exposed via the v1 API.
+
+        Format: ``sha256:<hex>``.  Stub entries return ``sha256:``.
+        """
+        return f"sha256:{self.artifact_sha256}"
+
+    @property
+    def loaded_at(self) -> str:
+        """ISO-8601 UTC timestamp of the last successful (re-)load.
+
+        Falls back to the unix epoch for stub entries.
+        """
+        from datetime import datetime, timezone
+
+        return (
+            datetime.fromtimestamp(self.loaded_at_unix or 0.0, tz=timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+
+    @property
+    def kind(self) -> str:
+        """Inference kind exposed via /v1/recipes.
+
+        Currently every irspack algorithm shipped by recotem is a
+        user-item collaborative filter, so this returns "user-item"
+        unconditionally.
+        """
+        return "user-item"
+
+    @property
+    def supported_verbs(self) -> list[str]:
+        """List of v1 verbs this entry can serve."""
+        if self.kind == "user-item":
+            return [
+                "recommend",
+                "recommend-related",
+                "batch-recommend",
+                "batch-recommend-related",
+            ]
+        return []
 
     @property
     def trained_at(self) -> str | None:

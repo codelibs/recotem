@@ -27,6 +27,7 @@ import hashlib
 import json
 import random
 import threading
+import time as _time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -1026,6 +1027,9 @@ class ArtifactWatcher(threading.Thread):
             metadata_index=metadata_index,
             last_load_error=None,
             artifact_path=artifact_path,
+            loaded_at_unix=_time.time(),
+            config_digest=header_dict.get("config_digest", ""),
+            algorithms=header_dict.get("algorithms", []) or [],
         )
 
     def _mark_error(self, name: str, error: str) -> None:

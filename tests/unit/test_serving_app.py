@@ -2343,3 +2343,147 @@ def test_docs_disabled_when_env_is_staging(tmp_path: Path) -> None:
     assert resp.status_code == 404, (
         f"RECOTEM_ENV=staging: /docs must return 404; got {resp.status_code}"
     )
+
+
+# ---------------------------------------------------------------------------
+# RequestIDMiddleware — X-Request-ID contract
+# ---------------------------------------------------------------------------
+
+
+def test_request_id_header_present_on_200_response(tmp_path: Path) -> None:
+    """X-Request-ID must be present in a 200 response (e.g. GET /v1/health)."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.get("/v1/health")
+    assert response.status_code == 200
+    assert "x-request-id" in response.headers, (
+        "X-Request-ID must be present in every 200 response"
+    )
+    assert response.headers["x-request-id"], "X-Request-ID must not be empty"
+
+
+def test_request_id_header_present_on_404_response(tmp_path: Path) -> None:
+    """X-Request-ID must be present on a 404 (non-existent recipe GET)."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/v1/recipes/no_such")
+    assert response.status_code == 404
+    assert "x-request-id" in response.headers, (
+        "X-Request-ID must be present even on 404 responses"
+    )
+
+
+def test_request_id_header_present_on_503_response(tmp_path: Path) -> None:
+    """X-Request-ID must be present on a 503 (unloaded recipe POST)."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    recipes_dir = Path(cfg.recipes_dir)  # type: ignore[arg-type]
+    missing_artifact = tmp_path / "no-artifact.recotem"
+    _write_recipe_yaml(recipes_dir, "broken_for_rid", missing_artifact)
+
+    app = create_app(cfg)
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post(
+        "/v1/recipes/broken_for_rid:recommend",
+        json={"user_id": "u1", "limit": 5},
+    )
+    assert response.status_code == 503
+    assert "x-request-id" in response.headers, (
+        "X-Request-ID must be present on 503 responses"
+    )
+
+
+def test_request_id_echoed_when_client_supplies_valid_id(tmp_path: Path) -> None:
+    """When the client sends a valid X-Request-ID, the same value is echoed back."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app)
+    trace_id = "my-trace-id-123"
+    response = client.get("/v1/health", headers={"X-Request-ID": trace_id})
+    assert response.status_code == 200
+    assert response.headers.get("x-request-id") == trace_id, (
+        f"Valid client X-Request-ID must be echoed; "
+        f"got {response.headers.get('x-request-id')!r}"
+    )
+
+
+def test_request_id_replaced_when_client_supplies_overlong_value(
+    tmp_path: Path,
+) -> None:
+    """A client-supplied X-Request-ID longer than 128 chars is rejected and
+    replaced by a server-generated ID."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app)
+    too_long = "a" * 200
+    response = client.get("/v1/health", headers={"X-Request-ID": too_long})
+    assert response.status_code == 200
+    returned = response.headers.get("x-request-id", "")
+    assert returned != too_long, (
+        "Overlong X-Request-ID must be replaced by a server-generated value"
+    )
+    assert len(returned) <= 128, (
+        f"Server-generated ID must be <=128 chars; got {len(returned)}"
+    )
+    assert returned, "Server-generated X-Request-ID must not be empty"
+
+
+def test_request_id_replaced_when_client_supplies_invalid_chars(
+    tmp_path: Path,
+) -> None:
+    """A client-supplied X-Request-ID with disallowed characters is replaced
+    by a server-generated ID."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app)
+    bad_value = "<script>alert(1)</script>"
+    response = client.get("/v1/health", headers={"X-Request-ID": bad_value})
+    assert response.status_code == 200
+    returned = response.headers.get("x-request-id", "")
+    assert returned != bad_value, (
+        "X-Request-ID with invalid chars must be replaced by a server-generated value"
+    )
+    assert returned, "Server-generated X-Request-ID must not be empty"
+
+
+def test_request_id_replaced_when_client_supplies_empty_value(
+    tmp_path: Path,
+) -> None:
+    """An empty X-Request-ID header is treated as absent and replaced by a
+    server-generated ID."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.get("/v1/health", headers={"X-Request-ID": ""})
+    assert response.status_code == 200
+    returned = response.headers.get("x-request-id", "")
+    assert returned, "Empty X-Request-ID must be replaced by a server-generated value"

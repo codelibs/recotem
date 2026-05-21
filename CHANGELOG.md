@@ -19,6 +19,10 @@ follows Keep a Changelog (https://keepachangelog.com/en/1.1.0/).
 ### Removed
 - The alpha-era `POST /predict/{name}` surface and the
   `GET /models` endpoint.  See `docs/migration-v1.md`.
+- Prometheus metrics `recotem_predict_total` and
+  `recotem_predict_latency_seconds` (use `recotem_v1_requests_total` /
+  `recotem_v1_request_latency_seconds` instead; see
+  `docs/migration-v1.md#removed-legacy-metrics`).
 
 ### Changed
 - Recommend responses now expose `model_version` (artifact SHA-256

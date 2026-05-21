@@ -54,6 +54,36 @@ def test_batch_related_mixed_success_and_failure():
     assert body["results"][1]["error"]["code"] == "UNKNOWN_SEED_ITEMS"
 
 
+def test_batch_related_404_when_recipe_missing_from_registry():
+    rec = MagicMock()
+    r = _client(rec).post(
+        "/v1/recipes/unknown:batch-recommend-related",
+        json={"requests": [{"seed_items": ["i1"]}]},
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "RECIPE_NOT_FOUND"
+
+
+def test_batch_related_503_when_recipe_stub_not_loaded():
+    stub = ModelEntry(
+        name="demo",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+    )
+    registry = ModelRegistry()
+    registry.replace("demo", stub)
+    app = FastAPI()
+    app.include_router(make_v1_router(registry, []), prefix="/v1")
+    r = TestClient(app).post(
+        "/v1/recipes/demo:batch-recommend-related",
+        json={"requests": [{"seed_items": ["i1"]}]},
+    )
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "RECIPE_UNAVAILABLE"
+
+
 def test_batch_related_422_on_empty_seed_in_one_entry():
     rec = MagicMock()
     r = _client(rec).post(

@@ -21,18 +21,23 @@ Notes:
 from __future__ import annotations
 
 import json
+import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import structlog
+import structlog.contextvars
 from fastapi import FastAPI, Request
 from fastapi.exceptions import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
 from recotem.artifact.format import ArtifactError, parse_header_from_bytes
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
@@ -52,6 +57,48 @@ from recotem.serving.watcher import (
 from recotem.version import __version__
 
 logger = structlog.get_logger(__name__)
+
+# Allowed characters and length for echoing a client-supplied X-Request-ID.
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
+
+
+# ---------------------------------------------------------------------------
+# Request-ID middleware
+# ---------------------------------------------------------------------------
+
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """Attach a request-scoped ID to every response.
+
+    - Reads ``X-Request-ID`` from the incoming request.  If the value passes
+      the allow-list (``[A-Za-z0-9_-]``, 1–128 chars) it is echoed back;
+      otherwise a server-generated 12-hex-char ID is used.
+    - Binds ``request_id`` into structlog's context-var store so all log
+      records emitted during the request carry the ID automatically.
+    - Writes ``X-Request-ID`` onto the response regardless of status code,
+      including 404/503 responses raised via ``HTTPException``.
+    - Stores the resolved ID on ``request.state.request_id`` so handlers that
+      need explicit access can read it without re-parsing the header.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        super().__init__(app)
+
+    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        raw = request.headers.get("x-request-id", "")
+        if _REQUEST_ID_RE.match(raw):
+            request_id = raw
+        else:
+            request_id = uuid.uuid4().hex[:12]
+
+        request.state.request_id = request_id
+        structlog.contextvars.bind_contextvars(request_id=request_id)
+        try:
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            structlog.contextvars.unbind_contextvars("request_id")
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +397,12 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         )
 
     # 10. Middlewares.
+    # Starlette processes add_middleware calls in LIFO order: the last one added
+    # is the outermost wrapper (first to process the request, last to process
+    # the response).  We want RequestIDMiddleware to be outermost so it sets
+    # X-Request-ID on every response regardless of what inner layers do.
+    # Therefore RequestIDMiddleware is added LAST (after TrustedHost and CORS).
+
     # allowed_hosts is always non-empty after ServeConfig.from_env() because
     # _split_csv_env falls back to _DEFAULT_ALLOWED_HOSTS on empty/unset input.
     app.add_middleware(
@@ -365,6 +418,9 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             allow_methods=["GET", "POST", "OPTIONS"],
             allow_headers=["*"],
         )
+
+    # Added last so it is outermost: ensures X-Request-ID is on every response.
+    app.add_middleware(RequestIDMiddleware)
 
     # 11. Routes.
     # ``--insecure-no-auth`` must short-circuit the X-API-Key check even when

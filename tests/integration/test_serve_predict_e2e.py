@@ -179,8 +179,8 @@ def test_serve_predict_e2e_unknown_user_404() -> None:
     assert response.status_code == 404
 
 
-def test_serve_predict_e2e_missing_recipe_503() -> None:
-    """Recipe not in registry returns 503."""
+def test_serve_predict_e2e_missing_recipe_404() -> None:
+    """Recipe not in registry returns 404 (not found)."""
     registry = ModelRegistry()
     router = make_v1_router(registry=registry, api_keys=[])
     app = FastAPI()
@@ -191,7 +191,7 @@ def test_serve_predict_e2e_missing_recipe_503() -> None:
         "/v1/recipes/does_not_exist:recommend",
         json={"user_id": "user1"},
     )
-    assert response.status_code == 503
+    assert response.status_code == 404
 
 
 def test_serve_health_endpoint_ok_with_loaded_model() -> None:

@@ -87,9 +87,9 @@ def test_recommend_422_on_empty_user_id():
     assert r.status_code == 422
 
 
-def test_recommend_503_when_recipe_missing_from_registry():
+def test_recommend_404_when_recipe_missing_from_registry():
     rec = MagicMock()
     client = _app_with_entry(_entry_with_recommender(rec))
     r = client.post("/v1/recipes/unknown:recommend", json={"user_id": "u1"})
-    # Missing recipe is treated the same as not-loaded (legacy parity)
-    assert r.status_code == 503
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "RECIPE_NOT_FOUND"

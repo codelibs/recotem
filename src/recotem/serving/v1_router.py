@@ -121,12 +121,21 @@ def make_v1_router(
 
         try:
             entry = registry.get(name)
-            if entry is None or not entry.loaded or entry.recommender is None:
+            if entry is None:
+                status = "unavailable"
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "detail": f"Recipe '{name}' not found",
+                        "code": "RECIPE_NOT_FOUND",
+                    },
+                )
+            if not entry.loaded or entry.recommender is None:
                 status = "unavailable"
                 raise HTTPException(
                     status_code=503,
                     detail={
-                        "detail": f"Recipe '{name}' is not loaded or unhealthy",
+                        "detail": f"Recipe '{name}' is registered but not loaded",
                         "code": "RECIPE_UNAVAILABLE",
                     },
                 )
@@ -171,7 +180,6 @@ def make_v1_router(
                     "items": items,
                 },
                 headers={
-                    "X-Request-ID": request_id,
                     "X-Recotem-Model-Version": entry.model_version,
                 },
             )
@@ -207,12 +215,21 @@ def make_v1_router(
 
         try:
             entry = registry.get(name)
-            if entry is None or not entry.loaded or entry.recommender is None:
+            if entry is None:
+                status = "unavailable"
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "detail": f"Recipe '{name}' not found",
+                        "code": "RECIPE_NOT_FOUND",
+                    },
+                )
+            if not entry.loaded or entry.recommender is None:
                 status = "unavailable"
                 raise HTTPException(
                     status_code=503,
                     detail={
-                        "detail": f"Recipe '{name}' is not loaded or unhealthy",
+                        "detail": f"Recipe '{name}' is registered but not loaded",
                         "code": "RECIPE_UNAVAILABLE",
                     },
                 )
@@ -256,7 +273,6 @@ def make_v1_router(
                     "items": items,
                 },
                 headers={
-                    "X-Request-ID": request_id,
                     "X-Recotem-Model-Version": entry.model_version,
                 },
             )
@@ -292,12 +308,21 @@ def make_v1_router(
 
         try:
             entry = registry.get(name)
-            if entry is None or not entry.loaded or entry.recommender is None:
+            if entry is None:
+                status = "unavailable"
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "detail": f"Recipe '{name}' not found",
+                        "code": "RECIPE_NOT_FOUND",
+                    },
+                )
+            if not entry.loaded or entry.recommender is None:
                 status = "unavailable"
                 raise HTTPException(
                     status_code=503,
                     detail={
-                        "detail": f"Recipe '{name}' is not loaded or unhealthy",
+                        "detail": f"Recipe '{name}' is registered but not loaded",
                         "code": "RECIPE_UNAVAILABLE",
                     },
                 )
@@ -347,7 +372,6 @@ def make_v1_router(
                     "results": results,
                 },
                 headers={
-                    "X-Request-ID": request_id,
                     "X-Recotem-Model-Version": entry.model_version,
                 },
             )
@@ -383,12 +407,21 @@ def make_v1_router(
 
         try:
             entry = registry.get(name)
-            if entry is None or not entry.loaded or entry.recommender is None:
+            if entry is None:
+                status = "unavailable"
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "detail": f"Recipe '{name}' not found",
+                        "code": "RECIPE_NOT_FOUND",
+                    },
+                )
+            if not entry.loaded or entry.recommender is None:
                 status = "unavailable"
                 raise HTTPException(
                     status_code=503,
                     detail={
-                        "detail": f"Recipe '{name}' is not loaded or unhealthy",
+                        "detail": f"Recipe '{name}' is registered but not loaded",
                         "code": "RECIPE_UNAVAILABLE",
                     },
                 )
@@ -438,7 +471,6 @@ def make_v1_router(
                     "results": results,
                 },
                 headers={
-                    "X-Request-ID": request_id,
                     "X-Recotem-Model-Version": entry.model_version,
                 },
             )
@@ -486,12 +518,20 @@ def make_v1_router(
         kid: str = Depends(_require_auth),
     ) -> dict[str, Any]:
         e = registry.get(name)
-        if e is None or not e.loaded:
+        if e is None:
             raise HTTPException(
                 status_code=404,
                 detail={
-                    "detail": f"Recipe '{name}' is not loaded",
+                    "detail": f"Recipe '{name}' not found",
                     "code": "RECIPE_NOT_FOUND",
+                },
+            )
+        if not e.loaded:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "detail": f"Recipe '{name}' is registered but not loaded",
+                    "code": "RECIPE_UNAVAILABLE",
                 },
             )
         return {

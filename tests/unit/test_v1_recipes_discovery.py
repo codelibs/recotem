@@ -46,6 +46,20 @@ def test_recipes_list_returns_summaries():
 def test_recipe_detail_returns_404_for_unknown():
     r = _client_with_entries([_stub("a")]).get("/v1/recipes/unknown")
     assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "RECIPE_NOT_FOUND"
+
+
+def test_recipe_detail_returns_503_for_stub_not_loaded():
+    unloaded = ModelEntry(
+        name="broken",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+    )
+    r = _client_with_entries([unloaded]).get("/v1/recipes/broken")
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "RECIPE_UNAVAILABLE"
 
 
 def test_recipe_detail_returns_full_summary_for_known():

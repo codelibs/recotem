@@ -15,20 +15,21 @@ and the datasource-layer metrics defined in ``recotem._metrics_bigquery``
 
 Metric inventory (matches docs/operations.md):
 
-| Name                                           | Type       | Labels             |
-|------------------------------------------------|------------|--------------------|
-| ``recotem_predict_total``                      | Counter    | recipe, status     |
-| ``recotem_predict_latency_seconds``            | Histogram  | recipe             |
-| ``recotem_model_loaded``                       | Gauge      | recipe             |
-| ``recotem_artifact_load_failures_total``       | Counter    | recipe             |
-| ``recotem_active_recipes``                     | Gauge      | —                  |
-| ``recotem_swap_total``                         | Counter    | recipe, result     |
-| ``recotem_artifact_stat_failures_total``       | Counter    | recipe             |
-| ``recotem_watcher_unhandled_errors_total``     | Counter    | —                  |
-| ``recotem_metadata_lookup_errors_total``       | Counter    | recipe             |
-| ``recotem_recipe_rescan_errors_total``         | Counter    | recipe             |
-| ``recotem_bigquery_storage_fallback_total``    | Counter    | reason             |
-| ``recotem_recipes_dir_scan_failures_total``    | Counter    | error_class        |
+| Name                                           | Type       | Labels              |
+|------------------------------------------------|------------|---------------------|
+| ``recotem_v1_requests_total``                  | Counter    | recipe, verb, status|
+| ``recotem_v1_request_latency_seconds``         | Histogram  | recipe, verb        |
+| ``recotem_v1_batch_size``                      | Histogram  | recipe, verb        |
+| ``recotem_model_loaded``                       | Gauge      | recipe              |
+| ``recotem_artifact_load_failures_total``       | Counter    | recipe              |
+| ``recotem_active_recipes``                     | Gauge      | —                   |
+| ``recotem_swap_total``                         | Counter    | recipe, result      |
+| ``recotem_artifact_stat_failures_total``       | Counter    | recipe              |
+| ``recotem_watcher_unhandled_errors_total``     | Counter    | —                   |
+| ``recotem_metadata_lookup_errors_total``       | Counter    | recipe              |
+| ``recotem_recipe_rescan_errors_total``         | Counter    | recipe              |
+| ``recotem_bigquery_storage_fallback_total``    | Counter    | reason              |
+| ``recotem_recipes_dir_scan_failures_total``    | Counter    | error_class         |
 """
 
 from __future__ import annotations
@@ -46,8 +47,6 @@ except ImportError:  # pragma: no cover - exercised via env without extra
     _PROMETHEUS_AVAILABLE = False
 
 
-_PREDICT_TOTAL: Any = None
-_PREDICT_LATENCY: Any = None
 _MODEL_LOADED: Any = None
 _ARTIFACT_LOAD_FAILURES: Any = None
 _ACTIVE_RECIPES: Any = None
@@ -77,24 +76,14 @@ def _ensure_initialized() -> None:
     Called lazily on the first recorder invocation so importing this module
     does not register metrics in environments that disable them.
     """
-    global _PREDICT_TOTAL, _PREDICT_LATENCY, _MODEL_LOADED
+    global _MODEL_LOADED
     global _ARTIFACT_LOAD_FAILURES, _ACTIVE_RECIPES, _SWAP_TOTAL
     global _ARTIFACT_STAT_FAILURES, _WATCHER_UNHANDLED_ERRORS
     global _METADATA_LOOKUP_ERRORS, _RECIPE_RESCAN_ERRORS
 
-    if not _PROMETHEUS_AVAILABLE or _PREDICT_TOTAL is not None:
+    if not _PROMETHEUS_AVAILABLE or _MODEL_LOADED is not None:
         return
 
-    _PREDICT_TOTAL = Counter(
-        "recotem_predict_total",
-        "Total /predict calls served, partitioned by status.",
-        ["recipe", "status"],
-    )
-    _PREDICT_LATENCY = Histogram(
-        "recotem_predict_latency_seconds",
-        "End-to-end /predict latency in seconds.",
-        ["recipe"],
-    )
     _MODEL_LOADED = Gauge(
         "recotem_model_loaded",
         "1 when the model for a recipe is loaded and serving, 0 otherwise.",
@@ -136,33 +125,6 @@ def _ensure_initialized() -> None:
         "(transient failures that leave the existing model serving).",
         ["recipe"],
     )
-
-
-def record_predict(recipe: str, status: str, latency_seconds: float) -> None:
-    """Record a /predict call.
-
-    Parameters
-    ----------
-    recipe:
-        Recipe name (the ``{name}`` path parameter from ``/predict/{name}``).
-    status:
-        One of the following documented status labels:
-
-        - ``"ok"``            — recommendation returned successfully
-        - ``"user_not_found"`` — user was not seen during training (HTTP 404)
-        - ``"unavailable"``   — recipe not loaded or unhealthy (HTTP 503)
-        - ``"error"``         — any other unexpected exception
-
-        Using finer-grained labels avoids alert storms from routine 404s
-        (cold-start users) being conflated with genuine 503s or internal errors.
-    latency_seconds:
-        End-to-end wall-clock time for the request in seconds.
-    """
-    _ensure_initialized()
-    if _PREDICT_TOTAL is None:
-        return
-    _PREDICT_TOTAL.labels(recipe=recipe, status=status).inc()
-    _PREDICT_LATENCY.labels(recipe=recipe).observe(latency_seconds)
 
 
 def set_model_loaded(recipe: str, loaded: bool) -> None:

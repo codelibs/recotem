@@ -19,6 +19,21 @@ clients per the table below.
 artifact identifier are available as `recipe` and `model_version`
 (prefixed `sha256:`) on every recommend response.
 
+## Removed legacy metrics
+
+The alpha `/predict/{name}` endpoint exposed two Prometheus metrics that have
+been removed.  Update any Prometheus alerting rules or Grafana dashboards to
+use the v1 equivalents:
+
+| Old (`/predict/{name}`) | New (`/v1/…`) |
+|---|---|
+| `recotem_predict_total` | `recotem_v1_requests_total{verb="recommend"}` |
+| `recotem_predict_latency_seconds` | `recotem_v1_request_latency_seconds{verb="recommend"}` |
+
+**Action required:** rename any alert rules or recording rules that reference
+`recotem_predict_total` or `recotem_predict_latency_seconds`; those series
+will no longer be emitted after upgrading to v1.
+
 ## New capability
 
 The "related items" use case is now first-class:

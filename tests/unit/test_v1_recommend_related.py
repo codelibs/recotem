@@ -62,3 +62,33 @@ def test_related_404_when_all_seeds_unknown_returns_empty():
     )
     assert r.status_code == 404
     assert r.json()["detail"]["code"] == "UNKNOWN_SEED_ITEMS"
+
+
+def test_related_404_when_recipe_missing_from_registry():
+    rec = MagicMock()
+    r = _client_with_recommender(rec).post(
+        "/v1/recipes/unknown:recommend-related",
+        json={"seed_items": ["i1"]},
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "RECIPE_NOT_FOUND"
+
+
+def test_related_503_when_recipe_stub_not_loaded():
+    stub = ModelEntry(
+        name="demo",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+    )
+    registry = ModelRegistry()
+    registry.replace("demo", stub)
+    app = FastAPI()
+    app.include_router(make_v1_router(registry, []), prefix="/v1")
+    r = TestClient(app).post(
+        "/v1/recipes/demo:recommend-related",
+        json={"seed_items": ["i1"]},
+    )
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "RECIPE_UNAVAILABLE"

@@ -84,6 +84,16 @@ def test_batch_recommend_503_when_recipe_unavailable():
     assert r.status_code == 503
 
 
+def test_batch_recommend_404_when_recipe_missing_from_registry():
+    rec = MagicMock()
+    r = _client(rec).post(
+        "/v1/recipes/unknown:batch-recommend",
+        json={"requests": [{"user_id": "u1"}]},
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "RECIPE_NOT_FOUND"
+
+
 def test_batch_recommend_422_on_too_many_requests():
     rec = MagicMock()
     r = _client(rec).post(

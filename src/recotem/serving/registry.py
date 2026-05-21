@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -112,11 +113,10 @@ class ModelEntry:
 
         Falls back to the unix epoch for stub entries.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        return (
-            datetime.fromtimestamp(self.loaded_at_unix or 0.0, tz=timezone.utc)
-            .strftime("%Y-%m-%dT%H:%M:%SZ")
+        return datetime.fromtimestamp(self.loaded_at_unix or 0.0, tz=UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
         )
 
     @property

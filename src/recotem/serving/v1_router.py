@@ -63,9 +63,7 @@ def make_v1_router(
             if entry_health.get("loaded", False) and not entry_health.get("error")
         )
         overall = (
-            "ok"
-            if (loaded_count == total and total > 0 or total == 0)
-            else "degraded"
+            "ok" if (loaded_count == total and total > 0 or total == 0) else "degraded"
         )
         for entry_health in snapshot.values():
             if not entry_health.get("loaded", True) or entry_health.get("error"):
@@ -116,9 +114,7 @@ def make_v1_router(
         kid: str = Depends(_require_auth),
     ) -> Any:
         raw_rid = request.headers.get("x-request-id", "")
-        request_id = (
-            raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
-        )
+        request_id = raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
         start = time.monotonic()
         status = "error"
         verb = "recommend"
@@ -161,9 +157,7 @@ def make_v1_router(
                 if meta_index is not None:
                     fields.update(meta_index.get(item_id, {}))
                 elif meta_df is not None:
-                    fields.update(
-                        _lookup_metadata(meta_df, item_id, _deny_set, name)
-                    )
+                    fields.update(_lookup_metadata(meta_df, item_id, _deny_set, name))
                 fields["item_id"] = item_id
                 fields["score"] = float(score)
                 items.append(fields)
@@ -206,9 +200,7 @@ def make_v1_router(
         kid: str = Depends(_require_auth),
     ) -> Any:
         raw_rid = request.headers.get("x-request-id", "")
-        request_id = (
-            raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
-        )
+        request_id = raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
         start = time.monotonic()
         status = "error"
         verb = "recommend-related"
@@ -250,9 +242,7 @@ def make_v1_router(
                 if meta_index is not None:
                     fields.update(meta_index.get(item_id, {}))
                 elif meta_df is not None:
-                    fields.update(
-                        _lookup_metadata(meta_df, item_id, _deny_set, name)
-                    )
+                    fields.update(_lookup_metadata(meta_df, item_id, _deny_set, name))
                 fields["item_id"] = item_id
                 fields["score"] = float(score)
                 items.append(fields)
@@ -295,9 +285,7 @@ def make_v1_router(
         kid: str = Depends(_require_auth),
     ) -> Any:
         raw_rid = request.headers.get("x-request-id", "")
-        request_id = (
-            raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
-        )
+        request_id = raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
         start = time.monotonic()
         status = "error"
         verb = "batch-recommend"
@@ -326,25 +314,29 @@ def make_v1_router(
                         {"item_id": item_id, "score": float(score)}
                         for item_id, score in raw
                     ]
-                    results.append({
-                        "index": idx,
-                        "status": "ok",
-                        "items": items,
-                        "error": None,
-                    })
+                    results.append(
+                        {
+                            "index": idx,
+                            "status": "ok",
+                            "items": items,
+                            "error": None,
+                        }
+                    )
                 except KeyError:
-                    results.append({
-                        "index": idx,
-                        "status": "error",
-                        "items": None,
-                        "error": {
-                            "code": "UNKNOWN_USER",
-                            "message": (
-                                f"User '{single.user_id}' "
-                                "was not seen during training"
-                            ),
-                        },
-                    })
+                    results.append(
+                        {
+                            "index": idx,
+                            "status": "error",
+                            "items": None,
+                            "error": {
+                                "code": "UNKNOWN_USER",
+                                "message": (
+                                    f"User '{single.user_id}' "
+                                    "was not seen during training"
+                                ),
+                            },
+                        }
+                    )
 
             status = "ok"
             return JSONResponse(
@@ -384,9 +376,7 @@ def make_v1_router(
         kid: str = Depends(_require_auth),
     ) -> Any:
         raw_rid = request.headers.get("x-request-id", "")
-        request_id = (
-            raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
-        )
+        request_id = raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
         start = time.monotonic()
         status = "error"
         verb = "batch-recommend-related"
@@ -411,29 +401,33 @@ def make_v1_router(
                     single.seed_items, single.limit
                 )
                 if not raw:
-                    results.append({
-                        "index": idx,
-                        "status": "error",
-                        "items": None,
-                        "error": {
-                            "code": "UNKNOWN_SEED_ITEMS",
-                            "message": (
-                                f"None of the seed_items "
-                                f"{single.seed_items!r} were known to the model"
-                            ),
-                        },
-                    })
+                    results.append(
+                        {
+                            "index": idx,
+                            "status": "error",
+                            "items": None,
+                            "error": {
+                                "code": "UNKNOWN_SEED_ITEMS",
+                                "message": (
+                                    f"None of the seed_items "
+                                    f"{single.seed_items!r} were known to the model"
+                                ),
+                            },
+                        }
+                    )
                     continue
                 items = [
                     {"item_id": item_id, "score": float(score)}
                     for item_id, score in raw
                 ]
-                results.append({
-                    "index": idx,
-                    "status": "ok",
-                    "items": items,
-                    "error": None,
-                })
+                results.append(
+                    {
+                        "index": idx,
+                        "status": "ok",
+                        "items": items,
+                        "error": None,
+                    }
+                )
 
             status = "ok"
             return JSONResponse(
@@ -471,13 +465,15 @@ def make_v1_router(
         for e in registry.list():
             if not e.loaded:
                 continue
-            summaries.append({
-                "name": e.name,
-                "model_version": e.model_version,
-                "loaded_at": e.loaded_at,
-                "supported_verbs": e.supported_verbs,
-                "kind": e.kind,
-            })
+            summaries.append(
+                {
+                    "name": e.name,
+                    "model_version": e.model_version,
+                    "loaded_at": e.loaded_at,
+                    "supported_verbs": e.supported_verbs,
+                    "kind": e.kind,
+                }
+            )
         return {"recipes": summaries}
 
     @router.get(

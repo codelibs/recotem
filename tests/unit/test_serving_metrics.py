@@ -198,7 +198,9 @@ from recotem.serving import metrics as _m  # noqa: E402
 
 def test_record_v1_request_accepts_verb_label(reset_metrics_registry):
     _m.record_v1_request("smartstocknotes", "recommend", "ok", 0.012)
-    _m.record_v1_request("smartstocknotes", "recommend-related", "unknown_seed_items", 0.005)
+    _m.record_v1_request(
+        "smartstocknotes", "recommend-related", "unknown_seed_items", 0.005
+    )
     out, _ = _m.generate_latest()
     text = out.decode()
     assert 'verb="recommend"' in text

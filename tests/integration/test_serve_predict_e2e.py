@@ -505,8 +505,7 @@ def test_broken_yaml_does_not_abort_serve_other_recipes_still_serve(
         json={"user_id": "u1", "limit": 5},
     )
     assert predict_broken.status_code == 503, (
-        f"broken recipe :recommend must return 503; "
-        f"got {predict_broken.status_code}"
+        f"broken recipe :recommend must return 503; got {predict_broken.status_code}"
     )
 
     # v1 :recommend for the good (missing artifact) recipe must also return 503

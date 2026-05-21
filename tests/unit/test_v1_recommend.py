@@ -44,9 +44,7 @@ def _app_with_entry(entry: ModelEntry) -> TestClient:
 
 def test_recommend_returns_items_and_envelope():
     rec = MagicMock()
-    rec.get_recommendation_for_known_user_id.return_value = [
-        ("i1", 0.9), ("i2", 0.5)
-    ]
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9), ("i2", 0.5)]
     client = _app_with_entry(_entry_with_recommender(rec))
     r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1", "limit": 2})
     assert r.status_code == 200, r.text
@@ -70,7 +68,11 @@ def test_recommend_404_when_user_unknown():
 
 def test_recommend_503_when_recipe_not_loaded():
     stub = ModelEntry(
-        name="demo", recommender=None, header={}, kid="", loaded=False,
+        name="demo",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
     )
     client = _app_with_entry(stub)
     r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})

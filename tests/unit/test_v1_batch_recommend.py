@@ -53,7 +53,8 @@ def test_batch_recommend_mixed_success_and_failure():
     assert body["recipe"] == "demo"
     assert len(body["results"]) == 3
     assert body["results"][0] == {
-        "index": 0, "status": "ok",
+        "index": 0,
+        "status": "ok",
         "items": [{"item_id": "i1", "score": 0.9}],
         "error": None,
     }
@@ -65,7 +66,11 @@ def test_batch_recommend_mixed_success_and_failure():
 def test_batch_recommend_503_when_recipe_unavailable():
     rec = MagicMock()
     stub = ModelEntry(
-        name="demo", recommender=None, header={}, kid="", loaded=False,
+        name="demo",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
     )
     registry = ModelRegistry()
     registry.replace("demo", stub)

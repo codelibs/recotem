@@ -7,16 +7,15 @@ from pydantic import ValidationError
 from recotem.serving.schemas import (
     BatchRecommendRelatedRequest,
     BatchRecommendRequest,
-    BatchRecommendResponse,
     BatchResultEntry,
     ErrorDetail,
+    RecipeDetailResponse,
+    RecipesListResponse,
+    RecipeSummary,
     RecommendItem,
     RecommendRelatedRequest,
     RecommendRequest,
     RecommendResponse,
-    RecipeDetailResponse,
-    RecipesListResponse,
-    RecipeSummary,
 )
 
 
@@ -63,9 +62,13 @@ def test_batch_recommend_request_requires_at_least_one():
 
 
 def test_batch_recommend_request_caps_at_256():
-    BatchRecommendRequest(requests=[RecommendRequest(user_id=f"u{i}") for i in range(256)])
+    BatchRecommendRequest(
+        requests=[RecommendRequest(user_id=f"u{i}") for i in range(256)]
+    )
     with pytest.raises(ValidationError):
-        BatchRecommendRequest(requests=[RecommendRequest(user_id=f"u{i}") for i in range(257)])
+        BatchRecommendRequest(
+            requests=[RecommendRequest(user_id=f"u{i}") for i in range(257)]
+        )
 
 
 def test_batch_recommend_related_request_caps_at_256():

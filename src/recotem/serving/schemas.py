@@ -7,10 +7,10 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 # ---------------------------------------------------------------------------
 # Single-request inputs
 # ---------------------------------------------------------------------------
+
 
 class RecommendRequest(BaseModel):
     user_id: Annotated[str, Field(min_length=1, max_length=256)]
@@ -30,17 +30,21 @@ class RecommendRelatedRequest(BaseModel):
 # Batch-request inputs
 # ---------------------------------------------------------------------------
 
+
 class BatchRecommendRequest(BaseModel):
     requests: Annotated[list[RecommendRequest], Field(min_length=1, max_length=256)]
 
 
 class BatchRecommendRelatedRequest(BaseModel):
-    requests: Annotated[list[RecommendRelatedRequest], Field(min_length=1, max_length=256)]
+    requests: Annotated[
+        list[RecommendRelatedRequest], Field(min_length=1, max_length=256)
+    ]
 
 
 # ---------------------------------------------------------------------------
 # Common response building blocks
 # ---------------------------------------------------------------------------
+
 
 class RecommendItem(BaseModel):
     item_id: str
@@ -78,6 +82,7 @@ class BatchRecommendResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Recipe discovery
 # ---------------------------------------------------------------------------
+
 
 class RecipeSummary(BaseModel):
     name: str

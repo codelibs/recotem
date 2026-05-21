@@ -144,7 +144,7 @@ SERVE_PID=$!
 echo "[e2e] Waiting for server to start (pid=${SERVE_PID})..."
 MAX_WAIT=30
 WAITED=0
-while ! curl -sf "http://127.0.0.1:${SERVE_PORT}/health" > /dev/null 2>&1; do
+while ! curl -sf "http://127.0.0.1:${SERVE_PORT}/v1/health" > /dev/null 2>&1; do
     sleep 1
     WAITED=$((WAITED + 1))
     if [ "${WAITED}" -ge "${MAX_WAIT}" ]; then
@@ -157,9 +157,9 @@ echo "[e2e] Server is up."
 # ---------------------------------------------------------------------------
 # 6. Health check
 # ---------------------------------------------------------------------------
-echo "[e2e] Checking /health..."
-HEALTH=$(curl -sf "http://127.0.0.1:${SERVE_PORT}/health")
-echo "[e2e] /health response: ${HEALTH}"
+echo "[e2e] Checking /v1/health..."
+HEALTH=$(curl -sf "http://127.0.0.1:${SERVE_PORT}/v1/health")
+echo "[e2e] /v1/health response: ${HEALTH}"
 
 STATUS=$(echo "${HEALTH}" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('status','unknown'))")
 if [ "${STATUS}" != "ok" ]; then
@@ -168,27 +168,26 @@ if [ "${STATUS}" != "ok" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7. /predict call
+# 7. /v1/recipes/{name}:recommend call
 # ---------------------------------------------------------------------------
-echo "[e2e] Calling /predict/${RECIPE_NAME}..."
+echo "[e2e] Calling /v1/recipes/${RECIPE_NAME}:recommend..."
 PREDICT=$(curl -sf \
     -X POST \
     -H "Content-Type: application/json" \
-    -d "{\"user_id\": \"${PREDICT_USER_ID}\", \"cutoff\": 5}" \
-    "http://127.0.0.1:${SERVE_PORT}/predict/${RECIPE_NAME}")
-echo "[e2e] /predict response: ${PREDICT}"
+    -d "{\"user_id\": \"${PREDICT_USER_ID}\", \"limit\": 5}" \
+    "http://127.0.0.1:${SERVE_PORT}/v1/recipes/${RECIPE_NAME}:recommend")
+echo "[e2e] /v1/recipes/:recommend response: ${PREDICT}"
 
-# Validate JSON shape: must have items, model, request_id
+# Validate JSON shape: must have items, recipe, model_version, request_id
 python3 - <<PYEOF
 import sys, json
 data = json.loads('''${PREDICT}''')
 assert "items" in data, f"Missing 'items' key: {data}"
 assert isinstance(data["items"], list), "items must be a list"
-assert "model" in data, f"Missing 'model' key: {data}"
+assert "recipe" in data, f"Missing 'recipe' key: {data}"
+assert data["recipe"] == "${RECIPE_NAME}", f"Wrong recipe name: {data['recipe']}"
 assert "request_id" in data, f"Missing 'request_id' key: {data}"
-model = data["model"]
-assert "recipe" in model, f"Missing 'recipe' in model: {model}"
-assert model["recipe"] == "${RECIPE_NAME}", f"Wrong recipe name: {model['recipe']}"
+assert "model_version" in data, f"Missing 'model_version' key: {data}"
 print("[e2e] JSON shape validation: PASSED")
 PYEOF
 

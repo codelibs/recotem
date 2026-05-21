@@ -248,6 +248,69 @@ def inc_recipe_rescan_error(recipe: str) -> None:
     _RECIPE_RESCAN_ERRORS.labels(recipe=recipe).inc()
 
 
+# ---------------------------------------------------------------------------
+# v1 API metrics
+# ---------------------------------------------------------------------------
+
+_V1_REQUEST_COUNTER: Any = None
+_V1_REQUEST_LATENCY: Any = None
+_V1_BATCH_SIZE: Any = None
+
+
+def _ensure_v1_initialized() -> None:
+    """Lazily create the v1 counter/histogram families.
+
+    Called from record_v1_request and observe_batch_size.  Mirrors the
+    pattern used by _ensure_initialized() for the legacy metrics.
+    """
+    global _V1_REQUEST_COUNTER, _V1_REQUEST_LATENCY, _V1_BATCH_SIZE
+    if _V1_REQUEST_COUNTER is not None:
+        return
+    if not metrics_enabled():
+        return
+
+    _V1_REQUEST_COUNTER = Counter(
+        "recotem_v1_requests_total",
+        "Total number of v1 API requests by recipe, verb, and status.",
+        ["recipe", "verb", "status"],
+    )
+    _V1_REQUEST_LATENCY = Histogram(
+        "recotem_v1_request_latency_seconds",
+        "End-to-end latency of v1 API requests.",
+        ["recipe", "verb"],
+    )
+    _V1_BATCH_SIZE = Histogram(
+        "recotem_v1_batch_size",
+        "Number of elements in a batch v1 request.",
+        ["recipe", "verb"],
+        buckets=(1, 2, 4, 8, 16, 32, 64, 128, 256),
+    )
+
+
+def record_v1_request(
+    recipe: str, verb: str, status: str, latency_seconds: float
+) -> None:
+    """Record a v1 API request.
+
+    *verb* ∈ {"recommend", "recommend-related", "batch-recommend",
+    "batch-recommend-related"}.  *status* ∈ {"ok", "unknown_user",
+    "unknown_seed_items", "unavailable", "validation_error", "error"}.
+    """
+    _ensure_v1_initialized()
+    if _V1_REQUEST_COUNTER is None:
+        return  # metrics disabled
+    _V1_REQUEST_COUNTER.labels(recipe=recipe, verb=verb, status=status).inc()
+    _V1_REQUEST_LATENCY.labels(recipe=recipe, verb=verb).observe(latency_seconds)
+
+
+def observe_batch_size(recipe: str, verb: str, size: int) -> None:
+    """Record a sample for the batch-size histogram."""
+    _ensure_v1_initialized()
+    if _V1_BATCH_SIZE is None:
+        return
+    _V1_BATCH_SIZE.labels(recipe=recipe, verb=verb).observe(size)
+
+
 def generate_latest() -> tuple[bytes, str]:
     """Return Prometheus exposition (data, content_type) for the registry.
 

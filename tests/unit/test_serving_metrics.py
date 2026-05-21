@@ -179,14 +179,28 @@ def reset_metrics_registry(monkeypatch: pytest.MonkeyPatch):
     from recotem.serving import metrics as _m
 
     def _teardown() -> None:
+        v1_names = {
+            "recotem_v1_requests",
+            "recotem_v1_request_latency_seconds",
+            "recotem_v1_batch_size",
+        }
+        for collector in list(REGISTRY._names_to_collectors.values()):
+            describe = getattr(collector, "describe", None)
+            if describe is None:
+                continue
+            try:
+                metrics = describe()
+            except Exception:
+                continue
+            for m in metrics:
+                if getattr(m, "name", None) in v1_names:
+                    try:
+                        REGISTRY.unregister(collector)
+                    except (KeyError, ValueError):
+                        pass
+                    break
         for attr in ("_V1_REQUEST_COUNTER", "_V1_REQUEST_LATENCY", "_V1_BATCH_SIZE"):
-            collector = getattr(_m, attr, None)
-            if collector is not None:
-                try:
-                    REGISTRY.unregister(collector)
-                except (KeyError, ValueError):
-                    pass
-                setattr(_m, attr, None)
+            setattr(_m, attr, None)
 
     _teardown()
     yield

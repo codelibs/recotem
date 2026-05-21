@@ -1028,7 +1028,7 @@ class ArtifactWatcher(threading.Thread):
             last_load_error=None,
             artifact_path=artifact_path,
             loaded_at_unix=_time.time(),
-            config_digest=header_dict.get("config_digest", ""),
+            config_digest=header_dict.get("config_digest", "") or "",
             algorithms=header_dict.get("algorithms", []) or [],
         )
 
@@ -1153,7 +1153,12 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
     # (ETag / mtime) is already cheap enough.
     try:
         sidecar_path = Path(artifact_path + ".sha256")
-    except TypeError:
+    except TypeError as exc:
+        logger.warning(
+            "sidecar_path_type_error",
+            path=str(artifact_path),
+            exc_type=type(exc).__name__,
+        )
         return False
 
     if not sidecar_path.exists():
@@ -1298,7 +1303,18 @@ def build_initial_states(
                     state.last_sidecar_contents = sidecar_path.read_text(
                         encoding="utf-8"
                     )
-            except (TypeError, OSError):
-                pass  # Remote URIs or unreadable sidecars: leave as None.
+            except TypeError as exc:
+                logger.warning(
+                    "sidecar_path_type_error",
+                    path=str(artifact_path),
+                    exc_type=type(exc).__name__,
+                )
+            except OSError as exc:
+                if not isinstance(exc, FileNotFoundError):
+                    logger.warning(
+                        "sidecar_read_failed",
+                        path=str(artifact_path),
+                        exc_type=type(exc).__name__,
+                    )
         states[recipe.name] = state
     return states

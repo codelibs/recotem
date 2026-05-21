@@ -8,25 +8,29 @@ The router is mounted at ``/v1`` by ``serving/app.py`` and exposes the
 
 from __future__ import annotations
 
+import collections
 import math
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
-from fastapi.responses import JSONResponse
 
 from recotem.config import ApiKeyEntry
 from recotem.serving import metrics as _metrics
 from recotem.serving.auth import verify_api_key
-from recotem.serving.registry import ModelRegistry
+from recotem.serving.registry import ModelEntry, ModelRegistry
 from recotem.serving.schemas import (
     BatchRecommendRelatedRequest,
     BatchRecommendRequest,
     BatchRecommendResponse,
+    BatchResultEntry,
+    ErrorDetail,
     RecipeDetailResponse,
     RecipesListResponse,
-    RecipeSummary,  # noqa: F401  # re-exported for clarity
+    RecommendItem,
     RecommendRelatedRequest,
     RecommendRequest,
     RecommendResponse,
@@ -34,10 +38,8 @@ from recotem.serving.schemas import (
 
 logger = structlog.get_logger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Metadata join helper
-# ---------------------------------------------------------------------------
+_METADATA_WARN_LIMIT = 10
+_metadata_warn_counter: collections.Counter[tuple[str, str]] = collections.Counter()
 
 
 def _lookup_metadata(
@@ -45,62 +47,43 @@ def _lookup_metadata(
     item_id: str,
     deny_set: frozenset[str],
     recipe_name: str = "",
-) -> dict[str, Any]:
-    """Return a flat dict of metadata fields for *item_id*.
-
-    Returns an empty dict if the item is not found or any error occurs.
-    The documented error set that returns empty dict:
-
-    - ``KeyError``      — item not in metadata index (normal, not an error).
-    - ``AttributeError`` — non-unique index returned a DataFrame instead of a
-                           Series so ``.to_dict()`` behaves unexpectedly.
-    - ``TypeError``     — a non-string column name caused ``.lower()`` to fail.
-    - ``ValueError``    — malformed row data that cannot be iterated.
-
-    All unexpected errors are logged at WARNING level and increment
-    ``recotem_metadata_lookup_errors_total`` so operators can detect
-    metadata misconfiguration without silencing it completely.
-    """
+) -> tuple[dict[str, Any], bool]:
     if item_id not in meta_df.index:
-        return {}
+        return {}, False
     try:
         row = meta_df.loc[item_id]
     except KeyError:
-        # Reaching here means item_id passed the index check above but
-        # loc[] still raised — possible with a non-unique index returning a
-        # DataFrame instead of a Series, or a corrupt index state.
-        logger.warning(
-            "metadata_lookup_unexpected_keyerror",
-            recipe=recipe_name,
-            item_id=str(item_id),
-        )
+        key = (recipe_name, "unexpected_keyerror")
+        if _metadata_warn_counter[key] < _METADATA_WARN_LIMIT:
+            logger.warning(
+                "metadata_lookup_unexpected_keyerror",
+                recipe=recipe_name,
+                item_id=str(item_id)[:64],
+            )
+        _metadata_warn_counter[key] += 1
         _metrics.inc_metadata_lookup_error(recipe_name)
-        return {}
+        return {}, True
     try:
         out: dict[str, Any] = {}
         for k, v in row.to_dict().items():
-            # Guard: skip non-string column names so ``.lower()`` cannot raise
-            # AttributeError on an int column name.
             if not isinstance(k, str):
                 continue
             if k.lower() in deny_set:
                 continue
             out[k] = None if isinstance(v, float) and math.isnan(v) else v
-        return out
+        return out, False
     except (AttributeError, TypeError, ValueError) as exc:
-        logger.warning(
-            "metadata_lookup_failed",
-            recipe=recipe_name,
-            item_id=str(item_id),
-            error_class=type(exc).__name__,
-        )
+        key = (recipe_name, "lookup_failed")
+        if _metadata_warn_counter[key] < _METADATA_WARN_LIMIT:
+            logger.warning(
+                "metadata_lookup_failed",
+                recipe=recipe_name,
+                item_id=str(item_id)[:64],
+                error_class=type(exc).__name__,
+            )
+        _metadata_warn_counter[key] += 1
         _metrics.inc_metadata_lookup_error(recipe_name)
-        return {}
-
-
-# ---------------------------------------------------------------------------
-# Router factory
-# ---------------------------------------------------------------------------
+        return {}, True
 
 
 def make_router(
@@ -108,7 +91,6 @@ def make_router(
     api_keys: list[ApiKeyEntry],
     metadata_field_deny: list[str] | None = None,
 ) -> APIRouter:
-    """Build and return the API router (mounted under ``/v1``)."""
     router = APIRouter()
     _deny_set: frozenset[str] = frozenset(
         s.lower() for s in (metadata_field_deny or [])
@@ -117,22 +99,59 @@ def make_router(
     def _require_auth(request: Request) -> str:
         return verify_api_key(request, api_keys)
 
+    def _resolve_entry(name: str, request_id: str, kid: str) -> ModelEntry:
+        entry = registry.get(name)
+        if entry is None:
+            logger.warning(
+                "recipe_unavailable",
+                name=name,
+                reason="not_found",
+                request_id=request_id,
+                kid=kid,
+            )
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "detail": f"Recipe '{name}' not found",
+                    "code": "RECIPE_NOT_FOUND",
+                },
+            )
+        if not entry.loaded or entry.recommender is None:
+            logger.warning(
+                "recipe_unavailable",
+                name=name,
+                reason="not_loaded",
+                request_id=request_id,
+                kid=kid,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "detail": f"Recipe '{name}' is registered but not loaded",
+                    "code": "RECIPE_UNAVAILABLE",
+                },
+            )
+        return entry
+
+    @contextmanager
+    def _request_metrics(recipe: str, verb: str, kid: str) -> Iterator[list[str]]:
+        start = time.monotonic()
+        structlog.contextvars.bind_contextvars(recipe=recipe, kid=kid)
+        status_holder: list[str] = ["error"]
+        try:
+            yield status_holder
+        finally:
+            _metrics.record_v1_request(
+                recipe, verb, status_holder[0], time.monotonic() - start
+            )
+            structlog.contextvars.unbind_contextvars("recipe", "kid")
+
     @router.get("/health", summary="Overall health status (probe-safe)")
     def health(response: Response) -> dict[str, Any]:
         snapshot = registry.health_snapshot()
         total = len(snapshot)
-        loaded_count = sum(
-            1
-            for entry_health in snapshot.values()
-            if entry_health.get("loaded", False) and not entry_health.get("error")
-        )
-        overall = (
-            "ok" if (loaded_count == total and total > 0 or total == 0) else "degraded"
-        )
-        for entry_health in snapshot.values():
-            if not entry_health.get("loaded", True) or entry_health.get("error"):
-                overall = "degraded"
-                break
+        loaded_count = registry.loaded_count()
+        overall = "ok" if total == 0 or loaded_count == total else "degraded"
         if overall == "degraded":
             response.status_code = 503
         return {"status": overall, "total": total, "loaded": loaded_count}
@@ -145,15 +164,19 @@ def make_router(
         response: Response,
         kid: str = Depends(_require_auth),
     ) -> dict[str, Any]:
-        snapshot = registry.health_snapshot()
-        overall = "ok"
-        for entry_health in snapshot.values():
-            if not entry_health.get("loaded", True) or entry_health.get("error"):
-                overall = "degraded"
-                break
-        if overall == "degraded":
-            response.status_code = 503
-        return {"status": overall, "recipes": snapshot}
+        structlog.contextvars.bind_contextvars(kid=kid)
+        try:
+            snapshot = registry.health_snapshot()
+            overall = "ok"
+            for entry_health in snapshot.values():
+                if not entry_health.get("loaded", True) or entry_health.get("error"):
+                    overall = "degraded"
+                    break
+            if overall == "degraded":
+                response.status_code = 503
+            return {"status": overall, "recipes": snapshot}
+        finally:
+            structlog.contextvars.unbind_contextvars("kid")
 
     if _metrics.metrics_enabled():
 
@@ -162,9 +185,13 @@ def make_router(
             summary="Prometheus metrics",
             include_in_schema=False,
         )
-        def metrics_endpoint() -> Any:
-            data, content_type = _metrics.generate_latest()
-            return Response(content=data, media_type=content_type)
+        def metrics_endpoint(kid: str = Depends(_require_auth)) -> Any:
+            structlog.contextvars.bind_contextvars(kid=kid)
+            try:
+                data, content_type = _metrics.generate_latest()
+                return Response(content=data, media_type=content_type)
+            finally:
+                structlog.contextvars.unbind_contextvars("kid")
 
     @router.post(
         "/recipes/{name}:recommend",
@@ -172,111 +199,83 @@ def make_router(
         summary="Recommend items for a single user",
     )
     def recommend(
-        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")],
+        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")],
         body: RecommendRequest,
         request: Request,
+        response: Response,
         kid: str = Depends(_require_auth),
     ) -> Any:
         request_id = request.state.request_id
-        start = time.monotonic()
-        status = "error"
         verb = "recommend"
-        structlog.contextvars.bind_contextvars(recipe=name, kid=kid)
 
-        try:
-            entry = registry.get(name)
-            if entry is None:
-                status = "unavailable"
-                logger.warning(
-                    "recipe_unavailable",
-                    name=name,
-                    reason="not_found",
-                    request_id=request_id,
-                    kid=kid,
-                )
-                raise HTTPException(
-                    status_code=404,
-                    detail={
-                        "detail": f"Recipe '{name}' not found",
-                        "code": "RECIPE_NOT_FOUND",
-                    },
-                )
-            if not entry.loaded or entry.recommender is None:
-                status = "unavailable"
-                logger.warning(
-                    "recipe_unavailable",
-                    name=name,
-                    reason="not_loaded",
-                    request_id=request_id,
-                    kid=kid,
-                )
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "detail": f"Recipe '{name}' is registered but not loaded",
-                        "code": "RECIPE_UNAVAILABLE",
-                    },
-                )
-
+        with _request_metrics(name, verb, kid) as status_holder:
             try:
-                raw_results: list[tuple[str, float]] = (
-                    entry.recommender.get_recommendation_for_known_user_id(
-                        body.user_id, body.limit
+                entry = _resolve_entry(name, request_id, kid)
+
+                try:
+                    raw_results: list[tuple[str, float]] = (
+                        entry.recommender.get_recommendation_for_known_user_id(
+                            body.user_id, body.limit
+                        )
                     )
+                except KeyError:
+                    status_holder[0] = "unknown_user"
+                    raise HTTPException(
+                        status_code=404,
+                        detail={
+                            "detail": "user not seen during training",
+                            "code": "UNKNOWN_USER",
+                        },
+                    ) from None
+
+                exclude = (
+                    frozenset(body.exclude_items) if body.exclude_items else frozenset()
                 )
-            except KeyError:
-                status = "unknown_user"
-                raise HTTPException(
-                    status_code=404,
-                    detail={
-                        "detail": (
-                            f"User '{body.user_id}' was not seen during training"
-                        ),
-                        "code": "UNKNOWN_USER",
-                    },
-                ) from None
+                meta_index = entry.metadata_index
+                meta_df = entry.metadata_df if meta_index is None else None
+                items: list[RecommendItem] = []
+                metadata_degraded = False
 
-            items: list[dict[str, Any]] = []
-            meta_index = entry.metadata_index
-            meta_df = entry.metadata_df if meta_index is None else None
-            for item_id, score in raw_results:
-                fields: dict[str, Any] = {}
-                if meta_index is not None:
-                    fields.update(meta_index.get(item_id, {}))
-                elif meta_df is not None:
-                    fields.update(_lookup_metadata(meta_df, item_id, _deny_set, name))
-                fields["item_id"] = item_id
-                fields["score"] = float(score)
-                items.append(fields)
+                for item_id, score in raw_results:
+                    if item_id in exclude:
+                        continue
+                    fields: dict[str, Any] = {}
+                    if meta_index is not None:
+                        fields.update(meta_index.get(item_id, {}))
+                    elif meta_df is not None:
+                        meta_fields, degraded = _lookup_metadata(
+                            meta_df, item_id, _deny_set, name
+                        )
+                        fields.update(meta_fields)
+                        if degraded:
+                            metadata_degraded = True
+                    fields["item_id"] = item_id
+                    fields["score"] = float(score)
+                    items.append(RecommendItem.model_validate(fields))
 
-            status = "ok"
-            return JSONResponse(
-                content={
-                    "request_id": request_id,
-                    "recipe": name,
-                    "model_version": entry.model_version,
-                    "items": items,
-                },
-                headers={
-                    "X-Recotem-Model-Version": entry.model_version,
-                },
-            )
-        except HTTPException:
-            raise
-        except (MemoryError, RecursionError):
-            raise
-        except Exception as exc:
-            logger.exception(
-                "recommend_unexpected_error",
-                name=name,
-                request_id=request_id,
-                kid=kid,
-                error_class=type(exc).__name__,
-            )
-            raise
-        finally:
-            _metrics.record_v1_request(name, verb, status, time.monotonic() - start)
-            structlog.contextvars.unbind_contextvars("recipe", "kid")
+                status_holder[0] = "ok"
+                response.headers["X-Recotem-Model-Version"] = entry.model_version
+                if metadata_degraded:
+                    response.headers["X-Recotem-Metadata-Degraded"] = "1"
+                return RecommendResponse(
+                    request_id=request_id,
+                    recipe=name,
+                    model_version=entry.model_version,
+                    items=items,
+                )
+            except HTTPException:
+                raise
+            except (MemoryError, RecursionError):
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "recommend_unexpected_error",
+                    name=name,
+                    request_id=request_id,
+                    kid=kid,
+                    error_class=type(exc).__name__,
+                )
+                raise
 
     @router.post(
         "/recipes/{name}:recommend-related",
@@ -284,110 +283,81 @@ def make_router(
         summary="Recommend items related to a seed list",
     )
     def recommend_related(
-        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")],
+        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")],
         body: RecommendRelatedRequest,
         request: Request,
+        response: Response,
         kid: str = Depends(_require_auth),
     ) -> Any:
         request_id = request.state.request_id
-        start = time.monotonic()
-        status = "error"
         verb = "recommend-related"
-        structlog.contextvars.bind_contextvars(recipe=name, kid=kid)
 
-        try:
-            entry = registry.get(name)
-            if entry is None:
-                status = "unavailable"
-                logger.warning(
-                    "recipe_unavailable",
+        with _request_metrics(name, verb, kid) as status_holder:
+            try:
+                entry = _resolve_entry(name, request_id, kid)
+
+                raw_results = entry.recommender.get_recommendation_for_new_user(
+                    body.seed_items, body.limit
+                )
+
+                if not raw_results:
+                    status_holder[0] = "unknown_seed_items"
+                    raise HTTPException(
+                        status_code=404,
+                        detail={
+                            "detail": "no known seed_items",
+                            "code": "UNKNOWN_SEED_ITEMS",
+                        },
+                    )
+
+                exclude = (
+                    frozenset(body.exclude_items) if body.exclude_items else frozenset()
+                )
+                meta_index = entry.metadata_index
+                meta_df = entry.metadata_df if meta_index is None else None
+                items: list[RecommendItem] = []
+                metadata_degraded = False
+
+                for item_id, score in raw_results:
+                    if item_id in exclude:
+                        continue
+                    fields: dict[str, Any] = {}
+                    if meta_index is not None:
+                        fields.update(meta_index.get(item_id, {}))
+                    elif meta_df is not None:
+                        meta_fields, degraded = _lookup_metadata(
+                            meta_df, item_id, _deny_set, name
+                        )
+                        fields.update(meta_fields)
+                        if degraded:
+                            metadata_degraded = True
+                    fields["item_id"] = item_id
+                    fields["score"] = float(score)
+                    items.append(RecommendItem.model_validate(fields))
+
+                status_holder[0] = "ok"
+                response.headers["X-Recotem-Model-Version"] = entry.model_version
+                if metadata_degraded:
+                    response.headers["X-Recotem-Metadata-Degraded"] = "1"
+                return RecommendResponse(
+                    request_id=request_id,
+                    recipe=name,
+                    model_version=entry.model_version,
+                    items=items,
+                )
+            except HTTPException:
+                raise
+            except (MemoryError, RecursionError):
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "recommend_related_unexpected_error",
                     name=name,
-                    reason="not_found",
                     request_id=request_id,
                     kid=kid,
+                    error_class=type(exc).__name__,
                 )
-                raise HTTPException(
-                    status_code=404,
-                    detail={
-                        "detail": f"Recipe '{name}' not found",
-                        "code": "RECIPE_NOT_FOUND",
-                    },
-                )
-            if not entry.loaded or entry.recommender is None:
-                status = "unavailable"
-                logger.warning(
-                    "recipe_unavailable",
-                    name=name,
-                    reason="not_loaded",
-                    request_id=request_id,
-                    kid=kid,
-                )
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "detail": f"Recipe '{name}' is registered but not loaded",
-                        "code": "RECIPE_UNAVAILABLE",
-                    },
-                )
-
-            raw_results = entry.recommender.get_recommendation_for_new_user(
-                body.seed_items, body.limit
-            )
-
-            if not raw_results:
-                status = "unknown_seed_items"
-                raise HTTPException(
-                    status_code=404,
-                    detail={
-                        "detail": (
-                            f"None of the seed_items {body.seed_items!r} "
-                            "were known to the model"
-                        ),
-                        "code": "UNKNOWN_SEED_ITEMS",
-                    },
-                )
-
-            items: list[dict[str, Any]] = []
-            meta_index = entry.metadata_index
-            meta_df = entry.metadata_df if meta_index is None else None
-            for item_id, score in raw_results:
-                fields: dict[str, Any] = {}
-                if meta_index is not None:
-                    fields.update(meta_index.get(item_id, {}))
-                elif meta_df is not None:
-                    fields.update(_lookup_metadata(meta_df, item_id, _deny_set, name))
-                fields["item_id"] = item_id
-                fields["score"] = float(score)
-                items.append(fields)
-
-            status = "ok"
-            return JSONResponse(
-                content={
-                    "request_id": request_id,
-                    "recipe": name,
-                    "model_version": entry.model_version,
-                    "items": items,
-                },
-                headers={
-                    "X-Recotem-Model-Version": entry.model_version,
-                },
-            )
-        except HTTPException:
-            raise
-        except (MemoryError, RecursionError):
-            raise
-        except Exception as exc:
-            logger.exception(
-                "recommend_related_unexpected_error",
-                name=name,
-                request_id=request_id,
-                kid=kid,
-                error_class=type(exc).__name__,
-            )
-            raise
-        finally:
-            _metrics.record_v1_request(name, verb, status, time.monotonic() - start)
-            structlog.contextvars.unbind_contextvars("recipe", "kid")
+                raise
 
     @router.post(
         "/recipes/{name}:batch-recommend",
@@ -395,116 +365,93 @@ def make_router(
         summary="Recommend items for multiple users",
     )
     def batch_recommend(
-        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")],
+        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")],
         body: BatchRecommendRequest,
         request: Request,
+        response: Response,
         kid: str = Depends(_require_auth),
     ) -> Any:
         request_id = request.state.request_id
-        start = time.monotonic()
-        status = "error"
         verb = "batch-recommend"
-        structlog.contextvars.bind_contextvars(recipe=name, kid=kid)
 
-        try:
-            entry = registry.get(name)
-            if entry is None:
-                status = "unavailable"
-                logger.warning(
-                    "recipe_unavailable",
-                    name=name,
-                    reason="not_found",
-                    request_id=request_id,
-                    kid=kid,
-                )
-                raise HTTPException(
-                    status_code=404,
-                    detail={
-                        "detail": f"Recipe '{name}' not found",
-                        "code": "RECIPE_NOT_FOUND",
-                    },
-                )
-            if not entry.loaded or entry.recommender is None:
-                status = "unavailable"
-                logger.warning(
-                    "recipe_unavailable",
-                    name=name,
-                    reason="not_loaded",
-                    request_id=request_id,
-                    kid=kid,
-                )
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "detail": f"Recipe '{name}' is registered but not loaded",
-                        "code": "RECIPE_UNAVAILABLE",
-                    },
-                )
+        with _request_metrics(name, verb, kid) as status_holder:
+            try:
+                entry = _resolve_entry(name, request_id, kid)
 
-            _metrics.observe_batch_size(name, verb, len(body.requests))
+                _metrics.observe_batch_size(name, verb, len(body.requests))
 
-            results: list[dict[str, Any]] = []
-            for idx, single in enumerate(body.requests):
-                try:
-                    raw = entry.recommender.get_recommendation_for_known_user_id(
-                        single.user_id, single.limit
-                    )
-                    items = [
-                        {"item_id": item_id, "score": float(score)}
-                        for item_id, score in raw
-                    ]
-                    results.append(
-                        {
-                            "index": idx,
-                            "status": "ok",
-                            "items": items,
-                            "error": None,
-                        }
-                    )
-                except KeyError:
-                    results.append(
-                        {
-                            "index": idx,
-                            "status": "error",
-                            "items": None,
-                            "error": {
-                                "code": "UNKNOWN_USER",
-                                "message": (
-                                    f"User '{single.user_id}' "
-                                    "was not seen during training"
+                results: list[BatchResultEntry] = []
+                for idx, single in enumerate(body.requests):
+                    try:
+                        raw = entry.recommender.get_recommendation_for_known_user_id(
+                            single.user_id, single.limit
+                        )
+                        items = [
+                            RecommendItem(item_id=item_id, score=float(score))
+                            for item_id, score in raw
+                        ]
+                        results.append(
+                            BatchResultEntry(
+                                index=idx,
+                                status="ok",
+                                items=items,
+                                error=None,
+                            )
+                        )
+                    except KeyError:
+                        results.append(
+                            BatchResultEntry(
+                                index=idx,
+                                status="error",
+                                items=None,
+                                error=ErrorDetail(
+                                    code="UNKNOWN_USER",
+                                    message="user not seen during training",
                                 ),
-                            },
-                        }
-                    )
+                            )
+                        )
+                    except (MemoryError, RecursionError):
+                        raise
+                    except Exception:
+                        logger.warning(
+                            "batch_element_error",
+                            recipe=name,
+                            idx=idx,
+                            exc_type="Exception",
+                        )
+                        results.append(
+                            BatchResultEntry(
+                                index=idx,
+                                status="error",
+                                items=None,
+                                error=ErrorDetail(
+                                    code="INTERNAL_ERROR",
+                                    message="internal error",
+                                ),
+                            )
+                        )
 
-            status = "ok"
-            return JSONResponse(
-                content={
-                    "request_id": request_id,
-                    "recipe": name,
-                    "model_version": entry.model_version,
-                    "results": results,
-                },
-                headers={
-                    "X-Recotem-Model-Version": entry.model_version,
-                },
-            )
-        except HTTPException:
-            raise
-        except (MemoryError, RecursionError):
-            raise
-        except Exception as exc:
-            logger.exception(
-                "batch_recommend_unexpected_error",
-                name=name,
-                request_id=request_id,
-                kid=kid,
-                error_class=type(exc).__name__,
-            )
-            raise
-        finally:
-            _metrics.record_v1_request(name, verb, status, time.monotonic() - start)
-            structlog.contextvars.unbind_contextvars("recipe", "kid")
+                status_holder[0] = "ok"
+                response.headers["X-Recotem-Model-Version"] = entry.model_version
+                return BatchRecommendResponse(
+                    request_id=request_id,
+                    recipe=name,
+                    model_version=entry.model_version,
+                    results=results,
+                )
+            except HTTPException:
+                raise
+            except (MemoryError, RecursionError):
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "batch_recommend_unexpected_error",
+                    name=name,
+                    request_id=request_id,
+                    kid=kid,
+                    error_class=type(exc).__name__,
+                )
+                raise
 
     @router.post(
         "/recipes/{name}:batch-recommend-related",
@@ -512,116 +459,106 @@ def make_router(
         summary="Recommend items related to multiple seed lists",
     )
     def batch_recommend_related(
-        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")],
+        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")],
         body: BatchRecommendRelatedRequest,
         request: Request,
+        response: Response,
         kid: str = Depends(_require_auth),
     ) -> Any:
         request_id = request.state.request_id
-        start = time.monotonic()
-        status = "error"
         verb = "batch-recommend-related"
-        structlog.contextvars.bind_contextvars(recipe=name, kid=kid)
 
-        try:
-            entry = registry.get(name)
-            if entry is None:
-                status = "unavailable"
-                logger.warning(
-                    "recipe_unavailable",
-                    name=name,
-                    reason="not_found",
-                    request_id=request_id,
-                    kid=kid,
-                )
-                raise HTTPException(
-                    status_code=404,
-                    detail={
-                        "detail": f"Recipe '{name}' not found",
-                        "code": "RECIPE_NOT_FOUND",
-                    },
-                )
-            if not entry.loaded or entry.recommender is None:
-                status = "unavailable"
-                logger.warning(
-                    "recipe_unavailable",
-                    name=name,
-                    reason="not_loaded",
-                    request_id=request_id,
-                    kid=kid,
-                )
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "detail": f"Recipe '{name}' is registered but not loaded",
-                        "code": "RECIPE_UNAVAILABLE",
-                    },
-                )
+        with _request_metrics(name, verb, kid) as status_holder:
+            try:
+                entry = _resolve_entry(name, request_id, kid)
 
-            _metrics.observe_batch_size(name, verb, len(body.requests))
+                _metrics.observe_batch_size(name, verb, len(body.requests))
 
-            results: list[dict[str, Any]] = []
-            for idx, single in enumerate(body.requests):
-                raw = entry.recommender.get_recommendation_for_new_user(
-                    single.seed_items, single.limit
-                )
-                if not raw:
-                    results.append(
-                        {
-                            "index": idx,
-                            "status": "error",
-                            "items": None,
-                            "error": {
-                                "code": "UNKNOWN_SEED_ITEMS",
-                                "message": (
-                                    f"None of the seed_items "
-                                    f"{single.seed_items!r} were known to the model"
+                results: list[BatchResultEntry] = []
+                for idx, single in enumerate(body.requests):
+                    try:
+                        raw = entry.recommender.get_recommendation_for_new_user(
+                            single.seed_items, single.limit
+                        )
+                        if not raw:
+                            results.append(
+                                BatchResultEntry(
+                                    index=idx,
+                                    status="error",
+                                    items=None,
+                                    error=ErrorDetail(
+                                        code="UNKNOWN_SEED_ITEMS",
+                                        message="no known seed_items",
+                                    ),
+                                )
+                            )
+                            continue
+                        items = [
+                            RecommendItem(item_id=item_id, score=float(score))
+                            for item_id, score in raw
+                        ]
+                        results.append(
+                            BatchResultEntry(
+                                index=idx,
+                                status="ok",
+                                items=items,
+                                error=None,
+                            )
+                        )
+                    except KeyError:
+                        results.append(
+                            BatchResultEntry(
+                                index=idx,
+                                status="error",
+                                items=None,
+                                error=ErrorDetail(
+                                    code="UNKNOWN_SEED_ITEMS",
+                                    message="no known seed_items",
                                 ),
-                            },
-                        }
-                    )
-                    continue
-                items = [
-                    {"item_id": item_id, "score": float(score)}
-                    for item_id, score in raw
-                ]
-                results.append(
-                    {
-                        "index": idx,
-                        "status": "ok",
-                        "items": items,
-                        "error": None,
-                    }
-                )
+                            )
+                        )
+                    except (MemoryError, RecursionError):
+                        raise
+                    except Exception:
+                        logger.warning(
+                            "batch_element_error",
+                            recipe=name,
+                            idx=idx,
+                            exc_type="Exception",
+                        )
+                        results.append(
+                            BatchResultEntry(
+                                index=idx,
+                                status="error",
+                                items=None,
+                                error=ErrorDetail(
+                                    code="INTERNAL_ERROR",
+                                    message="internal error",
+                                ),
+                            )
+                        )
 
-            status = "ok"
-            return JSONResponse(
-                content={
-                    "request_id": request_id,
-                    "recipe": name,
-                    "model_version": entry.model_version,
-                    "results": results,
-                },
-                headers={
-                    "X-Recotem-Model-Version": entry.model_version,
-                },
-            )
-        except HTTPException:
-            raise
-        except (MemoryError, RecursionError):
-            raise
-        except Exception as exc:
-            logger.exception(
-                "batch_recommend_related_unexpected_error",
-                name=name,
-                request_id=request_id,
-                kid=kid,
-                error_class=type(exc).__name__,
-            )
-            raise
-        finally:
-            _metrics.record_v1_request(name, verb, status, time.monotonic() - start)
-            structlog.contextvars.unbind_contextvars("recipe", "kid")
+                status_holder[0] = "ok"
+                response.headers["X-Recotem-Model-Version"] = entry.model_version
+                return BatchRecommendResponse(
+                    request_id=request_id,
+                    recipe=name,
+                    model_version=entry.model_version,
+                    results=results,
+                )
+            except HTTPException:
+                raise
+            except (MemoryError, RecursionError):
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "batch_recommend_related_unexpected_error",
+                    name=name,
+                    request_id=request_id,
+                    kid=kid,
+                    error_class=type(exc).__name__,
+                )
+                raise
 
     @router.get(
         "/recipes",
@@ -629,20 +566,24 @@ def make_router(
         summary="List loaded recipes",
     )
     def list_recipes(kid: str = Depends(_require_auth)) -> dict[str, Any]:
-        summaries: list[dict[str, Any]] = []
-        for e in registry.list():
-            if not e.loaded:
-                continue
-            summaries.append(
-                {
-                    "name": e.name,
-                    "model_version": e.model_version,
-                    "loaded_at": e.loaded_at,
-                    "supported_verbs": e.supported_verbs,
-                    "kind": e.kind,
-                }
-            )
-        return {"recipes": summaries}
+        structlog.contextvars.bind_contextvars(kid=kid)
+        try:
+            summaries: list[dict[str, Any]] = []
+            for e in registry.list():
+                if not e.loaded:
+                    continue
+                summaries.append(
+                    {
+                        "name": e.name,
+                        "model_version": e.model_version,
+                        "loaded_at": e.loaded_at,
+                        "supported_verbs": e.supported_verbs,
+                        "kind": e.kind,
+                    }
+                )
+            return {"recipes": summaries}
+        finally:
+            structlog.contextvars.unbind_contextvars("kid")
 
     @router.get(
         "/recipes/{name}",
@@ -650,11 +591,12 @@ def make_router(
         summary="Get recipe detail",
     )
     def recipe_detail(
-        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")],
+        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")],
         request: Request,
         kid: str = Depends(_require_auth),
     ) -> dict[str, Any]:
         request_id = request.state.request_id
+        structlog.contextvars.bind_contextvars(kid=kid)
         try:
             e = registry.get(name)
             if e is None:
@@ -687,6 +629,7 @@ def make_router(
                         "code": "RECIPE_UNAVAILABLE",
                     },
                 )
+            hdr = e.header
             return {
                 "name": e.name,
                 "model_version": e.model_version,
@@ -696,6 +639,17 @@ def make_router(
                 "config_digest": e.config_digest or "",
                 "algorithms": e.algorithms or [],
                 "best_algorithm": e.best_class or "",
+                "trained_at": hdr.get("trained_at"),
+                "best_class": hdr.get("best_class"),
+                "best_params": hdr.get("best_params"),
+                "best_score": hdr.get("best_score"),
+                "metric": hdr.get("metric"),
+                "cutoff": hdr.get("cutoff"),
+                "tuning": hdr.get("tuning"),
+                "data_stats": hdr.get("data_stats"),
+                "recotem_version": hdr.get("recotem_version"),
+                "irspack_version": hdr.get("irspack_version"),
+                "recipe_hash": hdr.get("recipe_hash"),
             }
         except HTTPException:
             raise
@@ -710,5 +664,7 @@ def make_router(
                 error_class=type(exc).__name__,
             )
             raise
+        finally:
+            structlog.contextvars.unbind_contextvars("kid")
 
     return router

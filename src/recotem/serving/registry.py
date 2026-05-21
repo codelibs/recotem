@@ -175,7 +175,7 @@ class ModelEntry:
         self._models_view["name"] = self.name
 
     def models_dict(self) -> dict[str, Any]:
-        """Return header metadata suitable for the ``/models`` endpoint.
+        """Return header metadata for introspection (e.g. tests, tooling).
 
         The artifact header JSON never contains ``hmac`` or ``key`` fields —
         those are stored in separate binary regions of the artifact format

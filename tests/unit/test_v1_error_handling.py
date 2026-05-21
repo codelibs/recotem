@@ -86,12 +86,12 @@ def _client_with(entry: ModelEntry) -> TestClient:
 
 
 def test_request_id_echoed_when_valid_long_value() -> None:
-    """A 100-char alphanumeric X-Request-ID (in 65-128 range) is echoed in
+    """A 64-char alphanumeric X-Request-ID (the documented max) is echoed in
     both the response body and the X-Request-ID response header, and the
     two values are identical."""
     client = _client_with(_loaded_entry())
-    sent = "a" * 100
-    assert 65 <= len(sent) <= 128
+    sent = "a" * 64
+    assert len(sent) == 64
 
     r = client.post(
         "/v1/recipes/demo:recommend",
@@ -102,6 +102,24 @@ def test_request_id_echoed_when_valid_long_value() -> None:
     body = r.json()
     assert body["request_id"] == sent
     assert r.headers["X-Request-ID"] == sent
+    assert body["request_id"] == r.headers["X-Request-ID"]
+
+
+def test_request_id_regenerated_when_over_64_chars() -> None:
+    """An X-Request-ID over 64 characters is rejected by the regex and the
+    server generates a fresh ID instead."""
+    client = _client_with(_loaded_entry())
+    sent = "a" * 65
+
+    r = client.post(
+        "/v1/recipes/demo:recommend",
+        json={"user_id": "u1", "limit": 1},
+        headers={"X-Request-ID": sent},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["request_id"] != sent
+    assert r.headers["X-Request-ID"] != sent
     assert body["request_id"] == r.headers["X-Request-ID"]
 
 

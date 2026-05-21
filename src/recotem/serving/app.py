@@ -59,14 +59,14 @@ from recotem.version import __version__
 logger = structlog.get_logger(__name__)
 
 # Allowed characters and length for echoing a client-supplied X-Request-ID.
-_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 
 # Pattern matching v1 inference verbs on the request path.  Used by the
 # RequestValidationError handler to record a ``validation_error`` metric for
 # the appropriate (recipe, verb) tuple when 422 is returned for a malformed
 # inference body.
 _V1_VERB_PATH_RE = re.compile(
-    r"^/v1/recipes/(?P<name>[A-Za-z0-9_-]{1,64}):"
+    r"^/v1/recipes/(?P<name>[A-Za-z0-9][A-Za-z0-9_-]{0,63}):"
     r"(?P<verb>recommend|recommend-related|batch-recommend|batch-recommend-related)$"
 )
 
@@ -289,11 +289,13 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
                 try:
                     entry = future.result()
                 except Exception as exc:  # pragma: no cover — defensive only
-                    logger.warning(
+                    logger.error(
                         "recipe_load_future_error",
                         name=recipe.name,
                         error=str(exc),
+                        exc_info=True,
                     )
+                    _metrics.inc_artifact_load_failure(recipe.name)
                     entry = _failed_entry(recipe, f"unexpected error: {exc}")
 
                 registry.replace(recipe.name, entry)
@@ -346,9 +348,11 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         if serve_config.insecure_no_auth or serve_config.dev_allow_unsigned:
             import asyncio
 
+            _warn_interval = 60 if (serve_config.env or "").lower() == "test" else 300
+
             async def _warn_loop() -> None:
                 while True:
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(_warn_interval)
                     if serve_config.insecure_no_auth:
                         _emit_insecure_banner(serve_config)
                     if serve_config.dev_allow_unsigned:
@@ -456,13 +460,17 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         # X-Request-ID header set by RequestIDMiddleware.  If the middleware
         # was bypassed (e.g. in a stripped-down test app), fall back to "".
         request_id = getattr(request.state, "request_id", "")
+        sanitized_errors = [
+            {k: v for k, v in err.items() if k not in ("input", "ctx")}
+            for err in exc.errors()
+        ]
         return JSONResponse(
             status_code=422,
             content={
                 "request_id": request_id,
                 "detail": "Request validation failed",
                 "code": "VALIDATION_ERROR",
-                "errors": exc.errors(),
+                "errors": sanitized_errors,
             },
         )
 
@@ -489,7 +497,11 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         headers = {"X-Request-ID": request_id} if request_id else None
         return JSONResponse(
             status_code=500,
-            content={"detail": "internal error", "code": "internal_error"},
+            content={
+                "detail": "internal error",
+                "code": "internal_error",
+                "request_id": request_id,
+            },
             headers=headers,
         )
 
@@ -653,6 +665,14 @@ def _emit_dev_unsigned_banner(serve_config: ServeConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
+_URI_RE = re.compile(r"\b(s3|gs|az|abfs|abfss|https?)://\S+")
+
+
+def _sanitize_error(reason: str) -> str:
+    truncated = reason[:200]
+    return _URI_RE.sub("<redacted-uri>", truncated)
+
+
 def _failed_entry(recipe: Any, reason: str) -> ModelEntry:
     """Stub ModelEntry inserted at startup when an artifact failed to load.
 
@@ -666,7 +686,7 @@ def _failed_entry(recipe: Any, reason: str) -> ModelEntry:
         header={},
         kid="",
         metadata_df=None,
-        last_load_error=reason,
+        last_load_error=_sanitize_error(reason),
         artifact_path=recipe.output.path,
         loaded=False,
     )

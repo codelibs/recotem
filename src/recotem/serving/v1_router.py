@@ -8,15 +8,23 @@ Routes are added incrementally across Tasks 6-11.
 from __future__ import annotations
 
 import re
-from typing import Any
+import time
+import uuid
+from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
+from fastapi.responses import JSONResponse
 
 from recotem.config import ApiKeyEntry
 from recotem.serving import metrics as _metrics
 from recotem.serving.auth import verify_api_key
 from recotem.serving.registry import ModelRegistry
+from recotem.serving.routes import _lookup_metadata  # reused legacy helper
+from recotem.serving.schemas import (
+    RecommendRequest,
+    RecommendResponse,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -88,5 +96,95 @@ def make_v1_router(
         def metrics_endpoint() -> Any:
             data, content_type = _metrics.generate_latest()
             return Response(content=data, media_type=content_type)
+
+    @router.post(
+        "/recipes/{name}:recommend",
+        response_model=RecommendResponse,
+        summary="Recommend items for a single user",
+    )
+    def recommend(
+        name: Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")],
+        body: RecommendRequest,
+        request: Request,
+        kid: str = Depends(_require_auth),
+    ) -> Any:
+        raw_rid = request.headers.get("x-request-id", "")
+        request_id = (
+            raw_rid if _REQUEST_ID_RE.match(raw_rid) else str(uuid.uuid4())
+        )
+        start = time.monotonic()
+        status = "error"
+        verb = "recommend"
+
+        try:
+            entry = registry.get(name)
+            if entry is None or not entry.loaded or entry.recommender is None:
+                status = "unavailable"
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "detail": f"Recipe '{name}' is not loaded or unhealthy",
+                        "code": "RECIPE_UNAVAILABLE",
+                    },
+                )
+
+            try:
+                raw_results: list[tuple[str, float]] = (
+                    entry.recommender.get_recommendation_for_known_user_id(
+                        body.user_id, body.limit
+                    )
+                )
+            except KeyError:
+                status = "unknown_user"
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "detail": (
+                            f"User '{body.user_id}' was not seen during training"
+                        ),
+                        "code": "UNKNOWN_USER",
+                    },
+                ) from None
+
+            items: list[dict[str, Any]] = []
+            meta_index = entry.metadata_index
+            meta_df = entry.metadata_df if meta_index is None else None
+            for item_id, score in raw_results:
+                fields: dict[str, Any] = {}
+                if meta_index is not None:
+                    fields.update(meta_index.get(item_id, {}))
+                elif meta_df is not None:
+                    fields.update(
+                        _lookup_metadata(meta_df, item_id, _deny_set, name)
+                    )
+                fields["item_id"] = item_id
+                fields["score"] = float(score)
+                items.append(fields)
+
+            status = "ok"
+            return JSONResponse(
+                content={
+                    "request_id": request_id,
+                    "recipe": name,
+                    "model_version": entry.model_version,
+                    "items": items,
+                },
+                headers={
+                    "X-Request-ID": request_id,
+                    "X-Recotem-Model-Version": entry.model_version,
+                },
+            )
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception(
+                "v1_recommend_unexpected_error",
+                name=name,
+                request_id=request_id,
+                kid=kid,
+            )
+            raise
+        finally:
+            _metrics.record_v1_request(name, verb, status, time.monotonic() - start)
 
     return router

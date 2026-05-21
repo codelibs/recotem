@@ -20,7 +20,9 @@ def test_make_v1_router_returns_routable_apiroute_factory():
     app.include_router(router, prefix="/v1")
 
     client = TestClient(app)
-    # The skeleton has no inference routes yet — but an unknown path
-    # returns 404, confirming the router is mounted at /v1.
-    r = client.post("/v1/recipes/x:recommend")
+    # An unknown path under /v1 returns 404, confirming the router is
+    # mounted at /v1.  Inference routes are added in Tasks 7-10; using
+    # a verb the router does not define keeps this skeleton-stage check
+    # valid as those routes land.
+    r = client.post("/v1/recipes/x:nonexistent-verb")
     assert r.status_code == 404

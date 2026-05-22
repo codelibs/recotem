@@ -299,7 +299,7 @@ def build_metadata_index(
             index[str(item_id)] = item_dict
         except (MemoryError, RecursionError):
             raise
-        except Exception:
+        except Exception as exc:
             # Unexpected per-row error (e.g. AttributeError from a non-unique
             # index, TypeError from a non-string column name).  Skip the row
             # and invoke the caller's counter callback so the issue is
@@ -309,6 +309,8 @@ def build_metadata_index(
             logger.warning(
                 "metadata_index_row_error",
                 item_id=str(item_id),
+                exc_type=type(exc).__name__,
+                error=str(exc)[:200],
             )
 
     logger.debug(

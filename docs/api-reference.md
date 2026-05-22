@@ -105,6 +105,12 @@ Authenticated.  Returns `{status, recipes: {name: health}}`.  Same 200
 Prometheus exposition.  Excluded from OpenAPI.  Requires
 `RECOTEM_METRICS_ENABLED` to be truthy at startup.
 
+**Requires `X-API-Key`** — unlike the alpha `/metrics` endpoint, which was
+unauthenticated.  Configure your Prometheus scraper with an `authorization`
+block or `http_headers` before upgrading.  See
+[docs/migration-v1.md](migration-v1.md#v1metrics-now-requires-x-api-key) for
+the scrape-config snippet.
+
 ## Headers
 
 - `X-Request-ID` — accepted (regex `^[A-Za-z0-9_-]{1,128}$`) or generated;

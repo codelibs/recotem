@@ -332,7 +332,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             max_workers=max_workers,
         )
 
-    _metrics.set_active_recipes(len(loaded_entries))
+    _metrics.set_active_recipes(registry.loaded_count())
 
     # Build watcher initial states — captures mtime/sha to avoid re-load on
     # first tick (spec: "capture initial mtime/sha inside the watcher's own
@@ -361,12 +361,18 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
 
             _warn_interval = 60 if (serve_config.env or "").lower() == "test" else 300
 
+            # Emit at most one combined banner per interval regardless of
+            # how many insecure flags are set (M5: prevent double-fire when
+            # both --insecure-no-auth and --dev-allow-unsigned are active).
+            _do_insecure = serve_config.insecure_no_auth
+            _do_unsigned = serve_config.dev_allow_unsigned
+
             async def _warn_loop() -> None:
                 while True:
                     await asyncio.sleep(_warn_interval)
-                    if serve_config.insecure_no_auth:
+                    if _do_insecure:
                         _emit_insecure_banner(serve_config)
-                    if serve_config.dev_allow_unsigned:
+                    if _do_unsigned:
                         _emit_dev_unsigned_banner(serve_config)
 
             banner_task = asyncio.create_task(_warn_loop())

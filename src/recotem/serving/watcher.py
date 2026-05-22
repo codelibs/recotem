@@ -183,6 +183,10 @@ class _RecipeWatchState:
     #: succeeded.  Used by OBS-1 to demote repeated identical errors from
     #: WARNING to DEBUG so log aggregation is not flooded during an outage.
     _last_stat_error_class: str | None = None
+    #: Set to True after the first TypeError from artifact_path + ".sha256"
+    #: so subsequent polls skip the sidecar check rather than flooding logs
+    #: with the same warning on every poll cycle (M7).
+    sidecar_unsupported: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1214,6 +1218,11 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
         ``False`` if unchanged or absent (let the outer marker comparison decide).
     """
     artifact_path = state.artifact_path
+    # Short-circuit: if a previous poll already determined that sidecar
+    # construction is unsupported for this path, skip straight to the full
+    # stat path rather than re-logging the same warning every poll cycle (M7).
+    if state.sidecar_unsupported:
+        return False
     # Only meaningful for local-FS paths where we can form a sibling sidecar.
     # For remote URIs (s3://, gs://) this is a no-op; the marker comparison
     # (ETag / mtime) is already cheap enough.
@@ -1225,6 +1234,7 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
             path=str(artifact_path),
             exc_type=type(exc).__name__,
         )
+        state.sidecar_unsupported = True
         return False
 
     if not sidecar_path.exists():

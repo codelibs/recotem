@@ -320,6 +320,17 @@ class ModelRegistry:
         with self._lock:
             return self._loaded_count
 
+    def health_counts(self) -> tuple[int, int]:
+        """Return ``(loaded, total)`` under a single lock acquisition.
+
+        Avoids the TOCTOU window between a separate ``loaded_count()`` and
+        ``health_snapshot()`` call in the ``/v1/health`` handler: both
+        numbers are read atomically so they are guaranteed to be consistent
+        with each other even if a hot-swap occurs between calls.
+        """
+        with self._lock:
+            return self._loaded_count, len(self._entries)
+
     def health_snapshot(self) -> dict[str, dict[str, Any]]:
         """Return per-recipe health info (safe copy, no model objects).
 

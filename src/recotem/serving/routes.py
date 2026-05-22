@@ -8,6 +8,7 @@ The router is mounted at ``/v1`` by ``serving/app.py`` and exposes the
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -212,9 +213,12 @@ def make_router(
 
     @router.get("/health", summary="Overall health status (probe-safe)")
     def health(response: Response) -> dict[str, Any]:
-        snapshot = registry.health_snapshot()
-        total = len(snapshot)
-        loaded_count = registry.loaded_count()
+        # Intentional design difference vs /health/details: this probe endpoint
+        # uses count-based degraded detection (loaded < total) under a single
+        # lock acquisition so the two numbers are consistent with each other.
+        # /health/details performs a per-recipe error scan for richer operator
+        # diagnostics; see health_details below.
+        loaded_count, total = registry.health_counts()
         overall = "ok" if total == 0 or loaded_count == total else "degraded"
         if overall == "degraded":
             response.status_code = 503
@@ -228,6 +232,10 @@ def make_router(
         response: Response,
         kid: str = Depends(_require_auth),
     ) -> dict[str, Any]:
+        # Intentional design difference vs /health: this operator endpoint
+        # checks per-recipe error fields (any last_load_error → degraded) and
+        # exposes per-recipe details for diagnostics.  /health uses the cheaper
+        # count-based check so it is safe for high-frequency liveness probes.
         structlog.contextvars.bind_contextvars(kid=kid)
         try:
             snapshot = registry.health_snapshot()
@@ -875,7 +883,18 @@ def make_router(
                 "trained_at": hdr.get("trained_at"),
                 "best_class": hdr.get("best_class"),
                 "best_params": hdr.get("best_params"),
-                "best_score": hdr.get("best_score"),
+                "best_score": (
+                    # Guard against NaN/Inf from old artifacts or buggy trainers.
+                    # RecommendItem.score uses allow_inf_nan=False; apply the same
+                    # posture here so the response is always valid JSON (M6).
+                    _raw_score
+                    if (
+                        (_raw_score := hdr.get("best_score")) is None
+                        or (isinstance(_raw_score, float) and math.isfinite(_raw_score))
+                        or not isinstance(_raw_score, float)
+                    )
+                    else None
+                ),
                 "metric": hdr.get("metric"),
                 "cutoff": hdr.get("cutoff"),
                 "tuning": hdr.get("tuning"),

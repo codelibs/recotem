@@ -36,7 +36,7 @@ Metric inventory (matches docs/operations.md):
 
 Artifact-load reason taxonomy (``recotem_artifact_load_failures_total``):
 ``read``, ``parse``, ``hmac``, ``header_json``, ``deserialize``, ``metadata``,
-``yaml``, ``unexpected``.
+``yaml``, ``unexpected``, ``dir_scan``, ``timeout``.
 """
 
 from __future__ import annotations
@@ -103,7 +103,7 @@ def _ensure_initialized() -> None:
         "recotem_artifact_load_failures_total",
         "Total artifact load failures (initial load and watcher reloads). "
         "reason ∈ {read, parse, hmac, header_json, deserialize, metadata, "
-        "yaml, unexpected}.",
+        "yaml, unexpected, dir_scan, timeout}.",
         ["recipe", "reason"],
     )
     _ACTIVE_RECIPES = Gauge(
@@ -172,6 +172,10 @@ _LOAD_FAILURE_REASONS: frozenset[str] = frozenset(
         "yaml",
         "unexpected",
         "dir_scan",
+        # Stat hung in the executor thread (object-store non-responsive).
+        # Distinct from "read" (file could not be opened/parsed) because stat
+        # timeouts are an infrastructure signal rather than a data signal.
+        "timeout",
     }
 )
 
@@ -181,8 +185,8 @@ def inc_artifact_load_failure(recipe: str, reason: str = "unexpected") -> None:
 
     *reason* must be one of the values in ``_LOAD_FAILURE_REASONS``
     (``read | parse | hmac | header_json | deserialize | metadata | yaml |
-    unexpected | dir_scan``); any other value is silently coerced to
-    ``"unexpected"`` so callers cannot accidentally explode the cardinality
+    unexpected | dir_scan | timeout``); any other value is silently coerced
+    to ``"unexpected"`` so callers cannot accidentally explode the cardinality
     of the label.
     """
     _ensure_initialized()

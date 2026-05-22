@@ -23,6 +23,7 @@ Integration assumptions:
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import random
@@ -742,6 +743,7 @@ class ArtifactWatcher(threading.Thread):
                     self._record_load_failure(
                         _failed_recipe,
                         f"stat timeout after {_per_future_timeout:.0f}s",
+                        reason="timeout",
                     )
                     fut.cancel()
                 pending = set()
@@ -865,7 +867,7 @@ class ArtifactWatcher(threading.Thread):
                 error=str(exc),
                 exc_type=type(exc).__name__,
             )
-            self._record_load_failure(name, f"read failed: {exc}")
+            self._record_load_failure(name, f"read failed: {exc}", reason="read")
             return
         except Exception as exc:
             logger.error(
@@ -875,7 +877,9 @@ class ArtifactWatcher(threading.Thread):
                 error=str(exc),
                 exc_type=type(exc).__name__,
             )
-            self._record_load_failure(name, f"unexpected read error: {exc}")
+            self._record_load_failure(
+                name, f"unexpected read error: {exc}", reason="read"
+            )
             return
 
         sha256 = _sha256_bytes(data)
@@ -1233,8 +1237,6 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
         # Distinguish ENOENT (sidecar was deleted between exists() and read_text)
         # from other OS errors (permission denied, I/O error) so operators can
         # diagnose misconfigured file permissions without reading raw tracebacks.
-        import errno  # noqa: PLC0415
-
         if exc.errno == errno.ENOENT:
             # W3: if the sidecar was present on the previous poll
             # (last_sidecar_contents is not None), emit a one-time WARNING so

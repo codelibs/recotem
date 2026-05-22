@@ -211,3 +211,105 @@ def test_recipe_detail_tolerates_missing_header_fields() -> None:
             f"Field {field_name!r} should be null when header omits it; "
             f"got {body[field_name]!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# M1/M2 (code-review): algorithms from tuning.tried_algorithms + config_digest normalize
+# ---------------------------------------------------------------------------
+
+
+def test_algorithms_from_tuning_tried_algorithms() -> None:
+    """extract_algorithms falls back to tuning.tried_algorithms when the top-level
+    'algorithms' key is absent or empty."""
+    from recotem.serving._header_utils import extract_algorithms
+
+    header_no_top_level = {
+        "trained_at": "2026-01-01T00:00:00Z",
+        "tuning": {"n_trials": 5, "tried_algorithms": ["TopPop", "IALS"]},
+    }
+    assert extract_algorithms(header_no_top_level) == ["TopPop", "IALS"], (
+        "extract_algorithms must fall back to tuning.tried_algorithms"
+    )
+
+    header_empty_top_level = {
+        "algorithms": [],
+        "tuning": {"tried_algorithms": ["TopPop", "IALS"]},
+    }
+    assert extract_algorithms(header_empty_top_level) == ["TopPop", "IALS"], (
+        "extract_algorithms must fall back to tried_algorithms when top-level is empty"
+    )
+
+    header_missing_tuning = {}
+    assert extract_algorithms(header_missing_tuning) == [], (
+        "extract_algorithms must return [] when both keys are absent"
+    )
+
+
+def test_algorithms_top_level_takes_precedence() -> None:
+    """When 'algorithms' is present and non-empty at the top level,
+    extract_algorithms must return it rather than tuning.tried_algorithms."""
+    from recotem.serving._header_utils import extract_algorithms
+
+    header = {
+        "algorithms": ["BPRMFRecommender"],
+        "tuning": {"tried_algorithms": ["TopPop", "IALS"]},
+    }
+    result = extract_algorithms(header)
+    assert result == ["BPRMFRecommender"], (
+        f"Top-level algorithms must take precedence; got {result!r}"
+    )
+
+
+def test_algorithms_field_in_recipe_detail_from_modelentry() -> None:
+    """The algorithms field returned by GET /v1/recipes/{name} comes from
+    ModelEntry.algorithms (populated by extract_algorithms at load time)."""
+    from recotem.serving._header_utils import extract_algorithms
+
+    header = {
+        "tuning": {"tried_algorithms": ["TopPop", "IALS"]},
+    }
+    entry = ModelEntry(
+        name="algo_recipe",
+        recommender=object(),
+        header=header,
+        kid="t",
+        metadata_df=None,
+        metadata_index=None,
+        loaded=True,
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
+        loaded_at_unix=1747800000.0,
+        algorithms=extract_algorithms(header),
+    )
+    r = _client_with_entries([entry]).get("/v1/recipes/algo_recipe")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["algorithms"] == ["TopPop", "IALS"], (
+        f"algorithms from tuning.tried_algorithms must appear in detail; "
+        f"got {body['algorithms']!r}"
+    )
+
+
+def test_config_digest_normalized_with_sha256_prefix() -> None:
+    """When the artifact header carries a bare hex config_digest (no sha256: prefix),
+    normalize_config_digest must add the prefix before storing in ModelEntry.
+
+    The resulting value must satisfy the Sha256Hex pattern (sha256:<64 hex chars>)
+    used by RecipeDetailResponse.config_digest.
+    """
+    from pydantic import TypeAdapter
+
+    from recotem.serving._header_utils import normalize_config_digest
+    from recotem.serving.schemas import Sha256Hex
+
+    _hex64 = "a" * 64
+    _prefixed = f"sha256:{_hex64}"
+
+    assert normalize_config_digest(_hex64) == _prefixed
+    assert normalize_config_digest(_prefixed) == _prefixed
+    assert normalize_config_digest("") is None
+    assert normalize_config_digest(None) is None
+
+    # Confirm the 64-hex prefixed result passes Sha256Hex pattern validation.
+    ta = TypeAdapter(Sha256Hex)
+    validated = ta.validate_python(normalize_config_digest(_hex64))
+    assert validated == _prefixed

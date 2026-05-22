@@ -43,6 +43,8 @@ def _enable_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
         "recotem_v1_request_latency_seconds",
         "recotem_v1_batch_size",
         "recotem_v1_batch_element_errors",
+        "recotem_v1_metadata_degraded_items",
+        "recotem_v1_validation_errors_outside_verb",
     }
     for collector in list(prometheus_client.REGISTRY._collector_to_names):
         names = prometheus_client.REGISTRY._collector_to_names.get(collector, set())
@@ -57,6 +59,8 @@ def _enable_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
         "_V1_REQUEST_LATENCY",
         "_V1_BATCH_SIZE",
         "_V1_BATCH_ELEMENT_ERRORS",
+        "_V1_METADATA_DEGRADED_ITEMS",
+        "_V1_VALIDATION_ERRORS_OUTSIDE_VERB",
     ):
         monkeypatch.setattr(_metrics, attr, None, raising=False)
 

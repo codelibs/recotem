@@ -8,6 +8,7 @@ The router is mounted at ``/v1`` by ``serving/app.py`` and exposes the
 
 from __future__ import annotations
 
+import hashlib
 import math
 import time
 from collections.abc import Iterator
@@ -109,9 +110,8 @@ def make_router(
         if entry is None:
             status_holder[0] = "recipe_not_found"
             logger.warning(
-                "recipe_unavailable",
+                "recipe_not_found",
                 name=name,
-                reason="not_found",
                 request_id=request_id,
                 kid=kid,
             )
@@ -125,9 +125,8 @@ def make_router(
         if not entry.loaded or entry.recommender is None:
             status_holder[0] = "unavailable"
             logger.warning(
-                "recipe_unavailable",
+                "recipe_not_loaded",
                 name=name,
-                reason="not_loaded",
                 request_id=request_id,
                 kid=kid,
             )
@@ -158,8 +157,17 @@ def make_router(
         exclude: frozenset[str],
         meta_index: dict[str, Any] | None,
         recipe_name: str = "",
-    ) -> list[RecommendItem]:
+        verb: str = "",
+    ) -> tuple[list[RecommendItem], int, int]:
+        """Build the item list for a recommend response.
+
+        Returns ``(items, fallback_count, dropped_count)``.  The caller is
+        responsible for setting ``X-Recotem-Items-Degraded`` and incrementing
+        the degraded-items metrics when either count is non-zero.
+        """
         items: list[RecommendItem] = []
+        fallback_count = 0
+        dropped_count = 0
         for item_id, score in raw_results:
             if item_id in exclude:
                 continue
@@ -171,10 +179,6 @@ def make_router(
             try:
                 items.append(RecommendItem.model_validate(fields))
             except ValidationError as exc:
-                # Per-item metadata serialization failure: skip the item
-                # rather than aborting the entire response.  The most likely
-                # cause is a metadata column with a value that violates the
-                # RecommendItem schema (e.g. NaN score, oversized item_id).
                 logger.warning(
                     "metadata_serialization_failed",
                     item_id=str(item_id),
@@ -182,7 +186,36 @@ def make_router(
                     recipe=recipe_name,
                 )
                 if recipe_name:
-                    _metrics.inc_metadata_lookup_error(recipe_name)
+                    _metrics.inc_metadata_serialization_error(recipe_name, verb)
+                # Fallback: serve item with only item_id and score.
+                bare: dict[str, Any] = {"item_id": item_id, "score": float(score)}
+                try:
+                    items.append(RecommendItem.model_validate(bare))
+                    fallback_count += 1
+                except ValidationError:
+                    # Even bare item fails (e.g. invalid item_id) — drop it.
+                    dropped_count += 1
+        return items, fallback_count, dropped_count
+
+    def _apply_build_items_degraded(
+        items_result: tuple[list[RecommendItem], int, int],
+        response: Response,
+        recipe_name: str,
+        verb: str,
+    ) -> list[RecommendItem]:
+        """Apply degraded-item side-effects and return the item list."""
+        items, fallback_count, dropped_count = items_result
+        degraded = fallback_count + dropped_count
+        if degraded > 0:
+            response.headers["X-Recotem-Items-Degraded"] = str(degraded)
+        if fallback_count > 0:
+            _metrics.inc_metadata_degraded_items(
+                recipe_name, verb, "fallback", fallback_count
+            )
+        if dropped_count > 0:
+            _metrics.inc_metadata_degraded_items(
+                recipe_name, verb, "dropped", dropped_count
+            )
         return items
 
     def _any_seed_known(
@@ -327,6 +360,9 @@ def make_router(
                         "recommender_unexpected_key_error",
                         recipe=name,
                         verb=verb,
+                        user_id_hash=hashlib.sha256(body.user_id.encode()).hexdigest()[
+                            :8
+                        ],
                     )
                     raise HTTPException(
                         status_code=500,
@@ -339,7 +375,14 @@ def make_router(
                 exclude = (
                     frozenset(body.exclude_items) if body.exclude_items else frozenset()
                 )
-                items = _build_items(raw_results, exclude, entry.metadata_index, name)
+                items = _apply_build_items_degraded(
+                    _build_items(
+                        raw_results, exclude, entry.metadata_index, name, verb
+                    ),
+                    response,
+                    name,
+                    verb,
+                )
 
                 status_holder[0] = "ok"
                 response.headers["X-Recotem-Model-Version"] = entry.model_version
@@ -353,14 +396,7 @@ def make_router(
                 raise
             except (MemoryError, RecursionError):
                 raise
-            except Exception as exc:
-                logger.exception(
-                    "recommend_unexpected_error",
-                    name=name,
-                    request_id=request_id,
-                    kid=kid,
-                    exc_type=type(exc).__name__,
-                )
+            except Exception:
                 raise
 
     @router.post(
@@ -413,6 +449,7 @@ def make_router(
                         "recommender_unexpected_key_error",
                         recipe=name,
                         verb=verb,
+                        seed_items_count=len(body.seed_items),
                     )
                     raise HTTPException(
                         status_code=500,
@@ -435,7 +472,14 @@ def make_router(
                 exclude = (
                     frozenset(body.exclude_items) if body.exclude_items else frozenset()
                 )
-                items = _build_items(raw_results, exclude, entry.metadata_index, name)
+                items = _apply_build_items_degraded(
+                    _build_items(
+                        raw_results, exclude, entry.metadata_index, name, verb
+                    ),
+                    response,
+                    name,
+                    verb,
+                )
 
                 status_holder[0] = "ok"
                 response.headers["X-Recotem-Model-Version"] = entry.model_version
@@ -449,14 +493,7 @@ def make_router(
                 raise
             except (MemoryError, RecursionError):
                 raise
-            except Exception as exc:
-                logger.exception(
-                    "recommend_related_unexpected_error",
-                    name=name,
-                    request_id=request_id,
-                    kid=kid,
-                    exc_type=type(exc).__name__,
-                )
+            except Exception:
                 raise
 
     @router.post(
@@ -553,7 +590,18 @@ def make_router(
                             else frozenset()
                         )
                         meta = entry.metadata_index if body.include_metadata else None
-                        items = _build_items(raw_results, exclude, meta, name)
+                        items, _fb, _dr = _build_items(
+                            raw_results, exclude, meta, name, verb
+                        )
+                        if _fb + _dr > 0:
+                            if _fb:
+                                _metrics.inc_metadata_degraded_items(
+                                    name, verb, "fallback", _fb
+                                )
+                            if _dr:
+                                _metrics.inc_metadata_degraded_items(
+                                    name, verb, "dropped", _dr
+                                )
                         results.append(
                             BatchResultOk(index=idx, status="ok", items=items)
                         )
@@ -590,8 +638,6 @@ def make_router(
                             recipe=name,
                             verb=verb,
                             idx=idx,
-                            request_id=request_id,
-                            kid=kid,
                             exc_type=type(exc).__name__,
                             exc_module=type(exc).__module__,
                         )
@@ -612,14 +658,7 @@ def make_router(
                 raise
             except (MemoryError, RecursionError):
                 raise
-            except Exception as exc:
-                logger.exception(
-                    "batch_recommend_unexpected_error",
-                    name=name,
-                    request_id=request_id,
-                    kid=kid,
-                    exc_type=type(exc).__name__,
-                )
+            except Exception:
                 raise
 
     @router.post(
@@ -748,7 +787,18 @@ def make_router(
                             else frozenset()
                         )
                         meta = entry.metadata_index if body.include_metadata else None
-                        items = _build_items(raw_results, exclude, meta, name)
+                        items, _fb, _dr = _build_items(
+                            raw_results, exclude, meta, name, verb
+                        )
+                        if _fb + _dr > 0:
+                            if _fb:
+                                _metrics.inc_metadata_degraded_items(
+                                    name, verb, "fallback", _fb
+                                )
+                            if _dr:
+                                _metrics.inc_metadata_degraded_items(
+                                    name, verb, "dropped", _dr
+                                )
                         results.append(
                             BatchResultOk(index=idx, status="ok", items=items)
                         )
@@ -760,8 +810,6 @@ def make_router(
                             recipe=name,
                             verb=verb,
                             idx=idx,
-                            request_id=request_id,
-                            kid=kid,
                             exc_type=type(exc).__name__,
                             exc_module=type(exc).__module__,
                         )
@@ -782,14 +830,7 @@ def make_router(
                 raise
             except (MemoryError, RecursionError):
                 raise
-            except Exception as exc:
-                logger.exception(
-                    "batch_recommend_related_unexpected_error",
-                    name=name,
-                    request_id=request_id,
-                    kid=kid,
-                    exc_type=type(exc).__name__,
-                )
+            except Exception:
                 raise
 
     @router.get(
@@ -837,14 +878,13 @@ def make_router(
         kid: str = Depends(_require_auth),
     ) -> dict[str, Any]:
         request_id = request.state.request_id
-        structlog.contextvars.bind_contextvars(kid=kid)
+        structlog.contextvars.bind_contextvars(kid=kid, recipe=name)
         try:
             e = registry.get(name)
             if e is None:
                 logger.warning(
-                    "recipe_unavailable",
+                    "recipe_not_found",
                     name=name,
-                    reason="not_found",
                     request_id=request_id,
                     kid=kid,
                 )
@@ -857,9 +897,8 @@ def make_router(
                 )
             if not e.loaded:
                 logger.warning(
-                    "recipe_unavailable",
+                    "recipe_not_loaded",
                     name=name,
-                    reason="not_loaded",
                     request_id=request_id,
                     kid=kid,
                 )
@@ -907,17 +946,10 @@ def make_router(
             raise
         except (MemoryError, RecursionError):
             raise
-        except Exception as exc:
-            logger.exception(
-                "recipe_detail_unexpected_error",
-                name=name,
-                request_id=request_id,
-                kid=kid,
-                exc_type=type(exc).__name__,
-            )
+        except Exception:
             raise
         finally:
-            structlog.contextvars.unbind_contextvars("kid")
+            structlog.contextvars.unbind_contextvars("kid", "recipe")
 
     return router
 

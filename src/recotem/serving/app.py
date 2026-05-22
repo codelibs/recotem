@@ -44,6 +44,8 @@ from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
 from recotem.config import ConfigError, ServeConfig
 from recotem.recipe.loader import load_recipes_directory_lenient
 from recotem.serving import metrics as _metrics
+from recotem.serving._header_utils import extract_algorithms, normalize_config_digest
+from recotem.serving._naming import dedup_stub_name
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from recotem.serving.routes import make_router
 from recotem.serving.watcher import (
@@ -156,7 +158,13 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         and dev_allow_unsigned is False.
     """
     # 1. Validate unsafe flags.
-    serve_config.validate_insecure_flags()
+    try:
+        serve_config.validate_insecure_flags()
+    except Exception:
+        # Emit security.posture before propagating so SIEM rules fire even
+        # when the flag validation rejects the configuration.
+        _emit_security_posture(serve_config, None)
+        raise
 
     # 2. Enforce host binding based on auth posture.
     serve_config.apply_auth_posture()
@@ -164,20 +172,29 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # 3. Build KeyRing (or None for dev-unsigned path).
     # Always emit security.posture even when key-ring construction fails so
     # SIEM rules that look for the posture event still fire and operators see
-    # the "missing" status in the log before the ConfigError propagates.
+    # the status in the log before the ConfigError propagates.
     _key_ring_build_exc: Exception | None = None
     key_ring: KeyRing | None = None
+    _key_ring_status: str | None = None
     try:
         key_ring = _build_key_ring(serve_config)
     except Exception as _exc:
         _key_ring_build_exc = _exc
-        logger.exception(
-            "signing_key_construction_failed",
-            error=str(_exc),
-        )
+        # Distinguish "keys not configured" (missing) from "keys provided but
+        # construction failed" (construction_failed).  The former is a routine
+        # operator configuration omission; the latter is a programming error or
+        # corrupt key material that warrants a different alert.
+        if not serve_config.signing_keys_raw and not serve_config.dev_allow_unsigned:
+            _key_ring_status = "missing"
+        else:
+            _key_ring_status = "construction_failed"
+            logger.exception(
+                "signing_key_construction_failed",
+                error=str(_exc),
+            )
 
     # 4. Emit security.posture log line (always, even on key-ring failure).
-    _emit_security_posture(serve_config, key_ring)
+    _emit_security_posture(serve_config, key_ring, key_ring_status=_key_ring_status)
 
     if _key_ring_build_exc is not None:
         raise _key_ring_build_exc
@@ -209,11 +226,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             stem = yaml_path.stem
             # Guard against duplicate stems in edge cases (two files whose stems
             # collide after the recipe name cannot be read).
-            stub_name = stem
-            _suffix = 0
-            while stub_name in _yaml_names_seen:
-                _suffix += 1
-                stub_name = f"{stem}_{_suffix}"
+            stub_name = dedup_stub_name(stem, lambda n: n in _yaml_names_seen)
             _yaml_names_seen[stub_name] = yaml_path.name
             yaml_failed_stub_paths[stub_name] = yaml_path
             logger.warning(
@@ -473,6 +486,8 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
                 status="validation_error",
                 latency_seconds=0.0,
             )
+        else:
+            _metrics.inc_validation_error_outside_verb()
         # Include request_id so 422 responses are correlatable with the
         # X-Request-ID header set by RequestIDMiddleware.  If the middleware
         # was bypassed (e.g. in a stripped-down test app), fall back to "".
@@ -560,6 +575,11 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             allow_credentials=False,
             allow_methods=["GET", "POST", "OPTIONS"],
             allow_headers=["*"],
+            expose_headers=[
+                "X-Request-ID",
+                "X-Recotem-Model-Version",
+                "X-Recotem-Items-Degraded",
+            ],
         )
 
     # Added last so it is outermost: ensures X-Request-ID is on every response.
@@ -610,7 +630,12 @@ def _build_key_ring(serve_config: ServeConfig) -> KeyRing | None:
 # ---------------------------------------------------------------------------
 
 
-def _emit_security_posture(serve_config: ServeConfig, key_ring: KeyRing | None) -> None:
+def _emit_security_posture(
+    serve_config: ServeConfig,
+    key_ring: KeyRing | None,
+    *,
+    key_ring_status: str | None = None,
+) -> None:
     """Emit the canonical security.posture log line.
 
     The ``signing_keys`` field is a list of ``{"kid", "fingerprint"}`` pairs
@@ -620,25 +645,31 @@ def _emit_security_posture(serve_config: ServeConfig, key_ring: KeyRing | None) 
     against the earlier schema.
 
     The signing_key_status field reflects:
-    - "configured"          — keys are present and the KeyRing was built.
-    - "dev_allow_unsigned"  — dev-unsigned mode, no keys required.
-    - "missing"             — keys absent and dev-unsigned not set; startup
-                                    will fail after this log line.
+    - "configured"           — keys are present and the KeyRing was built.
+    - "dev_allow_unsigned"   — dev-unsigned mode, no keys required.
+    - "missing"              — keys absent and dev-unsigned not set; startup
+                               will fail after this log line.
+    - "construction_failed"  — keys were provided but KeyRing construction
+                               raised an exception; startup will fail.
+
+    *key_ring_status* overrides the auto-derived value when provided (used
+    when the caller detects ``construction_failed`` before passing None as
+    *key_ring*).
     """
     if key_ring is not None:
         kids = key_ring.kids()
         signing_keys = [
             {"kid": kid, "fingerprint": key_ring.fingerprint(kid)} for kid in kids
         ]
-        signing_key_status = "configured"
+        signing_key_status = key_ring_status or "configured"
     elif serve_config.dev_allow_unsigned:
         kids = []
         signing_keys = []
-        signing_key_status = "dev_allow_unsigned"
+        signing_key_status = key_ring_status or "dev_allow_unsigned"
     else:
         kids = []
         signing_keys = []
-        signing_key_status = "missing"
+        signing_key_status = key_ring_status or "missing"
 
     logger.info(
         "security.posture",
@@ -840,7 +871,7 @@ def _try_load_artifact(
             _recipe_name = recipe.name
 
             def _on_row_error() -> None:
-                _metrics.inc_metadata_lookup_error(_recipe_name)
+                _metrics.inc_metadata_index_build_error(_recipe_name)
 
             metadata_index = build_metadata_index(
                 metadata_df, deny_set, on_row_error=_on_row_error
@@ -867,8 +898,8 @@ def _try_load_artifact(
         artifact_path=artifact_path,
         _loaded_marker=(marker, sha256),
         loaded_at_unix=time.time(),
-        config_digest=header_dict.get("config_digest", "") or "",
-        algorithms=header_dict.get("algorithms", []) or [],
+        config_digest=normalize_config_digest(header_dict.get("config_digest")) or "",
+        algorithms=extract_algorithms(header_dict),
     )
 
     logger.info(

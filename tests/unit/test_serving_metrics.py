@@ -184,6 +184,8 @@ def reset_metrics_registry(monkeypatch: pytest.MonkeyPatch):
             "recotem_v1_request_latency_seconds",
             "recotem_v1_batch_size",
             "recotem_v1_batch_element_errors",
+            "recotem_v1_metadata_degraded_items",
+            "recotem_v1_validation_errors_outside_verb",
         }
         for collector in list(REGISTRY._names_to_collectors.values()):
             describe = getattr(collector, "describe", None)
@@ -205,6 +207,8 @@ def reset_metrics_registry(monkeypatch: pytest.MonkeyPatch):
             "_V1_REQUEST_LATENCY",
             "_V1_BATCH_SIZE",
             "_V1_BATCH_ELEMENT_ERRORS",
+            "_V1_METADATA_DEGRADED_ITEMS",
+            "_V1_VALIDATION_ERRORS_OUTSIDE_VERB",
         ):
             setattr(_m, attr, None)
 
@@ -233,3 +237,27 @@ def test_observe_batch_size_records_histogram(reset_metrics_registry):
     out, _ = _m.generate_latest()
     text = out.decode()
     assert "recotem_v1_batch_size_bucket" in text
+
+
+@pytest.mark.skipif(
+    not _prometheus_available(),
+    reason="prometheus_client not installed in this environment",
+)
+def test_inc_metadata_degraded_items_coerces_unknown_kind(reset_metrics_registry):
+    """Unknown kind values must be coerced to 'unexpected' to prevent label
+    cardinality explosion; known kinds 'fallback' and 'dropped' pass through."""
+    _m.inc_metadata_degraded_items("r1", "recommend", "fallback", 2)
+    _m.inc_metadata_degraded_items("r1", "recommend", "dropped", 1)
+    _m.inc_metadata_degraded_items("r1", "recommend", "arbitrary_future_kind", 3)
+
+    out, _ = _m.generate_latest()
+    text = out.decode()
+
+    assert 'kind="fallback"' in text, "fallback kind must appear in output"
+    assert 'kind="dropped"' in text, "dropped kind must appear in output"
+    assert 'kind="unexpected"' in text, (
+        "arbitrary_future_kind must be coerced to 'unexpected'"
+    )
+    assert "arbitrary_future_kind" not in text, (
+        "raw unknown kind must not appear in Prometheus output"
+    )

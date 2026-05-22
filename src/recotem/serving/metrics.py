@@ -15,24 +15,27 @@ and the datasource-layer metrics defined in ``recotem._metrics_bigquery``
 
 Metric inventory (matches docs/operations.md):
 
-| Name                                           | Type       | Labels                  |
-|------------------------------------------------|------------|-------------------------|
-| ``recotem_v1_requests_total``                  | Counter    | recipe, verb, status    |
-| ``recotem_v1_request_latency_seconds``         | Histogram  | recipe, verb            |
-| ``recotem_v1_batch_size``                      | Histogram  | recipe, verb            |
-| ``recotem_v1_batch_element_errors_total``      | Counter    | recipe, verb, code      |
-| ``recotem_model_loaded``                       | Gauge      | recipe                  |
-| ``recotem_artifact_load_failures_total``       | Counter    | recipe, reason          |
-| ``recotem_active_recipes``                     | Gauge      | —                       |
-| ``recotem_swap_total``                         | Counter    | recipe, result          |
-| ``recotem_artifact_stat_failures_total``       | Counter    | recipe                  |
-| ``recotem_watcher_unhandled_errors_total``     | Counter    | —                       |
-| ``recotem_metadata_lookup_errors_total``       | Counter    | recipe                  |
-| ``recotem_recipe_rescan_errors_total``         | Counter    | recipe                  |
-| ``recotem_bigquery_storage_fallback_total``    | Counter    | reason                  |
-| ``recotem_recipes_dir_scan_failures_total``    | Counter    | error_class             |
-| ``recotem_recommender_layout_unexpected_total``| Counter    | recipe                  |
-| ``recotem_watcher_state_divergence_total``     | Counter    | —                       |
+| Name                                               | Type       | Labels                  |
+|----------------------------------------------------|------------|-------------------------|
+| ``recotem_v1_requests_total``                      | Counter    | recipe, verb, status    |
+| ``recotem_v1_request_latency_seconds``             | Histogram  | recipe, verb            |
+| ``recotem_v1_batch_size``                          | Histogram  | recipe, verb            |
+| ``recotem_v1_batch_element_errors_total``          | Counter    | recipe, verb, code      |
+| ``recotem_v1_metadata_degraded_items_total``       | Counter    | recipe, verb, kind      |
+| ``recotem_v1_validation_errors_outside_verb_total``| Counter    | —                       |
+| ``recotem_model_loaded``                           | Gauge      | recipe                  |
+| ``recotem_artifact_load_failures_total``           | Counter    | recipe, reason          |
+| ``recotem_active_recipes``                         | Gauge      | —                       |
+| ``recotem_swap_total``                             | Counter    | recipe, result          |
+| ``recotem_artifact_stat_failures_total``           | Counter    | recipe                  |
+| ``recotem_watcher_unhandled_errors_total``         | Counter    | —                       |
+| ``recotem_metadata_index_build_errors_total``      | Counter    | recipe                  |
+| ``recotem_metadata_serialization_errors_total``    | Counter    | recipe, verb            |
+| ``recotem_recipe_rescan_errors_total``             | Counter    | recipe                  |
+| ``recotem_bigquery_storage_fallback_total``        | Counter    | reason                  |
+| ``recotem_recipes_dir_scan_failures_total``        | Counter    | error_class             |
+| ``recotem_recommender_layout_unexpected_total``    | Counter    | recipe                  |
+| ``recotem_watcher_state_divergence_total``         | Counter    | —                       |
 
 Artifact-load reason taxonomy (``recotem_artifact_load_failures_total``):
 ``read``, ``parse``, ``hmac``, ``header_json``, ``deserialize``, ``metadata``,
@@ -60,7 +63,8 @@ _ACTIVE_RECIPES: Any = None
 _SWAP_TOTAL: Any = None
 _ARTIFACT_STAT_FAILURES: Any = None
 _WATCHER_UNHANDLED_ERRORS: Any = None
-_METADATA_LOOKUP_ERRORS: Any = None
+_METADATA_INDEX_BUILD_ERRORS: Any = None
+_METADATA_SERIALIZATION_ERRORS: Any = None
 _RECIPE_RESCAN_ERRORS: Any = None
 _RECOMMENDER_LAYOUT_UNEXPECTED: Any = None
 _WATCHER_STATE_DIVERGENCE: Any = None
@@ -88,7 +92,8 @@ def _ensure_initialized() -> None:
     global _MODEL_LOADED
     global _ARTIFACT_LOAD_FAILURES, _ACTIVE_RECIPES, _SWAP_TOTAL
     global _ARTIFACT_STAT_FAILURES, _WATCHER_UNHANDLED_ERRORS
-    global _METADATA_LOOKUP_ERRORS, _RECIPE_RESCAN_ERRORS
+    global _METADATA_INDEX_BUILD_ERRORS, _METADATA_SERIALIZATION_ERRORS
+    global _RECIPE_RESCAN_ERRORS
     global _RECOMMENDER_LAYOUT_UNEXPECTED, _WATCHER_STATE_DIVERGENCE
 
     if not _PROMETHEUS_AVAILABLE or _MODEL_LOADED is not None:
@@ -126,11 +131,17 @@ def _ensure_initialized() -> None:
         "Total unhandled exceptions in the watcher poll loop. "
         "A high rate here indicates a broken polling environment.",
     )
-    _METADATA_LOOKUP_ERRORS = Counter(
-        "recotem_metadata_lookup_errors_total",
-        "Metadata lookup errors during the v1 `:recommend` / "
-        "`:recommend-related` metadata join.",
+    _METADATA_INDEX_BUILD_ERRORS = Counter(
+        "recotem_metadata_index_build_errors_total",
+        "Per-row errors during build_metadata_index at artifact-load time "
+        "(load-time; watcher and startup paths).",
         ["recipe"],
+    )
+    _METADATA_SERIALIZATION_ERRORS = Counter(
+        "recotem_metadata_serialization_errors_total",
+        "Per-item metadata serialization failures during request-time "
+        "response building (request-time; router path).",
+        ["recipe", "verb"],
     )
     _RECIPE_RESCAN_ERRORS = Counter(
         "recotem_recipe_rescan_errors_total",
@@ -141,7 +152,8 @@ def _ensure_initialized() -> None:
     _RECOMMENDER_LAYOUT_UNEXPECTED = Counter(
         "recotem_recommender_layout_unexpected_total",
         "Total occurrences of an unexpected recommender internal layout "
-        "(AttributeError when accessing _mapper.item_id_to_index). "
+        "(AttributeError when accessing _mapper.user_id_to_index or "
+        "_mapper.item_id_to_index). "
         "A non-zero rate indicates an irspack API incompatibility.",
         ["recipe"],
     )
@@ -236,21 +248,30 @@ def inc_watcher_unhandled_error() -> None:
     _WATCHER_UNHANDLED_ERRORS.inc()
 
 
-def inc_metadata_lookup_error(recipe: str) -> None:
-    """Increment the per-recipe metadata-lookup-errors counter.
+def inc_metadata_index_build_error(recipe: str) -> None:
+    """Increment the per-recipe metadata-index-build-errors counter.
 
     Called at artifact-load time when ``build_metadata_index`` encounters
     a row that cannot be flattened — e.g. ``AttributeError`` from a
     non-unique index returning a DataFrame instead of a Series, or
-    ``TypeError`` from a non-string column name. The v1 router itself no
-    longer performs runtime metadata lookups (the index is pre-flattened
-    at load time), so this counter surfaces load-side metadata issues
-    rather than per-request ones.
+    ``TypeError`` from a non-string column name.
     """
     _ensure_initialized()
-    if _METADATA_LOOKUP_ERRORS is None:
+    if _METADATA_INDEX_BUILD_ERRORS is None:
         return
-    _METADATA_LOOKUP_ERRORS.labels(recipe=recipe).inc()
+    _METADATA_INDEX_BUILD_ERRORS.labels(recipe=recipe).inc()
+
+
+def inc_metadata_serialization_error(recipe: str, verb: str) -> None:
+    """Increment the per-recipe/verb metadata-serialization-errors counter.
+
+    Called at request time when ``RecommendItem.model_validate`` fails for
+    a single item during the metadata-join step in the router.
+    """
+    _ensure_initialized()
+    if _METADATA_SERIALIZATION_ERRORS is None:
+        return
+    _METADATA_SERIALIZATION_ERRORS.labels(recipe=recipe, verb=verb).inc()
 
 
 def inc_recipe_rescan_error(recipe: str) -> None:
@@ -301,6 +322,8 @@ _V1_REQUEST_COUNTER: Any = None
 _V1_REQUEST_LATENCY: Any = None
 _V1_BATCH_SIZE: Any = None
 _V1_BATCH_ELEMENT_ERRORS: Any = None
+_V1_METADATA_DEGRADED_ITEMS: Any = None
+_V1_VALIDATION_ERRORS_OUTSIDE_VERB: Any = None
 
 
 def _ensure_v1_initialized() -> None:
@@ -311,6 +334,7 @@ def _ensure_v1_initialized() -> None:
     """
     global _V1_REQUEST_COUNTER, _V1_REQUEST_LATENCY, _V1_BATCH_SIZE
     global _V1_BATCH_ELEMENT_ERRORS
+    global _V1_METADATA_DEGRADED_ITEMS, _V1_VALIDATION_ERRORS_OUTSIDE_VERB
     if _V1_REQUEST_COUNTER is not None:
         return
     if not metrics_enabled():
@@ -339,6 +363,18 @@ def _ensure_v1_initialized() -> None:
         "still records the HTTP-200 response — this counter surfaces the "
         "per-element failures that the outer counter would otherwise hide.",
         ["recipe", "verb", "code"],
+    )
+    _V1_METADATA_DEGRADED_ITEMS = Counter(
+        "recotem_v1_metadata_degraded_items_total",
+        "Items that could not be fully enriched with metadata during response "
+        "building. kind=fallback means item_id/score-only fallback was used; "
+        "kind=dropped means the item was omitted entirely.",
+        ["recipe", "verb", "kind"],
+    )
+    _V1_VALIDATION_ERRORS_OUTSIDE_VERB = Counter(
+        "recotem_v1_validation_errors_outside_verb_total",
+        "422 validation errors on non-v1-verb paths (e.g. /v1/recipes listing "
+        "with bad query parameters).",
     )
 
 
@@ -379,6 +415,41 @@ def inc_batch_element_error(recipe: str, verb: str, code: str) -> None:
     if _V1_BATCH_ELEMENT_ERRORS is None:
         return
     _V1_BATCH_ELEMENT_ERRORS.labels(recipe=recipe, verb=verb, code=code).inc()
+
+
+_DEGRADED_ITEM_KINDS: frozenset[str] = frozenset({"fallback", "dropped", "unexpected"})
+
+
+def inc_metadata_degraded_items(
+    recipe: str, verb: str, kind: str, count: int = 1
+) -> None:
+    """Increment the metadata-degraded-items counter.
+
+    *kind* must be ``"fallback"`` (item served with item_id/score only) or
+    ``"dropped"`` (item omitted entirely because even bare-item validation
+    failed).  Any value outside ``_DEGRADED_ITEM_KINDS`` is coerced to
+    ``"unexpected"`` to prevent accidental label cardinality explosion.
+    Called from the router's ``_build_items`` when metadata enrichment degrades
+    for one or more items.
+    """
+    _ensure_v1_initialized()
+    if _V1_METADATA_DEGRADED_ITEMS is None:
+        return
+    label = kind if kind in _DEGRADED_ITEM_KINDS else "unexpected"
+    _V1_METADATA_DEGRADED_ITEMS.labels(recipe=recipe, verb=verb, kind=label).inc(count)
+
+
+def inc_validation_error_outside_verb() -> None:
+    """Increment the counter for 422 errors on non-v1-verb paths.
+
+    Called from ``_validation_error_handler`` when the request path does not
+    match ``_V1_VERB_PATH_RE`` so operators have a metric for validation
+    failures on e.g. ``/v1/recipes`` list endpoints.
+    """
+    _ensure_v1_initialized()
+    if _V1_VALIDATION_ERRORS_OUTSIDE_VERB is None:
+        return
+    _V1_VALIDATION_ERRORS_OUTSIDE_VERB.inc()
 
 
 def generate_latest() -> tuple[bytes, str]:

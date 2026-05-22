@@ -279,18 +279,19 @@ Additional events emitted by the watcher, recipe loader, and size-cap helper tha
 | `recommender_layout_unexpected` | WARN | `serving/routes.py` | `_any_seed_known` encountered an `AttributeError` on `recommender._mapper.item_id_to_index`. The request is treated as `INTERNAL_ERROR`. Increment counter: `recotem_recommender_layout_unexpected_total`. |
 | `set_load_error_no_entry` | WARN | `serving/watcher.py` | The watcher tried to mark a load error on a recipe with no registry entry. Counter: `recotem_watcher_state_divergence_total`. |
 | `sidecar_disappeared` | WARN | `serving/watcher.py` | A `.sha256` sidecar file was present on the previous poll but raised ENOENT on the current read — emitted once per disappearance transition. |
-| `metadata_index_row_error` | WARN | `metadata/loader.py` | A per-row exception occurred during `build_metadata_index`. The row is skipped. Counted by `recotem_metadata_lookup_errors_total{recipe}`. |
+| `metadata_index_row_error` | WARN | `metadata/loader.py` | A per-row exception occurred during `build_metadata_index`. The row is skipped. Counted by `recotem_metadata_index_build_errors_total{recipe}`. |
 
 The `train_error` event uses `name=` (not `recipe=`) for the recipe name field and includes `kid=` when the signing kid is known, matching the `train_done` event's field names.
 
-> **Note (v1 change).** The alpha-era per-response header
-> `X-Recotem-Metadata-Degraded` is no longer emitted.  Metadata enrichment
-> now happens at artifact-load time, not per-request.  Use the
-> `recotem_metadata_lookup_errors_total{recipe}` counter for load-time
-> metadata join failures.  Per-request metadata failures are not surfaced
-> separately in v1.  See
-> [docs/migration-v1.md](migration-v1.md#dropped-without-replacement) for
-> details.
+> **Note.** Metadata enrichment is indexed at artifact-load time.
+> Use `recotem_metadata_index_build_errors_total{recipe}` for load-time
+> per-row build failures and `recotem_metadata_serialization_errors_total{recipe,verb}`
+> for request-time per-item serialization failures.  When per-item
+> metadata enrichment fails at request time, the item is served with
+> `item_id` and `score` only (fallback) or dropped; the
+> `X-Recotem-Items-Degraded` response header indicates how many items
+> were degraded, and `recotem_v1_metadata_degraded_items_total{kind}` counts
+> them by kind (`fallback` / `dropped`).
 
 ## Concurrent training and persistent search storage
 
@@ -461,13 +462,16 @@ Available metrics:
 | `recotem_v1_request_latency_seconds` | Histogram | `recipe`, `verb` | per-verb end-to-end latency |
 | `recotem_v1_batch_size` | Histogram | `recipe`, `verb` | observed batch fan-out (only for `batch-recommend` / `batch-recommend-related`) |
 | `recotem_v1_batch_element_errors_total` | Counter | `recipe`, `verb`, `code` | per-element errors inside batch HTTP-200 responses; `code` ∈ {`UNKNOWN_USER`, `UNKNOWN_SEED_ITEMS`, `NO_CANDIDATES`, `VALIDATION_ERROR`, `INTERNAL_ERROR`} |
+| `recotem_v1_metadata_degraded_items_total` | Counter | `recipe`, `verb`, `kind` | items served with degraded metadata; `kind` ∈ {`fallback` (item_id/score only), `dropped` (omitted entirely)} |
+| `recotem_v1_validation_errors_outside_verb_total` | Counter | — | 422 errors on non-inference paths (e.g. `/v1/recipes` list with bad query) |
 | `recotem_model_loaded` | Gauge | `recipe` | 1 if the recipe is currently loaded |
 | `recotem_artifact_load_failures_total` | Counter | `recipe`, `reason` | artifact-load failures since process start; `reason` ∈ {`read`, `parse`, `hmac`, `header_json`, `deserialize`, `metadata`, `yaml`, `unexpected`, `dir_scan`} |
 | `recotem_active_recipes` | Gauge | — | total recipes in the registry |
 | `recotem_swap_total` | Counter | `recipe`, `result` | hot-swap attempts (`ok` / `error`) |
 | `recotem_artifact_stat_failures_total` | Counter | `recipe` | watcher stat() failures |
 | `recotem_watcher_unhandled_errors_total` | Counter | — | watcher loop crashes |
-| `recotem_metadata_lookup_errors_total` | Counter | `recipe` | per-row errors during `build_metadata_index` at artifact-load time |
+| `recotem_metadata_index_build_errors_total` | Counter | `recipe` | per-row errors during `build_metadata_index` at artifact-load time (load-time) |
+| `recotem_metadata_serialization_errors_total` | Counter | `recipe`, `verb` | per-item metadata serialization failures during response building (request-time) |
 | `recotem_recipe_rescan_errors_total` | Counter | `recipe` | recipe rescan failures |
 | `recotem_bigquery_storage_fallback_total` | Counter | `reason` | BQ Storage Read API fell back to REST |
 | `recotem_recipes_dir_scan_failures_total` | Counter | `error_class` | recipes-dir scan failures |
@@ -576,9 +580,8 @@ Recotem follows semver. Within a major version (`2.x`):
 - The artifact format version is `1`. Older readers refuse newer formats
   with `unsupported format version`. When the format bumps, retrain after
   upgrading the writer; readers can be upgraded first.
-- The FQCN allow-list is frozen per release; changes appear in the
-  CHANGELOG. Re-train if your artifacts encode a class that has been
-  removed.
+- The FQCN allow-list is frozen per release. Re-train if your artifacts
+  encode a class that has been removed.
 
 For zero-downtime upgrade of the serve fleet, deploy new pods with both
 the old and new signing kids configured (rotation-style), let new pods

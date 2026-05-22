@@ -105,11 +105,8 @@ Authenticated.  Returns `{status, recipes: {name: health}}`.  Same 200
 Prometheus exposition.  Excluded from OpenAPI.  Requires
 `RECOTEM_METRICS_ENABLED` to be truthy at startup.
 
-**Requires `X-API-Key`** — unlike the alpha `/metrics` endpoint, which was
-unauthenticated.  Configure your Prometheus scraper with an `authorization`
-block or `http_headers` before upgrading.  See
-[docs/migration-v1.md](migration-v1.md#v1metrics-now-requires-x-api-key) for
-the scrape-config snippet.
+**Requires `X-API-Key`** — configure your Prometheus scraper with an
+`authorization` block or `http_headers` accordingly.
 
 ## Headers
 
@@ -120,6 +117,13 @@ the scrape-config snippet.
   always agree.
 - `X-Recotem-Model-Version` — present on every successful recommend
   response; mirrors `model_version` in the body.
+- `X-Recotem-Items-Degraded` — present on `:recommend` and
+  `:recommend-related` responses only when one or more items could not be
+  fully serialized with metadata.  The value is the total count of items
+  that fell back to bare `{item_id, score}` (fallback) or were omitted
+  entirely (dropped) due to metadata serialization failures.  Absent when
+  all items serialize cleanly.  **Not sent** on `:batch-recommend` or
+  `:batch-recommend-related` endpoints.
 
 ## Error body shape
 

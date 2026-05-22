@@ -14,6 +14,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from recotem.serving.registry import ModelEntry, ModelRegistry
@@ -326,3 +327,280 @@ def test_recommend_related_strips_denied_fields() -> None:
         )
         assert "title" in item
         assert "category" in item
+
+
+# ---------------------------------------------------------------------------
+# C1: _build_items fallback / drop / X-Recotem-Items-Degraded header
+# ---------------------------------------------------------------------------
+
+
+def test_build_items_fallback_path_via_monkeypatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario A (fallback): first model_validate (full fields) raises
+    ValidationError; second call (bare item_id/score) succeeds.
+
+    Asserts:
+    - Response is 200.
+    - X-Recotem-Items-Degraded header equals the fallback count.
+    - recotem_v1_metadata_degraded_items_total{kind="fallback"} increments.
+    - metadata_serialization_failed log event is captured.
+    - recotem_metadata_serialization_errors_total{recipe,verb} increments.
+    """
+    import structlog.testing
+    from pydantic import ValidationError
+
+    import recotem.serving.metrics as _metrics_mod
+    from recotem.serving.schemas import RecommendItem
+
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [
+        ("i1", 0.9),
+        ("i2", 0.5),
+    ]
+    meta_index = {"i1": {"title": "Widget A"}, "i2": {"title": "Widget B"}}
+    entry = ModelEntry(
+        name="demo",
+        recommender=rec,
+        header={},
+        kid="test",
+        metadata_df=None,
+        metadata_index=meta_index,
+        loaded=True,
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
+        loaded_at_unix=1747800000.0,
+    )
+    client = _make_client(entry)
+
+    original_validate = RecommendItem.model_validate
+    call_state: dict[str, int] = {}
+
+    def _failing_first_with_title(data, *args, **kwargs):
+        key = (data.get("item_id"), "has_title" if "title" in data else "bare")
+        if key[0] == "i1" and key[1] == "has_title":
+            call_state.setdefault("fail_count", 0)
+            call_state["fail_count"] += 1
+            raise original_validate(
+                {"item_id": "i1", "score": float("inf")}  # triggers allow_inf_nan=False
+            ).__class__  # won't reach here — need real ValidationError below
+
+    del _failing_first_with_title
+
+    first_call: dict[str, bool] = {}
+
+    def _patched_validate(data, *args, **kwargs):
+        if isinstance(data, dict) and data.get("item_id") == "i1" and "title" in data:
+            first_call["seen"] = True
+            try:
+                return original_validate({"item_id": "i1", "score": float("inf")})
+            except ValidationError as exc:
+                raise exc
+        return original_validate(data, *args, **kwargs)
+
+    monkeypatch.setattr(
+        RecommendItem, "model_validate", staticmethod(_patched_validate)
+    )
+
+    degraded_calls: list[tuple[str, str, str, int]] = []
+    real_inc = _metrics_mod.inc_metadata_degraded_items
+
+    def _spy_degraded(recipe, verb, kind, count=1):
+        degraded_calls.append((recipe, verb, kind, count))
+
+    monkeypatch.setattr(_metrics_mod, "inc_metadata_degraded_items", _spy_degraded)
+
+    serialization_calls: list[tuple[str, str]] = []
+    real_serialization = _metrics_mod.inc_metadata_serialization_error
+
+    def _spy_serialization(recipe, verb):
+        serialization_calls.append((recipe, verb))
+
+    monkeypatch.setattr(
+        _metrics_mod, "inc_metadata_serialization_error", _spy_serialization
+    )
+
+    with structlog.testing.capture_logs() as cap:
+        r = client.post(
+            "/v1/recipes/demo:recommend", json={"user_id": "u1", "limit": 2}
+        )
+
+    assert r.status_code == 200, r.text
+    degraded_val = r.headers.get("x-recotem-items-degraded")
+    assert degraded_val is not None, (
+        "X-Recotem-Items-Degraded must be set when fallback occurs"
+    )
+    assert int(degraded_val) >= 1, (
+        f"X-Recotem-Items-Degraded must be >= 1; got {degraded_val!r}"
+    )
+
+    fallback_events = [e for e in degraded_calls if e[2] == "fallback"]
+    assert fallback_events, (
+        f"inc_metadata_degraded_items must be called with kind='fallback'; got {degraded_calls!r}"
+    )
+
+    log_events = [e for e in cap if e.get("event") == "metadata_serialization_failed"]
+    assert log_events, (
+        f"metadata_serialization_failed log event must be emitted; got {[e.get('event') for e in cap]!r}"
+    )
+
+    assert serialization_calls, (
+        f"inc_metadata_serialization_error must be called; got {serialization_calls!r}"
+    )
+
+
+def test_build_items_dropped_path_via_monkeypatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario B (dropped): both model_validate calls (full and bare) raise
+    ValidationError for a specific item.
+
+    Asserts:
+    - Response is 200 (other items served).
+    - X-Recotem-Items-Degraded header equals the dropped count.
+    - recotem_v1_metadata_degraded_items_total{kind="dropped"} increments.
+    - metadata_serialization_failed log event is captured.
+    - recotem_metadata_serialization_errors_total{recipe,verb} increments.
+    """
+    import structlog.testing
+    from pydantic import ValidationError
+
+    import recotem.serving.metrics as _metrics_mod
+    from recotem.serving.schemas import RecommendItem
+
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [
+        ("bad-item", 0.9),
+        ("i2", 0.5),
+    ]
+    meta_index: dict[str, dict] = {}
+    entry = ModelEntry(
+        name="demo",
+        recommender=rec,
+        header={},
+        kid="test",
+        metadata_df=None,
+        metadata_index=meta_index,
+        loaded=True,
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
+        loaded_at_unix=1747800000.0,
+    )
+    client = _make_client(entry)
+
+    original_validate = RecommendItem.model_validate
+
+    def _patched_validate(data, *args, **kwargs):
+        if isinstance(data, dict) and data.get("item_id") == "bad-item":
+            try:
+                return original_validate({"item_id": "bad-item", "score": float("inf")})
+            except ValidationError as exc:
+                raise exc
+        return original_validate(data, *args, **kwargs)
+
+    monkeypatch.setattr(
+        RecommendItem, "model_validate", staticmethod(_patched_validate)
+    )
+
+    degraded_calls: list[tuple[str, str, str, int]] = []
+
+    def _spy_degraded(recipe, verb, kind, count=1):
+        degraded_calls.append((recipe, verb, kind, count))
+
+    monkeypatch.setattr(_metrics_mod, "inc_metadata_degraded_items", _spy_degraded)
+
+    serialization_calls: list[tuple[str, str]] = []
+
+    def _spy_serialization(recipe, verb):
+        serialization_calls.append((recipe, verb))
+
+    monkeypatch.setattr(
+        _metrics_mod, "inc_metadata_serialization_error", _spy_serialization
+    )
+
+    with structlog.testing.capture_logs() as cap:
+        r = client.post(
+            "/v1/recipes/demo:recommend", json={"user_id": "u1", "limit": 2}
+        )
+
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    item_ids = [it["item_id"] for it in items]
+    assert "bad-item" not in item_ids, "Dropped item must not appear in response"
+    assert "i2" in item_ids, "Valid item must still be served"
+
+    degraded_val = r.headers.get("x-recotem-items-degraded")
+    assert degraded_val is not None, (
+        "X-Recotem-Items-Degraded must be set when drop occurs"
+    )
+    assert int(degraded_val) >= 1
+
+    dropped_events = [e for e in degraded_calls if e[2] == "dropped"]
+    assert dropped_events, (
+        f"inc_metadata_degraded_items must be called with kind='dropped'; got {degraded_calls!r}"
+    )
+
+    log_events = [e for e in cap if e.get("event") == "metadata_serialization_failed"]
+    assert log_events, (
+        f"metadata_serialization_failed log event must be emitted; got {[e.get('event') for e in cap]!r}"
+    )
+
+    assert serialization_calls, (
+        f"inc_metadata_serialization_error must be called; got {serialization_calls!r}"
+    )
+
+
+def test_build_items_fallback_and_degraded_header() -> None:
+    """_build_items with no degradation must not set X-Recotem-Items-Degraded.
+
+    This confirms the "all items OK" baseline is clean before the degradation
+    scenarios in the monkeypatch tests above.
+    """
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [
+        ("i1", 0.9),
+        ("i2", 0.5),
+    ]
+    entry = ModelEntry(
+        name="demo",
+        recommender=rec,
+        header={},
+        kid="test",
+        metadata_df=None,
+        metadata_index=None,
+        loaded=True,
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
+        loaded_at_unix=1747800000.0,
+    )
+    client = _make_client(entry)
+    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1", "limit": 2})
+
+    assert r.status_code == 200, r.text
+    assert "x-recotem-items-degraded" not in r.headers, (
+        "No degradation must not set X-Recotem-Items-Degraded"
+    )
+    assert len(r.json()["items"]) == 2
+
+
+def test_build_items_no_degraded_header_when_all_items_ok() -> None:
+    """When all items serialize cleanly, X-Recotem-Items-Degraded must not
+    be set on the response."""
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    meta_index = {"i1": {"title": "OK Item"}}
+    entry = ModelEntry(
+        name="demo",
+        recommender=rec,
+        header={},
+        kid="test",
+        metadata_df=None,
+        metadata_index=meta_index,
+        loaded=True,
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
+        loaded_at_unix=1747800000.0,
+    )
+    client = _make_client(entry)
+    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
+
+    assert r.status_code == 200, r.text
+    assert "x-recotem-items-degraded" not in r.headers, (
+        "X-Recotem-Items-Degraded must NOT be present when all items are OK"
+    )

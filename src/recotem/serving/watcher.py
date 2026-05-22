@@ -41,6 +41,8 @@ from recotem._log_safe import format_kid_for_log as _format_kid_for_log
 from recotem._metrics_watcher import inc_recipes_dir_scan_failure as _inc_scan_failure
 from recotem.artifact.format import ArtifactError
 from recotem.serving import metrics as _metrics
+from recotem.serving._header_utils import extract_algorithms, normalize_config_digest
+from recotem.serving._naming import dedup_stub_name
 from recotem.serving.registry import ModelEntry, ModelRegistry
 
 if TYPE_CHECKING:
@@ -187,6 +189,14 @@ class _RecipeWatchState:
     #: so subsequent polls skip the sidecar check rather than flooding logs
     #: with the same warning on every poll cycle (M7).
     sidecar_unsupported: bool = False
+    #: The yaml_mtime at which sidecar_unsupported was set.  When the recipe
+    #: YAML changes (yaml_mtime differs from this value) the sidecar_unsupported
+    #: flag is cleared so the new configuration gets a fresh evaluation (C4).
+    sidecar_unsupported_at_mtime: float | None = None
+    #: Counter for consecutive transient OSErrors on sidecar reads.  After
+    #: 3 consecutive non-ENOENT OSErrors the watcher skips sidecar checks until
+    #: the next mtime change to avoid triggering full reloads indefinitely (m7).
+    sidecar_io_error_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -423,13 +433,10 @@ class ArtifactWatcher(threading.Thread):
         error:
             The exception raised by load_recipe().
         """
-        stub_name = yaml_file.stem
-        # De-duplicate against existing names — use a suffix if needed.
-        _suffix = 0
-        base = stub_name
-        while stub_name in self._states or self._registry.get(stub_name) is not None:
-            _suffix += 1
-            stub_name = f"{base}_{_suffix}"
+        stub_name = dedup_stub_name(
+            yaml_file.stem,
+            lambda n: n in self._states or self._registry.get(n) is not None,
+        )
 
         error_msg = f"YAML parse failed: {error}"
         stub = ModelEntry(
@@ -882,7 +889,7 @@ class ArtifactWatcher(threading.Thread):
                 exc_type=type(exc).__name__,
             )
             self._record_load_failure(
-                name, f"unexpected read error: {exc}", reason="read"
+                name, f"unexpected read error: {exc}", reason="unexpected"
             )
             return
 
@@ -949,6 +956,10 @@ class ArtifactWatcher(threading.Thread):
                 exc_type=type(exc).__name__,
                 error=str(exc),
             )
+            # Reset the deserialize-streak — an unrelated exception must not
+            # continue accumulating a streak that was tracking a different
+            # failure class (M9).
+            self._post_hmac_failure_streak.pop(name, None)
             self._record_load_failure(
                 name, f"{type(exc).__name__}: {exc}", reason="unexpected"
             )
@@ -1036,7 +1047,7 @@ class ArtifactWatcher(threading.Thread):
                 _recipe_name = name
 
                 def _on_row_error() -> None:
-                    _metrics.inc_metadata_lookup_error(_recipe_name)
+                    _metrics.inc_metadata_index_build_error(_recipe_name)
 
                 metadata_index = build_metadata_index(
                     metadata_df, deny_set, on_row_error=_on_row_error
@@ -1058,8 +1069,9 @@ class ArtifactWatcher(threading.Thread):
             last_load_error=None,
             artifact_path=artifact_path,
             loaded_at_unix=_time.time(),
-            config_digest=header_dict.get("config_digest", "") or "",
-            algorithms=header_dict.get("algorithms", []) or [],
+            config_digest=normalize_config_digest(header_dict.get("config_digest"))
+            or "",
+            algorithms=extract_algorithms(header_dict),
         )
 
     def _mark_error(self, name: str, error: str) -> None:
@@ -1139,7 +1151,11 @@ def _classify_artifact_error(err_msg: str) -> str:
         or "version" in lower
     ):
         return "parse"
-    return "parse"
+    logger.warning(
+        "artifact_error_unclassified",
+        message=err_msg[:200],
+    )
+    return "unexpected"
 
 
 def _extract_kid_safe(data: bytes) -> tuple[str, str | None]:
@@ -1150,10 +1166,9 @@ def _extract_kid_safe(data: bytes) -> tuple[str, str | None]:
     - On success: ``(sanitised_kid, None)`` — *sanitised_kid* is already
       processed through ``_format_kid_for_log`` (length-capped, non-printables
       hex-escaped).
-    - On structural failure: ``("\\x00<unparseable>", reason)`` — the sentinel
-      contains a ``\\x00`` byte that ``_format_kid_for_log`` renders as
-      ``\\x00``, making it impossible to collide with a valid UTF-8 kid; any
-      ``KeyRing`` lookup will reject it immediately.
+    - On structural failure: ``("<extract_failed>", reason)`` — the sentinel
+      is a fixed string that makes it impossible to collide with a valid UTF-8
+      kid; any ``KeyRing`` lookup will reject it immediately.
 
     *reason* is one of ``"too_short"``, ``"kid_len_out_of_range"``,
     ``"truncated"``, or ``"decode_error"``.
@@ -1166,7 +1181,7 @@ def _extract_kid_safe(data: bytes) -> tuple[str, str | None]:
     """
     from recotem.artifact.format import FIXED_PREFIX_SIZE, MAX_KID_LEN
 
-    _UNPARSEABLE_SENTINEL = "\x00<unparseable>"
+    _UNPARSEABLE_SENTINEL = "<extract_failed>"
 
     try:
         if len(data) < FIXED_PREFIX_SIZE:
@@ -1218,11 +1233,32 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
         ``False`` if unchanged or absent (let the outer marker comparison decide).
     """
     artifact_path = state.artifact_path
+
     # Short-circuit: if a previous poll already determined that sidecar
-    # construction is unsupported for this path, skip straight to the full
-    # stat path rather than re-logging the same warning every poll cycle (M7).
+    # construction is unsupported for this path, re-evaluate only if the
+    # recipe YAML mtime has changed since the flag was set (C4).
     if state.sidecar_unsupported:
-        return False
+        import os as _os
+
+        yaml_mtime: float | None = None
+        try:
+            recipe_yaml = getattr(state.recipe, "_yaml_path", None) or getattr(
+                state.recipe, "yaml_path", None
+            )
+            if recipe_yaml is not None:
+                yaml_mtime = _os.stat(recipe_yaml).st_mtime
+        except OSError:
+            pass
+        if (
+            yaml_mtime is None
+            or state.sidecar_unsupported_at_mtime is None
+            or yaml_mtime == state.sidecar_unsupported_at_mtime
+        ):
+            return False
+        # YAML mtime changed — clear the flag and re-evaluate.
+        state.sidecar_unsupported = False
+        state.sidecar_unsupported_at_mtime = None
+
     # Only meaningful for local-FS paths where we can form a sibling sidecar.
     # For remote URIs (s3://, gs://) this is a no-op; the marker comparison
     # (ETag / mtime) is already cheap enough.
@@ -1234,14 +1270,28 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
             path=str(artifact_path),
             exc_type=type(exc).__name__,
         )
+        import os as _os2
+
+        yaml_mtime2: float | None = None
+        try:
+            recipe_yaml2 = getattr(state.recipe, "_yaml_path", None) or getattr(
+                state.recipe, "yaml_path", None
+            )
+            if recipe_yaml2 is not None:
+                yaml_mtime2 = _os2.stat(recipe_yaml2).st_mtime
+        except OSError:
+            pass
         state.sidecar_unsupported = True
+        state.sidecar_unsupported_at_mtime = yaml_mtime2
         return False
 
     if not sidecar_path.exists():
+        state.sidecar_io_error_count = 0
         return False
 
     try:
         sidecar_contents = sidecar_path.read_text(encoding="utf-8")
+        state.sidecar_io_error_count = 0
     except OSError as exc:
         # Can't read the sidecar — be conservative and let the full stat run.
         # Distinguish ENOENT (sidecar was deleted between exists() and read_text)
@@ -1266,14 +1316,40 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
                 )
             # ENOENT: sidecar deleted between exists() and read_text — treat as
             # absent (no change signal); let the full-stat path decide.
+            state.sidecar_io_error_count = 0
             return False
         else:
+            state.sidecar_io_error_count += 1
             logger.warning(
                 "sidecar_read_failed",
                 path=str(sidecar_path),
                 error_class=type(exc).__name__,
                 errno=exc.errno,
             )
+            if state.sidecar_io_error_count >= 3:
+                # After 3 consecutive non-ENOENT errors, stop triggering full
+                # reloads on every tick to avoid a reload storm from a
+                # persistently unreadable sidecar (m7).  The flag is cleared
+                # when the next yaml_mtime change is detected (C4 logic above).
+                import os as _os3
+
+                yaml_mtime3: float | None = None
+                try:
+                    recipe_yaml3 = getattr(state.recipe, "_yaml_path", None) or getattr(
+                        state.recipe, "yaml_path", None
+                    )
+                    if recipe_yaml3 is not None:
+                        yaml_mtime3 = _os3.stat(recipe_yaml3).st_mtime
+                except OSError:
+                    pass
+                state.sidecar_unsupported = True
+                state.sidecar_unsupported_at_mtime = yaml_mtime3
+                state.sidecar_io_error_count = 0
+                logger.warning(
+                    "sidecar_io_errors_suppressed",
+                    path=str(sidecar_path),
+                )
+                return False
             # Non-ENOENT OSError (e.g. PermissionError, I/O error): trigger a
             # reload so that if the main artifact read also fails, _record_load_failure
             # surfaces the problem in /health (I-10).

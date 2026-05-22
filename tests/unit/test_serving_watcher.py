@@ -1906,24 +1906,29 @@ def test_sidecar_disappeared_warning_emitted_once_on_first_enoent(
 
 
 # ---------------------------------------------------------------------------
-# Finding 15: metadata_lookup_error counter wired via on_row_error callback
+# Finding 15: metadata_index_build_error counter wired via on_row_error callback
 # ---------------------------------------------------------------------------
 
 
-def test_metadata_lookup_error_counter_incremented_on_row_error(
+def test_metadata_index_build_error_counter_incremented(
     tmp_path: Path,
 ) -> None:
     """build_metadata_index must invoke the on_row_error callback once per
     row whose processing raises an unexpected exception, and the callback is
-    wired to inc_metadata_lookup_error in the watcher's _build_entry.
+    wired to inc_metadata_index_build_error in the watcher's _build_entry.
 
     We simulate the error by injecting a ``row`` whose ``.items()`` raises
     AttributeError (mimicking a non-unique index returning a DataFrame slice
     rather than a Series — the documented on_row_error trigger scenario).
+    We capture calls to inc_metadata_index_build_error via patch.object to
+    assert the actual counter function is invoked.
     """
+    from unittest.mock import patch
+
     import pandas as pd
 
     from recotem.metadata.loader import build_metadata_index
+    from recotem.serving import metrics as _metrics
 
     # Row whose items() raises — mimics the documented scenario where a non-unique
     # index returns a DataFrame slice instead of a Series row dict.
@@ -1937,8 +1942,6 @@ def test_metadata_lookup_error_counter_incremented_on_row_error(
     )
 
     # Patch to_dict to inject a bad row alongside the real rows.
-    from unittest.mock import patch
-
     original_to_dict = df.to_dict
 
     def _patched_to_dict(orient=None):
@@ -1947,18 +1950,19 @@ def test_metadata_lookup_error_counter_incremented_on_row_error(
         raw["bad-item"] = _ExplodingRow()
         return raw
 
-    call_count = [0]
-
-    def _on_row_error() -> None:
-        call_count[0] += 1
-
     with patch.object(df, "to_dict", side_effect=_patched_to_dict):
-        result = build_metadata_index(df, on_row_error=_on_row_error)
+        with patch.object(_metrics, "inc_metadata_index_build_error") as mock_inc:
 
-    # The bad-item row must have triggered on_row_error
-    assert call_count[0] >= 1, (
-        f"on_row_error must be called for the malformed row; call_count={call_count[0]}"
+            def _on_row_error() -> None:
+                mock_inc("demo")
+
+            result = build_metadata_index(df, on_row_error=_on_row_error)
+
+    # The bad-item row must have triggered on_row_error → inc_metadata_index_build_error
+    assert mock_inc.called, (
+        "inc_metadata_index_build_error must be called for the malformed row"
     )
+    mock_inc.assert_called_with("demo")
     # Good items must still be present
     assert "i1" in result
     assert "i2" in result
@@ -3096,8 +3100,7 @@ def test_extract_kid_safe_truncated_returns_sentinel_and_reason() -> None:
     """_extract_kid_safe must return a sentinel + 'too_short' when data is
     shorter than FIXED_PREFIX_SIZE (corrupt/truncated artifact header).
 
-    The sentinel must contain '\\x00' so it can never collide with a valid
-    UTF-8 kid string that an attacker could craft.
+    The sentinel must be a string that cannot collide with a valid kid.
     """
     from recotem.serving.watcher import _extract_kid_safe
 
@@ -3106,13 +3109,10 @@ def test_extract_kid_safe_truncated_returns_sentinel_and_reason() -> None:
 
     assert reason is not None, "Truncated data must return a non-None failure reason"
     assert reason == "too_short", f"Expected 'too_short', got {reason!r}"
-    # The sentinel must contain a raw \x00 byte so that any KeyRing.verify
-    # lookup using it will immediately fail (KeyRing kids are valid UTF-8).
-    # format_kid_for_log (called by log emitters) will later hex-escape it to
-    # '\\x00' in log output, but we verify the raw sentinel here.
-    assert "\x00" in kid_log, (
-        "Sentinel must contain a \\x00 byte to prevent collision with valid kids "
-        "(KeyRing rejects non-UTF-8 kids; \\x00 is safe as a sentinel marker)"
+    # The sentinel is "<extract_failed>" — a string that cannot match any
+    # real kid produced by KeyRing (valid kids are [A-Za-z0-9_-]).
+    assert kid_log == "<extract_failed>", (
+        f"Expected sentinel '<extract_failed>', got {kid_log!r}"
     )
 
 
@@ -4929,4 +4929,127 @@ def test_sidecar_enoent_still_returns_false(tmp_path: Path) -> None:
 
     assert changed is False, (
         "I-10: ENOENT sidecar read must still return False (file absent = no change)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C4: sidecar_unsupported resets when recipe YAML mtime changes
+# ---------------------------------------------------------------------------
+
+
+def test_sidecar_unsupported_clears_on_yaml_mtime_change(
+    tmp_path: Path,
+) -> None:
+    """When sidecar_unsupported=True and the recipe YAML mtime changes,
+    _check_sidecar_changed must clear the flag and re-evaluate (C4)."""
+    from unittest.mock import MagicMock, patch
+
+    from recotem.serving.watcher import _check_sidecar_changed, _RecipeWatchState
+
+    yaml_path = tmp_path / "recipe.yaml"
+    yaml_path.write_text("name: test\n")
+    artifact_path = str(tmp_path / "model.recotem")
+
+    recipe = MagicMock()
+    recipe.name = "c4_test"
+    recipe._yaml_path = yaml_path
+
+    initial_mtime = yaml_path.stat().st_mtime
+
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=artifact_path,
+        sidecar_unsupported=True,
+        sidecar_unsupported_at_mtime=initial_mtime,
+    )
+
+    # With same mtime, still unsupported — returns False immediately.
+    result = _check_sidecar_changed(state)
+    assert result is False, "No mtime change → sidecar_unsupported stays True"
+    assert state.sidecar_unsupported is True
+
+    # Simulate mtime change by patching os.stat to return a newer mtime.
+    new_mtime = initial_mtime + 1.0
+
+    class _FakeStat:
+        st_mtime = new_mtime
+
+    with patch("os.stat", return_value=_FakeStat()):
+        result2 = _check_sidecar_changed(state)
+
+    # After mtime change, sidecar_unsupported must be cleared.
+    assert state.sidecar_unsupported is False, (
+        "sidecar_unsupported must be cleared when recipe YAML mtime changes"
+    )
+    assert state.sidecar_unsupported_at_mtime is None
+
+
+# ---------------------------------------------------------------------------
+# M9: generic except clears post-hmac failure streak
+# ---------------------------------------------------------------------------
+
+
+def test_generic_except_resets_post_hmac_streak(
+    tmp_path: Path,
+) -> None:
+    """When _load_recipe encounters a non-ArtifactError exception, the
+    post_hmac_failure_streak for that recipe must be reset (M9)."""
+    from unittest.mock import MagicMock, patch
+
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+    from tests.conftest import ACTIVE_KEY_HEX
+
+    recipe = MagicMock()
+    recipe.name = "m9_test"
+    recipe.output.path = str(tmp_path / "model.recotem")
+    recipe.item_metadata = None
+
+    cfg = _make_serve_config()
+    registry = ModelRegistry()
+    stub = ModelEntry(
+        name="m9_test",
+        recommender=None,
+        header={},
+        kid="",
+        loaded=False,
+    )
+    registry.replace("m9_test", stub)
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=tmp_path,
+        serve_config=cfg,
+        key_ring=KeyRing(f"active:{ACTIVE_KEY_HEX}"),
+        initial_states=None,
+    )
+
+    # Pre-set a streak for this recipe.
+    watcher._post_hmac_failure_streak["m9_test"] = 5
+
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=recipe.output.path,
+    )
+    watcher._states["m9_test"] = state
+
+    # Force _build_entry to raise a generic (non-ArtifactError) exception.
+    with patch.object(
+        watcher,
+        "_build_entry",
+        side_effect=RuntimeError("unexpected boom"),
+    ):
+        with patch(
+            "recotem.serving.watcher._read_artifact_bytes",
+            return_value=b"dummy",
+        ):
+            with patch(
+                "recotem.serving.watcher._sha256_bytes",
+                return_value="a" * 64,
+            ):
+                # Set last_sha256 to something different to trigger the build path.
+                state.last_sha256 = "b" * 64
+                watcher._load_recipe("m9_test", state, force=False)
+
+    assert "m9_test" not in watcher._post_hmac_failure_streak, (
+        "Generic except must reset the post-HMAC failure streak (M9)"
     )

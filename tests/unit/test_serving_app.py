@@ -376,6 +376,37 @@ def test_CORS_allows_configured_origin(tmp_path: Path) -> None:
     )
 
 
+def test_CORS_expose_headers_includes_recotem_headers(tmp_path: Path) -> None:
+    """CORSMiddleware must expose X-Request-ID, X-Recotem-Model-Version, and
+    X-Recotem-Items-Degraded so browser JS can read them from cross-origin responses.
+
+    ``Access-Control-Expose-Headers`` is sent on actual cross-origin requests
+    (GET/POST), not on preflight (OPTIONS) per the CORS spec.
+    """
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.allowed_origins = ["https://app.example.com"]
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.get(
+        "/v1/health",
+        headers={"origin": "https://app.example.com"},
+    )
+    expose = response.headers.get("access-control-expose-headers", "")
+    exposed = {h.strip() for h in expose.split(",")}
+    for expected in (
+        "X-Request-ID",
+        "X-Recotem-Model-Version",
+        "X-Recotem-Items-Degraded",
+    ):
+        assert expected in exposed, (
+            f"Access-Control-Expose-Headers must include '{expected}'; got {expose!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # security.posture log includes unsafe_mode flag
 # ---------------------------------------------------------------------------
@@ -1680,8 +1711,8 @@ output:
         f"loaded_at_unix must fall within the load window "
         f"[{before}, {after}]; got {entry.loaded_at_unix}"
     )
-    assert entry.config_digest == "deadbeef", (
-        f"config_digest must be sourced from header; got {entry.config_digest!r}"
+    assert entry.config_digest == "sha256:deadbeef", (
+        f"config_digest must be normalized to sha256:<hex>; got {entry.config_digest!r}"
     )
     assert entry.algorithms == ["TopPop", "IALS"], (
         f"algorithms must be sourced from header; got {entry.algorithms!r}"

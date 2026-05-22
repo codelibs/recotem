@@ -356,3 +356,81 @@ def test_batch_recommend_per_request_limit_validation():
     assert "limit" in r_over.json()["results"][0]["error"]["message"], (
         "VALIDATION_ERROR message should mention 'limit'"
     )
+
+
+# ---------------------------------------------------------------------------
+# T2: exclude_items in batch-recommend
+# ---------------------------------------------------------------------------
+
+
+def test_batch_recommend_exclude_items_removes_item() -> None:
+    """When a batch element specifies exclude_items, those items must not
+    appear in the result for that element."""
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [
+        ("i1", 0.9),
+        ("i2", 0.5),
+        ("i3", 0.3),
+    ]
+    r = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend",
+        json={
+            "requests": [
+                {"user_id": "u1", "exclude_items": ["i2"]},
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    items = r.json()["results"][0]["items"]
+    item_ids = [item["item_id"] for item in items]
+    assert "i2" not in item_ids, (
+        f"exclude_items=['i2'] must remove i2; got {item_ids!r}"
+    )
+    assert "i1" in item_ids
+    assert "i3" in item_ids
+
+
+# ---------------------------------------------------------------------------
+# F4: X-Recotem-Items-Degraded must NOT be set on batch endpoints
+# ---------------------------------------------------------------------------
+
+
+def test_batch_recommend_no_items_degraded_header_even_when_metadata_degrades() -> None:
+    """Even when metadata serialization produces a fallback (score=nan triggers
+    ValidationError on the full path), :batch-recommend must NOT set
+    X-Recotem-Items-Degraded.  The header is reserved for single endpoints.
+
+    We use ``include_metadata=True`` with a metadata_index entry whose NaN
+    score field triggers the fallback path in _build_items; the batch handler
+    code does not call _apply_build_items_degraded, so the header is never set.
+    """
+    import math
+
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+
+    meta_index = {"i1": {"score": math.nan, "title": "Widget"}}
+    entry = ModelEntry(
+        name="demo",
+        recommender=rec,
+        header={},
+        kid="t",
+        metadata_df=None,
+        metadata_index=meta_index,
+        loaded=True,
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
+        loaded_at_unix=1.0,
+    )
+    registry = ModelRegistry()
+    registry.replace("demo", entry)
+    client = TestClient(build_v1_app(registry))
+
+    r = client.post(
+        "/v1/recipes/demo:batch-recommend",
+        json={"requests": [{"user_id": "u1"}], "include_metadata": True},
+    )
+    assert r.status_code == 200, r.text
+    assert "x-recotem-items-degraded" not in r.headers, (
+        ":batch-recommend must NOT set X-Recotem-Items-Degraded even when "
+        "metadata serialization degrades"
+    )

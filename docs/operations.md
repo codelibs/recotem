@@ -283,6 +283,15 @@ Additional events emitted by the watcher, recipe loader, and size-cap helper tha
 
 The `train_error` event uses `name=` (not `recipe=`) for the recipe name field and includes `kid=` when the signing kid is known, matching the `train_done` event's field names.
 
+> **Note (v1 change).** The alpha-era per-response header
+> `X-Recotem-Metadata-Degraded` is no longer emitted.  Metadata enrichment
+> now happens at artifact-load time, not per-request.  Use the
+> `recotem_metadata_lookup_errors_total{recipe}` counter for load-time
+> metadata join failures.  Per-request metadata failures are not surfaced
+> separately in v1.  See
+> [docs/migration-v1.md](migration-v1.md#dropped-without-replacement) for
+> details.
+
 ## Concurrent training and persistent search storage
 
 `recotem train` acquires a per-recipe POSIX `flock` at

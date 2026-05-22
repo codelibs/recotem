@@ -156,6 +156,7 @@ def make_router(
         raw_results: list[tuple[str, float]],
         exclude: frozenset[str],
         meta_index: dict[str, Any] | None,
+        recipe_name: str = "",
     ) -> list[RecommendItem]:
         items: list[RecommendItem] = []
         for item_id, score in raw_results:
@@ -166,7 +167,21 @@ def make_router(
                 fields.update(meta_index.get(item_id, {}))
             fields["item_id"] = item_id
             fields["score"] = float(score)
-            items.append(RecommendItem.model_validate(fields))
+            try:
+                items.append(RecommendItem.model_validate(fields))
+            except ValidationError as exc:
+                # Per-item metadata serialization failure: skip the item
+                # rather than aborting the entire response.  The most likely
+                # cause is a metadata column with a value that violates the
+                # RecommendItem schema (e.g. NaN score, oversized item_id).
+                logger.warning(
+                    "metadata_serialization_failed",
+                    item_id=str(item_id),
+                    error=str(exc)[:200],
+                    recipe=recipe_name,
+                )
+                if recipe_name:
+                    _metrics.inc_metadata_lookup_error(recipe_name)
         return items
 
     def _any_seed_known(
@@ -316,7 +331,7 @@ def make_router(
                 exclude = (
                     frozenset(body.exclude_items) if body.exclude_items else frozenset()
                 )
-                items = _build_items(raw_results, exclude, entry.metadata_index)
+                items = _build_items(raw_results, exclude, entry.metadata_index, name)
 
                 status_holder[0] = "ok"
                 response.headers["X-Recotem-Model-Version"] = entry.model_version
@@ -412,7 +427,7 @@ def make_router(
                 exclude = (
                     frozenset(body.exclude_items) if body.exclude_items else frozenset()
                 )
-                items = _build_items(raw_results, exclude, entry.metadata_index)
+                items = _build_items(raw_results, exclude, entry.metadata_index, name)
 
                 status_holder[0] = "ok"
                 response.headers["X-Recotem-Model-Version"] = entry.model_version
@@ -530,7 +545,7 @@ def make_router(
                             else frozenset()
                         )
                         meta = entry.metadata_index if body.include_metadata else None
-                        items = _build_items(raw_results, exclude, meta)
+                        items = _build_items(raw_results, exclude, meta, name)
                         results.append(
                             BatchResultOk(index=idx, status="ok", items=items)
                         )
@@ -725,7 +740,7 @@ def make_router(
                             else frozenset()
                         )
                         meta = entry.metadata_index if body.include_metadata else None
-                        items = _build_items(raw_results, exclude, meta)
+                        items = _build_items(raw_results, exclude, meta, name)
                         results.append(
                             BatchResultOk(index=idx, status="ok", items=items)
                         )

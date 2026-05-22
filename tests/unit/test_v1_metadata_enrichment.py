@@ -215,3 +215,114 @@ def test_response_preserves_extra_metadata_through_pydantic_roundtrip() -> None:
     assert r.status_code == 200, r.text
     item = r.json()["items"][0]
     assert item.get("foo bar") == "extra-value"
+
+
+# ---------------------------------------------------------------------------
+# T5: :recommend-related enriches with metadata + respects RECOTEM_METADATA_FIELD_DENY
+# ---------------------------------------------------------------------------
+
+
+def _entry_related_with_metadata_index(
+    metadata_index: dict[str, dict],
+    recommender: MagicMock,
+) -> ModelEntry:
+    """Return a loaded entry suitable for :recommend-related with a metadata_index."""
+    # :recommend-related pre-checks _mapper.item_id_to_index for known seeds.
+    recommender._mapper.item_id_to_index = {"seed1": 0, "seed2": 1}
+    return ModelEntry(
+        name="demo",
+        recommender=recommender,
+        header={},
+        kid="test",
+        metadata_df=None,
+        metadata_index=metadata_index,
+        loaded=True,
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
+        loaded_at_unix=1747800000.0,
+    )
+
+
+def _entry_related_with_loaded_metadata(
+    df: pd.DataFrame,
+    recommender: MagicMock,
+    metadata_field_deny: list[str] | None = None,
+) -> ModelEntry:
+    """Return a loaded entry whose metadata_index is built from *df* (deny applied)."""
+    from recotem.metadata.loader import build_metadata_index
+
+    recommender._mapper.item_id_to_index = {"seed1": 0}
+    deny_set: frozenset[str] = frozenset(s.lower() for s in (metadata_field_deny or []))
+    index = build_metadata_index(df, deny_set=deny_set)
+    return ModelEntry(
+        name="demo",
+        recommender=recommender,
+        header={},
+        kid="test",
+        metadata_df=None,
+        metadata_index=index,
+        loaded=True,
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
+        loaded_at_unix=1747800000.0,
+    )
+
+
+def test_recommend_related_includes_metadata_fields() -> None:
+    """Items returned by :recommend-related carry metadata from metadata_index."""
+    meta_index = {
+        "i1": {"title": "Widget A", "category": "tools"},
+        "i2": {"title": "Widget B", "category": "home"},
+    }
+    rec = MagicMock()
+    rec.get_recommendation_for_new_user.return_value = [("i1", 0.9), ("i2", 0.5)]
+
+    entry = _entry_related_with_metadata_index(meta_index, rec)
+    client = _make_client(entry)
+
+    r = client.post(
+        "/v1/recipes/demo:recommend-related",
+        json={"seed_items": ["seed1"], "limit": 2},
+    )
+
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert len(items) == 2
+
+    item1 = next(x for x in items if x["item_id"] == "i1")
+    assert item1["title"] == "Widget A"
+    assert item1["category"] == "tools"
+    assert item1["score"] == 0.9
+
+    item2 = next(x for x in items if x["item_id"] == "i2")
+    assert item2["title"] == "Widget B"
+
+
+def test_recommend_related_strips_denied_fields() -> None:
+    """Denied fields (applied at load time) must not appear in :recommend-related items."""
+    df = pd.DataFrame(
+        {
+            "title": ["Widget A", "Widget B"],
+            "internal_score": [99.0, 88.0],
+            "category": ["tools", "home"],
+        },
+        index=pd.Index(["i1", "i2"], name="item_id"),
+    )
+    rec = MagicMock()
+    rec.get_recommendation_for_new_user.return_value = [("i1", 0.9), ("i2", 0.5)]
+
+    entry = _entry_related_with_loaded_metadata(
+        df, rec, metadata_field_deny=["internal_score"]
+    )
+    client = _make_client(entry)
+
+    r = client.post(
+        "/v1/recipes/demo:recommend-related",
+        json={"seed_items": ["seed1"], "limit": 2},
+    )
+
+    assert r.status_code == 200, r.text
+    for item in r.json()["items"]:
+        assert "internal_score" not in item, (
+            "Denied field 'internal_score' must not appear in :recommend-related items"
+        )
+        assert "title" in item
+        assert "category" in item

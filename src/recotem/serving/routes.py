@@ -26,6 +26,8 @@ from recotem.serving.schemas import (
     BatchRecommendRelatedRequest,
     BatchRecommendRequest,
     BatchRecommendResponse,
+    BatchResultErr,
+    BatchResultOk,
     ErrorCode,
     ErrorDetail,
     RecipeDetailResponse,
@@ -34,8 +36,6 @@ from recotem.serving.schemas import (
     RecommendRelatedRequest,
     RecommendRequest,
     RecommendResponse,
-    _BatchResultErr,
-    _BatchResultOk,
 )
 
 logger = structlog.get_logger(__name__)
@@ -45,6 +45,47 @@ logger = structlog.get_logger(__name__)
 # time is also routable. The regex is intentionally permissive of leading
 # ``_``/``-`` characters because the recipe loader already accepts them.
 _RECIPE_NAME_RE = r"^[A-Za-z0-9_-]{1,64}$"
+
+# ---------------------------------------------------------------------------
+# Batch validation helpers
+# ---------------------------------------------------------------------------
+
+# Maximum number of per-error entries included in sanitized_errors log field.
+_BATCH_VALIDATION_MAX_ERRORS = 10
+
+
+def _sanitize_validation_errors(exc: ValidationError) -> list[dict[str, Any]]:
+    """Return a sanitized list of pydantic error dicts (loc, msg, type only).
+
+    Strips ``input`` and ``url`` fields (user-controlled / verbose).
+    Caps to ``_BATCH_VALIDATION_MAX_ERRORS`` entries to bound log size.
+    """
+    out: list[dict[str, Any]] = []
+    for err in exc.errors()[:_BATCH_VALIDATION_MAX_ERRORS]:
+        out.append(
+            {
+                "loc": err.get("loc", ()),
+                "msg": err.get("msg", ""),
+                "type": err.get("type", ""),
+            }
+        )
+    return out
+
+
+def _format_batch_validation_message(exc: ValidationError) -> str:
+    """Build a human-readable message from the first pydantic error.
+
+    Format: ``"<dot-joined loc>: <msg>"``.  Falls back to ``"validation
+    failed"`` when the error list is empty (should not happen in practice).
+    """
+    errors = exc.errors()
+    if not errors:
+        return "validation failed"
+    first = errors[0]
+    loc_parts = first.get("loc", ())
+    loc_path = ".".join(str(p) for p in loc_parts) if loc_parts else ""
+    msg = first.get("msg", "validation failed")
+    return f"{loc_path}: {msg}" if loc_path else msg
 
 
 def make_router(
@@ -416,7 +457,7 @@ def make_router(
 
                 _metrics.observe_batch_size(name, verb, len(body.requests))
 
-                results: list[_BatchResultOk | _BatchResultErr] = []
+                results: list[BatchResultOk | BatchResultErr] = []
                 aggregate_limit = 0
                 for idx, raw in enumerate(body.requests):
                     if not isinstance(raw, dict):
@@ -429,11 +470,17 @@ def make_router(
                         continue
                     try:
                         single = RecommendRequest.model_validate(raw)
-                    except ValidationError:
+                    except ValidationError as exc:
+                        _msg = _format_batch_validation_message(exc)
+                        logger.warning(
+                            "batch_element_validation_failed",
+                            recipe=name,
+                            verb=verb,
+                            idx=idx,
+                            errors=_sanitize_validation_errors(exc),
+                        )
                         results.append(
-                            _batch_error_entry(
-                                idx, "VALIDATION_ERROR", "validation failed"
-                            )
+                            _batch_error_entry(idx, "VALIDATION_ERROR", _msg)
                         )
                         _metrics.inc_batch_element_error(name, verb, "VALIDATION_ERROR")
                         continue
@@ -485,7 +532,7 @@ def make_router(
                         meta = entry.metadata_index if body.include_metadata else None
                         items = _build_items(raw_results, exclude, meta)
                         results.append(
-                            _BatchResultOk(index=idx, status="ok", items=items)
+                            BatchResultOk(index=idx, status="ok", items=items)
                         )
                     except KeyError:
                         if batch_user_known is False:
@@ -573,7 +620,7 @@ def make_router(
 
                 _metrics.observe_batch_size(name, verb, len(body.requests))
 
-                results: list[_BatchResultOk | _BatchResultErr] = []
+                results: list[BatchResultOk | BatchResultErr] = []
                 aggregate_limit = 0
                 for idx, raw in enumerate(body.requests):
                     if not isinstance(raw, dict):
@@ -586,11 +633,17 @@ def make_router(
                         continue
                     try:
                         single = RecommendRelatedRequest.model_validate(raw)
-                    except ValidationError:
+                    except ValidationError as exc:
+                        _msg = _format_batch_validation_message(exc)
+                        logger.warning(
+                            "batch_element_validation_failed",
+                            recipe=name,
+                            verb=verb,
+                            idx=idx,
+                            errors=_sanitize_validation_errors(exc),
+                        )
                         results.append(
-                            _batch_error_entry(
-                                idx, "VALIDATION_ERROR", "validation failed"
-                            )
+                            _batch_error_entry(idx, "VALIDATION_ERROR", _msg)
                         )
                         _metrics.inc_batch_element_error(name, verb, "VALIDATION_ERROR")
                         continue
@@ -674,7 +727,7 @@ def make_router(
                         meta = entry.metadata_index if body.include_metadata else None
                         items = _build_items(raw_results, exclude, meta)
                         results.append(
-                            _BatchResultOk(index=idx, status="ok", items=items)
+                            BatchResultOk(index=idx, status="ok", items=items)
                         )
                     except (MemoryError, RecursionError):
                         raise
@@ -835,8 +888,8 @@ def make_router(
     return router
 
 
-def _batch_error_entry(idx: int, code: ErrorCode, message: str) -> _BatchResultErr:
-    return _BatchResultErr(
+def _batch_error_entry(idx: int, code: ErrorCode, message: str) -> BatchResultErr:
+    return BatchResultErr(
         index=idx,
         status="error",
         error=ErrorDetail(code=code, message=message),

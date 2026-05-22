@@ -173,7 +173,7 @@ class RecommendResponse(BaseModel):
     ]
 
 
-class _BatchResultOk(BaseModel):
+class BatchResultOk(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     index: Annotated[
@@ -186,7 +186,7 @@ class _BatchResultOk(BaseModel):
     ]
 
 
-class _BatchResultErr(BaseModel):
+class BatchResultErr(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     index: Annotated[
@@ -201,7 +201,7 @@ class _BatchResultErr(BaseModel):
 # parse/serialise time so the ok/error invariant is enforced by the type
 # system rather than a ``@model_validator``.
 BatchResultEntry = Annotated[
-    _BatchResultOk | _BatchResultErr, Field(discriminator="status")
+    BatchResultOk | BatchResultErr, Field(discriminator="status")
 ]
 
 

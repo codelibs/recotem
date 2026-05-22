@@ -109,6 +109,12 @@ def test_batch_related_empty_seed_in_one_entry_is_per_element_error():
     results = r.json()["results"]
     assert results[0]["status"] == "error"
     assert results[0]["error"]["code"] == "VALIDATION_ERROR"
+    # The message should mention the violating field so callers can diagnose
+    # which sub-field failed without re-parsing the full schema error.
+    assert "seed_items" in results[0]["error"]["message"], (
+        f"VALIDATION_ERROR message should mention 'seed_items'; "
+        f"got {results[0]['error']['message']!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

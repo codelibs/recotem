@@ -51,7 +51,7 @@ def test_batch_recommend_mixed_success_and_failure():
     body = r.json()
     assert body["recipe"] == "demo"
     assert len(body["results"]) == 3
-    # Under the discriminated-union schema, _BatchResultOk has extra="forbid"
+    # Under the discriminated-union schema, BatchResultOk has extra="forbid"
     # and does NOT carry an "error" field.  Assert field by field rather than
     # doing an equality check against a literal dict that includes "error": None.
     ok_result = body["results"][0]
@@ -59,7 +59,7 @@ def test_batch_recommend_mixed_success_and_failure():
     assert ok_result["status"] == "ok"
     assert ok_result["items"] == [{"item_id": "i1", "score": 0.9}]
     assert "error" not in ok_result, (
-        "_BatchResultOk (discriminated union) must not carry an 'error' key"
+        "BatchResultOk (discriminated union) must not carry an 'error' key"
     )
     assert body["results"][1]["status"] == "error"
     assert body["results"][1]["error"]["code"] == "UNKNOWN_USER"
@@ -340,6 +340,11 @@ def test_batch_recommend_per_request_limit_validation():
     assert rs[0]["status"] == "ok"
     assert rs[1]["status"] == "error"
     assert rs[1]["error"]["code"] == "VALIDATION_ERROR"
+    # The message must mention the violating field name so callers can diagnose
+    # which sub-field failed without re-parsing the full schema error.
+    assert "limit" in rs[1]["error"]["message"], (
+        f"VALIDATION_ERROR message should mention 'limit'; got {rs[1]['error']['message']!r}"
+    )
 
     r_over = _client(rec).post(
         "/v1/recipes/demo:batch-recommend",
@@ -348,3 +353,6 @@ def test_batch_recommend_per_request_limit_validation():
     assert r_over.status_code == 200, r_over.text
     assert r_over.json()["results"][0]["status"] == "error"
     assert r_over.json()["results"][0]["error"]["code"] == "VALIDATION_ERROR"
+    assert "limit" in r_over.json()["results"][0]["error"]["message"], (
+        "VALIDATION_ERROR message should mention 'limit'"
+    )

@@ -9,6 +9,8 @@ from pydantic import ValidationError
 from recotem.serving.schemas import (
     BatchRecommendRelatedRequest,
     BatchRecommendRequest,
+    BatchResultErr,
+    BatchResultOk,
     ErrorDetail,
     RecipeDetailResponse,
     RecipesListResponse,
@@ -17,8 +19,6 @@ from recotem.serving.schemas import (
     RecommendRelatedRequest,
     RecommendRequest,
     RecommendResponse,
-    _BatchResultErr,
-    _BatchResultOk,
 )
 
 
@@ -85,18 +85,18 @@ def test_batch_recommend_request_accepts_arbitrary_dict_for_runtime_validation()
 
 
 def test_batch_result_entry_status_enum():
-    """_BatchResultOk and _BatchResultErr are the two concrete discriminated variants."""
-    _BatchResultOk(index=0, status="ok", items=[])
-    _BatchResultErr(
+    """BatchResultOk and BatchResultErr are the two concrete discriminated variants."""
+    BatchResultOk(index=0, status="ok", items=[])
+    BatchResultErr(
         index=0,
         status="error",
         error=ErrorDetail(code="VALIDATION_ERROR", message="m"),
     )
     # Wrong status literal on concrete class
     with pytest.raises(ValidationError):
-        _BatchResultOk(index=0, status="error", items=[])  # type: ignore[arg-type]
+        BatchResultOk(index=0, status="error", items=[])  # type: ignore[arg-type]
     with pytest.raises(ValidationError):
-        _BatchResultErr(
+        BatchResultErr(
             index=0,
             status="ok",
             error=ErrorDetail(code="INTERNAL_ERROR", message="m"),  # type: ignore[arg-type]
@@ -109,21 +109,21 @@ def test_batch_result_entry_rejects_unknown_error_code():
 
 
 def test_batch_result_ok_requires_items():
-    """_BatchResultOk must carry items; it has no error field."""
+    """BatchResultOk must carry items; it has no error field."""
     # items is a required field
     with pytest.raises((ValidationError, TypeError)):
-        _BatchResultOk(index=0, status="ok")  # type: ignore[call-arg]
+        BatchResultOk(index=0, status="ok")  # type: ignore[call-arg]
 
 
 def test_batch_result_err_requires_error():
-    """_BatchResultErr must carry an error; it has no items field."""
+    """BatchResultErr must carry an error; it has no items field."""
     with pytest.raises((ValidationError, TypeError)):
-        _BatchResultErr(index=0, status="error")  # type: ignore[call-arg]
+        BatchResultErr(index=0, status="error")  # type: ignore[call-arg]
 
 
 def test_batch_result_entry_rejects_negative_index():
     with pytest.raises(ValidationError):
-        _BatchResultOk(index=-1, status="ok", items=[])
+        BatchResultOk(index=-1, status="ok", items=[])
 
 
 _VALID_SHA256 = "sha256:" + "a" * 64
@@ -324,9 +324,9 @@ def test_recommend_request_extra_fields_rejected() -> None:
 
 
 def test_batch_result_ok_rejects_error_field() -> None:
-    """_BatchResultOk has extra='forbid'; passing an 'error' field must raise."""
+    """BatchResultOk has extra='forbid'; passing an 'error' field must raise."""
     with pytest.raises(ValidationError):
-        _BatchResultOk(
+        BatchResultOk(
             index=0,
             status="ok",
             items=[],
@@ -335,9 +335,9 @@ def test_batch_result_ok_rejects_error_field() -> None:
 
 
 def test_batch_result_err_rejects_items_field() -> None:
-    """_BatchResultErr has extra='forbid'; passing an 'items' field must raise."""
+    """BatchResultErr has extra='forbid'; passing an 'items' field must raise."""
     with pytest.raises(ValidationError):
-        _BatchResultErr(
+        BatchResultErr(
             index=0,
             status="error",
             error=ErrorDetail(code="INTERNAL_ERROR", message="m"),
@@ -363,7 +363,7 @@ def test_batch_result_entry_deserializes_ok_shape_via_discriminator() -> None:
             }
         }
     )
-    assert isinstance(w.entry, _BatchResultOk)
+    assert isinstance(w.entry, BatchResultOk)
     assert w.entry.status == "ok"
     assert w.entry.items[0].item_id == "i1"
 
@@ -386,7 +386,7 @@ def test_batch_result_entry_deserializes_error_shape_via_discriminator() -> None
             }
         }
     )
-    assert isinstance(w.entry, _BatchResultErr)
+    assert isinstance(w.entry, BatchResultErr)
     assert w.entry.status == "error"
     assert w.entry.error.code == "UNKNOWN_USER"
 

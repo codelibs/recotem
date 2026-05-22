@@ -145,10 +145,17 @@ jobs:
 
           echo "Scanning log files in $LOG_DIR ..."
 
-          # Pattern 1: raw sha256 hex digest (signing key or hash leaked)
-          if grep -rEq 'sha256:[0-9a-f]{64}' "$LOG_DIR"; then
+          # Pattern 1: raw sha256 hex digest (signing key or hash leaked).
+          # Excludes the public X-Recotem-Model-Version header and the
+          # corresponding JSON "model_version" response field, which carry
+          # the artifact content hash by design and are not secrets.
+          pat1_hits=$(grep -rEn 'sha256:[0-9a-f]{64}' "$LOG_DIR" \
+            | grep -v '"model_version"[[:space:]]*:[[:space:]]*"sha256:' \
+            | grep -vi 'x-recotem-model-version:[[:space:]]*sha256:' \
+            || true)
+          if [ -n "$pat1_hits" ]; then
             echo "FAIL: Found sha256:<hex64> in log output."
-            grep -rEn 'sha256:[0-9a-f]{64}' "$LOG_DIR" | head -5
+            echo "$pat1_hits" | head -5
             FAIL=1
           fi
 

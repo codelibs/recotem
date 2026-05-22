@@ -2,7 +2,7 @@
 
 ## Getting started
 
-- [Getting started](getting-started.md) — install (Docker or pip), train from a public CSV, curl `/predict`
+- [Getting started](getting-started.md) — install (Docker or pip), train from a public CSV, curl `/v1/recipes/{name}:recommend`
 
 ## Reference
 

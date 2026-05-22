@@ -311,7 +311,7 @@ def test_TrustedHost_blocks_unrecognized_host(tmp_path: Path) -> None:
     cfg.allowed_hosts = ["allowed.example.com"]
     app = create_app(cfg)
     client = TestClient(app, raise_server_exceptions=False)
-    response = client.get("/health", headers={"host": "evil.attacker.com"})
+    response = client.get("/v1/health", headers={"host": "evil.attacker.com"})
     assert response.status_code in (400, 403, 422)
 
 
@@ -325,7 +325,7 @@ def test_TrustedHost_allows_configured_host(tmp_path: Path) -> None:
     cfg.allowed_hosts = ["testserver"]
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.get("/health")
+    response = client.get("/v1/health")
     assert response.status_code == 200
 
 
@@ -345,7 +345,7 @@ def test_CORS_blocks_unconfigured_origin(tmp_path: Path) -> None:
     app = create_app(cfg)
     client = TestClient(app)
     response = client.options(
-        "/health",
+        "/v1/health",
         headers={
             "origin": "https://evil.example.com",
             "access-control-request-method": "GET",
@@ -365,7 +365,7 @@ def test_CORS_allows_configured_origin(tmp_path: Path) -> None:
     app = create_app(cfg)
     client = TestClient(app)
     response = client.options(
-        "/health",
+        "/v1/health",
         headers={
             "origin": "https://app.example.com",
             "access-control-request-method": "GET",
@@ -374,6 +374,37 @@ def test_CORS_allows_configured_origin(tmp_path: Path) -> None:
     assert (
         response.headers.get("access-control-allow-origin") == "https://app.example.com"
     )
+
+
+def test_CORS_expose_headers_includes_recotem_headers(tmp_path: Path) -> None:
+    """CORSMiddleware must expose X-Request-ID, X-Recotem-Model-Version, and
+    X-Recotem-Items-Degraded so browser JS can read them from cross-origin responses.
+
+    ``Access-Control-Expose-Headers`` is sent on actual cross-origin requests
+    (GET/POST), not on preflight (OPTIONS) per the CORS spec.
+    """
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    cfg.allowed_origins = ["https://app.example.com"]
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.get(
+        "/v1/health",
+        headers={"origin": "https://app.example.com"},
+    )
+    expose = response.headers.get("access-control-expose-headers", "")
+    exposed = {h.strip() for h in expose.split(",")}
+    for expected in (
+        "X-Request-ID",
+        "X-Recotem-Model-Version",
+        "X-Recotem-Items-Degraded",
+    ):
+        assert expected in exposed, (
+            f"Access-Control-Expose-Headers must include '{expected}'; got {expose!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +525,7 @@ def test_failed_initial_load_inserts_stub_with_loaded_false(tmp_path: Path) -> N
     app = create_app(cfg)
     client = TestClient(app)
     # /health (probe-safe) must return 503 when degraded
-    response = client.get("/health")
+    response = client.get("/v1/health")
     assert response.status_code == 503
     body = response.json()
     assert body["status"] == "degraded", (
@@ -502,7 +533,7 @@ def test_failed_initial_load_inserts_stub_with_loaded_false(tmp_path: Path) -> N
     )
 
     # /health/details carries the per-recipe info (auth passed via insecure_no_auth)
-    response_details = client.get("/health/details")
+    response_details = client.get("/v1/health/details")
     assert response_details.status_code == 503
     details = response_details.json()
     assert "missing_recipe" in details["recipes"]
@@ -514,8 +545,8 @@ def test_failed_initial_load_inserts_stub_with_loaded_false(tmp_path: Path) -> N
 
 
 def test_failed_load_recipe_returns_503_on_predict(tmp_path: Path) -> None:
-    """/predict against a recipe whose artifact failed to load returns 503,
-    not 200 or 500."""
+    """POST /v1/recipes/{name}:recommend against a recipe whose artifact failed
+    to load returns 503, not 200 or 500."""
     from fastapi.testclient import TestClient
 
     from recotem.serving.app import create_app
@@ -527,7 +558,10 @@ def test_failed_load_recipe_returns_503_on_predict(tmp_path: Path) -> None:
 
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.post("/predict/broken", json={"user_id": "u1", "cutoff": 5})
+    response = client.post(
+        "/v1/recipes/broken:recommend",
+        json={"user_id": "u1", "limit": 5},
+    )
     assert response.status_code == 503
 
 
@@ -591,7 +625,7 @@ output:
 
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.get("/health")
+    response = client.get("/v1/health")
     # Same B-2 contract: a stub recipe (loaded=False) makes the overall
     # status degraded, which now surfaces as HTTP 503.
     assert response.status_code == 503
@@ -599,7 +633,7 @@ output:
     assert body["status"] == "degraded"
 
     # Per-recipe detail only available via /health/details (I-3).
-    response_details = client.get("/health/details")
+    response_details = client.get("/v1/health/details")
     assert response_details.status_code == 503
     details = response_details.json()
     assert "with_bad_metadata" in details["recipes"]
@@ -611,8 +645,8 @@ output:
 
 
 def test_failed_load_recipe_excluded_from_models_listing(tmp_path: Path) -> None:
-    """/models lists only successfully loaded recipes; stubs are hidden
-    (operators see them via /health instead)."""
+    """/v1/recipes lists only successfully loaded recipes; stubs are hidden
+    (operators see them via /v1/health/details instead)."""
     from fastapi.testclient import TestClient
 
     from recotem.serving.app import create_app
@@ -624,9 +658,9 @@ def test_failed_load_recipe_excluded_from_models_listing(tmp_path: Path) -> None
 
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.get("/models")
+    response = client.get("/v1/recipes")
     assert response.status_code == 200
-    names = [m.get("name") for m in response.json()]
+    names = [r.get("name") for r in response.json().get("recipes", [])]
     assert "broken" not in names
 
 
@@ -947,7 +981,7 @@ def test_corrupt_header_json_returns_failed_entry_not_crash(tmp_path: Path) -> N
 
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.get("/health")
+    response = client.get("/v1/health")
     # Same B-2 contract: a stub recipe (loaded=False) makes overall
     # status degraded → HTTP 503.
     assert response.status_code == 503
@@ -955,7 +989,7 @@ def test_corrupt_header_json_returns_failed_entry_not_crash(tmp_path: Path) -> N
     assert body["status"] == "degraded"
 
     # Per-recipe detail only available via /health/details (I-3).
-    response_details = client.get("/health/details")
+    response_details = client.get("/v1/health/details")
     assert response_details.status_code == 503
     details = response_details.json()
     assert "corrupt_header" in details["recipes"], (
@@ -996,7 +1030,7 @@ def test_CORS_preflight_returns_success_for_configured_origin(tmp_path: Path) ->
     app = create_app(cfg)
     client = TestClient(app)
     response = client.options(
-        "/predict/some_model",
+        "/v1/recipes/some_model:recommend",
         headers={
             "origin": "https://app.example.com",
             "access-control-request-method": "POST",
@@ -1032,7 +1066,7 @@ def test_CORS_allow_credentials_header_not_sent_for_configured_origin(
     app = create_app(cfg)
     client = TestClient(app)
     response = client.options(
-        "/health",
+        "/v1/health",
         headers={
             "origin": "https://app.example.com",
             "access-control-request-method": "GET",
@@ -1216,7 +1250,7 @@ def test_insecure_no_auth_http_request_without_key_returns_200(
     app = create_app(cfg)
     client = TestClient(app)
     # No X-API-Key header — must still pass with insecure_no_auth=True
-    response = client.get("/health")
+    response = client.get("/v1/health")
     assert response.status_code == 200, (
         f"insecure_no_auth=True must allow unauthenticated requests; "
         f"got {response.status_code}"
@@ -1378,9 +1412,9 @@ def test_startup_one_failed_load_does_not_block_others(
 
     app = create_app(cfg)
     with TestClient(app) as client:
-        response = client.get("/health")
+        response = client.get("/v1/health")
         # /health/details shows per-recipe breakdown (I-3); auth skipped (insecure_no_auth)
-        response_details = client.get("/health/details")
+        response_details = client.get("/v1/health/details")
 
     # /health aggregate
     body = response.json()
@@ -1568,12 +1602,13 @@ output:
 
     key_ring = KeyRing(f"active:{ACTIVE_KEY_HEX}")
 
-    entry = _try_load_artifact(recipe, key_ring, cfg)
+    entry, reason = _try_load_artifact(recipe, key_ring, cfg)
 
     assert entry.loaded, (
         f"_try_load_artifact must return loaded=True for a valid artifact + metadata; "
-        f"error={entry.last_load_error!r}"
+        f"error={entry.last_load_error!r}; reason={reason!r}"
     )
+    assert reason == "ok"
     assert entry.metadata_index is not None, (
         "metadata_index must be populated (not None) when item_metadata is present"
     )
@@ -1588,6 +1623,99 @@ output:
     assert entry.metadata_index["i1"].get("title") == "Alpha", (
         f"metadata_index['i1']['title'] must be 'Alpha'; "
         f"got {entry.metadata_index['i1']!r}"
+    )
+
+
+def test_try_load_artifact_populates_loaded_at_unix(tmp_path: Path) -> None:
+    """Regression: startup-scan path must populate v1 fields.
+
+    Bug-for-bug parallel to the watcher's _build_entry fix in Task 3 of
+    the v1 API overhaul plan.  Without this, recipes loaded at startup
+    report ``loaded_at: 1970-01-01T00:00:00Z`` from GET /v1/recipes until
+    a hot-swap occurs.
+
+    Invariant: any ModelEntry returned with ``loaded=True`` must carry
+    ``loaded_at_unix > 0`` and an ``algorithms`` list / ``config_digest``
+    string sourced from the header.
+    """
+    import time as _time
+
+    from recotem.artifact.signing import KeyRing
+    from recotem.config import ServeConfig
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving.app import _try_load_artifact
+    from tests.conftest import ACTIVE_KEY_HEX, build_raw_artifact
+
+    # build_raw_artifact provides a safe default payload (a small builtin
+    # dict pickled via SafeUnpickler's allow-list); we only override the
+    # header to carry the v1 fields we want to assert on.
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(
+        build_raw_artifact(
+            kid="active",
+            key_hex=ACTIVE_KEY_HEX,
+            header_dict={
+                "recipe_name": "loaded_at_test",
+                "best_class": "TopPop",
+                "trained_at": "2026-01-01T00:00:00Z",
+                "config_digest": "deadbeef",
+                "algorithms": ["TopPop", "IALS"],
+            },
+        )
+    )
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    yaml_path = recipes_dir / "loaded_at_test.yaml"
+    yaml_path.write_text(
+        f"""\
+name: loaded_at_test
+source:
+  type: csv
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {artifact_path}
+"""
+    )
+
+    recipe = load_recipe(yaml_path)
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = f"active:{ACTIVE_KEY_HEX}"
+    cfg.max_artifact_bytes = 100 * 1024 * 1024
+    cfg.max_payload_bytes = 50 * 1024 * 1024
+    cfg.metadata_field_deny = []
+
+    key_ring = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    before = _time.time()
+    entry, reason = _try_load_artifact(recipe, key_ring, cfg)
+    after = _time.time()
+
+    assert entry.loaded, (
+        f"_try_load_artifact must return loaded=True for a valid artifact; "
+        f"error={entry.last_load_error!r}; reason={reason!r}"
+    )
+    assert reason == "ok"
+    assert entry.loaded_at_unix > 0, (
+        f"startup-scan path must populate loaded_at_unix (regression: was 0.0); "
+        f"got {entry.loaded_at_unix!r}"
+    )
+    assert before <= entry.loaded_at_unix <= after, (
+        f"loaded_at_unix must fall within the load window "
+        f"[{before}, {after}]; got {entry.loaded_at_unix}"
+    )
+    assert entry.config_digest == "sha256:deadbeef", (
+        f"config_digest must be normalized to sha256:<hex>; got {entry.config_digest!r}"
+    )
+    assert entry.algorithms == ["TopPop", "IALS"], (
+        f"algorithms must be sourced from header; got {entry.algorithms!r}"
     )
 
 
@@ -1995,7 +2123,7 @@ def test_security_posture_signing_key_status_dev_allow_unsigned(
 
 def test_unhandled_exception_returns_structured_json_500(tmp_path: Path) -> None:
     """I-1: An unexpected Exception from a route handler must return HTTP 500
-    with body {detail: 'internal error', code: 'internal_error'} rather than
+    with body {detail: 'internal error', code: 'INTERNAL_ERROR'} rather than
     a plain-text FastAPI default or an unhandled traceback.
     """
     from fastapi.testclient import TestClient
@@ -2020,8 +2148,8 @@ def test_unhandled_exception_returns_structured_json_500(tmp_path: Path) -> None
     assert data.get("detail") == "internal error", (
         f"Expected detail='internal error'; got {data!r}"
     )
-    assert data.get("code") == "internal_error", (
-        f"Expected code='internal_error'; got {data!r}"
+    assert data.get("code") == "INTERNAL_ERROR", (
+        f"Expected code='INTERNAL_ERROR'; got {data!r}"
     )
 
 
@@ -2069,7 +2197,7 @@ def test_health_returns_only_aggregate_counts(tmp_path: Path) -> None:
     cfg = _minimal_config(tmp_path)
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.get("/health")
+    response = client.get("/v1/health")
 
     assert response.status_code == 200
     body = response.json()
@@ -2113,7 +2241,7 @@ def test_health_details_requires_auth_when_keys_configured(tmp_path: Path) -> No
 
     app = create_app(cfg)
     client = TestClient(app, raise_server_exceptions=False)
-    response = client.get("/health/details")
+    response = client.get("/v1/health/details")
     assert response.status_code == 401, (
         f"/health/details must return 401 when auth is configured; got {response.status_code}"
     )
@@ -2136,7 +2264,7 @@ def test_health_details_returns_per_recipe_data_when_auth_passes(
 
     app = create_app(cfg)
     client = TestClient(app)
-    response = client.get("/health/details")
+    response = client.get("/v1/health/details")
 
     # Degraded because artifact is missing.
     assert response.status_code == 503
@@ -2248,3 +2376,147 @@ def test_docs_disabled_when_env_is_staging(tmp_path: Path) -> None:
     assert resp.status_code == 404, (
         f"RECOTEM_ENV=staging: /docs must return 404; got {resp.status_code}"
     )
+
+
+# ---------------------------------------------------------------------------
+# RequestIDMiddleware — X-Request-ID contract
+# ---------------------------------------------------------------------------
+
+
+def test_request_id_header_present_on_200_response(tmp_path: Path) -> None:
+    """X-Request-ID must be present in a 200 response (e.g. GET /v1/health)."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.get("/v1/health")
+    assert response.status_code == 200
+    assert "x-request-id" in response.headers, (
+        "X-Request-ID must be present in every 200 response"
+    )
+    assert response.headers["x-request-id"], "X-Request-ID must not be empty"
+
+
+def test_request_id_header_present_on_404_response(tmp_path: Path) -> None:
+    """X-Request-ID must be present on a 404 (non-existent recipe GET)."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/v1/recipes/no_such")
+    assert response.status_code == 404
+    assert "x-request-id" in response.headers, (
+        "X-Request-ID must be present even on 404 responses"
+    )
+
+
+def test_request_id_header_present_on_503_response(tmp_path: Path) -> None:
+    """X-Request-ID must be present on a 503 (unloaded recipe POST)."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    recipes_dir = Path(cfg.recipes_dir)  # type: ignore[arg-type]
+    missing_artifact = tmp_path / "no-artifact.recotem"
+    _write_recipe_yaml(recipes_dir, "broken_for_rid", missing_artifact)
+
+    app = create_app(cfg)
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post(
+        "/v1/recipes/broken_for_rid:recommend",
+        json={"user_id": "u1", "limit": 5},
+    )
+    assert response.status_code == 503
+    assert "x-request-id" in response.headers, (
+        "X-Request-ID must be present on 503 responses"
+    )
+
+
+def test_request_id_echoed_when_client_supplies_valid_id(tmp_path: Path) -> None:
+    """When the client sends a valid X-Request-ID, the same value is echoed back."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app)
+    trace_id = "my-trace-id-123"
+    response = client.get("/v1/health", headers={"X-Request-ID": trace_id})
+    assert response.status_code == 200
+    assert response.headers.get("x-request-id") == trace_id, (
+        f"Valid client X-Request-ID must be echoed; "
+        f"got {response.headers.get('x-request-id')!r}"
+    )
+
+
+def test_request_id_replaced_when_client_supplies_overlong_value(
+    tmp_path: Path,
+) -> None:
+    """A client-supplied X-Request-ID longer than 128 chars is rejected and
+    replaced by a server-generated ID."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app)
+    too_long = "a" * 200
+    response = client.get("/v1/health", headers={"X-Request-ID": too_long})
+    assert response.status_code == 200
+    returned = response.headers.get("x-request-id", "")
+    assert returned != too_long, (
+        "Overlong X-Request-ID must be replaced by a server-generated value"
+    )
+    assert len(returned) <= 128, (
+        f"Server-generated ID must be <=128 chars; got {len(returned)}"
+    )
+    assert returned, "Server-generated X-Request-ID must not be empty"
+
+
+def test_request_id_replaced_when_client_supplies_invalid_chars(
+    tmp_path: Path,
+) -> None:
+    """A client-supplied X-Request-ID with disallowed characters is replaced
+    by a server-generated ID."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app)
+    bad_value = "<script>alert(1)</script>"
+    response = client.get("/v1/health", headers={"X-Request-ID": bad_value})
+    assert response.status_code == 200
+    returned = response.headers.get("x-request-id", "")
+    assert returned != bad_value, (
+        "X-Request-ID with invalid chars must be replaced by a server-generated value"
+    )
+    assert returned, "Server-generated X-Request-ID must not be empty"
+
+
+def test_request_id_replaced_when_client_supplies_empty_value(
+    tmp_path: Path,
+) -> None:
+    """An empty X-Request-ID header is treated as absent and replaced by a
+    server-generated ID."""
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    client = TestClient(app)
+    response = client.get("/v1/health", headers={"X-Request-ID": ""})
+    assert response.status_code == 200
+    returned = response.headers.get("x-request-id", "")
+    assert returned, "Empty X-Request-ID must be replaced by a server-generated value"

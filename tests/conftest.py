@@ -345,3 +345,126 @@ def movielens_small_df(movielens_df: pd.DataFrame) -> pd.DataFrame:
     """50 most-active users from MovieLens100K — fast training slice."""
     top_users = movielens_df["user_id"].value_counts().head(50).index
     return movielens_df[movielens_df["user_id"].isin(top_users)].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Serving app builder for unit / integration tests
+# ---------------------------------------------------------------------------
+#
+# ``create_app`` (in src/recotem/serving/app.py) registers a RequestIDMiddleware
+# that sets ``request.state.request_id`` and two custom exception handlers
+# that flatten error bodies and route 422s through a validation handler.
+#
+# Most tests don't want to build a full ServeConfig; they just want a router
+# wired to a hand-built ModelRegistry.  This helper mirrors what create_app
+# does (middleware + handlers) so the tests exercise the production response
+# shape without dragging in recipes-dir loading.
+# ---------------------------------------------------------------------------
+
+
+def build_v1_app(
+    registry,
+    api_keys=None,
+):
+    """Build a FastAPI app mounting the v1 router with production middleware.
+
+    Parameters
+    ----------
+    registry:
+        ``ModelRegistry`` populated with the model entries the test needs.
+    api_keys:
+        Optional list of ``ApiKeyEntry`` (defaults to []).
+
+    Returns
+    -------
+    FastAPI
+        Application with the v1 router mounted at ``/v1`` plus the
+        RequestIDMiddleware and the flat-body / validation-error
+        exception handlers registered exactly as ``create_app`` would.
+    """
+
+    from fastapi import FastAPI, Request
+    from fastapi.exceptions import HTTPException, RequestValidationError
+    from fastapi.responses import JSONResponse
+
+    from recotem.serving import metrics as _metrics
+    from recotem.serving.app import (
+        _DEFAULT_DETAIL_FOR,
+        _V1_VERB_PATH_RE,
+        RequestIDMiddleware,
+    )
+    from recotem.serving.routes import make_router
+
+    app = FastAPI()
+
+    @app.exception_handler(HTTPException)
+    async def _http_exception_handler(
+        request: Request, exc: HTTPException
+    ) -> JSONResponse:
+        headers = getattr(exc, "headers", None)
+        if isinstance(exc.detail, dict):
+            content: dict[str, Any] = dict(exc.detail)
+            content.setdefault(
+                "detail", _DEFAULT_DETAIL_FOR.get(exc.status_code, "Error")
+            )
+        else:
+            content = {"detail": exc.detail}
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=content,
+            headers=headers,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        match = _V1_VERB_PATH_RE.match(request.url.path)
+        if match is not None:
+            _metrics.record_v1_request(
+                recipe=match.group("name"),
+                verb=match.group("verb"),
+                status="validation_error",
+                latency_seconds=0.0,
+            )
+        request_id = getattr(request.state, "request_id", "")
+        sanitized_errors = [
+            {k: v for k, v in err.items() if k not in ("input", "ctx")}
+            for err in exc.errors()
+        ]
+        return JSONResponse(
+            status_code=422,
+            content={
+                "request_id": request_id,
+                "detail": "Request validation failed",
+                "code": "VALIDATION_ERROR",
+                "errors": sanitized_errors,
+            },
+        )
+
+    # Structured exception handler for unhandled non-HTTP exceptions.
+    # FastAPI's default 500 response is a plain text "Internal Server Error"
+    # string which leaks no details.  We register our own handler to ensure
+    # the response is JSON-formatted with a stable structure that clients can
+    # parse, while still NOT leaking stack traces.  Starlette dispatches
+    # HTTPException to its dedicated handler first, so we never receive it here.
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "")
+        headers = {"X-Request-ID": request_id} if request_id else None
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "internal error", "code": "INTERNAL_ERROR"},
+            headers=headers,
+        )
+
+    app.add_middleware(RequestIDMiddleware)
+
+    router = make_router(
+        registry=registry,
+        api_keys=api_keys or [],
+    )
+    app.include_router(router, prefix="/v1")
+    return app

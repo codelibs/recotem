@@ -158,7 +158,7 @@ docker run --rm \
 | `RECOTEM_ENV` | no | `""` | `--insecure-no-auth` permitted when set to `development`, `dev`, or `test`; `--dev-allow-unsigned` permitted only when set to `development`. |
 | `RECOTEM_ARTIFACT_ROOT` | no | `""` | If set, local `output.path` must resolve under this directory (symlink-escape guard) |
 | `RECOTEM_LOCK_DIR` | no | `""` | Override directory for per-recipe training lock files. Needed when `output.path` is a remote URI (lock files must be host-local). Falls back to a temp dir under the system temp directory. |
-| `RECOTEM_METADATA_FIELD_DENY` | no | `""` | Comma-separated column names stripped from `/predict` responses after the metadata join |
+| `RECOTEM_METADATA_FIELD_DENY` | no | `""` | Comma-separated column names stripped from `/v1/recipes/{name}:recommend` and `:recommend-related` responses after the metadata join |
 | `RECOTEM_METRICS_ENABLED` | no | `""` | Set to `1`/`true`/`yes`/`on` to enable the Prometheus `/metrics` endpoint. Requires `recotem[metrics]` extra. |
 | `RECOTEM_STARTUP_PARALLELISM` | no | `""` (auto) | Number of parallel threads used to load artifacts at startup. Default is `min(len(recipes), 8)`. Clamped 1–32. Set to `1` for sequential loading (useful for memory-constrained environments or debugging). |
 

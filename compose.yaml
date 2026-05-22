@@ -20,10 +20,10 @@
 #   3. Serve + curl
 #      $ RECOTEM_SIGNING_KEYS="..." RECOTEM_API_KEYS="..." \
 #        docker compose up -d serve
-#      $ curl -sX POST http://localhost:8080/predict/purchase_log \
+#      $ curl -sX POST http://localhost:8080/v1/recipes/purchase_log:recommend \
 #          -H "X-API-Key: <api plaintext>" \
 #          -H "Content-Type: application/json" \
-#          -d '{"user_id": "1", "cutoff": 5}'
+#          -d '{"user_id": "1", "limit": 5}'
 
 x-recotem-image: &recotem-image
   image: ghcr.io/codelibs/recotem:latest

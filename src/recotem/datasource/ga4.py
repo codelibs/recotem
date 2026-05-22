@@ -16,6 +16,8 @@ from recotem.datasource.base import DataSourceError, FetchContext
 _EVENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,39}$")
 _log = structlog.get_logger(__name__)
 
+_PAGE_SIZE = 100_000
+
 
 class GA4Config(BaseModel):
     type: Literal["ga4"]
@@ -255,7 +257,7 @@ class GA4Source:
             raise DataSourceError("google.api_core is required for GA4Source") from exc
 
         client = self._get_client()
-        page_size = 100_000
+        page_size = _PAGE_SIZE
         max_pages = get_ga4_max_pages()
         page_frames: list[pd.DataFrame] = []
         offset = 0

@@ -7,7 +7,7 @@
 4. Attempts initial artifact load for each recipe.
 5. Builds the ``ModelRegistry``.
 6. Registers FastAPI middlewares (TrustedHost, CORS).
-7. Registers routes (via ``make_router``).
+7. Registers routes (via ``make_router`` mounted at ``/v1``).
 8. Wires the app lifespan to start the ``ArtifactWatcher`` and stop it
    gracefully on shutdown.
 
@@ -21,24 +21,31 @@ Notes:
 from __future__ import annotations
 
 import json
+import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import structlog
+import structlog.contextvars
 from fastapi import FastAPI, Request
-from fastapi.exceptions import HTTPException
+from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
 from recotem.artifact.format import ArtifactError, parse_header_from_bytes
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
 from recotem.config import ConfigError, ServeConfig
 from recotem.recipe.loader import load_recipes_directory_lenient
 from recotem.serving import metrics as _metrics
+from recotem.serving._header_utils import extract_algorithms, normalize_config_digest
+from recotem.serving._naming import dedup_stub_name
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from recotem.serving.routes import make_router
 from recotem.serving.watcher import (
@@ -52,6 +59,77 @@ from recotem.serving.watcher import (
 from recotem.version import __version__
 
 logger = structlog.get_logger(__name__)
+
+# Allowed characters and length for echoing a client-supplied X-Request-ID.
+# 128 chars matches common tracing-vendor IDs (e.g. W3C traceparent excluding
+# hyphens, Datadog dd-trace UUIDs).
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
+
+# Pattern matching v1 inference verbs on the request path.  Used by the
+# RequestValidationError handler to record a ``validation_error`` metric for
+# the appropriate (recipe, verb) tuple when 422 is returned for a malformed
+# inference body. The name character class must mirror the recipe-name
+# regex in ``recotem.recipe.models`` so a YAML recipe whose name starts with
+# ``_`` or ``-`` still produces (recipe, verb)-labelled validation_error
+# metrics rather than falling through to the unlabelled path.
+_V1_VERB_PATH_RE = re.compile(
+    r"^/v1/recipes/(?P<name>[A-Za-z0-9_-]{1,64}):"
+    r"(?P<verb>recommend|recommend-related|batch-recommend|batch-recommend-related)$"
+)
+
+# Default ``detail`` strings used by the HTTPException handler when callers
+# raise ``HTTPException(detail={...})`` with a dict that omits a ``detail``
+# key.  Keeps the response body well-formed (every error body has a string
+# ``detail`` field) even if a handler forgets to set one.
+_DEFAULT_DETAIL_FOR: dict[int, str] = {
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    422: "Unprocessable Entity",
+    500: "Internal Server Error",
+    503: "Service Unavailable",
+}
+
+
+# ---------------------------------------------------------------------------
+# Request-ID middleware
+# ---------------------------------------------------------------------------
+
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """Attach a request-scoped ID to every response.
+
+    - Reads ``X-Request-ID`` from the incoming request.  If the value passes
+      the allow-list (``[A-Za-z0-9_-]``, 1–128 chars) it is echoed back
+      verbatim; otherwise a server-generated 12-hex-char ID is used.
+    - Binds ``request_id`` into structlog's context-var store so all log
+      records emitted during the request carry the ID automatically.
+    - Writes ``X-Request-ID`` onto the response regardless of status code,
+      including 404/503 responses raised via ``HTTPException``.
+    - Stores the resolved ID on ``request.state.request_id`` so handlers that
+      need explicit access can read it without re-parsing the header.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        super().__init__(app)
+
+    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        raw = request.headers.get("x-request-id", "")
+        if _REQUEST_ID_RE.match(raw):
+            request_id = raw
+        else:
+            request_id = uuid.uuid4().hex[:12]
+
+        request.state.request_id = request_id
+        structlog.contextvars.bind_contextvars(request_id=request_id)
+        try:
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            structlog.contextvars.unbind_contextvars("request_id")
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +158,13 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         and dev_allow_unsigned is False.
     """
     # 1. Validate unsafe flags.
-    serve_config.validate_insecure_flags()
+    try:
+        serve_config.validate_insecure_flags()
+    except Exception:
+        # Emit security.posture before propagating so SIEM rules fire even
+        # when the flag validation rejects the configuration.
+        _emit_security_posture(serve_config, None)
+        raise
 
     # 2. Enforce host binding based on auth posture.
     serve_config.apply_auth_posture()
@@ -88,16 +172,29 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # 3. Build KeyRing (or None for dev-unsigned path).
     # Always emit security.posture even when key-ring construction fails so
     # SIEM rules that look for the posture event still fire and operators see
-    # the "missing" status in the log before the ConfigError propagates.
+    # the status in the log before the ConfigError propagates.
     _key_ring_build_exc: Exception | None = None
     key_ring: KeyRing | None = None
+    _key_ring_status: str | None = None
     try:
         key_ring = _build_key_ring(serve_config)
     except Exception as _exc:
         _key_ring_build_exc = _exc
+        # Distinguish "keys not configured" (missing) from "keys provided but
+        # construction failed" (construction_failed).  The former is a routine
+        # operator configuration omission; the latter is a programming error or
+        # corrupt key material that warrants a different alert.
+        if not serve_config.signing_keys_raw and not serve_config.dev_allow_unsigned:
+            _key_ring_status = "missing"
+        else:
+            _key_ring_status = "construction_failed"
+            logger.exception(
+                "signing_key_construction_failed",
+                error=str(_exc),
+            )
 
     # 4. Emit security.posture log line (always, even on key-ring failure).
-    _emit_security_posture(serve_config, key_ring)
+    _emit_security_posture(serve_config, key_ring, key_ring_status=_key_ring_status)
 
     if _key_ring_build_exc is not None:
         raise _key_ring_build_exc
@@ -129,11 +226,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             stem = yaml_path.stem
             # Guard against duplicate stems in edge cases (two files whose stems
             # collide after the recipe name cannot be read).
-            stub_name = stem
-            _suffix = 0
-            while stub_name in _yaml_names_seen:
-                _suffix += 1
-                stub_name = f"{stem}_{_suffix}"
+            stub_name = dedup_stub_name(stem, lambda n: n in _yaml_names_seen)
             _yaml_names_seen[stub_name] = yaml_path.name
             yaml_failed_stub_paths[stub_name] = yaml_path
             logger.warning(
@@ -164,7 +257,8 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # On successful load we insert a fully populated ModelEntry; on failure
     # we still insert a stub (loaded=False, last_load_error=<reason>) so
     # /health returns degraded and operators can see which recipes are not
-    # serving.  /predict checks  and returns 503 for stubs.
+    # serving.  The v1 inference endpoints check ``entry.loaded`` and return
+    # 503 for stubs.
     #
     # Loads are parallelised via a ThreadPoolExecutor so startup time is
     # bounded by the slowest single artifact rather than the sum of all
@@ -176,7 +270,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # Register YAML-parse-failed stubs first so they appear in /health.
     for stub in yaml_failed_stubs:
         registry.replace(stub.name, stub)
-        _metrics.inc_artifact_load_failure(stub.name)
+        _metrics.inc_artifact_load_failure(stub.name, reason="yaml")
         _metrics.set_model_loaded(stub.name, False)
 
     n_recipes = len(recipes)
@@ -215,25 +309,29 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
                 # _try_load_artifact never raises (it catches internally and
                 # returns a stub), but guard defensively.
                 try:
-                    entry = future.result()
+                    entry, load_reason = future.result()
                 except Exception as exc:  # pragma: no cover — defensive only
-                    logger.warning(
+                    logger.error(
                         "recipe_load_future_error",
                         name=recipe.name,
                         error=str(exc),
+                        exc_info=True,
                     )
+                    _metrics.inc_artifact_load_failure(recipe.name, reason="unexpected")
                     entry = _failed_entry(recipe, f"unexpected error: {exc}")
+                    load_reason = "unexpected"
 
                 registry.replace(recipe.name, entry)
                 _metrics.set_model_loaded(recipe.name, entry.loaded)
                 if entry.loaded:
                     loaded_entries[recipe.name] = entry
                 else:
-                    _metrics.inc_artifact_load_failure(recipe.name)
+                    _metrics.inc_artifact_load_failure(recipe.name, reason=load_reason)
                     logger.warning(
                         "recipe_not_loaded_at_startup",
                         name=recipe.name,
                         error=entry.last_load_error,
+                        reason=load_reason,
                     )
 
         _wall_seconds = time.perf_counter() - _startup_t0
@@ -247,7 +345,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             max_workers=max_workers,
         )
 
-    _metrics.set_active_recipes(len(loaded_entries))
+    _metrics.set_active_recipes(registry.loaded_count())
 
     # Build watcher initial states — captures mtime/sha to avoid re-load on
     # first tick (spec: "capture initial mtime/sha inside the watcher's own
@@ -274,12 +372,20 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         if serve_config.insecure_no_auth or serve_config.dev_allow_unsigned:
             import asyncio
 
+            _warn_interval = 60 if (serve_config.env or "").lower() == "test" else 300
+
+            # Emit at most one combined banner per interval regardless of
+            # how many insecure flags are set (M5: prevent double-fire when
+            # both --insecure-no-auth and --dev-allow-unsigned are active).
+            _do_insecure = serve_config.insecure_no_auth
+            _do_unsigned = serve_config.dev_allow_unsigned
+
             async def _warn_loop() -> None:
                 while True:
-                    await asyncio.sleep(60)
-                    if serve_config.insecure_no_auth:
+                    await asyncio.sleep(_warn_interval)
+                    if _do_insecure:
                         _emit_insecure_banner(serve_config)
-                    if serve_config.dev_allow_unsigned:
+                    if _do_unsigned:
                         _emit_dev_unsigned_banner(serve_config)
 
             banner_task = asyncio.create_task(_warn_loop())
@@ -331,25 +437,130 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         openapi_url=_openapi_url,
     )
 
-    # 9. Structured exception handler for unhandled non-HTTP exceptions.
+    # 9a. Flat-body HTTPException handler.
+    # Handlers raise ``HTTPException(detail={"detail": "...", "code": "..."})``
+    # so callers can attach a machine-readable code alongside the human
+    # message.  FastAPI's default would wrap that into
+    # ``{"detail": {"detail": "...", "code": "..."}}`` (double-detail).  We
+    # flatten dict-shaped details to the top level so the response body is
+    # a single flat object — ``{"detail": "...", "code": "..."}`` — while
+    # string-shaped details fall through to FastAPI's default shape.
+    @app.exception_handler(HTTPException)
+    async def _http_exception_handler(
+        request: Request, exc: HTTPException
+    ) -> JSONResponse:
+        headers = getattr(exc, "headers", None)
+        if isinstance(exc.detail, dict):
+            content: dict[str, Any] = dict(exc.detail)
+            # Defensive: if a handler raised HTTPException(detail={...})
+            # without including a "detail" key, fill in a sensible default
+            # so the response body always has a string ``detail`` field.
+            content.setdefault(
+                "detail", _DEFAULT_DETAIL_FOR.get(exc.status_code, "Error")
+            )
+        else:
+            content = {"detail": exc.detail}
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=content,
+            headers=headers,
+        )
+
+    # 9b. Flat-body RequestValidationError handler.
+    # FastAPI's default 422 body is ``{"detail": [errors...]}`` which clashes
+    # with our flat error shape.  Wrap it in our standard ``{"detail",
+    # "code", "errors"}`` envelope, and record a ``validation_error`` metric
+    # for the matching (recipe, verb) tuple when the request path is a v1
+    # inference verb.  If the path does not match (e.g. /v1/recipes listing
+    # with bad query), the metric is skipped but the 422 body is still
+    # returned.
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        match = _V1_VERB_PATH_RE.match(request.url.path)
+        if match is not None:
+            _metrics.record_v1_request(
+                recipe=match.group("name"),
+                verb=match.group("verb"),
+                status="validation_error",
+                latency_seconds=0.0,
+            )
+        else:
+            _metrics.inc_validation_error_outside_verb()
+        # Include request_id so 422 responses are correlatable with the
+        # X-Request-ID header set by RequestIDMiddleware.  If the middleware
+        # was bypassed (e.g. in a stripped-down test app), fall back to "".
+        request_id = getattr(request.state, "request_id", "")
+        sanitized_errors = [
+            {k: v for k, v in err.items() if k not in ("input", "ctx")}
+            for err in exc.errors()
+        ]
+        # Always emit a structured WARN log so non-v1-verb paths (e.g. a
+        # malformed query string on ``/v1/recipes``) still produce an
+        # operational signal — the v1 metric counter only covers paths that
+        # match _V1_VERB_PATH_RE.  Include the sanitised errors so operators
+        # can grep by request_id and see which field failed without raw input.
+        logger.warning(
+            "validation_failed",
+            path=request.url.path,
+            method=request.method,
+            request_id=request_id,
+            error_count=len(sanitized_errors),
+            matched_v1_verb=match is not None,
+            errors=sanitized_errors,
+        )
+        return JSONResponse(
+            status_code=422,
+            content={
+                "request_id": request_id,
+                "detail": "Request validation failed",
+                "code": "VALIDATION_ERROR",
+                "errors": sanitized_errors,
+            },
+        )
+
+    # 9c. Structured exception handler for unhandled non-HTTP exceptions.
     # FastAPI's default 500 response is a plain text "Internal Server Error"
     # string which leaks no details.  We register our own handler to ensure
     # the response is JSON-formatted with a stable structure that clients can
-    # parse, while still NOT leaking stack traces.  HTTPException is
-    # intentionally excluded so FastAPI's own handler keeps it.
+    # parse, while still NOT leaking stack traces.
+    # Note: Starlette dispatches HTTPException to its dedicated handler first
+    # so we never receive HTTPException here — no isinstance guard needed.
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(
         request: Request, exc: Exception
     ) -> JSONResponse:
-        if isinstance(exc, HTTPException):
-            # Let FastAPI's built-in HTTPException handler deal with it.
-            raise exc
+        # Starlette's ServerErrorMiddleware sits OUTSIDE RequestIDMiddleware,
+        # so the middleware's normal X-Request-ID injection does not run for
+        # 500 responses produced here.  Read the value our middleware already
+        # stashed on ``request.state`` and re-attach it so every error
+        # response — including 500s — carries a correlatable ID.
+        request_id = getattr(request.state, "request_id", "")
+        logger.exception(
+            "unhandled_500",
+            path=str(request.url.path),
+            request_id=request_id,
+            exc_type=type(exc).__name__,
+        )
+        headers = {"X-Request-ID": request_id} if request_id else None
         return JSONResponse(
             status_code=500,
-            content={"detail": "internal error", "code": "internal_error"},
+            content={
+                "detail": "internal error",
+                "code": "INTERNAL_ERROR",
+                "request_id": request_id,
+            },
+            headers=headers,
         )
 
     # 10. Middlewares.
+    # Starlette processes add_middleware calls in LIFO order: the last one added
+    # is the outermost wrapper (first to process the request, last to process
+    # the response).  We want RequestIDMiddleware to be outermost so it sets
+    # X-Request-ID on every response regardless of what inner layers do.
+    # Therefore RequestIDMiddleware is added LAST (after TrustedHost and CORS).
+
     # allowed_hosts is always non-empty after ServeConfig.from_env() because
     # _split_csv_env falls back to _DEFAULT_ALLOWED_HOSTS on empty/unset input.
     app.add_middleware(
@@ -364,19 +575,27 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             allow_credentials=False,
             allow_methods=["GET", "POST", "OPTIONS"],
             allow_headers=["*"],
+            expose_headers=[
+                "X-Request-ID",
+                "X-Recotem-Model-Version",
+                "X-Recotem-Items-Degraded",
+            ],
         )
+
+    # Added last so it is outermost: ensures X-Request-ID is on every response.
+    app.add_middleware(RequestIDMiddleware)
 
     # 11. Routes.
     # ``--insecure-no-auth`` must short-circuit the X-API-Key check even when
     # ``RECOTEM_API_KEYS`` is still set in the environment, otherwise the flag
     # is documented but silently ineffective.
     router_api_keys = [] if serve_config.insecure_no_auth else serve_config.api_keys
-    router = make_router(
+    api_router = make_router(
         registry=registry,
         api_keys=router_api_keys,
-        metadata_field_deny=serve_config.metadata_field_deny,
+        insecure_no_auth=serve_config.insecure_no_auth,
     )
-    app.include_router(router)
+    app.include_router(api_router, prefix="/v1")
 
     return app
 
@@ -411,7 +630,12 @@ def _build_key_ring(serve_config: ServeConfig) -> KeyRing | None:
 # ---------------------------------------------------------------------------
 
 
-def _emit_security_posture(serve_config: ServeConfig, key_ring: KeyRing | None) -> None:
+def _emit_security_posture(
+    serve_config: ServeConfig,
+    key_ring: KeyRing | None,
+    *,
+    key_ring_status: str | None = None,
+) -> None:
     """Emit the canonical security.posture log line.
 
     The ``signing_keys`` field is a list of ``{"kid", "fingerprint"}`` pairs
@@ -421,25 +645,31 @@ def _emit_security_posture(serve_config: ServeConfig, key_ring: KeyRing | None) 
     against the earlier schema.
 
     The signing_key_status field reflects:
-    - "configured"          — keys are present and the KeyRing was built.
-    - "dev_allow_unsigned"  — dev-unsigned mode, no keys required.
-    - "missing"             — keys absent and dev-unsigned not set; startup
-                                    will fail after this log line.
+    - "configured"           — keys are present and the KeyRing was built.
+    - "dev_allow_unsigned"   — dev-unsigned mode, no keys required.
+    - "missing"              — keys absent and dev-unsigned not set; startup
+                               will fail after this log line.
+    - "construction_failed"  — keys were provided but KeyRing construction
+                               raised an exception; startup will fail.
+
+    *key_ring_status* overrides the auto-derived value when provided (used
+    when the caller detects ``construction_failed`` before passing None as
+    *key_ring*).
     """
     if key_ring is not None:
         kids = key_ring.kids()
         signing_keys = [
             {"kid": kid, "fingerprint": key_ring.fingerprint(kid)} for kid in kids
         ]
-        signing_key_status = "configured"
+        signing_key_status = key_ring_status or "configured"
     elif serve_config.dev_allow_unsigned:
         kids = []
         signing_keys = []
-        signing_key_status = "dev_allow_unsigned"
+        signing_key_status = key_ring_status or "dev_allow_unsigned"
     else:
         kids = []
         signing_keys = []
-        signing_key_status = "missing"
+        signing_key_status = key_ring_status or "missing"
 
     logger.info(
         "security.posture",
@@ -500,6 +730,14 @@ def _emit_dev_unsigned_banner(serve_config: ServeConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
+_URI_RE = re.compile(r"\b(s3|gs|az|abfs|abfss|https?)://\S+")
+
+
+def _sanitize_error(reason: str) -> str:
+    truncated = reason[:200]
+    return _URI_RE.sub("<redacted-uri>", truncated)
+
+
 def _failed_entry(recipe: Any, reason: str) -> ModelEntry:
     """Stub ModelEntry inserted at startup when an artifact failed to load.
 
@@ -513,7 +751,7 @@ def _failed_entry(recipe: Any, reason: str) -> ModelEntry:
         header={},
         kid="",
         metadata_df=None,
-        last_load_error=reason,
+        last_load_error=_sanitize_error(reason),
         artifact_path=recipe.output.path,
         loaded=False,
     )
@@ -523,12 +761,13 @@ def _try_load_artifact(
     recipe: Any,
     key_ring: KeyRing | None,
     serve_config: ServeConfig,
-) -> ModelEntry:
+) -> tuple[ModelEntry, str]:
     """Attempt to load the artifact for *recipe* at startup.
 
-    Returns a fully-populated ModelEntry on success, or a stub entry with
-    ``loaded=False`` and ``last_load_error`` set on any failure.  Either way
-    the caller registers the entry so ``/health`` reports the recipe.
+    Returns ``(entry, reason)``. On success *reason* is ``"ok"`` and *entry*
+    is fully populated. On failure *reason* is the load-failure category
+    and *entry* is a stub with ``loaded=False`` and ``last_load_error`` set.
+    Either way the caller registers the entry so ``/health`` reports the recipe.
     """
     artifact_path = recipe.output.path
     max_artifact_bytes = serve_config.max_artifact_bytes
@@ -538,12 +777,12 @@ def _try_load_artifact(
         data = read_artifact_bytes(artifact_path, max_artifact_bytes)
     except ArtifactError as exc:
         logger.warning("initial_artifact_read_failed", name=recipe.name, error=str(exc))
-        return _failed_entry(recipe, f"read failed: {exc}")
+        return _failed_entry(recipe, f"read failed: {exc}"), "read"
     except (MemoryError, RecursionError):
         raise
     except Exception as exc:
         logger.warning("initial_artifact_read_error", name=recipe.name, error=str(exc))
-        return _failed_entry(recipe, f"read error: {exc}")
+        return _failed_entry(recipe, f"read error: {exc}"), "read"
 
     sha256 = sha256_bytes(data)
 
@@ -556,7 +795,7 @@ def _try_load_artifact(
         logger.warning(
             "initial_artifact_parse_failed", name=recipe.name, error=str(exc)
         )
-        return _failed_entry(recipe, f"parse failed: {exc}")
+        return _failed_entry(recipe, f"parse failed: {exc}"), "parse"
 
     payload_bytes = data[hdr.payload_offset :]
 
@@ -571,13 +810,18 @@ def _try_load_artifact(
                 hdr.hmac_digest,
             )
         except ArtifactError as exc:
-            logger.warning(
+            # HMAC failure is a security signal (wrong key, tampered artifact);
+            # log at ERROR with traceback so SIEM rules filtering on level
+            # >= ERROR fire. Other startup failure modes stay at WARNING since
+            # they are operational rather than security.
+            logger.error(
                 "initial_artifact_hmac_failed",
                 name=recipe.name,
                 kid=hdr.kid,
                 error=str(exc),
+                exc_info=True,
             )
-            return _failed_entry(recipe, f"HMAC verify failed: {exc}")
+            return _failed_entry(recipe, f"HMAC verify failed: {exc}"), "hmac"
     else:
         logger.warning(
             "initial_artifact_hmac_skipped_dev",
@@ -598,7 +842,10 @@ def _try_load_artifact(
             kid=hdr.kid,
             error=str(exc),
         )
-        return _failed_entry(recipe, f"header JSON decode failed: {exc}")
+        return (
+            _failed_entry(recipe, f"header JSON decode failed: {exc}"),
+            "header_json",
+        )
 
     try:
         recommender = unpickle_payload(payload_bytes)
@@ -609,7 +856,7 @@ def _try_load_artifact(
             kid=hdr.kid,
             error=str(exc),
         )
-        return _failed_entry(recipe, f"deserialize failed: {exc}")
+        return _failed_entry(recipe, f"deserialize failed: {exc}"), "deserialize"
 
     metadata_df = None
     metadata_index = None
@@ -621,7 +868,14 @@ def _try_load_artifact(
             deny_set: frozenset[str] = frozenset(
                 s.lower() for s in (serve_config.metadata_field_deny or [])
             )
-            metadata_index = build_metadata_index(metadata_df, deny_set)
+            _recipe_name = recipe.name
+
+            def _on_row_error() -> None:
+                _metrics.inc_metadata_index_build_error(_recipe_name)
+
+            metadata_index = build_metadata_index(
+                metadata_df, deny_set, on_row_error=_on_row_error
+            )
         except (MemoryError, RecursionError):
             raise
         except Exception as exc:
@@ -630,7 +884,7 @@ def _try_load_artifact(
                 name=recipe.name,
                 error=str(exc),
             )
-            return _failed_entry(recipe, f"metadata load failed: {exc}")
+            return _failed_entry(recipe, f"metadata load failed: {exc}"), "metadata"
 
     marker = stat_marker(artifact_path)
     entry = ModelEntry(
@@ -643,6 +897,9 @@ def _try_load_artifact(
         last_load_error=None,
         artifact_path=artifact_path,
         _loaded_marker=(marker, sha256),
+        loaded_at_unix=time.time(),
+        config_digest=normalize_config_digest(header_dict.get("config_digest")) or "",
+        algorithms=extract_algorithms(header_dict),
     )
 
     logger.info(
@@ -652,4 +909,4 @@ def _try_load_artifact(
         trained_at=header_dict.get("trained_at"),
         best_class=header_dict.get("best_class"),
     )
-    return entry
+    return entry, "ok"

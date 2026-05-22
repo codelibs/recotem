@@ -44,16 +44,16 @@ This multi-kid pattern enables zero-downtime rotation:
    RECOTEM_SIGNING_KEYS="prod-2026-q3:ddeeff..."
    ```
 
-   Restart `recotem serve`. Any artifact still signed with the old kid will fail to load and will show up as `loaded: false` in `/health/details`. Retrain those recipes.
+   Restart `recotem serve`. Any artifact still signed with the old kid will fail to load and will show up as `loaded: false` in `/v1/health/details`. Retrain those recipes.
 
-   Confirm all recipes loaded successfully. Per-recipe state lives behind the authenticated `/health/details` endpoint — the public `/health` returns only `{status, total, loaded}` aggregates, not the `recipes` map:
+   Confirm all recipes loaded successfully. Per-recipe state lives behind the authenticated `/v1/health/details` endpoint — the public `/v1/health` returns only `{status, total, loaded}` aggregates, not the `recipes` map:
 
    ```bash
    # -f / --fail returns exit 22 on 4xx/5xx, which would mask a 503.
    # Use -w to capture the status code instead.
    HTTP_STATUS=$(curl -s -o /tmp/health.json -w "%{http_code}" \
      -H "X-API-Key: $RECOTEM_API_PLAINTEXT" \
-     http://localhost:8080/health/details)
+     http://localhost:8080/v1/health/details)
    echo "HTTP $HTTP_STATUS"
    jq '.recipes | to_entries[] | select(.value.loaded == false)' /tmp/health.json
    ```
@@ -127,7 +127,9 @@ wrong-magic file of the expected length, the parsed kid string is shown
 verbatim instead — useful for grepping which signing key the offending
 artifact was written with.
 
-The server continues running and returns 503 for that recipe's `/predict/{name}` endpoint.
+The server continues running and returns 503 (`RECIPE_UNAVAILABLE`) for
+that recipe's `/v1/recipes/{name}:recommend` (and sibling verbs)
+endpoints.
 
 **Recovery steps:**
 
@@ -154,8 +156,9 @@ The server continues running and returns 503 for that recipe's `/predict/{name}`
 3. **Verify.**
 
    ```bash
-   curl http://localhost:8080/health | jq '.recipes.my_recipe'
-   # {"loaded": true, "best_class": "IALSRecommender", ...}
+   curl -H "X-API-Key: $RECOTEM_API_PLAINTEXT" \
+     http://localhost:8080/v1/health/details | jq '.recipes.my_recipe'
+   # {"loaded": true, ...}
    ```
 
 If the artifact was written with `versioning: append_sha`, the old corrupt file is still present with its sha-suffix name. You can delete it after confirming the new artifact loaded:
@@ -269,12 +272,26 @@ Additional events emitted by the watcher, recipe loader, and size-cap helper tha
 | `recipe_security_violation_skipped` | ERROR | `recipe/loader.py` lenient loader | A recipe file contains a security-category error (path traversal, disallowed scheme, embedded credentials). The recipe is skipped but the server keeps running. **Alertable** — indicates a misconfigured or potentially hostile recipe file. |
 | `recipe_load_error_skipped` | WARN | `recipe/loader.py` lenient loader | A recipe file failed to load for non-security reasons (schema error, YAML parse error). The recipe is skipped. |
 | `size_cap_probe_failed` | WARN | `_size_cap.py` | An fsspec `info()` call on an object-store path failed unexpectedly (not `FileNotFoundError` / `PermissionError`). The size cap check was skipped; the subsequent read proceeds but is unbounded by the pre-read cap. Indicates degraded-but-bounded behavior. |
-| `auth_anonymous_bypass` | DEBUG | `serving/auth.py` | Every request that passes without an API key (when `RECOTEM_API_KEYS` is empty). Emitted on every request for access-log correlation. |
+| `auth_anonymous_bypass` | DEBUG | `serving/auth.py` | Every request that passes without an API key (when `RECOTEM_API_KEYS` is empty). Emitted on every request for access-log correlation. The `mode` field distinguishes `"insecure_no_auth"` (explicit flag) from `"loopback_no_keys"` (no keys configured). |
 | `auth_anonymous_bypass_first_seen` | INFO | `serving/auth.py` | First anonymous request from a given `client_host` (per process). The LRU cache tracking first-seen IPs is bounded to 1024 entries to prevent unbounded memory growth. |
 | `kid_extraction_failed` | WARN | `serving/watcher.py` | An artifact's kid bytes could not be parsed from the raw bytes (too short, out-of-range length, decode error). The kid shown in subsequent log fields is `\x00<unparseable>` — intentionally not collidable with any real kid. |
 | `artifact_stat_timeout` | WARN | `serving/watcher.py` | A stat() future did not complete within the per-future timeout (`min(watch_interval, 30)` seconds). Hung object-store stats no longer block tick progress or delay SIGTERM handling. |
+| `recommender_layout_unexpected` | WARN | `serving/routes.py` | `_any_seed_known` encountered an `AttributeError` on `recommender._mapper.item_id_to_index`. The request is treated as `INTERNAL_ERROR`. Increment counter: `recotem_recommender_layout_unexpected_total`. |
+| `set_load_error_no_entry` | WARN | `serving/watcher.py` | The watcher tried to mark a load error on a recipe with no registry entry. Counter: `recotem_watcher_state_divergence_total`. |
+| `sidecar_disappeared` | WARN | `serving/watcher.py` | A `.sha256` sidecar file was present on the previous poll but raised ENOENT on the current read — emitted once per disappearance transition. |
+| `metadata_index_row_error` | WARN | `metadata/loader.py` | A per-row exception occurred during `build_metadata_index`. The row is skipped. Counted by `recotem_metadata_index_build_errors_total{recipe}`. |
 
 The `train_error` event uses `name=` (not `recipe=`) for the recipe name field and includes `kid=` when the signing kid is known, matching the `train_done` event's field names.
+
+> **Note.** Metadata enrichment is indexed at artifact-load time.
+> Use `recotem_metadata_index_build_errors_total{recipe}` for load-time
+> per-row build failures and `recotem_metadata_serialization_errors_total{recipe,verb}`
+> for request-time per-item serialization failures.  When per-item
+> metadata enrichment fails at request time, the item is served with
+> `item_id` and `score` only (fallback) or dropped; the
+> `X-Recotem-Items-Degraded` response header indicates how many items
+> were degraded, and `recotem_v1_metadata_degraded_items_total{kind}` counts
+> them by kind (`fallback` / `dropped`).
 
 ## Concurrent training and persistent search storage
 
@@ -386,7 +403,7 @@ Full list of environment variables recognised by Recotem. Variables marked `serv
 | `RECOTEM_ENV` | (empty) | serve | Deployment environment tag. `--insecure-no-auth` is permitted only when set to `development`, `dev`, or `test`; `--dev-allow-unsigned` only when set to `development`. When set to `production`, `prod`, or `staging`, the `/docs`, `/redoc`, and `/openapi.json` endpoints are disabled. |
 | `RECOTEM_DRAIN_SECONDS` | 30 | serve | SIGTERM graceful drain window (clamped [1, 300]). Set `terminationGracePeriodSeconds` ≥ this + 5 in Kubernetes. |
 | `RECOTEM_LOG_FORMAT` | auto | train + serve | `auto` / `json` / `console`. |
-| `RECOTEM_METADATA_FIELD_DENY` | (empty) | serve | Comma-separated columns stripped from `/predict` responses after the metadata join. |
+| `RECOTEM_METADATA_FIELD_DENY` | (empty) | serve | Comma-separated columns stripped from `/v1/recipes/{name}:recommend` and `:recommend-related` responses after the metadata join. |
 | `RECOTEM_METRICS_ENABLED` | (unset) | serve | Truthy enables the Prometheus `/metrics` endpoint. Requires `recotem[metrics]` extra. |
 | `RECOTEM_ARTIFACT_ROOT` | (empty) | train | Local `output.path` must lie under this directory (symlink escapes rejected). |
 | `RECOTEM_LOCK_DIR` | (empty) | train | Override directory for per-recipe training lock files. Needed when `output.path` is a remote URI (`s3://`, `gs://`, …); falls back to `<tempdir>/recotem-locks/`. |
@@ -404,11 +421,19 @@ Recotem does not enforce SLOs internally. Recommended baseline targets for produ
 
 | Metric | Target |
 |--------|--------|
-| `/predict/{name}` p99 latency | < 50 ms (pure recommender, no metadata join) |
-| `/health` p99 latency | < 5 ms |
+| `/v1/recipes/{name}:recommend` p99 latency | < 50 ms (pure recommender, no metadata join) |
+| `/v1/recipes/{name}:recommend-related` p99 latency | < 50 ms |
+| `/v1/recipes/{name}:batch-recommend` and `:batch-recommend-related` p99 latency | budget separately per verb — track via `recotem_v1_request_latency_seconds{recipe,verb}` |
+| `/v1/health` p99 latency | < 5 ms |
 | Availability (per recipe) | Measure via `recotem_model_loaded{recipe}` Prometheus gauge |
 | Artifact hot-swap time | ≤ `RECOTEM_WATCH_INTERVAL` + model load time |
 | Train-to-serve lag | Schedule train; serve detects in ≤ `RECOTEM_WATCH_INTERVAL` seconds |
+
+SLO budgets above describe each v1 verb individually (`recommend`,
+`recommend-related`, `batch-recommend`, `batch-recommend-related`). Use
+the `verb` label on `recotem_v1_requests_total` /
+`recotem_v1_request_latency_seconds` to break out per-verb rates and
+quantiles.
 
 Enable Prometheus metrics:
 
@@ -418,32 +443,40 @@ pip install "recotem[metrics]"
 
 The `/metrics` endpoint is opt-in and off by default. Set `RECOTEM_METRICS_ENABLED` to a truthy value (`1`, `true`, `yes`, `on`) to activate.
 
-> **Network exposure.** Both `/metrics` and `/health` are unauthenticated by
-> design — the same posture Prometheus and Kubernetes liveness/readiness
-> probes expect. The endpoints surface recipe names, kid IDs, load-error
-> strings, model-load timestamps, and predict-latency histograms.
-> **Restrict them with the cluster's NetworkPolicy** (`/metrics` to the
-> Prometheus namespace, `/health` to kubelet probes) rather than relying
-> on the API-key middleware. The `helm/recotem` chart's NetworkPolicy
-> template ships with a deny-all baseline; allow only the scrapers and
-> probes you actually need.
+> **Network exposure.** Both `/v1/metrics` and `/v1/health` are
+> unauthenticated by design — the same posture Prometheus and Kubernetes
+> liveness/readiness probes expect. The endpoints surface recipe names,
+> kid IDs, load-error strings, model-load timestamps, and per-verb
+> latency histograms.
+> **Restrict them with the cluster's NetworkPolicy** (`/v1/metrics` to
+> the Prometheus namespace, `/v1/health` to kubelet probes) rather than
+> relying on the API-key middleware. The `helm/recotem` chart's
+> NetworkPolicy template ships with a deny-all baseline; allow only the
+> scrapers and probes you actually need.
 
 Available metrics:
 
-| Metric | Type | Labels |
-|--------|------|--------|
-| `recotem_predict_total` | Counter | `recipe`, `status` |
-| `recotem_predict_latency_seconds` | Histogram | `recipe` |
-| `recotem_model_loaded` | Gauge | `recipe` |
-| `recotem_artifact_load_failures_total` | Counter | `recipe` |
-| `recotem_active_recipes` | Gauge | — |
-| `recotem_swap_total` | Counter | `recipe`, `result` |
-| `recotem_artifact_stat_failures_total` | Counter | `recipe` |
-| `recotem_watcher_unhandled_errors_total` | Counter | — |
-| `recotem_metadata_lookup_errors_total` | Counter | `recipe` |
-| `recotem_recipe_rescan_errors_total` | Counter | `recipe` |
-| `recotem_bigquery_storage_fallback_total` | Counter | `reason` |
-| `recotem_recipes_dir_scan_failures_total` | Counter | `error_class` |
+| Metric | Type | Labels | Purpose |
+|--------|------|--------|---------|
+| `recotem_v1_requests_total` | Counter | `recipe`, `verb`, `status` | v1 request volume; `status` ∈ {`ok`, `unknown_user`, `unknown_seed_items`, `no_candidates`, `recipe_not_found`, `unavailable`, `validation_error`, `error`} |
+| `recotem_v1_request_latency_seconds` | Histogram | `recipe`, `verb` | per-verb end-to-end latency |
+| `recotem_v1_batch_size` | Histogram | `recipe`, `verb` | observed batch fan-out (only for `batch-recommend` / `batch-recommend-related`) |
+| `recotem_v1_batch_element_errors_total` | Counter | `recipe`, `verb`, `code` | per-element errors inside batch HTTP-200 responses; `code` ∈ {`UNKNOWN_USER`, `UNKNOWN_SEED_ITEMS`, `NO_CANDIDATES`, `VALIDATION_ERROR`, `INTERNAL_ERROR`} |
+| `recotem_v1_metadata_degraded_items_total` | Counter | `recipe`, `verb`, `kind` | items served with degraded metadata; `kind` ∈ {`fallback` (item_id/score only), `dropped` (omitted entirely)} |
+| `recotem_v1_validation_errors_outside_verb_total` | Counter | — | 422 errors on non-inference paths (e.g. `/v1/recipes` list with bad query) |
+| `recotem_model_loaded` | Gauge | `recipe` | 1 if the recipe is currently loaded |
+| `recotem_artifact_load_failures_total` | Counter | `recipe`, `reason` | artifact-load failures since process start; `reason` ∈ {`read`, `parse`, `hmac`, `header_json`, `deserialize`, `metadata`, `yaml`, `unexpected`, `dir_scan`} |
+| `recotem_active_recipes` | Gauge | — | total recipes in the registry |
+| `recotem_swap_total` | Counter | `recipe`, `result` | hot-swap attempts (`ok` / `error`) |
+| `recotem_artifact_stat_failures_total` | Counter | `recipe` | watcher stat() failures |
+| `recotem_watcher_unhandled_errors_total` | Counter | — | watcher loop crashes |
+| `recotem_metadata_index_build_errors_total` | Counter | `recipe` | per-row errors during `build_metadata_index` at artifact-load time (load-time) |
+| `recotem_metadata_serialization_errors_total` | Counter | `recipe`, `verb` | per-item metadata serialization failures during response building (request-time) |
+| `recotem_recipe_rescan_errors_total` | Counter | `recipe` | recipe rescan failures |
+| `recotem_bigquery_storage_fallback_total` | Counter | `reason` | BQ Storage Read API fell back to REST |
+| `recotem_recipes_dir_scan_failures_total` | Counter | `error_class` | recipes-dir scan failures |
+| `recotem_recommender_layout_unexpected_total` | Counter | `recipe` | `AttributeError` on `recommender._mapper.item_id_to_index` — indicates irspack API incompatibility |
+| `recotem_watcher_state_divergence_total` | Counter | — | watcher tried to mark an error on a non-existent registry entry (ordering bug) |
 
 ---
 
@@ -474,18 +507,18 @@ Available metrics:
   `recipe_removed` and the entry is dropped from the registry.
 - On any failure during reload (`artifact_load_failed`,
   `artifact_load_unexpected_error`), the existing entry remains served and
-  its `last_load_error` field is set so `/health` shows the staleness while
-  `/predict` continues to return the previous good model.
+  its `last_load_error` field is set so `/v1/health/details` shows the staleness while
+  `/v1/recipes/{name}:recommend` continues to return the previous good model.
 - On `_stat_marker` returning None (file disappeared), the existing entry
   keeps serving and an `artifact_disappeared` warning is logged once.
 
 ### Initial load failure
 
 When an artifact fails to load at startup the recipe is still registered as
-a stub (`loaded=false`, `error=<reason>`). The server starts, `/health`
-reports `degraded`, and `/predict/{name}` returns 503. This is intentional:
-a partial outage is recoverable by retraining without restarting the
-process.
+a stub (`loaded=false`, `error=<reason>`). The server starts, `/v1/health`
+reports `degraded`, and `/v1/recipes/{name}:recommend` (and sibling verbs)
+return 503 (`RECIPE_UNAVAILABLE`). This is intentional: a partial outage
+is recoverable by retraining without restarting the process.
 
 The startup-only event variants are:
 
@@ -524,10 +557,13 @@ The high-signal metrics for production alerting:
 | Recipe is unloaded | `recotem_model_loaded{recipe=...} == 0` for > `RECOTEM_WATCH_INTERVAL × 3` | page on-call |
 | Hot-swap failures | `rate(recotem_swap_total{result="error"}[5m]) > 0` | warn |
 | Artifact load failures since restart | `recotem_artifact_load_failures_total{recipe=...}` increase | warn (often paired with the unloaded alert above) |
+| HMAC verification failures | `rate(recotem_artifact_load_failures_total{reason="hmac"}[5m])` | page — security signal (wrong key or tampered artifact) |
+| Batch per-element error rate | `rate(recotem_v1_batch_element_errors_total[5m]) / rate(recotem_v1_requests_total{verb=~"batch-.*"}[5m])` | warn at sustained > 1% per recipe |
 | Artifact stat failures (watcher poll) | `recotem_artifact_stat_failures_total{recipe=...}` increase | warn |
 | Watcher unhandled errors | `recotem_watcher_unhandled_errors_total` increase | warn |
-| Predict error rate | `rate(recotem_predict_total{status="error"}[5m]) / rate(recotem_predict_total[5m])` | warn at 1%, page at 10% |
-| Predict latency | `histogram_quantile(0.99, recotem_predict_latency_seconds_bucket)` | per-recipe SLO |
+| Recommend error rate | `rate(recotem_v1_requests_total{status="error"}[5m]) / rate(recotem_v1_requests_total[5m])` | warn at 1%, page at 10% |
+| Recommend latency | `histogram_quantile(0.99, sum by (le, recipe, verb) (rate(recotem_v1_request_latency_seconds_bucket[5m])))` | per-recipe, per-verb SLO |
+| Batch fan-out | `histogram_quantile(0.95, sum by (le, recipe, verb) (rate(recotem_v1_batch_size_bucket[5m])))` | watch for clients approaching the 256-element cap |
 | Active recipes | `recotem_active_recipes` drop > 0 since last scrape | warn (recipe removed or all stub) |
 | BigQuery Storage API fallback | `rate(recotem_bigquery_storage_fallback_total{reason="api_error"}[5m]) > 0` | warn — grant `bigquery.readSessions.create` to restore fast path |
 | Recipes-dir scan failures | `rate(recotem_recipes_dir_scan_failures_total[5m]) > 0` | warn — broken recipe YAML or artifact path; check `error_class` label for `RecipeError` (schema), `OSError` (permissions), or `sidecar_stale` (artifact read failed after sidecar change) |
@@ -544,9 +580,8 @@ Recotem follows semver. Within a major version (`2.x`):
 - The artifact format version is `1`. Older readers refuse newer formats
   with `unsupported format version`. When the format bumps, retrain after
   upgrading the writer; readers can be upgraded first.
-- The FQCN allow-list is frozen per release; changes appear in the
-  CHANGELOG. Re-train if your artifacts encode a class that has been
-  removed.
+- The FQCN allow-list is frozen per release. Re-train if your artifacts
+  encode a class that has been removed.
 
 For zero-downtime upgrade of the serve fleet, deploy new pods with both
 the old and new signing kids configured (rotation-style), let new pods
@@ -557,7 +592,8 @@ become healthy, then drain old pods (relying on `RECOTEM_DRAIN_SECONDS`).
 ### `recotem serve` starts but recipe is `loaded: false`
 
 ```bash
-curl http://localhost:8080/health | jq '.recipes'
+curl -H "X-API-Key: $RECOTEM_API_PLAINTEXT" \
+  http://localhost:8080/v1/health/details | jq '.recipes'
 ```
 
 ```json
@@ -613,18 +649,44 @@ All Optuna trials scored 0.0. Common causes:
 - The split produced an empty test set (too few users or interactions). Try `split.scheme: random` or lower `split.heldout_ratio`.
 - The data after cleansing has too few items for the cutoff. Lower `training.cutoff`.
 
-### 401 on `/predict`
+### 401 on `/v1/recipes/{name}:recommend`
 
 - Trailing or leading whitespace in the `X-API-Key` header is treated as part of the key and will not match. Trim client-side.
 - Confirm the hash in `RECOTEM_API_KEYS` was produced by `recotem keygen --type api` for the plaintext you are sending. The wire prefix is `sha256:` but the digest is **scrypt** (`hashlib.scrypt(plaintext, salt=b"recotem.api-key.v1", n=2, r=8, p=1, dklen=32)`). A plain `sha256(plaintext)` will not match.
 
-### 503 on `/predict/{name}`
+### 503 on `/v1/recipes/{name}:recommend` (or any sibling verb)
 
-The recipe is unhealthy (`loaded: false`). See `/health` for the error. Usually a signing mismatch or corrupt artifact.
+The recipe is unhealthy (`loaded: false`) — response body carries
+`{"detail": "...", "code": "RECIPE_UNAVAILABLE"}`. See
+`/v1/health/details` for the underlying error. Usually a signing
+mismatch or corrupt artifact.
 
-### 404 on `/predict/{name}`
+### 404 on `/v1/recipes/{name}:recommend`
 
-The `user_id` in the request was not present in training data. This is expected for new users. Handle it in your application layer (fall back to popularity-based recommendations, for example).
+Response body carries `{"detail": "...", "code": "UNKNOWN_USER"}` — the
+`user_id` was not present in training data. This is expected for new
+users; handle it in your application layer (fall back to popularity-based
+recommendations, for example).
+
+### 404 on `/v1/recipes/{name}:recommend-related`
+
+Response body carries `{"detail": "...", "code": "UNKNOWN_SEED_ITEMS"}` —
+none of the supplied `seed_items` are known to the trained model.
+
+### 422 on any `/v1/recipes/{name}:*` verb
+
+Request validation failed before the handler executed. The body is
+`{"detail": "Request validation failed", "code": "VALIDATION_ERROR",
+"errors": [...]}` and the request is counted as `status="validation_error"`
+in `recotem_v1_requests_total`.
+
+### Partial failure in `/v1/recipes/{name}:batch-recommend` / `:batch-recommend-related`
+
+Batch endpoints accept up to 256 requests per call and return per-element
+`status` so a single bad input does not fail the whole batch. The HTTP
+response is **200** when *any* element succeeded (failed elements carry
+`status: "error"` with a `code` field). HTTP **503** is reserved for the
+case where the recipe itself is unavailable (no element can be served).
 
 ### Watcher does not pick up new artifact
 

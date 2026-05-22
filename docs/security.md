@@ -12,8 +12,8 @@
                         │          recotem serve                     │
                         │  binds to RECOTEM_HOST:RECOTEM_PORT        │
   API clients           │                                            │
-  (authenticated) ─────►│  POST /predict/{name}  X-API-Key header   │
-                        │  GET  /health                              │
+  (authenticated) ─────►│  POST /v1/recipes/{name}:*  X-API-Key      │
+                        │  GET  /v1/health                           │
                         └──────────────┬────────────────────────────┘
                                        │ reads (signed)
                         ┌──────────────▼────────────────────────────┐
@@ -183,7 +183,7 @@ The four layered controls:
 
 The FQCN allow-list in `SafeUnpickler.find_class` is a secondary layer that operates independently of HMAC. Its purpose is to bound the blast radius if HMAC is ever bypassed (e.g. a signing-key compromise that has not yet been rotated, or a future HMAC vulnerability). It does **not** guarantee safety by itself: a sufficiently broad allow-list still exposes whatever API surface the permitted libraries expose.
 
-The allow-list is frozen per irspack 0.4.x. If irspack adds or renames recommender classes, the list and the CHANGELOG entry are updated together.
+The allow-list is frozen per irspack 0.4.x. If irspack adds or renames recommender classes, the list is updated with the corresponding Recotem release.
 
 The FQCN allow-list permits only these classes. Any other class outside both this list and the module-prefix allow-list triggers `ArtifactError` before construction:
 
@@ -220,7 +220,7 @@ builtins.frozenset
 collections.OrderedDict
 ```
 
-This list is frozen per Recotem release. Changes ship with a CHANGELOG entry.
+This list is frozen per Recotem release.
 
 In addition to the FQCN list, classes whose defining module sits under
 one of the following narrow prefixes are permitted via the prefix
@@ -471,15 +471,18 @@ Both `auth_missing_header` and `auth_invalid_key` log `path=<request.url.path>` 
 
 When `RECOTEM_API_KEYS` is empty, `auth_anonymous_bypass` fires on **every** request (DEBUG) so access-log correlation is possible. `auth_anonymous_bypass_first_seen` fires once per unique `client_host` (INFO) for a first-seen audit trail. The LRU cache tracking first-seen client IPs is bounded to 1024 entries to prevent unbounded memory growth under high IP churn (e.g. rotating CI IPs or attacker scanning).
 
-## Predict response: information leakage
+## Inference response: information leakage
 
-`POST /predict/{name}` returns:
+`POST /v1/recipes/{name}:recommend` (and its siblings `:recommend-related`,
+`:batch-recommend`, `:batch-recommend-related`) returns:
 
-- 503 (`recipe_unavailable`) — recipe stub or stale entry; visible without auth context only at `/health`.
-- 404 (`user_not_found`) — `user_id` was not in training data. This response distinguishes "known user, no recommendations" from "unknown user". If user-existence is sensitive in your application, mask 404 responses at your reverse proxy and return a generic empty-recommendation body.
+- 503 (`RECIPE_UNAVAILABLE`) — recipe stub or stale entry; visible without auth context only at `/v1/health`.
+- 404 (`RECIPE_NOT_FOUND`) — the recipe name is not registered at all. Distinct from `UNKNOWN_USER` (same status, different `code`).
+- 404 (`UNKNOWN_USER`) on `:recommend` — `user_id` was not in training data. This response distinguishes "known user, no recommendations" from "unknown user". If user-existence is sensitive in your application, mask 404 responses at your reverse proxy and return a generic empty-recommendation body.
+- 404 (`UNKNOWN_SEED_ITEMS`) on `:recommend-related` — none of the supplied `seed_items` are known to the trained model.
 - 200 — recommendations, optionally joined with item metadata. Field stripping is configured via `RECOTEM_METADATA_FIELD_DENY` (case-**insensitive** column names — `"Internal_ID"` in metadata is stripped if `"internal_id"` is in the deny list). Use this to keep PII columns out of API responses even when they are present in the metadata file.
 
-`cutoff` is bounded at `[1, 1000]` by the request schema; oversized requests
+`limit` is bounded at `[1, 1000]` by the request schema; oversized requests
 receive a 422 from FastAPI before reaching the recommender.
 
 ## Rate limiting and DoS
@@ -487,7 +490,7 @@ receive a 422 from FastAPI before reaching the recommender.
 Recotem itself does not implement request-rate limiting. Operators **must**
 front `recotem serve` with a reverse proxy (nginx `limit_req`, Caddy
 `rate_limit`, ALB / Cloud Armor) and apply per-IP or per-API-key quotas on
-`/predict/*`. This is not optional in production.
+the `/v1/` surface. This is not optional in production.
 
 **Why the proxy layer is responsible — scrypt amplification.** Every
 authentication attempt (valid or not) runs a scrypt key-derivation check
@@ -497,26 +500,32 @@ therefore trigger CPU-bound scrypt work on every failed authentication, at a
 rate bounded only by the network rather than by the application. Recotem does
 not implement its own rate limiter; that is the proxy's responsibility.
 
-`/predict` is also CPU-bound for recommendation inference; sustained request
-rates above the recommender's inference throughput will queue under uvicorn
-and cause request latency to climb. Measure and cap at the proxy.
+The v1 inference verbs (`:recommend`, `:recommend-related`,
+`:batch-recommend`, `:batch-recommend-related`) are also CPU-bound for
+recommendation inference; sustained request rates above the recommender's
+inference throughput will queue under uvicorn and cause request latency to
+climb. Measure and cap at the proxy.
 
 **Recommended nginx configuration:**
 
 ```nginx
 # Define a rate-limit zone keyed by IP address (adjust burst/rate as needed).
-limit_req_zone $binary_remote_addr zone=recotem_predict:10m rate=20r/s;
+limit_req_zone $binary_remote_addr zone=recotem_v1:10m rate=20r/s;
 
 server {
     # ... TLS and upstream configuration ...
 
-    location /predict/ {
-        limit_req zone=recotem_predict burst=40 nodelay;
+    location /v1/ {
+        limit_req zone=recotem_v1 burst=40 nodelay;
         limit_req_status 429;
         proxy_pass http://recotem_backend;
     }
 }
 ```
+
+Operators who want to exempt `/v1/health` or `/v1/metrics` from the limit
+can carve them out with a more specific `location` block; the recommended
+default is to rate-limit the entire `/v1/` surface.
 
 For per-API-key limiting, key on the `$http_x_api_key` variable or use a WAF
 (AWS WAF, GCP Cloud Armor, Cloudflare) that can enforce quotas per header

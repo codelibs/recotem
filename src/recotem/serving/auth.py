@@ -119,7 +119,11 @@ def _hash_api_key(value: str) -> str:
     ).hex()
 
 
-def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
+def verify_api_key(
+    request: Request,
+    api_keys: list[ApiKeyEntry],
+    bypass_mode: str = "loopback_no_keys",
+) -> str:
     """Verify the ``X-API-Key`` header and return the matching ``kid``.
 
     Parameters
@@ -131,6 +135,13 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
         The list of configured :class:`~recotem.config.ApiKeyEntry` objects.
         If the list is empty, all requests are allowed and ``kid`` is set to
         ``"anonymous"``.
+    bypass_mode:
+        Label for the ``mode`` field on ``auth_anonymous_bypass`` / ``_first_seen``
+        log events when ``api_keys`` is empty.  Callers should pass
+        ``"insecure_no_auth"`` when the server was explicitly started with
+        ``--insecure-no-auth``, or ``"loopback_no_keys"`` (default) when
+        auth is absent because no API keys are configured (loopback-only
+        bind is enforced by ``apply_auth_posture`` in that case).
 
     Returns
     -------
@@ -161,11 +172,20 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
         else:
             client_host = str(getattr(_client, "host", "unknown"))
 
+        # Distinguish why auth is bypassed: operator explicitly passed
+        # ``insecure_no_auth=True`` (intentional dev mode) versus the keys
+        # list being empty for another reason (e.g. loopback-only bind when
+        # no API keys are configured — apply_auth_posture handles the bind
+        # restriction).  The ``bypass_mode`` kwarg is forwarded from the
+        # ``_require_auth`` closure in ``make_router``.
+        _bypass_mode = bypass_mode
+
         # DEBUG log on EVERY anonymous bypass — correlates with access logs.
         logger.debug(
             "auth_anonymous_bypass",
             client_host=client_host,
             path=request.url.path,
+            mode=_bypass_mode,
         )
 
         # INFO log only on the FIRST bypass per client_host (process-local).
@@ -178,6 +198,7 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
                 "auth_anonymous_bypass_first_seen",
                 client_host=client_host,
                 path=request.url.path,
+                mode=_bypass_mode,
             )
         else:
             # Move to tail so it stays in the LRU (recently used).
@@ -197,7 +218,7 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
         _hash_api_key("\x00" * _API_KEY_MAX_LEN)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
-            detail={"detail": "X-API-Key header required", "code": "missing_api_key"},
+            detail={"detail": "X-API-Key header required", "code": "MISSING_API_KEY"},
         )
 
     # Reject oversized headers BEFORE invoking the scrypt KDF on the real
@@ -217,7 +238,7 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
         _hash_api_key("\x00" * _API_KEY_MAX_LEN)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
-            detail={"detail": "Invalid API key", "code": "invalid_api_key"},
+            detail={"detail": "Invalid API key", "code": "INVALID_API_KEY"},
         )
 
     # Reject plaintexts shorter than _API_KEY_MIN_LEN.
@@ -241,7 +262,7 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
         _hash_api_key("\x00" * _API_KEY_MAX_LEN)  # constant-time equalisation
         raise HTTPException(
             status_code=401,
-            detail={"detail": "Invalid API key", "code": "invalid_api_key"},
+            detail={"detail": "Invalid API key", "code": "INVALID_API_KEY"},
         )
 
     # No stripping — whitespace is part of the key.
@@ -273,5 +294,5 @@ def verify_api_key(request: Request, api_keys: list[ApiKeyEntry]) -> str:
     logger.warning("auth_invalid_key", path=request.url.path)
     raise HTTPException(
         status_code=401,
-        detail={"detail": "Invalid API key", "code": "invalid_api_key"},
+        detail={"detail": "Invalid API key", "code": "INVALID_API_KEY"},
     )

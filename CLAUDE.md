@@ -11,7 +11,7 @@ single Python package (`pip install recotem`) plus a single Docker image.
 ├──────────────────────────────────────────────────────────────────┤
 │  CLI (Typer)                                                     │
 │  ├─ recotem train   <recipe.yaml>      batch: fetch→train→sign   │
-│  ├─ recotem serve   --recipes <dir>    FastAPI /predict          │
+│  ├─ recotem serve   --recipes <dir>    FastAPI /v1/recipes/:*   │
 │  ├─ recotem inspect <artifact>         read header (no payload)  │
 │  ├─ recotem validate <recipe.yaml>     schema + connectivity     │
 │  ├─ recotem schema                     emit JSON Schema for IDEs │
@@ -52,12 +52,12 @@ src/recotem/
 
 tests/
 ├── unit/               per-module tests (recipe, artifact, training, ...)
-├── integration/        in-process train + serve + predict
+├── integration/        in-process train + serve + recommend
 ├── fuzz/               hypothesis byte mutations on artifact / recipe loaders
-└── e2e/                bash script: train → serve → curl /predict
+└── e2e/                bash script: train → serve → curl /v1/recipes/{name}:recommend
 
 docs/
-├── getting-started.md  Docker / pip walkthrough → train → /predict
+├── getting-started.md  Docker / pip walkthrough → train → /v1/recipes/{name}:recommend
 ├── recipe-reference.md every recipe field, type, default, validation
 ├── data-sources/       bigquery.md, csv.md, ga4.md, sql.md
 ├── deployment/         docker.md, k8s.md, cron.md
@@ -90,16 +90,16 @@ uv run recotem train examples/tutorial-purchase-log/recipe.yaml
 # Serve from a directory of recipes
 uv run recotem serve --recipes ./recipes/ --port 8080
 
-# Predict
-curl -X POST http://localhost:8080/predict/news_articles \
+# Recommend
+curl -X POST http://localhost:8080/v1/recipes/news_articles:recommend \
      -H "X-API-Key: <plaintext>" \
      -H "Content-Type: application/json" \
-     -d '{"user_id":"u1","cutoff":10}'
+     -d '{"user_id":"u1","limit":10}'
 ```
 
 ## Recipe model
 
-A recipe is the single source of truth: 1 YAML = 1 model = 1 `/predict/{name}`.
+A recipe is the single source of truth: 1 YAML = 1 model = 1 `/v1/recipes/{name}:recommend` (plus the related/batch verbs).
 See `docs/recipe-reference.md` for the full schema. Highlights:
 
 - `source.type` is a discriminator (`csv` | `parquet` | `bigquery` | `sql` | `ga4` | plugins).
@@ -146,9 +146,11 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
   `uv run ruff format src tests`). Line-length 88. Selected rules in
   `pyproject.toml`.
 - pytest 8 + hypothesis 6. `@pytest.mark.slow` deselected by default.
-- `from __future__ import annotations` is used everywhere except where it
-  breaks FastAPI dependency introspection (e.g. `routes.py` uses
-  `kid: str = Depends(_require_auth)` instead of `Annotated[...]`).
+- `from __future__ import annotations` is used everywhere, including the
+  serving router. FastAPI dependency arguments are written as
+  `kid: str = Depends(_require_auth)` (not `Annotated[...]`) in
+  `serving/routes.py` so that `Depends` is resolved as a runtime
+  default rather than a stringified annotation.
 - structlog logger per module; the redaction processor in
   `recotem.log_redaction` is first in the chain and strips API keys, signing
   keys, and cloud creds. Lives at the top level so `train`-only invocations do
@@ -208,7 +210,7 @@ uv run ruff format --check src tests
 | `RECOTEM_MAX_PAYLOAD_BYTES` | 512 MiB | Per-payload cap (post-HMAC-verify) for serve-side deserialization. Clamped [1 MiB, 16 GiB]. Smaller than `RECOTEM_MAX_ARTIFACT_BYTES` to bound deserialization memory expansion. |
 | `RECOTEM_ARTIFACT_ROOT` | (empty) | If set, local `output.path` must lie under it. |
 | `RECOTEM_RECIPE_*` | — | Allow-listed for `${...}` recipe expansion. |
-| `RECOTEM_METADATA_FIELD_DENY` | (empty) | Comma-separated columns stripped from `/predict` responses. |
+| `RECOTEM_METADATA_FIELD_DENY` | (empty) | Comma-separated columns stripped from `/v1/recipes/{name}:recommend` and `:recommend-related` responses. |
 | `RECOTEM_METRICS_ENABLED` | (empty) | Opt-in Prometheus `/metrics` endpoint. Truthy values: `1`, `true`, `yes`, `on`. Requires `recotem[metrics]` extra. |
 | `RECOTEM_LOCK_DIR` | (empty) | Override directory for per-recipe training lock files. Local outputs always lock at `<output_path>.lock`; remote outputs (`s3://`, `gs://`, ...) need a host-local path and fall back to `<tempdir>/recotem-locks/`. `flock` is host-local — across hosts use scheduler-level mutex (`concurrencyPolicy: Forbid`). |
 | `RECOTEM_BQ_REQUIRE_STORAGE_API` | (empty) | When truthy (`1`/`true`/`yes`/`on`), the BigQuery source raises `DataSourceError` instead of falling back to the REST path when the Storage Read API fails. Requires the service account to hold `bigquery.readSessions.create`. |

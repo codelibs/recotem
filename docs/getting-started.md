@@ -67,30 +67,43 @@ docker compose logs --no-color -n 20 serve
 Health check:
 
 ```bash
-curl http://localhost:8080/health
-# {"status":"ok","recipes":{"purchase_log":{"loaded":true,...}}}
+curl http://localhost:8080/v1/health
+# {"status":"ok","total":1,"loaded":1}
 ```
 
-### 4. Predict
+### 4. Recommend
 
 ```bash
-curl -sX POST http://localhost:8080/predict/purchase_log \
+curl -sX POST http://localhost:8080/v1/recipes/purchase_log:recommend \
   -H "X-API-Key: $RECOTEM_API_PLAINTEXT" \
   -H "Content-Type: application/json" \
-  -d '{"user_id": "1", "cutoff": 5}' | jq .
+  -d '{"user_id": "1", "limit": 5}' | jq .
 ```
 
 Expected (the exact items / scores depend on training):
 
 ```json
 {
+  "request_id": "req_01HZX...",
+  "recipe": "purchase_log",
+  "model_version": "sha256:abc...",
   "items": [
     {"item_id": "...", "score": 0.91},
     ...
-  ],
-  "model": {"recipe": "purchase_log", "best_class": "IALSRecommender", "kid": "dev"},
-  "request_id": "..."
+  ]
 }
+```
+
+### 4b. Recommend related items
+
+`:recommend-related` returns items similar to one or more seed items —
+useful for "related products" widgets or content carousels:
+
+```bash
+curl -sX POST http://localhost:8080/v1/recipes/purchase_log:recommend-related \
+  -H "X-API-Key: $RECOTEM_API_PLAINTEXT" \
+  -H "Content-Type: application/json" \
+  -d '{"seed_items": ["<item_id>"], "limit": 5}' | jq .
 ```
 
 ### 5. Tear down
@@ -147,13 +160,13 @@ recotem train examples/tutorial-purchase-log/recipe.yaml
 recotem serve --recipes examples/tutorial-purchase-log/
 ```
 
-### 4. Predict
+### 4. Recommend
 
 ```bash
-curl -sX POST http://127.0.0.1:8080/predict/purchase_log \
+curl -sX POST http://127.0.0.1:8080/v1/recipes/purchase_log:recommend \
   -H "X-API-Key: $RECOTEM_API_PLAINTEXT" \
   -H "Content-Type: application/json" \
-  -d '{"user_id": "1", "cutoff": 5}' | jq .
+  -d '{"user_id": "1", "limit": 5}' | jq .
 ```
 
 ## What just happened
@@ -163,8 +176,8 @@ curl -sX POST http://127.0.0.1:8080/predict/purchase_log \
   IALS and TopPop, and wrote a binary artifact signed with your signing key.
 - `recotem serve` watched the artifact directory, picked up the new file,
   HMAC-verified it against the same signing key, and registered the
-  `/predict/purchase_log` endpoint.
-- The `/predict` request was authenticated by the API key allow-list and
+  `/v1/recipes/purchase_log:recommend` endpoint.
+- The recommend request was authenticated by the API key allow-list and
   scored using the trained model.
 
 ## Train from SQLite (zero cloud, zero Docker)
@@ -194,8 +207,8 @@ See `docs/data-sources/sql.md` for PostgreSQL / MySQL recipes.
 | `DataSourceError: sha256 mismatch` | Upstream rotated the file | Re-compute with `curl -sL <url> \| shasum -a 256` and update the recipe |
 | `DataSourceError: HTTP 404 fetching …` | URL changed | Verify the URL in a browser; restore the v1.0.0 tag |
 | `ArtifactError: RECOTEM_SIGNING_KEYS not set` | Step 1 not exported | Re-run the export and try again |
-| `401 Unauthorized` on /predict | Wrong API key plaintext | Use the `plaintext` line from `keygen --type api`, not the `hash` |
-| `503 recipe_unavailable` on /predict immediately after train | Watcher has not polled yet | Wait up to `RECOTEM_WATCH_INTERVAL` seconds (default 5; tutorial sets 10). Check `/health`. |
+| `401 Unauthorized` on `:recommend` | Wrong API key plaintext | Use the `plaintext` line from `keygen --type api`, not the `hash` |
+| `503 recipe_unavailable` on `:recommend` immediately after train | Watcher has not polled yet | Wait up to `RECOTEM_WATCH_INTERVAL` seconds (default 5; tutorial sets 10). Check `/v1/health`. |
 | Path B: artifact written to wrong directory | Recipe `output.path` is CWD-relative | Run `recotem train` from the repo root (or edit `output.path` to an absolute path). |
 | `recotem: command not found` after pip install | `pip` installed to a venv not on `PATH` | Use `python -m recotem ...`, or activate the venv (`uv run recotem ...`). |
 

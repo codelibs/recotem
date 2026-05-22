@@ -862,3 +862,73 @@ def test_registry_lock_is_plain_lock_not_rlock() -> None:
         f"ModelRegistry._lock must be a plain threading.Lock, "
         f"got {lock_type_name!r} — reentrancy is not needed and adds overhead"
     )
+
+
+# ---------------------------------------------------------------------------
+# Plan A Task 3: v1 ModelEntry extensions
+# ---------------------------------------------------------------------------
+
+
+def _stub_entry() -> ModelEntry:
+    """Return a minimal ModelEntry with a populated sha256 marker for v1 tests.
+
+    Re-uses the module's existing _make_entry() helper and additionally sets
+    a non-empty _loaded_marker[1] so the model_version property has a real
+    artifact hash to format.  loaded_at_unix is set so loaded_at returns a
+    real timestamp rather than the unix epoch.
+    """
+    entry = _make_entry("v1_entry")
+    entry._loaded_marker = ("etag-v1", "a" * 64)
+    entry.loaded_at_unix = 1_700_000_000.0
+    return entry
+
+
+def test_model_entry_supported_verbs_default_for_user_item_kind():
+    e = _stub_entry()
+    assert "recommend" in e.supported_verbs
+    assert "recommend-related" in e.supported_verbs
+    assert "batch-recommend" in e.supported_verbs
+    assert "batch-recommend-related" in e.supported_verbs
+
+
+def test_model_entry_kind_defaults_to_user_item():
+    e = _stub_entry()
+    assert e.kind == "user-item"
+
+
+def test_model_entry_model_version_sha256_prefixed():
+    e = _stub_entry()
+    assert e.model_version.startswith("sha256:")
+    assert len(e.model_version) > len("sha256:")  # not empty hex
+
+
+def test_model_entry_loaded_at_is_utc_datetime():
+    """loaded_at is now a timezone-aware datetime (not a string)."""
+
+    e = _stub_entry()
+    loaded_at = e.loaded_at
+    assert loaded_at.tzinfo is not None, "loaded_at must be timezone-aware"
+    assert loaded_at.utcoffset().total_seconds() == 0, "loaded_at must be UTC"
+
+
+# ---------------------------------------------------------------------------
+# K. last_load_error sanitization (PR #103)
+# ---------------------------------------------------------------------------
+
+
+def test_last_load_error_redacts_uri_paths() -> None:
+    from recotem.serving.app import _sanitize_error
+
+    reason = "read failed: s3://my-bucket/secret-models/foo.bin not accessible"
+    sanitized = _sanitize_error(reason)
+    assert "<redacted-uri>" in sanitized
+    assert "my-bucket" not in sanitized
+    assert "secret-models" not in sanitized
+
+
+def test_last_load_error_truncated_to_200_chars() -> None:
+    from recotem.serving.app import _sanitize_error
+
+    long_reason = "x" * 500
+    sanitized = _sanitize_error(long_reason)
+    assert len(sanitized) <= 200

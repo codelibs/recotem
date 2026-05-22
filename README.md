@@ -9,8 +9,9 @@ Recipe-driven recommender training and serving, built on
 [irspack](https://github.com/tohtsky/irspack). One YAML recipe describes
 where the data lives, how to train, and where to write the result —
 `recotem train` produces a signed binary artifact, `recotem serve`
-mounts it as a `/predict/{name}` HTTP endpoint and hot-swaps when a new
-artifact appears. No database, no message broker, no admin UI.
+mounts it under `/v1/recipes/{name}:recommend` (plus `:recommend-related`
+and batch verbs) and hot-swaps when a new artifact appears. No database,
+no message broker, no admin UI.
 
 ## Why Recotem
 
@@ -32,7 +33,7 @@ moving parts to a recipe file and a binary artifact:
 
 ## Features
 
-- Recipe-driven: 1 YAML = 1 model = 1 `/predict/{name}` endpoint
+- Recipe-driven: 1 YAML = 1 model = 1 `/v1/recipes/{name}:recommend` endpoint (with related/batch verbs)
 - Hyperparameter search across irspack algorithms via Optuna
 - Pluggable data sources (built-in: CSV / Parquet / BigQuery / SQL / GA4; extend via Python entry points)
 - HMAC-signed artifacts with multi-key rotation and a deterministic
@@ -84,21 +85,28 @@ recotem train examples/quickstart/recipe.yaml
 recotem serve --recipes examples/quickstart/ &
 
 # Wait for the server to become ready before sending traffic.
-until curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health | grep -q "200"; do sleep 1; done
+until curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/v1/health | grep -q "200"; do sleep 1; done
 
-# 3. Predict
-curl -X POST http://localhost:8080/predict/top_picks \
+# 3. Recommend
+# 3a. Recommend for a known user
+curl -X POST http://localhost:8080/v1/recipes/top_picks:recommend \
   -H "X-API-Key: $RECOTEM_API_PLAINTEXT" \
   -H "Content-Type: application/json" \
-  -d '{"user_id": "u01", "cutoff": 5}'
+  -d '{"user_id": "u01", "limit": 5}'
+
+# 3b. Recommend items related to a seed item
+curl -X POST http://localhost:8080/v1/recipes/top_picks:recommend-related \
+  -H "X-API-Key: $RECOTEM_API_PLAINTEXT" \
+  -H "Content-Type: application/json" \
+  -d '{"seed_items": ["i00"], "limit": 5}'
 ```
 
 ```json
 {
-  "items": [{"item_id": "i00", "score": 0.91}],
-  "model": {"recipe": "top_picks", "trained_at": "...",
-            "best_class": "TopPopRecommender", "kid": "dev"},
-  "request_id": "..."
+  "request_id": "req_01HZX...",
+  "recipe": "top_picks",
+  "model_version": "sha256:abc...",
+  "items": [{"item_id": "i00", "score": 0.91}]
 }
 ```
 
@@ -112,8 +120,8 @@ for the source of truth and
 | Variable | Required by | Purpose |
 |---|---|---|
 | `RECOTEM_SIGNING_KEYS` | `train` and `serve` | HMAC sign / verify artifact files (server keeps plaintext; needed for both sides) |
-| `RECOTEM_API_KEYS` | `serve` | Authenticate `/predict` callers (server keeps **hash** only) |
-| `X-API-Key: <plaintext>` | HTTP clients | Sent by clients on every `/predict` call; server re-hashes and compares |
+| `RECOTEM_API_KEYS` | `serve` | Authenticate `/v1/recipes/*` callers (server keeps **hash** only) |
+| `X-API-Key: <plaintext>` | HTTP clients | Sent by clients on every `/v1/recipes/*` call; server re-hashes and compares |
 
 Both variables accept multiple comma-separated entries (`kid:value,kid2:value,…`)
 to enable zero-downtime key rotation — that is why they are pluralised.
@@ -129,7 +137,7 @@ to enable zero-downtime key rotation — that is why they are pluralised.
 │                   (batch job)        (HMAC-signed)        (FastAPI,    │
 │                                                            hot-swap)   │
 │                                                                        │
-│   any scheduler          local FS, S3,             POST /predict/{name}│
+│   any scheduler          local FS, S3,         POST /v1/recipes/{name} │
 │   (cron / k8s / …)       GCS, fsspec               X-API-Key auth      │
 │                                                                        │
 └────────────────────────────────────────────────────────────────────────┘

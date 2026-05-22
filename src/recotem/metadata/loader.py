@@ -18,13 +18,15 @@ scheme allow-list, and userinfo redaction in logs. See
 
 ``build_metadata_index`` converts a loaded DataFrame into a
 ``dict[str, dict[str, Any]]`` keyed by item_id for O(1) per-item lookups
-during ``/predict`` — NaN values are converted to ``None`` for JSON safety
-and deny-listed fields are stripped once at build time.
+during ``/v1/recipes/{name}:recommend`` and ``:recommend-related`` — NaN
+values are converted to ``None`` for JSON safety and deny-listed fields are
+stripped once at build time.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from io import BytesIO
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -201,8 +203,8 @@ def load_item_metadata(
     # -----------------------------------------------------------------------
     df = df[[item_id_col, *fields]].copy()
     # Drop duplicate item-ids before set_index — a non-unique index turns
-    # df.loc[item_id] from a Series into a DataFrame slice, which silently
-    # zeros out the metadata join in routes._lookup_metadata.
+    # df.loc[item_id] from a Series into a DataFrame slice, which would
+    # silently corrupt the metadata index built later by build_metadata_index.
     dup_count = int(df[item_id_col].duplicated().sum())
     if dup_count > 0:
         logger.warning(
@@ -227,13 +229,15 @@ def load_item_metadata(
 def build_metadata_index(
     df: pd.DataFrame,
     deny_set: frozenset[str] | None = None,
+    on_row_error: Callable[[], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Convert a metadata DataFrame into a pre-flattened dict for O(1) lookups.
 
     This function is called once at model-load time (in the watcher's
-    ``_build_entry``) so that ``/predict`` can perform an O(1) dict ``.get()``
-    per recommended item rather than an O(n) DataFrame index lookup followed by
-    row serialisation.
+    ``_build_entry``) so that ``/v1/recipes/{name}:recommend`` and
+    ``:recommend-related`` can perform an O(1) dict ``.get()`` per recommended
+    item rather than an O(n) DataFrame index lookup followed by row
+    serialisation.
 
     Parameters
     ----------
@@ -245,6 +249,14 @@ def build_metadata_index(
         per-item dict.  Filtering is applied here once rather than on
         every request.  Pass ``frozenset(s.lower() for s in deny_list)``
         (the same normalisation used in :func:`~recotem.serving.routes.make_router`).
+    on_row_error:
+        Optional zero-argument callback invoked once per row that raises
+        an unexpected exception during flattening (e.g. ``AttributeError``
+        from a non-unique index returning a DataFrame slice instead of a
+        Series, or ``TypeError`` from a non-string column name that
+        bypasses the ``isinstance`` guard).  Callers pass this to increment
+        a Prometheus counter without coupling this module to the serving
+        layer directly.  The row is skipped and processing continues.
 
     Returns
     -------
@@ -259,8 +271,7 @@ def build_metadata_index(
           safe to pass directly to ``json.dumps`` or Pydantic's
           ``model_construct``.
         - Fields whose lowercased name appears in *deny_set* are omitted.
-        - Non-string column names are omitted (same guard as
-          :func:`~recotem.serving.routes._lookup_metadata`).
+        - Non-string column names are omitted defensively.
     """
     _deny: frozenset[str] = deny_set or frozenset()
 
@@ -271,20 +282,36 @@ def build_metadata_index(
 
     index: dict[str, dict[str, Any]] = {}
     for item_id, row in raw.items():
-        item_dict: dict[str, Any] = {}
-        for col, val in row.items():
-            if not isinstance(col, str):
-                continue
-            if col.lower() in _deny:
-                continue
-            # Convert float NaN to None for JSON-safety.  Pandas uses float
-            # NaN for missing values even in object-typed columns; standard
-            # json.dumps raises on NaN by default (or silently emits 'NaN'
-            # which is not valid JSON).
-            if isinstance(val, float) and math.isnan(val):
-                val = None
-            item_dict[col] = val
-        index[str(item_id)] = item_dict
+        try:
+            item_dict: dict[str, Any] = {}
+            for col, val in row.items():
+                if not isinstance(col, str):
+                    continue
+                if col.lower() in _deny:
+                    continue
+                # Convert float NaN to None for JSON-safety.  Pandas uses float
+                # NaN for missing values even in object-typed columns; standard
+                # json.dumps raises on NaN by default (or silently emits 'NaN'
+                # which is not valid JSON).
+                if isinstance(val, float) and math.isnan(val):
+                    val = None
+                item_dict[col] = val
+            index[str(item_id)] = item_dict
+        except (MemoryError, RecursionError):
+            raise
+        except Exception as exc:
+            # Unexpected per-row error (e.g. AttributeError from a non-unique
+            # index, TypeError from a non-string column name).  Skip the row
+            # and invoke the caller's counter callback so the issue is
+            # observable in metrics without coupling this module to serving.
+            if on_row_error is not None:
+                on_row_error()
+            logger.warning(
+                "metadata_index_row_error",
+                item_id=str(item_id),
+                exc_type=type(exc).__name__,
+                error=str(exc)[:200],
+            )
 
     logger.debug(
         "metadata_index_built",

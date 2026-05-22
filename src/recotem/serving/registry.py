@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -35,7 +36,7 @@ class ModelEntry:
     Attributes
     ----------
     name:
-        Recipe name (matches ``/predict/{name}``).
+        Recipe name (matches the path parameter in ``/v1/recipes/{name}:*`` endpoints).
     recommender:
         The deserialized ``IDMappedRecommender`` instance.
     header:
@@ -52,7 +53,8 @@ class ModelEntry:
         columns — no large numeric arrays are duplicated.
     metadata_index:
         Pre-flattened ``dict[str, dict[str, Any]]`` keyed by item_id for
-        O(1) per-item lookups during ``/predict``.  Built once at model-load
+        O(1) per-item lookups during ``:recommend`` / ``:recommend-related``
+        response metadata join.  Built once at model-load
         time by :func:`~recotem.metadata.loader.build_metadata_index` with
         NaN→None normalisation and deny-list filtering already applied.
         ``None`` when no item_metadata is configured for this recipe.
@@ -66,8 +68,9 @@ class ModelEntry:
         ``True`` when ``recommender`` is a usable model.  ``False`` for stub
         entries inserted at startup when the artifact failed to load — these
         entries appear in ``/health`` as ``loaded=false`` so operators can see
-        which recipes are not serving, and ``/predict`` should reject them
-        with 503.
+        which recipes are not serving, and the v1 inference endpoints
+        (``:recommend``, ``:recommend-related``, ``:batch-recommend``,
+        ``:batch-recommend-related``) should reject them with 503.
     """
 
     name: str
@@ -81,6 +84,60 @@ class ModelEntry:
     loaded: bool = True
     # Internal watcher state: (mtime_or_etag, sha256_hex)
     _loaded_marker: tuple[Any, str] = field(default_factory=lambda: (None, ""))
+    # v1 additions. The watcher sets loaded_at_unix on every successful
+    # (re-)load.  Stays at 0.0 for stub entries that never loaded.
+    loaded_at_unix: float = 0.0
+    # Optional artifact-derived metadata used by /v1/recipes/{name}.
+    config_digest: str = ""
+    algorithms: list[str] = field(default_factory=list)
+
+    # --- v1 API additions ---
+    @property
+    def artifact_sha256(self) -> str:
+        """SHA-256 of the artifact bytes (hex, no prefix).
+
+        Derived from ``_loaded_marker[1]`` which the watcher populates
+        at every successful (re-)load.  Empty for stub entries.
+        """
+        return self._loaded_marker[1] if self._loaded_marker else ""
+
+    @property
+    def model_version(self) -> str:
+        """Deterministic artifact identifier exposed via the v1 API.
+
+        Format: ``sha256:<hex>``.  Stub entries return ``sha256:``.
+        """
+        return f"sha256:{self.artifact_sha256}"
+
+    @property
+    def loaded_at(self) -> datetime:
+        """Timezone-aware UTC datetime of the last successful (re-)load.
+
+        Falls back to the unix epoch for stub entries.
+        """
+        return datetime.fromtimestamp(self.loaded_at_unix or 0.0, tz=UTC)
+
+    @property
+    def kind(self) -> str:
+        """Inference kind exposed via /v1/recipes.
+
+        Currently every irspack algorithm shipped by recotem is a
+        user-item collaborative filter, so this returns "user-item"
+        unconditionally.
+        """
+        return "user-item"
+
+    @property
+    def supported_verbs(self) -> list[str]:
+        """List of v1 verbs this entry can serve."""
+        if self.kind == "user-item":
+            return [
+                "recommend",
+                "recommend-related",
+                "batch-recommend",
+                "batch-recommend-related",
+            ]
+        return []
 
     @property
     def trained_at(self) -> str | None:
@@ -114,7 +171,7 @@ class ModelEntry:
         self._models_view["name"] = self.name
 
     def models_dict(self) -> dict[str, Any]:
-        """Return header metadata suitable for the ``/models`` endpoint.
+        """Return header metadata for introspection (e.g. tests, tooling).
 
         The artifact header JSON never contains ``hmac`` or ``key`` fields —
         those are stored in separate binary regions of the artifact format
@@ -263,6 +320,17 @@ class ModelRegistry:
         with self._lock:
             return self._loaded_count
 
+    def health_counts(self) -> tuple[int, int]:
+        """Return ``(loaded, total)`` under a single lock acquisition.
+
+        Avoids the TOCTOU window between a separate ``loaded_count()`` and
+        ``health_snapshot()`` call in the ``/v1/health`` handler: both
+        numbers are read atomically so they are guaranteed to be consistent
+        with each other even if a hot-swap occurs between calls.
+        """
+        with self._lock:
+            return self._loaded_count, len(self._entries)
+
     def health_snapshot(self) -> dict[str, dict[str, Any]]:
         """Return per-recipe health info (safe copy, no model objects).
 
@@ -282,7 +350,7 @@ class ModelRegistry:
         """
         with self._lock:
             items = list(self._entries.items())
-        # Build the dict outside the lock so /health cannot block /predict
+        # Build the dict outside the lock so /health cannot block `:recommend`
         # threads waiting to acquire the lock.
         return {name: entry.health_dict() for name, entry in items}
 

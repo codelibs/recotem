@@ -51,3 +51,8 @@ az:/
 
 # Tools
 .serena/
+
+# Local working docs (plans, specs) — not for the public repo
+docs/plans/
+docs/specs/
+

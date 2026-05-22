@@ -61,8 +61,7 @@ _ALLOWED_CLASSES: frozenset[tuple[str, str]] = frozenset(
         ("irspack.utils.id_mapping", "IDMapper"),
         # irspack recommenders.  Pickle records the original defining
         # submodule, not the package re-export.  The set is frozen per
-        # release and tracked in CHANGELOG when irspack adds / renames
-        # recommenders.
+        # release and updated when irspack adds / renames recommenders.
         ("irspack.recommenders.ials", "IALSRecommender"),
         ("irspack.recommenders.knn", "CosineKNNRecommender"),
         ("irspack.recommenders.toppop", "TopPopRecommender"),

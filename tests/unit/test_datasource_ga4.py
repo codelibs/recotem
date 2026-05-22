@@ -302,14 +302,20 @@ def _make_page(rows, row_count=None, property_quota=None, has_data_loss=False):
 def test_fetch_paginates_until_drained(monkeypatch) -> None:
     """Pagination accumulates rows across pages; short final page ends the loop.
 
-    Page 0: 100_000 rows (full page → loop continues).
+    Page 0: ``_PAGE_SIZE`` rows (full page → loop continues).
     Page 1: 4 rows (short page → loop breaks).
-    Total: 100_004 rows.
+    ``_PAGE_SIZE`` is monkey-patched to 10 to keep the mock-row count small —
+    the production constant (100_000) would make every full-page test build
+    half a million MagicMock instances and iterate them through pandas.
     """
+    import recotem.datasource.ga4 as ga4_mod
+
+    monkeypatch.setattr(ga4_mod, "_PAGE_SIZE", 10)
+
     fake_mod = MagicMock()
     fake_client = MagicMock()
 
-    page_size = 100_000
+    page_size = 10
     full_rows = [
         _row([f"u{i}", "i1", "20260101", "purchase"], "1") for i in range(page_size)
     ]
@@ -319,9 +325,10 @@ def test_fetch_paginates_until_drained(monkeypatch) -> None:
         _row(["u3", "i3", "20260103", "purchase"], "2"),
         _row(["u4", "i4", "20260104", "purchase"], "5"),
     ]
+    total = page_size + len(partial_rows)
     pages = [
-        _make_page(rows=full_rows, row_count=100_004),
-        _make_page(rows=partial_rows, row_count=100_004),
+        _make_page(rows=full_rows, row_count=total),
+        _make_page(rows=partial_rows, row_count=total),
     ]
     fake_client.run_report.side_effect = pages
     fake_mod.BetaAnalyticsDataClient.return_value = fake_client
@@ -332,7 +339,7 @@ def test_fetch_paginates_until_drained(monkeypatch) -> None:
 
     src = GA4Source(_cfg(max_rows=1_000_000))
     df = src.fetch(_fetch_ctx())
-    assert len(df) == 100_004
+    assert len(df) == total
     assert list(df.columns) == ["userId", "itemId", "date", "event_count"]
     assert df["event_count"].dtype.name == "int64"
     # Two API calls: one full page + one short page
@@ -380,8 +387,15 @@ def test_fetch_max_rows_exceeded(monkeypatch) -> None:
 def test_fetch_max_pages_exceeded(monkeypatch) -> None:
     fake_mod = MagicMock()
     fake_client = MagicMock()
-    # Return a full page (100_000 rows) every call to never hit a short-page break
-    full_page_rows = [_row(["u", "i", "20260101", "purchase"], "1")] * 100_000
+
+    import recotem.datasource.ga4 as ga4_mod
+
+    # Shrink page size so the production loop iterates a few rows per page,
+    # not 100_000.  The behavior under test (max_pages cap) is independent
+    # of the absolute page size.
+    monkeypatch.setattr(ga4_mod, "_PAGE_SIZE", 10)
+    # Return a full page every call to never hit a short-page break
+    full_page_rows = [_row(["u", "i", "20260101", "purchase"], "1")] * 10
     resp = _make_page(rows=full_page_rows, row_count=1_000_000)
     fake_client.run_report.return_value = resp
     fake_mod.BetaAnalyticsDataClient.return_value = fake_client
@@ -389,8 +403,6 @@ def test_fetch_max_pages_exceeded(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
 
     # Patch the module-level get_ga4_max_pages alias to 3:
-    import recotem.datasource.ga4 as ga4_mod
-
     monkeypatch.setattr(ga4_mod, "get_ga4_max_pages", lambda: 3)
 
     from recotem.datasource.ga4 import GA4Source
@@ -544,12 +556,16 @@ def test_fetch_permission_denied_on_page_gt_0_raises(monkeypatch) -> None:
     """PermissionDenied raised on page 1 (not page 0) must still be caught."""
     from google.api_core.exceptions import PermissionDenied
 
+    import recotem.datasource.ga4 as ga4_mod
+
+    monkeypatch.setattr(ga4_mod, "_PAGE_SIZE", 10)
+
     fake_mod = MagicMock()
     fake_client = MagicMock()
 
     # Page 0: return a full page so the loop continues to page 1
     full_page_rows = [
-        _row([f"u{i}", "i", "20260101", "purchase"], "1") for i in range(100_000)
+        _row([f"u{i}", "i", "20260101", "purchase"], "1") for i in range(10)
     ]
     page0 = _make_page(rows=full_page_rows, row_count=2_000_000)
     fake_client.run_report.side_effect = [page0, PermissionDenied("denied on page 1")]
@@ -570,30 +586,39 @@ def test_fetch_permission_denied_on_page_gt_0_raises(monkeypatch) -> None:
 
 
 def test_fetch_short_page_breaks_early(monkeypatch) -> None:
-    """3 full pages (100k rows each) + 1 partial page = 305k rows, no error."""
+    """3 full pages + 1 partial page, no error.
+
+    Uses a tiny ``_PAGE_SIZE`` so the test builds 35 MagicMock rows rather
+    than 305_000.  The short-page-break behavior under test is independent
+    of the absolute page size.
+    """
+    import recotem.datasource.ga4 as ga4_mod
+
+    monkeypatch.setattr(ga4_mod, "_PAGE_SIZE", 10)
+
     fake_mod = MagicMock()
     fake_client = MagicMock()
 
-    page_size = 100_000
+    page_size = 10
+    partial_size = 5
     full_rows = [
         _row([f"u{i}", "i", "20260101", "purchase"], "1") for i in range(page_size)
     ]
     partial_rows = [
-        _row([f"u{i}", "i", "20260101", "purchase"], "1") for i in range(5_000)
+        _row([f"u{i}", "i", "20260101", "purchase"], "1") for i in range(partial_size)
     ]
+    total = page_size * 3 + partial_size
 
     pages = [
-        _make_page(rows=full_rows, row_count=305_000),
-        _make_page(rows=full_rows, row_count=305_000),
-        _make_page(rows=full_rows, row_count=305_000),
-        _make_page(rows=partial_rows, row_count=305_000),
+        _make_page(rows=full_rows, row_count=total),
+        _make_page(rows=full_rows, row_count=total),
+        _make_page(rows=full_rows, row_count=total),
+        _make_page(rows=partial_rows, row_count=total),
     ]
     fake_client.run_report.side_effect = pages
     fake_mod.BetaAnalyticsDataClient.return_value = fake_client
     monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
     monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta.types", MagicMock())
-
-    import recotem.datasource.ga4 as ga4_mod
 
     monkeypatch.setattr(ga4_mod, "get_ga4_max_pages", lambda: 500)
 
@@ -601,7 +626,7 @@ def test_fetch_short_page_breaks_early(monkeypatch) -> None:
 
     src = GA4Source(_cfg(max_rows=50_000_000))
     df = src.fetch(_fetch_ctx())
-    assert len(df) == 305_000
+    assert len(df) == total
     # Exactly 4 API calls (3 full + 1 partial)
     assert fake_client.run_report.call_count == 4
 
@@ -616,11 +641,12 @@ def test_fetch_wall_clock_budget_exceeded(monkeypatch) -> None:
     fake_mod = MagicMock()
     fake_client = MagicMock()
 
-    # Return a full page every call so the loop would normally continue
-    full_page_rows = [
-        _row([f"u{i}", "i", "20260101", "purchase"], "1") for i in range(100_000)
-    ]
-    resp = _make_page(rows=full_page_rows, row_count=10_000_000)
+    # The fake_monotonic below makes the top-of-loop deadline check trip
+    # before run_report is ever consumed — so any non-empty rows list works.
+    resp = _make_page(
+        rows=[_row(["u", "i", "20260101", "purchase"], "1")],
+        row_count=10_000_000,
+    )
     fake_client.run_report.return_value = resp
     fake_mod.BetaAnalyticsDataClient.return_value = fake_client
     monkeypatch.setitem(sys.modules, "google.analytics.data_v1beta", fake_mod)
@@ -916,6 +942,10 @@ def test_fetch_emits_quota_warning_at_most_once_across_pages(monkeypatch) -> Non
     """
     import structlog.testing
 
+    import recotem.datasource.ga4 as ga4_mod
+
+    monkeypatch.setattr(ga4_mod, "_PAGE_SIZE", 10)
+
     fake_mod = MagicMock()
     fake_client = MagicMock()
 
@@ -935,7 +965,7 @@ def test_fetch_emits_quota_warning_at_most_once_across_pages(monkeypatch) -> Non
         resp.property_quota = empty_quota
         return resp
 
-    page_size = 100_000
+    page_size = 10
     fake_client.run_report.side_effect = [
         _empty_quota_response(page_size, full_page=True),
         _empty_quota_response(page_size, full_page=True),
@@ -974,13 +1004,15 @@ def test_fetch_post_call_deadline_check_fires(monkeypatch) -> None:
     """
     import time as _time
 
+    import recotem.datasource.ga4 as ga4_mod
+
+    monkeypatch.setattr(ga4_mod, "_PAGE_SIZE", 10)
+
     fake_mod = MagicMock()
     fake_client = MagicMock()
     full_page = _make_page(
-        rows=[
-            _row(["u1", f"i{i}", "20260101", "purchase"], "1") for i in range(100_000)
-        ],
-        row_count=100_000,
+        rows=[_row(["u1", f"i{i}", "20260101", "purchase"], "1") for i in range(10)],
+        row_count=10,
         has_data_loss=False,
     )
     fake_client.run_report.return_value = full_page

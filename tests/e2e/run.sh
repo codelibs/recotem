@@ -144,7 +144,7 @@ SERVE_PID=$!
 echo "[e2e] Waiting for server to start (pid=${SERVE_PID})..."
 MAX_WAIT=30
 WAITED=0
-while ! curl -sf "http://127.0.0.1:${SERVE_PORT}/health" > /dev/null 2>&1; do
+while ! curl -sf "http://127.0.0.1:${SERVE_PORT}/v1/health" > /dev/null 2>&1; do
     sleep 1
     WAITED=$((WAITED + 1))
     if [ "${WAITED}" -ge "${MAX_WAIT}" ]; then
@@ -157,9 +157,9 @@ echo "[e2e] Server is up."
 # ---------------------------------------------------------------------------
 # 6. Health check
 # ---------------------------------------------------------------------------
-echo "[e2e] Checking /health..."
-HEALTH=$(curl -sf "http://127.0.0.1:${SERVE_PORT}/health")
-echo "[e2e] /health response: ${HEALTH}"
+echo "[e2e] Checking /v1/health..."
+HEALTH=$(curl -sf "http://127.0.0.1:${SERVE_PORT}/v1/health")
+echo "[e2e] /v1/health response: ${HEALTH}"
 
 STATUS=$(echo "${HEALTH}" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('status','unknown'))")
 if [ "${STATUS}" != "ok" ]; then
@@ -168,28 +168,148 @@ if [ "${STATUS}" != "ok" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7. /predict call
+# 7. /v1/recipes/{name}:recommend call
 # ---------------------------------------------------------------------------
-echo "[e2e] Calling /predict/${RECIPE_NAME}..."
+echo "[e2e] Calling /v1/recipes/${RECIPE_NAME}:recommend..."
 PREDICT=$(curl -sf \
     -X POST \
     -H "Content-Type: application/json" \
-    -d "{\"user_id\": \"${PREDICT_USER_ID}\", \"cutoff\": 5}" \
-    "http://127.0.0.1:${SERVE_PORT}/predict/${RECIPE_NAME}")
-echo "[e2e] /predict response: ${PREDICT}"
+    -d "{\"user_id\": \"${PREDICT_USER_ID}\", \"limit\": 5}" \
+    "http://127.0.0.1:${SERVE_PORT}/v1/recipes/${RECIPE_NAME}:recommend")
+echo "[e2e] /v1/recipes/:recommend response: ${PREDICT}"
 
-# Validate JSON shape: must have items, model, request_id
+# Validate JSON shape: must have items, recipe, model_version, request_id
 python3 - <<PYEOF
 import sys, json
 data = json.loads('''${PREDICT}''')
 assert "items" in data, f"Missing 'items' key: {data}"
 assert isinstance(data["items"], list), "items must be a list"
-assert "model" in data, f"Missing 'model' key: {data}"
+assert "recipe" in data, f"Missing 'recipe' key: {data}"
+assert data["recipe"] == "${RECIPE_NAME}", f"Wrong recipe name: {data['recipe']}"
 assert "request_id" in data, f"Missing 'request_id' key: {data}"
-model = data["model"]
-assert "recipe" in model, f"Missing 'recipe' in model: {model}"
-assert model["recipe"] == "${RECIPE_NAME}", f"Wrong recipe name: {model['recipe']}"
+assert "model_version" in data, f"Missing 'model_version' key: {data}"
 print("[e2e] JSON shape validation: PASSED")
+PYEOF
+
+# ---- 8. GET /v1/recipes ----
+echo "[e2e] Calling GET /v1/recipes..."
+RECIPES_LIST=$(curl -sf "http://127.0.0.1:${SERVE_PORT}/v1/recipes")
+echo "[e2e] GET /v1/recipes response: ${RECIPES_LIST}"
+
+python3 - <<PYEOF
+import sys, json
+data = json.loads('''${RECIPES_LIST}''')
+assert "recipes" in data, f"Missing 'recipes' key: {data}"
+assert isinstance(data["recipes"], list), "'recipes' must be a list"
+names = [r["name"] for r in data["recipes"]]
+assert "${RECIPE_NAME}" in names, f"Recipe '${RECIPE_NAME}' not found in list: {names}"
+print("[e2e] GET /v1/recipes validation: PASSED")
+PYEOF
+
+# ---- 9. GET /v1/recipes/{name} ----
+echo "[e2e] Calling GET /v1/recipes/${RECIPE_NAME}..."
+RECIPE_DETAIL=$(curl -sf "http://127.0.0.1:${SERVE_PORT}/v1/recipes/${RECIPE_NAME}")
+echo "[e2e] GET /v1/recipes/${RECIPE_NAME} response: ${RECIPE_DETAIL}"
+
+python3 - <<PYEOF
+import sys, json
+data = json.loads('''${RECIPE_DETAIL}''')
+for key in ("name", "model_version", "loaded_at", "kind", "supported_verbs"):
+    assert key in data, f"Missing '{key}' key: {data}"
+assert data["name"] == "${RECIPE_NAME}", f"Wrong name: {data['name']}"
+assert isinstance(data["supported_verbs"], list), "'supported_verbs' must be a list"
+assert len(data["supported_verbs"]) > 0, "'supported_verbs' must be non-empty"
+print("[e2e] GET /v1/recipes/{name} validation: PASSED")
+PYEOF
+
+# ---- 10. Parse seed item_id from prior :recommend response ----
+SEED_ITEM_ID=$(python3 - <<PYEOF
+import sys, json
+data = json.loads('''${PREDICT}''')
+items = data.get("items", [])
+if items:
+    print(items[0]["item_id"])
+else:
+    # Fallback: item IDs in synthetic data are "i0".."i49"
+    print("i0")
+PYEOF
+)
+echo "[e2e] Using seed item_id='${SEED_ITEM_ID}' for :recommend-related"
+
+# ---- 11. POST /v1/recipes/{name}:recommend-related ----
+echo "[e2e] Calling /v1/recipes/${RECIPE_NAME}:recommend-related..."
+RELATED=$(curl -sf \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -d "{\"seed_items\": [\"${SEED_ITEM_ID}\"], \"limit\": 5}" \
+    "http://127.0.0.1:${SERVE_PORT}/v1/recipes/${RECIPE_NAME}:recommend-related")
+echo "[e2e] :recommend-related response: ${RELATED}"
+
+python3 - <<PYEOF
+import sys, json
+data = json.loads('''${RELATED}''')
+assert "items" in data, f"Missing 'items' key: {data}"
+assert isinstance(data["items"], list), "'items' must be a list"
+assert len(data["items"]) >= 1, "Expected at least one related item"
+assert "recipe" in data, f"Missing 'recipe' key: {data}"
+assert "model_version" in data, f"Missing 'model_version' key: {data}"
+assert "request_id" in data, f"Missing 'request_id' key: {data}"
+print("[e2e] :recommend-related validation: PASSED")
+PYEOF
+
+# ---- 12. POST /v1/recipes/{name}:batch-recommend ----
+echo "[e2e] Calling /v1/recipes/${RECIPE_NAME}:batch-recommend..."
+# Send two requests: one known user and one unknown user
+BATCH=$(curl -sf \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -d "{\"requests\": [{\"user_id\": \"${PREDICT_USER_ID}\", \"limit\": 3}, {\"user_id\": \"__definitely_unknown_user__\", \"limit\": 3}]}" \
+    "http://127.0.0.1:${SERVE_PORT}/v1/recipes/${RECIPE_NAME}:batch-recommend")
+echo "[e2e] :batch-recommend response: ${BATCH}"
+
+python3 - <<PYEOF
+import sys, json
+data = json.loads('''${BATCH}''')
+assert "results" in data, f"Missing 'results' key: {data}"
+assert isinstance(data["results"], list), "'results' must be a list"
+assert len(data["results"]) == 2, f"Expected 2 results, got {len(data['results'])}"
+assert "recipe" in data, f"Missing 'recipe' key: {data}"
+assert "model_version" in data, f"Missing 'model_version' key: {data}"
+assert "request_id" in data, f"Missing 'request_id' key: {data}"
+
+# First request (known user) should succeed
+r0 = data["results"][0]
+assert r0["index"] == 0, f"Expected index 0, got {r0['index']}"
+assert r0["status"] == "ok", f"Expected status 'ok' for known user, got {r0['status']}"
+assert isinstance(r0["items"], list), "items for known user must be a list"
+
+# Second request (unknown user) should have error status
+r1 = data["results"][1]
+assert r1["index"] == 1, f"Expected index 1, got {r1['index']}"
+assert r1["status"] == "error", f"Expected status 'error' for unknown user, got {r1['status']}"
+assert r1["error"] is not None, "error field must be present for unknown user"
+assert r1["error"]["code"] == "UNKNOWN_USER", f"Expected UNKNOWN_USER code, got {r1['error']['code']}"
+print("[e2e] :batch-recommend validation: PASSED")
+PYEOF
+
+# ---- 13. X-Request-ID echo ----
+echo "[e2e] Testing X-Request-ID echo via :recommend..."
+TRACED=$(curl -sf \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -H "X-Request-ID: e2e-trace-001" \
+    -d "{\"user_id\": \"${PREDICT_USER_ID}\", \"limit\": 3}" \
+    "http://127.0.0.1:${SERVE_PORT}/v1/recipes/${RECIPE_NAME}:recommend")
+echo "[e2e] X-Request-ID echo response: ${TRACED}"
+
+python3 - <<PYEOF
+import sys, json
+data = json.loads('''${TRACED}''')
+assert "request_id" in data, f"Missing 'request_id' key: {data}"
+assert data["request_id"] == "e2e-trace-001", (
+    f"Expected request_id 'e2e-trace-001', got {data['request_id']!r}"
+)
+print("[e2e] X-Request-ID echo validation: PASSED")
 PYEOF
 
 echo "[e2e] All checks passed!"

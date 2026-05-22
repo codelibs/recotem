@@ -23,10 +23,12 @@ Integration assumptions:
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import random
 import threading
+import time as _time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +41,8 @@ from recotem._log_safe import format_kid_for_log as _format_kid_for_log
 from recotem._metrics_watcher import inc_recipes_dir_scan_failure as _inc_scan_failure
 from recotem.artifact.format import ArtifactError
 from recotem.serving import metrics as _metrics
+from recotem.serving._header_utils import extract_algorithms, normalize_config_digest
+from recotem.serving._naming import dedup_stub_name
 from recotem.serving.registry import ModelEntry, ModelRegistry
 
 if TYPE_CHECKING:
@@ -181,6 +185,18 @@ class _RecipeWatchState:
     #: succeeded.  Used by OBS-1 to demote repeated identical errors from
     #: WARNING to DEBUG so log aggregation is not flooded during an outage.
     _last_stat_error_class: str | None = None
+    #: Set to True after the first TypeError from artifact_path + ".sha256"
+    #: so subsequent polls skip the sidecar check rather than flooding logs
+    #: with the same warning on every poll cycle (M7).
+    sidecar_unsupported: bool = False
+    #: The yaml_mtime at which sidecar_unsupported was set.  When the recipe
+    #: YAML changes (yaml_mtime differs from this value) the sidecar_unsupported
+    #: flag is cleared so the new configuration gets a fresh evaluation (C4).
+    sidecar_unsupported_at_mtime: float | None = None
+    #: Counter for consecutive transient OSErrors on sidecar reads.  After
+    #: 3 consecutive non-ENOENT OSErrors the watcher skips sidecar checks until
+    #: the next mtime change to avoid triggering full reloads indefinitely (m7).
+    sidecar_io_error_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -417,13 +433,10 @@ class ArtifactWatcher(threading.Thread):
         error:
             The exception raised by load_recipe().
         """
-        stub_name = yaml_file.stem
-        # De-duplicate against existing names — use a suffix if needed.
-        _suffix = 0
-        base = stub_name
-        while stub_name in self._states or self._registry.get(stub_name) is not None:
-            _suffix += 1
-            stub_name = f"{base}_{_suffix}"
+        stub_name = dedup_stub_name(
+            yaml_file.stem,
+            lambda n: n in self._states or self._registry.get(n) is not None,
+        )
 
         error_msg = f"YAML parse failed: {error}"
         stub = ModelEntry(
@@ -437,7 +450,7 @@ class ArtifactWatcher(threading.Thread):
             loaded=False,
         )
         self._registry.replace(stub_name, stub)
-        _metrics.inc_artifact_load_failure(stub_name)
+        _metrics.inc_artifact_load_failure(stub_name, reason="yaml")
         _metrics.set_model_loaded(stub_name, False)
 
         # Create a minimal _RecipeWatchState using a sentinel recipe object.
@@ -481,6 +494,10 @@ class ArtifactWatcher(threading.Thread):
             scan_error_msg = f"recipes-dir scan failed: {exc}"
             for _name in list(self._states.keys()):
                 self._registry.set_load_error(_name, scan_error_msg)
+                # W2: also bump the artifact-load-failure counter per recipe
+                # so Prometheus alerts on dir-scan failures can be expressed
+                # in terms of this counter rather than the neutral scan counter.
+                _metrics.inc_artifact_load_failure(_name, reason="dir_scan")
             return
 
         current_names = set(self._states.keys())
@@ -737,6 +754,7 @@ class ArtifactWatcher(threading.Thread):
                     self._record_load_failure(
                         _failed_recipe,
                         f"stat timeout after {_per_future_timeout:.0f}s",
+                        reason="timeout",
                     )
                     fut.cancel()
                 pending = set()
@@ -795,7 +813,7 @@ class ArtifactWatcher(threading.Thread):
                 if entry is not None and entry.last_load_error is None:
                     logger.warning("artifact_disappeared", name=name)
             self._registry.set_load_error(name, error_msg)
-            _metrics.inc_artifact_load_failure(name)
+            _metrics.inc_artifact_load_failure(name, reason="read")
             return
 
         # Successful stat — clear the error-class tracker (OBS-1).
@@ -860,7 +878,7 @@ class ArtifactWatcher(threading.Thread):
                 error=str(exc),
                 exc_type=type(exc).__name__,
             )
-            self._record_load_failure(name, f"read failed: {exc}")
+            self._record_load_failure(name, f"read failed: {exc}", reason="read")
             return
         except Exception as exc:
             logger.error(
@@ -870,7 +888,9 @@ class ArtifactWatcher(threading.Thread):
                 error=str(exc),
                 exc_type=type(exc).__name__,
             )
-            self._record_load_failure(name, f"unexpected read error: {exc}")
+            self._record_load_failure(
+                name, f"unexpected read error: {exc}", reason="unexpected"
+            )
             return
 
         sha256 = _sha256_bytes(data)
@@ -891,11 +911,12 @@ class ArtifactWatcher(threading.Thread):
                     reason=kid_reason,
                     kid=kid_log,
                 )
-            # Distinguish post-HMAC deserialization failures from other
-            # ArtifactErrors by message prefix.  This prefix is set by
-            # unpickle_payload in artifact/signing.py.
+            # Classify the failure step from the error message prefix so the
+            # recotem_artifact_load_failures_total counter can be partitioned
+            # by reason (read/parse/hmac/header_json/deserialize/metadata).
             _err_str = str(exc)
-            if _err_str.startswith("deserialization failed:"):
+            reason = _classify_artifact_error(_err_str)
+            if reason == "deserialize":
                 streak = self._post_hmac_failure_streak.get(name, 0) + 1
                 self._post_hmac_failure_streak[name] = streak
                 logger.error(
@@ -918,8 +939,9 @@ class ArtifactWatcher(threading.Thread):
                 name=name,
                 kid=kid_log,
                 error=_err_str,
+                reason=reason,
             )
-            self._record_load_failure(name, _err_str)
+            self._record_load_failure(name, _err_str, reason=reason)
             return
         except (MemoryError, RecursionError):
             # Never swallow OOM / stack-exhaustion in a long-running thread:
@@ -934,7 +956,13 @@ class ArtifactWatcher(threading.Thread):
                 exc_type=type(exc).__name__,
                 error=str(exc),
             )
-            self._record_load_failure(name, f"{type(exc).__name__}: {exc}")
+            # Reset the deserialize-streak — an unrelated exception must not
+            # continue accumulating a streak that was tracking a different
+            # failure class (M9).
+            self._post_hmac_failure_streak.pop(name, None)
+            self._record_load_failure(
+                name, f"{type(exc).__name__}: {exc}", reason="unexpected"
+            )
             return
 
         new_marker = (
@@ -1009,13 +1037,27 @@ class ArtifactWatcher(threading.Thread):
         metadata_df = None
         metadata_index = None
         if recipe.item_metadata is not None:
-            metadata_df = _load_metadata(recipe, name)
-            from recotem.metadata.loader import build_metadata_index
+            try:
+                metadata_df = _load_metadata(recipe, name)
+                from recotem.metadata.loader import build_metadata_index
 
-            deny_set: frozenset[str] = frozenset(
-                s.lower() for s in (self._config.metadata_field_deny or [])
-            )
-            metadata_index = build_metadata_index(metadata_df, deny_set)
+                deny_set: frozenset[str] = frozenset(
+                    s.lower() for s in (self._config.metadata_field_deny or [])
+                )
+                _recipe_name = name
+
+                def _on_row_error() -> None:
+                    _metrics.inc_metadata_index_build_error(_recipe_name)
+
+                metadata_index = build_metadata_index(
+                    metadata_df, deny_set, on_row_error=_on_row_error
+                )
+            except (MemoryError, RecursionError):
+                raise
+            except ArtifactError as exc:
+                raise ArtifactError(f"metadata load failed: {exc}") from exc
+            except Exception as exc:
+                raise ArtifactError(f"metadata load failed: {exc}") from exc
 
         return ModelEntry(
             name=name,
@@ -1026,6 +1068,10 @@ class ArtifactWatcher(threading.Thread):
             metadata_index=metadata_index,
             last_load_error=None,
             artifact_path=artifact_path,
+            loaded_at_unix=_time.time(),
+            config_digest=normalize_config_digest(header_dict.get("config_digest"))
+            or "",
+            algorithms=extract_algorithms(header_dict),
         )
 
     def _mark_error(self, name: str, error: str) -> None:
@@ -1038,8 +1084,8 @@ class ArtifactWatcher(threading.Thread):
         ``set_load_error`` returns False when no entry is registered under
         *name*.  This should be unreachable in normal operation because the
         watcher inserts a stub entry before any load attempt, but log it as
-        a warning when it does happen so we can detect ordering bugs in
-        future refactors (rather than silently losing the failure signal).
+        a warning and increment a counter when it does happen so we can
+        detect ordering bugs in future refactors (W1).
         """
         ok = self._registry.set_load_error(name, error)
         if not ok:
@@ -1048,11 +1094,17 @@ class ArtifactWatcher(threading.Thread):
                 name=name,
                 error=error,
             )
+            _metrics.inc_watcher_state_divergence()
 
-    def _record_load_failure(self, name: str, error: str) -> None:
-        """Mark the entry's load error and increment the failure metrics."""
+    def _record_load_failure(
+        self, name: str, error: str, reason: str = "unexpected"
+    ) -> None:
+        """Mark the entry's load error and increment the failure metrics.
+
+        *reason* labels the failure step for ``recotem_artifact_load_failures_total``.
+        """
         self._mark_error(name, error)
-        _metrics.inc_artifact_load_failure(name)
+        _metrics.inc_artifact_load_failure(name, reason=reason)
         _metrics.record_swap(name, ok=False)
 
 
@@ -1068,6 +1120,44 @@ class ArtifactWatcher(threading.Thread):
 _KID_LOG_MAX_LEN: int = 64
 
 
+def _classify_artifact_error(err_msg: str) -> str:
+    """Map an ``ArtifactError`` message to the load-failure reason label.
+
+    The reason label is used as a Prometheus metric label on
+    ``recotem_artifact_load_failures_total`` so operators can distinguish
+    bad-signature, corrupt-payload, missing-metadata, and similar failure
+    modes for alerting (e.g. an HMAC spike is a security signal; a metadata
+    spike is a data-pipeline signal). Classification is deliberately
+    message-prefix based to match the stable wording chosen at each
+    ArtifactError raise site in ``artifact/format.py`` and
+    ``artifact/signing.py``.
+    """
+    lower = err_msg.lower()
+    if lower.startswith("deserialization failed:"):
+        return "deserialize"
+    if lower.startswith("metadata load failed:"):
+        return "metadata"
+    if lower.startswith("header json"):
+        return "header_json"
+    if "hmac verification failed" in lower or "unknown kid" in lower:
+        return "hmac"
+    if (
+        "artifact too short" in lower
+        or "magic" in lower
+        or "reserved bytes" in lower
+        or "kid is not valid" in lower
+        or "header json is not valid" in lower
+        or "header_len" in lower
+        or "version" in lower
+    ):
+        return "parse"
+    logger.warning(
+        "artifact_error_unclassified",
+        message=err_msg[:200],
+    )
+    return "unexpected"
+
+
 def _extract_kid_safe(data: bytes) -> tuple[str, str | None]:
     """Best-effort extraction of kid from raw artifact bytes.
 
@@ -1076,10 +1166,9 @@ def _extract_kid_safe(data: bytes) -> tuple[str, str | None]:
     - On success: ``(sanitised_kid, None)`` — *sanitised_kid* is already
       processed through ``_format_kid_for_log`` (length-capped, non-printables
       hex-escaped).
-    - On structural failure: ``("\\x00<unparseable>", reason)`` — the sentinel
-      contains a ``\\x00`` byte that ``_format_kid_for_log`` renders as
-      ``\\x00``, making it impossible to collide with a valid UTF-8 kid; any
-      ``KeyRing`` lookup will reject it immediately.
+    - On structural failure: ``("<extract_failed>", reason)`` — the sentinel
+      is a fixed string that makes it impossible to collide with a valid UTF-8
+      kid; any ``KeyRing`` lookup will reject it immediately.
 
     *reason* is one of ``"too_short"``, ``"kid_len_out_of_range"``,
     ``"truncated"``, or ``"decode_error"``.
@@ -1092,7 +1181,7 @@ def _extract_kid_safe(data: bytes) -> tuple[str, str | None]:
     """
     from recotem.artifact.format import FIXED_PREFIX_SIZE, MAX_KID_LEN
 
-    _UNPARSEABLE_SENTINEL = "\x00<unparseable>"
+    _UNPARSEABLE_SENTINEL = "<extract_failed>"
 
     try:
         if len(data) < FIXED_PREFIX_SIZE:
@@ -1144,43 +1233,123 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
         ``False`` if unchanged or absent (let the outer marker comparison decide).
     """
     artifact_path = state.artifact_path
+
+    # Short-circuit: if a previous poll already determined that sidecar
+    # construction is unsupported for this path, re-evaluate only if the
+    # recipe YAML mtime has changed since the flag was set (C4).
+    if state.sidecar_unsupported:
+        import os as _os
+
+        yaml_mtime: float | None = None
+        try:
+            recipe_yaml = getattr(state.recipe, "_yaml_path", None) or getattr(
+                state.recipe, "yaml_path", None
+            )
+            if recipe_yaml is not None:
+                yaml_mtime = _os.stat(recipe_yaml).st_mtime
+        except OSError:
+            pass
+        if (
+            yaml_mtime is None
+            or state.sidecar_unsupported_at_mtime is None
+            or yaml_mtime == state.sidecar_unsupported_at_mtime
+        ):
+            return False
+        # YAML mtime changed — clear the flag and re-evaluate.
+        state.sidecar_unsupported = False
+        state.sidecar_unsupported_at_mtime = None
+
     # Only meaningful for local-FS paths where we can form a sibling sidecar.
     # For remote URIs (s3://, gs://) this is a no-op; the marker comparison
     # (ETag / mtime) is already cheap enough.
     try:
         sidecar_path = Path(artifact_path + ".sha256")
-    except TypeError:
+    except TypeError as exc:
+        logger.warning(
+            "sidecar_path_type_error",
+            path=str(artifact_path),
+            exc_type=type(exc).__name__,
+        )
+        import os as _os2
+
+        yaml_mtime2: float | None = None
+        try:
+            recipe_yaml2 = getattr(state.recipe, "_yaml_path", None) or getattr(
+                state.recipe, "yaml_path", None
+            )
+            if recipe_yaml2 is not None:
+                yaml_mtime2 = _os2.stat(recipe_yaml2).st_mtime
+        except OSError:
+            pass
+        state.sidecar_unsupported = True
+        state.sidecar_unsupported_at_mtime = yaml_mtime2
         return False
 
     if not sidecar_path.exists():
+        state.sidecar_io_error_count = 0
         return False
 
     try:
         sidecar_contents = sidecar_path.read_text(encoding="utf-8")
+        state.sidecar_io_error_count = 0
     except OSError as exc:
         # Can't read the sidecar — be conservative and let the full stat run.
         # Distinguish ENOENT (sidecar was deleted between exists() and read_text)
         # from other OS errors (permission denied, I/O error) so operators can
         # diagnose misconfigured file permissions without reading raw tracebacks.
-        import errno  # noqa: PLC0415
-
         if exc.errno == errno.ENOENT:
-            logger.debug(
-                "sidecar_read_failed",
-                path=str(sidecar_path),
-                error_class=type(exc).__name__,
-                reason="ENOENT",
-            )
+            # W3: if the sidecar was present on the previous poll
+            # (last_sidecar_contents is not None), emit a one-time WARNING so
+            # operators can detect tooling that is removing sidecar files.
+            if state.last_sidecar_contents is not None:
+                logger.warning(
+                    "sidecar_disappeared",
+                    path=str(sidecar_path),
+                )
+                state.last_sidecar_contents = None
+            else:
+                logger.debug(
+                    "sidecar_read_failed",
+                    path=str(sidecar_path),
+                    error_class=type(exc).__name__,
+                    reason="ENOENT",
+                )
             # ENOENT: sidecar deleted between exists() and read_text — treat as
             # absent (no change signal); let the full-stat path decide.
+            state.sidecar_io_error_count = 0
             return False
         else:
+            state.sidecar_io_error_count += 1
             logger.warning(
                 "sidecar_read_failed",
                 path=str(sidecar_path),
                 error_class=type(exc).__name__,
                 errno=exc.errno,
             )
+            if state.sidecar_io_error_count >= 3:
+                # After 3 consecutive non-ENOENT errors, stop triggering full
+                # reloads on every tick to avoid a reload storm from a
+                # persistently unreadable sidecar (m7).  The flag is cleared
+                # when the next yaml_mtime change is detected (C4 logic above).
+                import os as _os3
+
+                yaml_mtime3: float | None = None
+                try:
+                    recipe_yaml3 = getattr(state.recipe, "_yaml_path", None) or getattr(
+                        state.recipe, "yaml_path", None
+                    )
+                    if recipe_yaml3 is not None:
+                        yaml_mtime3 = _os3.stat(recipe_yaml3).st_mtime
+                except OSError:
+                    pass
+                state.sidecar_unsupported = True
+                state.sidecar_unsupported_at_mtime = yaml_mtime3
+                state.sidecar_io_error_count = 0
+                logger.warning(
+                    "sidecar_io_errors_suppressed",
+                    path=str(sidecar_path),
+                )
+                return False
             # Non-ENOENT OSError (e.g. PermissionError, I/O error): trigger a
             # reload so that if the main artifact read also fails, _record_load_failure
             # surfaces the problem in /health (I-10).
@@ -1294,7 +1463,18 @@ def build_initial_states(
                     state.last_sidecar_contents = sidecar_path.read_text(
                         encoding="utf-8"
                     )
-            except (TypeError, OSError):
-                pass  # Remote URIs or unreadable sidecars: leave as None.
+            except TypeError as exc:
+                logger.warning(
+                    "sidecar_path_type_error",
+                    path=str(artifact_path),
+                    exc_type=type(exc).__name__,
+                )
+            except OSError as exc:
+                if not isinstance(exc, FileNotFoundError):
+                    logger.warning(
+                        "sidecar_read_failed",
+                        path=str(artifact_path),
+                        exc_type=type(exc).__name__,
+                    )
         states[recipe.name] = state
     return states

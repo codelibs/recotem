@@ -150,3 +150,114 @@ def test_bigquery_fallback_counter_exposed_via_metrics_endpoint(
     assert "text/plain" in content_type, (
         f"Content-Type must be text/plain Prometheus format; got {content_type!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# v1 API metrics: recotem_v1_requests_total, recotem_v1_request_latency_seconds,
+# recotem_v1_batch_size
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def reset_metrics_registry(monkeypatch: pytest.MonkeyPatch):
+    """Reset v1 metric globals and unregister their collectors before/after.
+
+    The prometheus_client default registry is a process-global singleton, so
+    re-running a test that creates the same Counter/Histogram name would raise
+    "Duplicated timeseries in CollectorRegistry".  This fixture:
+
+    1. Enables metrics via ``RECOTEM_METRICS_ENABLED=1``.
+    2. Tears down any pre-existing v1 collectors (defensive — handles state
+       leaked from a prior test run within the same process).
+    3. Resets the module-level globals so ``_ensure_v1_initialized`` runs.
+    4. Repeats teardown after the test so subsequent tests start clean.
+    """
+    monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "1")
+
+    from prometheus_client import REGISTRY
+
+    from recotem.serving import metrics as _m
+
+    def _teardown() -> None:
+        v1_names = {
+            "recotem_v1_requests",
+            "recotem_v1_request_latency_seconds",
+            "recotem_v1_batch_size",
+            "recotem_v1_batch_element_errors",
+            "recotem_v1_metadata_degraded_items",
+            "recotem_v1_validation_errors_outside_verb",
+        }
+        for collector in list(REGISTRY._names_to_collectors.values()):
+            describe = getattr(collector, "describe", None)
+            if describe is None:
+                continue
+            try:
+                metrics = describe()
+            except Exception:
+                continue
+            for m in metrics:
+                if getattr(m, "name", None) in v1_names:
+                    try:
+                        REGISTRY.unregister(collector)
+                    except (KeyError, ValueError):
+                        pass
+                    break
+        for attr in (
+            "_V1_REQUEST_COUNTER",
+            "_V1_REQUEST_LATENCY",
+            "_V1_BATCH_SIZE",
+            "_V1_BATCH_ELEMENT_ERRORS",
+            "_V1_METADATA_DEGRADED_ITEMS",
+            "_V1_VALIDATION_ERRORS_OUTSIDE_VERB",
+        ):
+            setattr(_m, attr, None)
+
+    _teardown()
+    yield
+    _teardown()
+
+
+from recotem.serving import metrics as _m  # noqa: E402
+
+
+def test_record_v1_request_accepts_verb_label(reset_metrics_registry):
+    _m.record_v1_request("smartstocknotes", "recommend", "ok", 0.012)
+    _m.record_v1_request(
+        "smartstocknotes", "recommend-related", "unknown_seed_items", 0.005
+    )
+    out, _ = _m.generate_latest()
+    text = out.decode()
+    assert 'verb="recommend"' in text
+    assert 'verb="recommend-related"' in text
+    assert 'status="unknown_seed_items"' in text
+
+
+def test_observe_batch_size_records_histogram(reset_metrics_registry):
+    _m.observe_batch_size("smartstocknotes", "batch-recommend", 7)
+    out, _ = _m.generate_latest()
+    text = out.decode()
+    assert "recotem_v1_batch_size_bucket" in text
+
+
+@pytest.mark.skipif(
+    not _prometheus_available(),
+    reason="prometheus_client not installed in this environment",
+)
+def test_inc_metadata_degraded_items_coerces_unknown_kind(reset_metrics_registry):
+    """Unknown kind values must be coerced to 'unexpected' to prevent label
+    cardinality explosion; known kinds 'fallback' and 'dropped' pass through."""
+    _m.inc_metadata_degraded_items("r1", "recommend", "fallback", 2)
+    _m.inc_metadata_degraded_items("r1", "recommend", "dropped", 1)
+    _m.inc_metadata_degraded_items("r1", "recommend", "arbitrary_future_kind", 3)
+
+    out, _ = _m.generate_latest()
+    text = out.decode()
+
+    assert 'kind="fallback"' in text, "fallback kind must appear in output"
+    assert 'kind="dropped"' in text, "dropped kind must appear in output"
+    assert 'kind="unexpected"' in text, (
+        "arbitrary_future_kind must be coerced to 'unexpected'"
+    )
+    assert "arbitrary_future_kind" not in text, (
+        "raw unknown kind must not appear in Prometheus output"
+    )

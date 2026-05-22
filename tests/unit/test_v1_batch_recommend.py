@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from tests.conftest import build_v1_app
 
+_FAKE_SHA256_HEX = "b" * 64  # 64 lowercase hex chars for a valid Sha256Hex marker
+
 
 def _client(rec) -> TestClient:
     entry = ModelEntry(
@@ -20,7 +22,7 @@ def _client(rec) -> TestClient:
         metadata_df=None,
         metadata_index=None,
         loaded=True,
-        _loaded_marker=(None, "abc"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1.0,
     )
     registry = ModelRegistry()
@@ -49,12 +51,16 @@ def test_batch_recommend_mixed_success_and_failure():
     body = r.json()
     assert body["recipe"] == "demo"
     assert len(body["results"]) == 3
-    assert body["results"][0] == {
-        "index": 0,
-        "status": "ok",
-        "items": [{"item_id": "i1", "score": 0.9}],
-        "error": None,
-    }
+    # Under the discriminated-union schema, _BatchResultOk has extra="forbid"
+    # and does NOT carry an "error" field.  Assert field by field rather than
+    # doing an equality check against a literal dict that includes "error": None.
+    ok_result = body["results"][0]
+    assert ok_result["index"] == 0
+    assert ok_result["status"] == "ok"
+    assert ok_result["items"] == [{"item_id": "i1", "score": 0.9}]
+    assert "error" not in ok_result, (
+        "_BatchResultOk (discriminated union) must not carry an 'error' key"
+    )
     assert body["results"][1]["status"] == "error"
     assert body["results"][1]["error"]["code"] == "UNKNOWN_USER"
     assert body["results"][2]["status"] == "ok"
@@ -192,6 +198,126 @@ def test_batch_rejects_extra_field_on_request_element() -> None:
     results = r.json()["results"]
     assert results[0]["status"] == "error"
     assert results[0]["error"]["code"] == "VALIDATION_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: model_version header on partial-failure batch response
+# ---------------------------------------------------------------------------
+
+
+def _client_with_metadata(rec, meta_index: dict | None = None) -> TestClient:
+    """Build a client whose entry has a metadata_index pre-populated."""
+    entry = ModelEntry(
+        name="demo",
+        recommender=rec,
+        header={},
+        kid="t",
+        metadata_df=None,
+        metadata_index=meta_index,
+        loaded=True,
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
+        loaded_at_unix=1.0,
+    )
+    registry = ModelRegistry()
+    registry.replace("demo", entry)
+    return TestClient(build_v1_app(registry))
+
+
+def test_batch_recommend_sets_model_version_on_partial_failure():
+    """When a batch has one ok and one error element, the 200 response must
+    carry X-Recotem-Model-Version and the body model_version must match."""
+    rec = MagicMock()
+
+    def _side(user_id, limit):
+        if user_id == "known-user":
+            return [("i1", 0.9)]
+        raise KeyError(user_id)
+
+    rec.get_recommendation_for_known_user_id.side_effect = _side
+    r = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend",
+        json={
+            "requests": [
+                {"user_id": "known-user"},
+                {"user_id": "unknown-user"},
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # One ok, one error
+    statuses = [e["status"] for e in body["results"]]
+    assert "ok" in statuses
+    assert "error" in statuses
+    # Header must be set
+    header_val = r.headers.get("x-recotem-model-version")
+    assert header_val, (
+        "X-Recotem-Model-Version must be present on partial-failure batch"
+    )
+    assert header_val == body["model_version"], (
+        "Header value must match body model_version"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finding 9: include_metadata opt-in on batch-recommend
+# ---------------------------------------------------------------------------
+
+
+def test_batch_recommend_include_metadata_false_no_extra_fields():
+    """Default include_metadata=False: items carry only item_id and score."""
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    meta_index = {"i1": {"title": "Widget A", "category": "tools"}}
+    r = _client_with_metadata(rec, meta_index).post(
+        "/v1/recipes/demo:batch-recommend",
+        json={"requests": [{"user_id": "u1"}]},
+        # include_metadata defaults to False — no key in JSON
+    )
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    assert results[0]["status"] == "ok"
+    items = results[0]["items"]
+    assert len(items) == 1
+    item = items[0]
+    assert set(item.keys()) == {"item_id", "score"}, (
+        f"With include_metadata=False, items must have only item_id+score; got {set(item.keys())!r}"
+    )
+
+
+def test_batch_recommend_include_metadata_false_explicit():
+    """Explicit include_metadata=False must also omit metadata fields."""
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    meta_index = {"i1": {"title": "Widget A"}}
+    r = _client_with_metadata(rec, meta_index).post(
+        "/v1/recipes/demo:batch-recommend",
+        json={"requests": [{"user_id": "u1"}], "include_metadata": False},
+    )
+    assert r.status_code == 200, r.text
+    item = r.json()["results"][0]["items"][0]
+    assert "title" not in item, (
+        "include_metadata=False must not include metadata fields"
+    )
+
+
+def test_batch_recommend_include_metadata_true_adds_fields():
+    """include_metadata=True: items carry the same metadata as single :recommend."""
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    meta_index = {"i1": {"title": "Widget A", "category": "tools"}}
+    r = _client_with_metadata(rec, meta_index).post(
+        "/v1/recipes/demo:batch-recommend",
+        json={"requests": [{"user_id": "u1"}], "include_metadata": True},
+    )
+    assert r.status_code == 200, r.text
+    item = r.json()["results"][0]["items"][0]
+    assert item["item_id"] == "i1"
+    assert item["score"] == 0.9
+    assert item.get("title") == "Widget A", (
+        "include_metadata=True must include metadata fields in batch items"
+    )
+    assert item.get("category") == "tools"
 
 
 def test_batch_recommend_per_request_limit_validation():

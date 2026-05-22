@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from tests.conftest import build_v1_app
 
+_FAKE_SHA256_HEX = "4" * 64  # 64 lowercase hex chars for a valid Sha256Hex marker
+
 
 def _client(rec, known_items: list[str] | None = None) -> TestClient:
     """Wrap *rec* in a ModelEntry whose id-map advertises *known_items*.
@@ -27,7 +29,7 @@ def _client(rec, known_items: list[str] | None = None) -> TestClient:
         metadata_df=None,
         metadata_index=None,
         loaded=True,
-        _loaded_marker=(None, "abc"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1.0,
     )
     registry = ModelRegistry()
@@ -189,3 +191,24 @@ def test_batch_recommend_related_sets_model_version_response_header():
     header_val = r.headers.get("x-recotem-model-version")
     assert header_val, "X-Recotem-Model-Version header must be present and non-empty"
     assert header_val == r.json()["model_version"]
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: empty outer requests list → 422
+# ---------------------------------------------------------------------------
+
+
+def test_batch_recommend_related_rejects_empty_outer_requests_list():
+    """POST :batch-recommend-related with {"requests": []} must return 422.
+
+    The schema enforces min_length=1 on the outer list; an empty list must
+    fail at the schema level (HTTP 422), not reach the handler.
+    """
+    rec = MagicMock()
+    r = _client(rec).post(
+        "/v1/recipes/demo:batch-recommend-related",
+        json={"requests": []},
+    )
+    assert r.status_code == 422, (
+        f"Empty requests list must produce 422; got {r.status_code}: {r.text}"
+    )

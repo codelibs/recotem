@@ -23,6 +23,9 @@ def _client_with_entry(entry: ModelEntry) -> TestClient:
     return TestClient(build_v1_app(registry))
 
 
+_FAKE_SHA256_HEX = "d" * 64  # 64 lowercase hex chars for a valid Sha256Hex marker
+
+
 def _loaded_entry(name: str = "demo") -> ModelEntry:
     rec = MagicMock()
     rec.get_recommendation_for_known_user_id.return_value = []
@@ -34,7 +37,7 @@ def _loaded_entry(name: str = "demo") -> ModelEntry:
         metadata_df=None,
         metadata_index=None,
         loaded=True,
-        _loaded_marker=(None, "abc"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1747800000.0,
     )
 

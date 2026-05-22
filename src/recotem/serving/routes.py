@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Annotated, Any
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
@@ -26,7 +26,7 @@ from recotem.serving.schemas import (
     BatchRecommendRelatedRequest,
     BatchRecommendRequest,
     BatchRecommendResponse,
-    BatchResultEntry,
+    ErrorCode,
     ErrorDetail,
     RecipeDetailResponse,
     RecipesListResponse,
@@ -34,6 +34,8 @@ from recotem.serving.schemas import (
     RecommendRelatedRequest,
     RecommendRequest,
     RecommendResponse,
+    _BatchResultErr,
+    _BatchResultOk,
 )
 
 logger = structlog.get_logger(__name__)
@@ -43,23 +45,20 @@ logger = structlog.get_logger(__name__)
 # time is also routable. The regex is intentionally permissive of leading
 # ``_``/``-`` characters because the recipe loader already accepts them.
 _RECIPE_NAME_RE = r"^[A-Za-z0-9_-]{1,64}$"
-_RecipeName = Annotated[str, Path(pattern=_RECIPE_NAME_RE)]
 
 
 def make_router(
     registry: ModelRegistry,
     api_keys: list[ApiKeyEntry],
-    metadata_field_deny: list[str] | None = None,  # noqa: ARG001
+    insecure_no_auth: bool = False,
 ) -> APIRouter:
     router = APIRouter()
-    # metadata_field_deny is consumed at artifact-load time when the
-    # per-recipe ``metadata_index`` is built (see watcher / app.py). The
-    # router no longer carries a runtime fallback path, so the parameter
-    # is preserved only for signature compatibility with the existing
-    # ``create_app`` wiring.
+
+    # S5: distinguish explicit --insecure-no-auth from "no keys configured".
+    _bypass_mode = "insecure_no_auth" if insecure_no_auth else "loopback_no_keys"
 
     def _require_auth(request: Request) -> str:
-        return verify_api_key(request, api_keys)
+        return verify_api_key(request, api_keys, bypass_mode=_bypass_mode)
 
     def _resolve_entry(
         name: str, request_id: str, kid: str, status_holder: list[str]
@@ -129,8 +128,13 @@ def make_router(
             items.append(RecommendItem.model_validate(fields))
         return items
 
-    def _any_seed_known(entry: ModelEntry, seed_items: list[str]) -> bool:
+    def _any_seed_known(
+        entry: ModelEntry, seed_items: list[str], name: str
+    ) -> bool | None:
         """Return True if at least one seed is known to the model id-map.
+
+        Returns None when the recommender layout is unexpected (caller must
+        treat this as INTERNAL_ERROR rather than UNKNOWN_SEED_ITEMS).
 
         Used to distinguish ``UNKNOWN_SEED_ITEMS`` (no seed in id-map) from
         ``NO_CANDIDATES`` (some seeds known but the ranker produced no
@@ -139,11 +143,15 @@ def make_router(
         try:
             mapper = entry.recommender._mapper
             id_map = mapper.item_id_to_index
-        except AttributeError:
-            # Defensive: if the recommender layout ever changes we fall
-            # back to the conservative "treat as unknown" branch rather
-            # than mis-attributing the failure.
-            return False
+        except AttributeError as exc:
+            # Unexpected recommender layout — log and signal to caller.
+            logger.warning(
+                "recommender_layout_unexpected",
+                recipe=name,
+                exc_type=type(exc).__name__,
+            )
+            _metrics.inc_recommender_layout_unexpected(name)
+            return None
         return any(str(s) in id_map for s in seed_items)
 
     @router.get("/health", summary="Overall health status (probe-safe)")
@@ -199,10 +207,10 @@ def make_router(
         summary="Recommend items for a single user",
     )
     def recommend(
-        name: _RecipeName,
-        body: RecommendRequest,
-        request: Request,
-        response: Response,
+        name: str = Path(pattern=_RECIPE_NAME_RE),
+        body: RecommendRequest = ...,
+        request: Request = ...,
+        response: Response = ...,
         kid: str = Depends(_require_auth),
     ) -> Any:
         request_id = request.state.request_id
@@ -212,6 +220,26 @@ def make_router(
             try:
                 entry = _resolve_entry(name, request_id, kid, status_holder)
 
+                # S1: determine known-membership BEFORE calling irspack so a
+                # genuine missing user produces UNKNOWN_USER, not INTERNAL_ERROR.
+                # Returns None when the recommender layout is unexpected (F4).
+                try:
+                    user_known: bool | None = (
+                        body.user_id in entry.recommender._mapper.user_id_to_index
+                    )
+                except AttributeError as _attr_exc:
+                    # Unexpected recommender layout — mirror _any_seed_known sentinel.
+                    logger.warning(
+                        "recommender_layout_unexpected",
+                        recipe=name,
+                        verb=verb,
+                        exc_type=type(_attr_exc).__name__,
+                    )
+                    _metrics.inc_recommender_layout_unexpected(name)
+                    user_known = (
+                        None  # let irspack decide; None → INTERNAL_ERROR on KeyError
+                    )
+
                 try:
                     raw_results: list[tuple[str, float]] = (
                         entry.recommender.get_recommendation_for_known_user_id(
@@ -219,12 +247,28 @@ def make_router(
                         )
                     )
                 except KeyError:
-                    status_holder[0] = "unknown_user"
+                    if user_known is False:
+                        # Deterministic miss: user was not in the id-map.
+                        status_holder[0] = "unknown_user"
+                        raise HTTPException(
+                            status_code=404,
+                            detail={
+                                "detail": "user not seen during training",
+                                "code": "UNKNOWN_USER",
+                            },
+                        ) from None
+                    # user_known is True or None (unexpected layout): propagate as
+                    # INTERNAL_ERROR so layout surprises are visible, not silent.
+                    logger.exception(
+                        "recommender_unexpected_key_error",
+                        recipe=name,
+                        verb=verb,
+                    )
                     raise HTTPException(
-                        status_code=404,
+                        status_code=500,
                         detail={
-                            "detail": "user not seen during training",
-                            "code": "UNKNOWN_USER",
+                            "detail": "internal error",
+                            "code": "INTERNAL_ERROR",
                         },
                     ) from None
 
@@ -261,10 +305,10 @@ def make_router(
         summary="Recommend items related to a seed list",
     )
     def recommend_related(
-        name: _RecipeName,
-        body: RecommendRelatedRequest,
-        request: Request,
-        response: Response,
+        name: str = Path(pattern=_RECIPE_NAME_RE),
+        body: RecommendRelatedRequest = ...,
+        request: Request = ...,
+        response: Response = ...,
         kid: str = Depends(_require_auth),
     ) -> Any:
         request_id = request.state.request_id
@@ -274,7 +318,18 @@ def make_router(
             try:
                 entry = _resolve_entry(name, request_id, kid, status_holder)
 
-                if not _any_seed_known(entry, body.seed_items):
+                seed_known = _any_seed_known(entry, body.seed_items, name)
+                if seed_known is None:
+                    # M1: unexpected recommender layout — propagate as INTERNAL_ERROR.
+                    status_holder[0] = "error"
+                    raise HTTPException(
+                        status_code=500,
+                        detail={
+                            "detail": "internal error",
+                            "code": "INTERNAL_ERROR",
+                        },
+                    )
+                if not seed_known:
                     status_holder[0] = "unknown_seed_items"
                     raise HTTPException(
                         status_code=404,
@@ -284,9 +339,24 @@ def make_router(
                         },
                     )
 
-                raw_results = entry.recommender.get_recommendation_for_new_user(
-                    body.seed_items, body.limit
-                )
+                try:
+                    raw_results = entry.recommender.get_recommendation_for_new_user(
+                        body.seed_items, body.limit
+                    )
+                except KeyError:
+                    # S1: unexpected KeyError despite seed appearing known.
+                    logger.exception(
+                        "recommender_unexpected_key_error",
+                        recipe=name,
+                        verb=verb,
+                    )
+                    raise HTTPException(
+                        status_code=500,
+                        detail={
+                            "detail": "internal error",
+                            "code": "INTERNAL_ERROR",
+                        },
+                    ) from None
 
                 if not raw_results:
                     status_holder[0] = "no_candidates"
@@ -331,10 +401,10 @@ def make_router(
         summary="Recommend items for multiple users",
     )
     def batch_recommend(
-        name: _RecipeName,
-        body: BatchRecommendRequest,
-        request: Request,
-        response: Response,
+        name: str = Path(pattern=_RECIPE_NAME_RE),
+        body: BatchRecommendRequest = ...,
+        request: Request = ...,
+        response: Response = ...,
         kid: str = Depends(_require_auth),
     ) -> Any:
         request_id = request.state.request_id
@@ -346,7 +416,7 @@ def make_router(
 
                 _metrics.observe_batch_size(name, verb, len(body.requests))
 
-                results: list[BatchResultEntry] = []
+                results: list[_BatchResultOk | _BatchResultErr] = []
                 aggregate_limit = 0
                 for idx, raw in enumerate(body.requests):
                     if not isinstance(raw, dict):
@@ -379,7 +449,29 @@ def make_router(
                         _metrics.inc_batch_element_error(name, verb, "VALIDATION_ERROR")
                         continue
                     aggregate_limit += single.limit
+                    # F5: initialize user_known at top of each iteration so
+                    # stale values from a previous iteration cannot leak on
+                    # future refactors.
+                    batch_user_known: bool | None = True
                     try:
+                        # S1/F4: check membership before calling irspack.
+                        # Returns None when the recommender layout is unexpected.
+                        try:
+                            batch_user_known = (
+                                single.user_id
+                                in entry.recommender._mapper.user_id_to_index
+                            )
+                        except AttributeError as _attr_exc:
+                            # Mirror _any_seed_known sentinel: log + metric + None.
+                            logger.warning(
+                                "recommender_layout_unexpected",
+                                recipe=name,
+                                verb=verb,
+                                exc_type=type(_attr_exc).__name__,
+                            )
+                            _metrics.inc_recommender_layout_unexpected(name)
+                            batch_user_known = None
+
                         raw_results = (
                             entry.recommender.get_recommendation_for_known_user_id(
                                 single.user_id, single.limit
@@ -390,22 +482,36 @@ def make_router(
                             if single.exclude_items
                             else frozenset()
                         )
-                        items = _build_items(raw_results, exclude, None)
+                        meta = entry.metadata_index if body.include_metadata else None
+                        items = _build_items(raw_results, exclude, meta)
                         results.append(
-                            BatchResultEntry(
-                                index=idx,
-                                status="ok",
-                                items=items,
-                                error=None,
-                            )
+                            _BatchResultOk(index=idx, status="ok", items=items)
                         )
                     except KeyError:
-                        results.append(
-                            _batch_error_entry(
-                                idx, "UNKNOWN_USER", "user not seen during training"
+                        if batch_user_known is False:
+                            results.append(
+                                _batch_error_entry(
+                                    idx, "UNKNOWN_USER", "user not seen during training"
+                                )
                             )
-                        )
-                        _metrics.inc_batch_element_error(name, verb, "UNKNOWN_USER")
+                            _metrics.inc_batch_element_error(name, verb, "UNKNOWN_USER")
+                        else:
+                            # batch_user_known is True or None (unexpected layout):
+                            # propagate as INTERNAL_ERROR for observability.
+                            logger.exception(
+                                "recommender_unexpected_key_error",
+                                recipe=name,
+                                verb=verb,
+                                idx=idx,
+                            )
+                            results.append(
+                                _batch_error_entry(
+                                    idx, "INTERNAL_ERROR", "internal error"
+                                )
+                            )
+                            _metrics.inc_batch_element_error(
+                                name, verb, "INTERNAL_ERROR"
+                            )
                     except (MemoryError, RecursionError):
                         raise
                     except Exception as exc:
@@ -452,10 +558,10 @@ def make_router(
         summary="Recommend items related to multiple seed lists",
     )
     def batch_recommend_related(
-        name: _RecipeName,
-        body: BatchRecommendRelatedRequest,
-        request: Request,
-        response: Response,
+        name: str = Path(pattern=_RECIPE_NAME_RE),
+        body: BatchRecommendRelatedRequest = ...,
+        request: Request = ...,
+        response: Response = ...,
         kid: str = Depends(_require_auth),
     ) -> Any:
         request_id = request.state.request_id
@@ -467,7 +573,7 @@ def make_router(
 
                 _metrics.observe_batch_size(name, verb, len(body.requests))
 
-                results: list[BatchResultEntry] = []
+                results: list[_BatchResultOk | _BatchResultErr] = []
                 aggregate_limit = 0
                 for idx, raw in enumerate(body.requests):
                     if not isinstance(raw, dict):
@@ -501,7 +607,19 @@ def make_router(
                         continue
                     aggregate_limit += single.limit
                     try:
-                        if not _any_seed_known(entry, single.seed_items):
+                        seed_known = _any_seed_known(entry, single.seed_items, name)
+                        if seed_known is None:
+                            # M1: unexpected layout — INTERNAL_ERROR for this element.
+                            results.append(
+                                _batch_error_entry(
+                                    idx, "INTERNAL_ERROR", "internal error"
+                                )
+                            )
+                            _metrics.inc_batch_element_error(
+                                name, verb, "INTERNAL_ERROR"
+                            )
+                            continue
+                        if not seed_known:
                             results.append(
                                 _batch_error_entry(
                                     idx,
@@ -513,9 +631,29 @@ def make_router(
                                 name, verb, "UNKNOWN_SEED_ITEMS"
                             )
                             continue
-                        raw_results = entry.recommender.get_recommendation_for_new_user(
-                            single.seed_items, single.limit
-                        )
+                        try:
+                            raw_results = (
+                                entry.recommender.get_recommendation_for_new_user(
+                                    single.seed_items, single.limit
+                                )
+                            )
+                        except KeyError:
+                            # S1: unexpected KeyError despite seed appearing known.
+                            logger.exception(
+                                "recommender_unexpected_key_error",
+                                recipe=name,
+                                verb=verb,
+                                idx=idx,
+                            )
+                            results.append(
+                                _batch_error_entry(
+                                    idx, "INTERNAL_ERROR", "internal error"
+                                )
+                            )
+                            _metrics.inc_batch_element_error(
+                                name, verb, "INTERNAL_ERROR"
+                            )
+                            continue
                         if not raw_results:
                             results.append(
                                 _batch_error_entry(
@@ -533,23 +671,10 @@ def make_router(
                             if single.exclude_items
                             else frozenset()
                         )
-                        items = _build_items(raw_results, exclude, None)
+                        meta = entry.metadata_index if body.include_metadata else None
+                        items = _build_items(raw_results, exclude, meta)
                         results.append(
-                            BatchResultEntry(
-                                index=idx,
-                                status="ok",
-                                items=items,
-                                error=None,
-                            )
-                        )
-                    except KeyError:
-                        results.append(
-                            _batch_error_entry(
-                                idx, "UNKNOWN_SEED_ITEMS", "no known seed_items"
-                            )
-                        )
-                        _metrics.inc_batch_element_error(
-                            name, verb, "UNKNOWN_SEED_ITEMS"
+                            _BatchResultOk(index=idx, status="ok", items=items)
                         )
                     except (MemoryError, RecursionError):
                         raise
@@ -599,18 +724,27 @@ def make_router(
     def list_recipes(kid: str = Depends(_require_auth)) -> dict[str, Any]:
         structlog.contextvars.bind_contextvars(kid=kid)
         try:
+            all_entries = registry.list()
+            total = len(all_entries)
             summaries: list[dict[str, Any]] = []
-            for e in registry.list():
+            for e in all_entries:
                 if not e.loaded:
                     continue
                 summaries.append(
                     {
                         "name": e.name,
-                        "model_version": e.model_version,
+                        "model_version": e.model_version if e.artifact_sha256 else None,
                         "loaded_at": e.loaded_at,
                         "supported_verbs": e.supported_verbs,
                         "kind": e.kind,
                     }
+                )
+            shown = len(summaries)
+            if shown < total:
+                logger.debug(
+                    "recipes_list_filtered",
+                    total=total,
+                    shown=shown,
                 )
             return {"recipes": summaries}
         finally:
@@ -622,8 +756,8 @@ def make_router(
         summary="Get recipe detail",
     )
     def recipe_detail(
-        name: _RecipeName,
-        request: Request,
+        name: str = Path(pattern=_RECIPE_NAME_RE),
+        request: Request = ...,
         kid: str = Depends(_require_auth),
     ) -> dict[str, Any]:
         request_id = request.state.request_id
@@ -663,11 +797,11 @@ def make_router(
             hdr = e.header
             return {
                 "name": e.name,
-                "model_version": e.model_version,
+                "model_version": e.model_version if e.artifact_sha256 else None,
                 "loaded_at": e.loaded_at,
                 "supported_verbs": e.supported_verbs,
                 "kind": e.kind,
-                "config_digest": e.config_digest or "",
+                "config_digest": e.config_digest or None,
                 "algorithms": e.algorithms or [],
                 "best_algorithm": e.best_class or "",
                 "trained_at": hdr.get("trained_at"),
@@ -680,7 +814,7 @@ def make_router(
                 "data_stats": hdr.get("data_stats"),
                 "recotem_version": hdr.get("recotem_version"),
                 "irspack_version": hdr.get("irspack_version"),
-                "recipe_hash": hdr.get("recipe_hash"),
+                "recipe_hash": hdr.get("recipe_hash") or None,
             }
         except HTTPException:
             raise
@@ -701,10 +835,9 @@ def make_router(
     return router
 
 
-def _batch_error_entry(idx: int, code: str, message: str) -> BatchResultEntry:
-    return BatchResultEntry(
+def _batch_error_entry(idx: int, code: ErrorCode, message: str) -> _BatchResultErr:
+    return _BatchResultErr(
         index=idx,
         status="error",
-        items=None,
-        error=ErrorDetail(code=code, message=message),  # type: ignore[arg-type]
+        error=ErrorDetail(code=code, message=message),
     )

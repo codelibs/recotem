@@ -3,10 +3,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 # Aggregate ``limit`` cap across all sub-requests in a single batch call.
 # Documented in docs/api-reference.md. Bounds total candidate work per HTTP
@@ -48,10 +47,6 @@ class RecommendRequest(BaseModel):
         list[_ItemStr] | None,
         Field(max_length=1000, description="Item IDs to exclude from results"),
     ] = None
-    context: Annotated[
-        dict[str, Any] | None,
-        Field(description="Reserved: arbitrary per-request context"),
-    ] = None
 
 
 class RecommendRelatedRequest(BaseModel):
@@ -71,10 +66,6 @@ class RecommendRelatedRequest(BaseModel):
     exclude_items: Annotated[
         list[_ItemStr] | None,
         Field(max_length=1000, description="Item IDs to exclude from results"),
-    ] = None
-    context: Annotated[
-        dict[str, Any] | None,
-        Field(description="Reserved: arbitrary per-request context"),
     ] = None
 
 
@@ -99,6 +90,16 @@ class BatchRecommendRequest(BaseModel):
             min_length=1, max_length=256, description="Individual recommend requests"
         ),
     ]
+    include_metadata: Annotated[
+        bool,
+        Field(
+            description=(
+                "When True, include per-item metadata fields in each result "
+                "(same as single-recommend enrichment). Default False preserves "
+                "performance for large batches."
+            )
+        ),
+    ] = False
 
 
 class BatchRecommendRelatedRequest(BaseModel):
@@ -112,6 +113,27 @@ class BatchRecommendRelatedRequest(BaseModel):
             description="Individual recommend-related requests",
         ),
     ]
+    include_metadata: Annotated[
+        bool,
+        Field(
+            description=(
+                "When True, include per-item metadata fields in each result "
+                "(same as single-recommend enrichment). Default False preserves "
+                "performance for large batches."
+            )
+        ),
+    ] = False
+
+
+# ---------------------------------------------------------------------------
+# Branded string types for artifact digests
+# ---------------------------------------------------------------------------
+
+# ``sha256:<64 hex chars>`` — used for model_version in responses.
+Sha256Hex = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+
+# Plain 64-char hex string — used for recipe_hash in artifact headers.
+HexHash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +142,9 @@ class BatchRecommendRelatedRequest(BaseModel):
 
 
 class RecommendItem(BaseModel):
-    item_id: Annotated[str, Field(description="Item identifier")]
+    item_id: Annotated[
+        str, Field(min_length=1, max_length=256, description="Item identifier")
+    ]
     score: Annotated[
         float, Field(allow_inf_nan=False, description="Recommendation score")
     ]
@@ -143,42 +167,42 @@ class RecommendResponse(BaseModel):
         str, Field(min_length=1, description="Unique request identifier")
     ]
     recipe: Annotated[str, Field(min_length=1, description="Recipe name")]
-    model_version: Annotated[
-        str, Field(min_length=1, description="Artifact SHA-256 digest")
-    ]
+    model_version: Annotated[Sha256Hex, Field(description="Artifact SHA-256 digest")]
     items: Annotated[
         list[RecommendItem], Field(description="Recommended items in ranked order")
     ]
 
 
-class BatchResultEntry(BaseModel):
+class _BatchResultOk(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     index: Annotated[
         int,
         Field(ge=0, description="Zero-based index of the original sub-request"),
     ]
-    status: Annotated[Literal["ok", "error"], Field(description="Sub-request outcome")]
+    status: Literal["ok"]
     items: Annotated[
-        list[RecommendItem] | None, Field(description="Recommended items (ok only)")
-    ] = None
-    error: Annotated[
-        ErrorDetail | None, Field(description="Error detail (error only)")
-    ] = None
+        list[RecommendItem], Field(description="Recommended items in ranked order")
+    ]
 
-    @model_validator(mode="after")
-    def _check_status_invariant(self) -> BatchResultEntry:
-        if self.status == "ok":
-            if self.items is None or self.error is not None:
-                raise ValueError(
-                    "ok results must carry items and must not carry an error"
-                )
-        else:
-            if self.error is None or self.items is not None:
-                raise ValueError(
-                    "error results must carry an error and must not carry items"
-                )
-        return self
+
+class _BatchResultErr(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    index: Annotated[
+        int,
+        Field(ge=0, description="Zero-based index of the original sub-request"),
+    ]
+    status: Literal["error"]
+    error: Annotated[ErrorDetail, Field(description="Error detail")]
+
+
+# Discriminated union: ``status`` field selects the concrete class at
+# parse/serialise time so the ok/error invariant is enforced by the type
+# system rather than a ``@model_validator``.
+BatchResultEntry = Annotated[
+    _BatchResultOk | _BatchResultErr, Field(discriminator="status")
+]
 
 
 class BatchRecommendResponse(BaseModel):
@@ -188,9 +212,7 @@ class BatchRecommendResponse(BaseModel):
         str, Field(min_length=1, description="Unique request identifier")
     ]
     recipe: Annotated[str, Field(min_length=1, description="Recipe name")]
-    model_version: Annotated[
-        str, Field(min_length=1, description="Artifact SHA-256 digest")
-    ]
+    model_version: Annotated[Sha256Hex, Field(description="Artifact SHA-256 digest")]
     results: Annotated[
         list[BatchResultEntry], Field(description="Per-request results in input order")
     ]
@@ -201,23 +223,17 @@ class BatchRecommendResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _parse_loaded_at(v: str) -> str:
-    dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        raise ValueError("loaded_at must include timezone info")
-    utc = dt.astimezone(UTC)
-    return utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 class RecipeSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str, Field(min_length=1, description="Recipe name")]
     model_version: Annotated[
-        str, Field(min_length=1, description="Artifact SHA-256 digest")
+        Sha256Hex | None,
+        Field(description="Artifact SHA-256 digest, or null for stub entries"),
     ]
     loaded_at: Annotated[
-        str, Field(min_length=1, description="ISO-8601 UTC timestamp of last hot-swap")
+        AwareDatetime,
+        Field(description="UTC timestamp of last successful hot-swap"),
     ]
     supported_verbs: Annotated[
         list[
@@ -234,11 +250,6 @@ class RecipeSummary(BaseModel):
         Literal["user-item", "item-item"], Field(description="Recommendation kind")
     ]
 
-    @field_validator("loaded_at", mode="before")
-    @classmethod
-    def _validate_loaded_at(cls, v: str) -> str:
-        return _parse_loaded_at(v)
-
 
 class RecipesListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -247,19 +258,22 @@ class RecipesListResponse(BaseModel):
 
 
 class RecipeDetailResponse(RecipeSummary):
-    config_digest: Annotated[str, Field(description="SHA-256 digest of recipe config")]
+    config_digest: Annotated[
+        Sha256Hex | None,
+        Field(description="SHA-256 digest of recipe config, or null when unavailable"),
+    ] = None
     algorithms: Annotated[
         list[str], Field(description="Algorithms evaluated during training")
     ]
     best_algorithm: Annotated[str, Field(description="Algorithm selected by Optuna")]
-    trained_at: str | None = None
+    trained_at: AwareDatetime | None = None
     best_class: str | None = None
     best_params: dict[str, Any] | None = None
     best_score: float | None = None
-    metric: str | None = None
-    cutoff: int | None = None
+    metric: Literal["ndcg", "map", "recall", "hit"] | None = None
+    cutoff: Annotated[int, Field(ge=1)] | None = None
     tuning: dict[str, Any] | None = None
     data_stats: dict[str, Any] | None = None
-    recotem_version: str | None = None
-    irspack_version: str | None = None
-    recipe_hash: str | None = None
+    recotem_version: Annotated[str, Field(pattern=r"^\d+\.\d+")] | None = None
+    irspack_version: Annotated[str, Field(pattern=r"^\d+\.\d+")] | None = None
+    recipe_hash: HexHash | None = None

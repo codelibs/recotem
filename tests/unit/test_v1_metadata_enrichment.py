@@ -26,13 +26,15 @@ from tests.conftest import build_v1_app
 
 def _make_client(
     entry: ModelEntry,
-    metadata_field_deny: list[str] | None = None,
 ) -> TestClient:
     registry = ModelRegistry()
     registry.replace(entry.name, entry)
     return TestClient(
-        build_v1_app(registry, metadata_field_deny=metadata_field_deny),
+        build_v1_app(registry),
     )
+
+
+_FAKE_SHA256_HEX = "3" * 64  # 64 lowercase hex chars for a valid Sha256Hex marker
 
 
 def _entry_with_metadata_index(
@@ -48,7 +50,7 @@ def _entry_with_metadata_index(
         metadata_df=None,
         metadata_index=metadata_index,
         loaded=True,
-        _loaded_marker=(None, "abc123"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1747800000.0,
     )
 
@@ -76,7 +78,7 @@ def _entry_with_loaded_metadata(
         metadata_df=None,
         metadata_index=index,
         loaded=True,
-        _loaded_marker=(None, "abc123"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1747800000.0,
     )
 

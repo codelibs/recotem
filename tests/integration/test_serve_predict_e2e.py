@@ -19,6 +19,8 @@ from recotem.serving.registry import ModelEntry, ModelRegistry
 from tests.conftest import build_v1_app
 
 ACTIVE_KEY_HEX = "aa" * 32
+_FAKE_SHA256_HEX = "dead" * 16  # 64 lowercase hex chars for a valid Sha256Hex marker
+_FAKE_CONFIG_DIGEST = "sha256:" + "cafe" * 16  # valid Sha256Hex for config_digest
 
 
 def _make_mock_recommender(users: list[str], items: list[str]):
@@ -83,7 +85,7 @@ def test_serve_predict_e2e_in_process() -> None:
         },
         kid="active",
         # _loaded_marker[1] is the artifact sha that backs model_version.
-        _loaded_marker=(None, "deadbeef"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1.0,
     )
 
@@ -125,7 +127,7 @@ def test_v1_related_endpoint_returns_items() -> None:
             "recipe_name": "test_model",
         },
         kid="active",
-        _loaded_marker=(None, "deadbeef"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1.0,
     )
 
@@ -162,7 +164,7 @@ def test_serve_predict_e2e_unknown_user_404() -> None:
         recommender=rec,
         header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
         kid="active",
-        _loaded_marker=(None, "deadbeef"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1.0,
     )
     registry = ModelRegistry()
@@ -199,7 +201,7 @@ def test_serve_health_endpoint_ok_with_loaded_model() -> None:
         recommender=rec,
         header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
         kid="k1",
-        _loaded_marker=(None, "deadbeef"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1.0,
     )
     registry = ModelRegistry()
@@ -522,7 +524,7 @@ def _make_registry_and_client(
     recipe_name: str = "test_model",
     plaintext: str = "integration_test_api_key_32bytes",
     algorithms: list[str] | None = None,
-    config_digest: str = "sha256:abc123",
+    config_digest: str = _FAKE_CONFIG_DIGEST,
 ) -> tuple[ModelRegistry, TestClient, str]:
     """Build a populated registry, a FastAPI TestClient, and the auth key.
 
@@ -539,7 +541,7 @@ def _make_registry_and_client(
             "recipe_name": recipe_name,
         },
         kid="active",
-        _loaded_marker=(None, "deadbeef1234"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=time.time(),
         algorithms=algorithms or ["TopPopRecommender"],
         config_digest=config_digest,
@@ -606,10 +608,11 @@ def test_batch_recommend_train_serve_call() -> None:
     assert isinstance(r1["items"], list)
 
     # Index 2: unknown user — must carry UNKNOWN_USER error, no items.
+    # Under the discriminated-union schema, _BatchResultErr has no "items" field.
     r2 = results[2]
     assert r2["index"] == 2
     assert r2["status"] == "error"
-    assert r2["items"] is None
+    assert "items" not in r2, "_BatchResultErr must not carry 'items' field"
     assert r2["error"] is not None
     assert r2["error"]["code"] == "UNKNOWN_USER"
 
@@ -662,10 +665,11 @@ def test_batch_recommend_related_train_serve_call() -> None:
     assert all(it["item_id"] != "item0" for it in r0["items"])
 
     # Index 1: seeds known but ranker returns [] → NO_CANDIDATES.
+    # Under the discriminated-union schema, _BatchResultErr has no "items" field.
     r1 = results[1]
     assert r1["index"] == 1
     assert r1["status"] == "error"
-    assert r1["items"] is None
+    assert "items" not in r1, "_BatchResultErr must not carry 'items' field"
     assert r1["error"] is not None
     assert r1["error"]["code"] == "NO_CANDIDATES"
 
@@ -686,7 +690,7 @@ def test_recipes_discovery_list_and_detail() -> None:
         items,
         recipe_name="discovery_model",
         algorithms=["TopPopRecommender"],
-        config_digest="sha256:cafebabe",
+        config_digest=_FAKE_CONFIG_DIGEST,
     )
 
     # --- GET /v1/recipes (list) ---
@@ -751,7 +755,7 @@ def test_recipes_discovery_list_and_detail() -> None:
     assert set(detail["supported_verbs"]) == expected_verbs
 
     # Config digest and algorithms must match what was set in ModelEntry.
-    assert detail["config_digest"] == "sha256:cafebabe"
+    assert detail["config_digest"] == _FAKE_CONFIG_DIGEST
     assert isinstance(detail["algorithms"], list)
     assert "TopPopRecommender" in detail["algorithms"]
 

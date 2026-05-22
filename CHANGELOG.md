@@ -6,6 +6,28 @@ follows Keep a Changelog (https://keepachangelog.com/en/1.1.0/).
 ## Unreleased
 
 ### Added
+- `include_metadata: bool = False` on `BatchRecommendRequest` and
+  `BatchRecommendRelatedRequest`.  When `True`, batch results include
+  per-item metadata fields (same join as single-recommend endpoints).
+  Default `False` preserves the performance-first default for bulk callers.
+- `recotem_recommender_layout_unexpected_total{recipe}` counter
+  incremented when `_any_seed_known` encounters an `AttributeError`
+  on `recommender._mapper.item_id_to_index`.  A non-zero rate indicates
+  an irspack internal API incompatibility.
+- `recotem_watcher_state_divergence_total` counter incremented when the
+  watcher's `set_load_error_no_entry` race fires (stub entry missing).
+- `recotem_artifact_load_failures_total` now accepts `reason="dir_scan"`
+  when the recipes-directory iteration itself fails (W2).
+- `mode` field on `auth_anonymous_bypass` / `auth_anonymous_bypass_first_seen`
+  log events: `"insecure_no_auth"` when `--insecure-no-auth` is active,
+  `"loopback_no_keys"` when no API keys are configured.
+- `build_metadata_index` accepts `on_row_error: Callable[[], None] | None`
+  callback for per-row error counting without coupling the metadata loader
+  to the serving layer.
+- `_BatchResultOk` / `_BatchResultErr` discriminated-union concrete classes
+  replace the old `BatchResultEntry` flat class with `@model_validator`.
+  The discriminator field `status` enforces the ok/error invariant at the
+  type level.
 - v1 HTTP API mounted at `/v1` with four inference verbs
   (`:recommend`, `:recommend-related`, `:batch-recommend`,
   `:batch-recommend-related`), recipe discovery
@@ -35,11 +57,16 @@ follows Keep a Changelog (https://keepachangelog.com/en/1.1.0/).
 - Prometheus metrics `recotem_predict_total` and
   `recotem_predict_latency_seconds` (use `recotem_v1_requests_total` /
   `recotem_v1_request_latency_seconds` instead).
-- `X-Recotem-Metadata-Degraded` header.  The fallback path that emitted
-  it became unreachable once `metadata_index` was populated at every
-  artifact load, so the header and its in-router dead code have been
-  removed.  `recotem_metadata_lookup_errors_total` is still emitted from
-  the artifact-load path.
+- `X-Recotem-Metadata-Degraded` header.  Metadata enrichment now happens
+  entirely at artifact-load time (not per-request), so the header has no
+  per-request signal to report.  Per-row errors during index build are
+  counted by `recotem_metadata_lookup_errors_total{recipe}`.
+- `context` field from `RecommendRequest` and `RecommendRelatedRequest`.
+  It was never read by any handler.  With `extra="forbid"` in place,
+  sending `context` now produces a 422 `VALIDATION_ERROR`.
+- `metadata_field_deny` parameter removed from `make_router` (internal
+  implementation detail; deny-list is applied at model-load time via
+  `build_metadata_index`).
 
 ### Changed
 - Recommend responses now expose `model_version` (artifact SHA-256

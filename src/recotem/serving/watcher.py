@@ -482,6 +482,10 @@ class ArtifactWatcher(threading.Thread):
             scan_error_msg = f"recipes-dir scan failed: {exc}"
             for _name in list(self._states.keys()):
                 self._registry.set_load_error(_name, scan_error_msg)
+                # W2: also bump the artifact-load-failure counter per recipe
+                # so Prometheus alerts on dir-scan failures can be expressed
+                # in terms of this counter rather than the neutral scan counter.
+                _metrics.inc_artifact_load_failure(_name, reason="dir_scan")
             return
 
         current_names = set(self._states.keys())
@@ -1021,7 +1025,14 @@ class ArtifactWatcher(threading.Thread):
                 deny_set: frozenset[str] = frozenset(
                     s.lower() for s in (self._config.metadata_field_deny or [])
                 )
-                metadata_index = build_metadata_index(metadata_df, deny_set)
+                _recipe_name = name
+
+                def _on_row_error() -> None:
+                    _metrics.inc_metadata_lookup_error(_recipe_name)
+
+                metadata_index = build_metadata_index(
+                    metadata_df, deny_set, on_row_error=_on_row_error
+                )
             except (MemoryError, RecursionError):
                 raise
             except ArtifactError as exc:
@@ -1053,8 +1064,8 @@ class ArtifactWatcher(threading.Thread):
         ``set_load_error`` returns False when no entry is registered under
         *name*.  This should be unreachable in normal operation because the
         watcher inserts a stub entry before any load attempt, but log it as
-        a warning when it does happen so we can detect ordering bugs in
-        future refactors (rather than silently losing the failure signal).
+        a warning and increment a counter when it does happen so we can
+        detect ordering bugs in future refactors (W1).
         """
         ok = self._registry.set_load_error(name, error)
         if not ok:
@@ -1063,6 +1074,7 @@ class ArtifactWatcher(threading.Thread):
                 name=name,
                 error=error,
             )
+            _metrics.inc_watcher_state_divergence()
 
     def _record_load_failure(
         self, name: str, error: str, reason: str = "unexpected"
@@ -1224,12 +1236,22 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
         import errno  # noqa: PLC0415
 
         if exc.errno == errno.ENOENT:
-            logger.debug(
-                "sidecar_read_failed",
-                path=str(sidecar_path),
-                error_class=type(exc).__name__,
-                reason="ENOENT",
-            )
+            # W3: if the sidecar was present on the previous poll
+            # (last_sidecar_contents is not None), emit a one-time WARNING so
+            # operators can detect tooling that is removing sidecar files.
+            if state.last_sidecar_contents is not None:
+                logger.warning(
+                    "sidecar_disappeared",
+                    path=str(sidecar_path),
+                )
+                state.last_sidecar_contents = None
+            else:
+                logger.debug(
+                    "sidecar_read_failed",
+                    path=str(sidecar_path),
+                    error_class=type(exc).__name__,
+                    reason="ENOENT",
+                )
             # ENOENT: sidecar deleted between exists() and read_text — treat as
             # absent (no change signal); let the full-stat path decide.
             return False

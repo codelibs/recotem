@@ -911,6 +911,88 @@ def test_matched_kid_retains_first_match_when_duplicates_present() -> None:
     assert request.state.kid == "first-team"
 
 
+# ---------------------------------------------------------------------------
+# Finding 12: Auth bypass mode log field distinguishes insecure_no_auth from
+# loopback_no_keys
+# ---------------------------------------------------------------------------
+
+
+def test_anonymous_bypass_log_mode_field_is_insecure_no_auth() -> None:
+    """When bypass_mode='insecure_no_auth', the debug log must carry
+    mode='insecure_no_auth'."""
+    import structlog.testing
+
+    import recotem.serving.auth as auth_mod
+
+    auth_mod._anon_seen.clear()
+
+    request = _make_anon_request("127.0.0.1")
+
+    with structlog.testing.capture_logs() as logs:
+        verify_api_key(request, [], bypass_mode="insecure_no_auth")
+
+    debug_logs = [
+        e
+        for e in logs
+        if e.get("event") == "auth_anonymous_bypass" and e.get("log_level") == "debug"
+    ]
+    assert debug_logs, "auth_anonymous_bypass DEBUG log must fire"
+    assert debug_logs[0].get("mode") == "insecure_no_auth", (
+        f"Debug log must carry mode='insecure_no_auth'; got {debug_logs[0]!r}"
+    )
+
+
+def test_anonymous_bypass_log_mode_field_is_loopback_no_keys() -> None:
+    """When bypass_mode='loopback_no_keys' (default), the debug log must carry
+    mode='loopback_no_keys'."""
+    import structlog.testing
+
+    import recotem.serving.auth as auth_mod
+
+    auth_mod._anon_seen.clear()
+
+    request = _make_anon_request("127.0.0.1")
+
+    with structlog.testing.capture_logs() as logs:
+        # Default bypass_mode='loopback_no_keys'
+        verify_api_key(request, [])
+
+    debug_logs = [
+        e
+        for e in logs
+        if e.get("event") == "auth_anonymous_bypass" and e.get("log_level") == "debug"
+    ]
+    assert debug_logs, "auth_anonymous_bypass DEBUG log must fire"
+    assert debug_logs[0].get("mode") == "loopback_no_keys", (
+        f"Debug log must carry mode='loopback_no_keys'; got {debug_logs[0]!r}"
+    )
+
+
+def test_anonymous_bypass_first_seen_log_carries_mode_field() -> None:
+    """The INFO log (first_seen) must also carry a mode field."""
+    import structlog.testing
+
+    import recotem.serving.auth as auth_mod
+
+    auth_mod._anon_seen.clear()
+
+    request = _make_anon_request("10.2.3.4")
+
+    with structlog.testing.capture_logs() as logs:
+        verify_api_key(request, [], bypass_mode="insecure_no_auth")
+
+    info_logs = [
+        e
+        for e in logs
+        if e.get("event") == "auth_anonymous_bypass_first_seen"
+        and e.get("log_level") == "info"
+    ]
+    assert info_logs, "auth_anonymous_bypass_first_seen INFO log must fire"
+    assert info_logs[0].get("mode") == "insecure_no_auth", (
+        f"First-seen log must carry mode='insecure_no_auth'; got {info_logs[0]!r}"
+    )
+
+
 def test_matched_kid_single_match_unchanged() -> None:
     """Regression guard: single-match behaviour must be unchanged."""
     from recotem.serving.auth import verify_api_key

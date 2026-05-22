@@ -31,6 +31,8 @@ Metric inventory (matches docs/operations.md):
 | ``recotem_recipe_rescan_errors_total``         | Counter    | recipe                  |
 | ``recotem_bigquery_storage_fallback_total``    | Counter    | reason                  |
 | ``recotem_recipes_dir_scan_failures_total``    | Counter    | error_class             |
+| ``recotem_recommender_layout_unexpected_total``| Counter    | recipe                  |
+| ``recotem_watcher_state_divergence_total``     | Counter    | —                       |
 
 Artifact-load reason taxonomy (``recotem_artifact_load_failures_total``):
 ``read``, ``parse``, ``hmac``, ``header_json``, ``deserialize``, ``metadata``,
@@ -60,6 +62,8 @@ _ARTIFACT_STAT_FAILURES: Any = None
 _WATCHER_UNHANDLED_ERRORS: Any = None
 _METADATA_LOOKUP_ERRORS: Any = None
 _RECIPE_RESCAN_ERRORS: Any = None
+_RECOMMENDER_LAYOUT_UNEXPECTED: Any = None
+_WATCHER_STATE_DIVERGENCE: Any = None
 
 
 def metrics_enabled() -> bool:
@@ -85,6 +89,7 @@ def _ensure_initialized() -> None:
     global _ARTIFACT_LOAD_FAILURES, _ACTIVE_RECIPES, _SWAP_TOTAL
     global _ARTIFACT_STAT_FAILURES, _WATCHER_UNHANDLED_ERRORS
     global _METADATA_LOOKUP_ERRORS, _RECIPE_RESCAN_ERRORS
+    global _RECOMMENDER_LAYOUT_UNEXPECTED, _WATCHER_STATE_DIVERGENCE
 
     if not _PROMETHEUS_AVAILABLE or _MODEL_LOADED is not None:
         return
@@ -133,6 +138,19 @@ def _ensure_initialized() -> None:
         "(transient failures that leave the existing model serving).",
         ["recipe"],
     )
+    _RECOMMENDER_LAYOUT_UNEXPECTED = Counter(
+        "recotem_recommender_layout_unexpected_total",
+        "Total occurrences of an unexpected recommender internal layout "
+        "(AttributeError when accessing _mapper.item_id_to_index). "
+        "A non-zero rate indicates an irspack API incompatibility.",
+        ["recipe"],
+    )
+    _WATCHER_STATE_DIVERGENCE = Counter(
+        "recotem_watcher_state_divergence_total",
+        "Total times the watcher attempted to mark a load error on a recipe "
+        "that has no registry entry (set_load_error returned False). "
+        "Indicates a state ordering bug in the watcher.",
+    )
 
 
 def set_model_loaded(recipe: str, loaded: bool) -> None:
@@ -153,6 +171,7 @@ _LOAD_FAILURE_REASONS: frozenset[str] = frozenset(
         "metadata",
         "yaml",
         "unexpected",
+        "dir_scan",
     }
 )
 
@@ -160,9 +179,11 @@ _LOAD_FAILURE_REASONS: frozenset[str] = frozenset(
 def inc_artifact_load_failure(recipe: str, reason: str = "unexpected") -> None:
     """Increment the per-recipe artifact-load-failures counter.
 
-    *reason* must be one of the values in ``_LOAD_FAILURE_REASONS``; any
-    other value is silently coerced to ``"unexpected"`` so callers cannot
-    accidentally explode the cardinality of the label.
+    *reason* must be one of the values in ``_LOAD_FAILURE_REASONS``
+    (``read | parse | hmac | header_json | deserialize | metadata | yaml |
+    unexpected | dir_scan``); any other value is silently coerced to
+    ``"unexpected"`` so callers cannot accidentally explode the cardinality
+    of the label.
     """
     _ensure_initialized()
     if _ARTIFACT_LOAD_FAILURES is None:
@@ -239,6 +260,33 @@ def inc_recipe_rescan_error(recipe: str) -> None:
     if _RECIPE_RESCAN_ERRORS is None:
         return
     _RECIPE_RESCAN_ERRORS.labels(recipe=recipe).inc()
+
+
+def inc_recommender_layout_unexpected(recipe: str) -> None:
+    """Increment the per-recipe recommender-layout-unexpected counter.
+
+    Called when ``_any_seed_known`` encounters an ``AttributeError`` accessing
+    ``recommender._mapper.item_id_to_index``, indicating an unexpected irspack
+    internal layout.  A non-zero rate signals an API incompatibility.
+    """
+    _ensure_initialized()
+    if _RECOMMENDER_LAYOUT_UNEXPECTED is None:
+        return
+    _RECOMMENDER_LAYOUT_UNEXPECTED.labels(recipe=recipe).inc()
+
+
+def inc_watcher_state_divergence() -> None:
+    """Increment the watcher-state-divergence counter.
+
+    Called when ``set_load_error_no_entry`` fires in the watcher — i.e. the
+    watcher tried to mark a load error on a recipe that has no registry entry.
+    Indicates a state ordering bug: the watcher should always insert a stub
+    entry before attempting a load.
+    """
+    _ensure_initialized()
+    if _WATCHER_STATE_DIVERGENCE is None:
+        return
+    _WATCHER_STATE_DIVERGENCE.inc()
 
 
 # ---------------------------------------------------------------------------

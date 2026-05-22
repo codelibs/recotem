@@ -171,6 +171,10 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         key_ring = _build_key_ring(serve_config)
     except Exception as _exc:
         _key_ring_build_exc = _exc
+        logger.exception(
+            "signing_key_construction_failed",
+            error=str(_exc),
+        )
 
     # 4. Emit security.posture log line (always, even on key-ring failure).
     _emit_security_posture(serve_config, key_ring)
@@ -474,7 +478,8 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         # Always emit a structured WARN log so non-v1-verb paths (e.g. a
         # malformed query string on ``/v1/recipes``) still produce an
         # operational signal — the v1 metric counter only covers paths that
-        # match _V1_VERB_PATH_RE.
+        # match _V1_VERB_PATH_RE.  Include the sanitised errors so operators
+        # can grep by request_id and see which field failed without raw input.
         logger.warning(
             "validation_failed",
             path=request.url.path,
@@ -482,6 +487,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             request_id=request_id,
             error_count=len(sanitized_errors),
             matched_v1_verb=match is not None,
+            errors=sanitized_errors,
         )
         return JSONResponse(
             status_code=422,
@@ -497,22 +503,25 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     # FastAPI's default 500 response is a plain text "Internal Server Error"
     # string which leaks no details.  We register our own handler to ensure
     # the response is JSON-formatted with a stable structure that clients can
-    # parse, while still NOT leaking stack traces.  HTTPException is
-    # intentionally excluded so the dedicated HTTPException handler above
-    # keeps responsibility for it.
+    # parse, while still NOT leaking stack traces.
+    # Note: Starlette dispatches HTTPException to its dedicated handler first
+    # so we never receive HTTPException here — no isinstance guard needed.
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(
         request: Request, exc: Exception
     ) -> JSONResponse:
-        if isinstance(exc, HTTPException):
-            # Let the dedicated HTTPException handler deal with it.
-            raise exc
         # Starlette's ServerErrorMiddleware sits OUTSIDE RequestIDMiddleware,
         # so the middleware's normal X-Request-ID injection does not run for
         # 500 responses produced here.  Read the value our middleware already
         # stashed on ``request.state`` and re-attach it so every error
         # response — including 500s — carries a correlatable ID.
         request_id = getattr(request.state, "request_id", "")
+        logger.exception(
+            "unhandled_500",
+            path=str(request.url.path),
+            request_id=request_id,
+            exc_type=type(exc).__name__,
+        )
         headers = {"X-Request-ID": request_id} if request_id else None
         return JSONResponse(
             status_code=500,
@@ -558,7 +567,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     api_router = make_router(
         registry=registry,
         api_keys=router_api_keys,
-        metadata_field_deny=serve_config.metadata_field_deny,
+        insecure_no_auth=serve_config.insecure_no_auth,
     )
     app.include_router(api_router, prefix="/v1")
 
@@ -822,7 +831,14 @@ def _try_load_artifact(
             deny_set: frozenset[str] = frozenset(
                 s.lower() for s in (serve_config.metadata_field_deny or [])
             )
-            metadata_index = build_metadata_index(metadata_df, deny_set)
+            _recipe_name = recipe.name
+
+            def _on_row_error() -> None:
+                _metrics.inc_metadata_lookup_error(_recipe_name)
+
+            metadata_index = build_metadata_index(
+                metadata_df, deny_set, on_row_error=_on_row_error
+            )
         except (MemoryError, RecursionError):
             raise
         except Exception as exc:

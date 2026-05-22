@@ -272,10 +272,14 @@ Additional events emitted by the watcher, recipe loader, and size-cap helper tha
 | `recipe_security_violation_skipped` | ERROR | `recipe/loader.py` lenient loader | A recipe file contains a security-category error (path traversal, disallowed scheme, embedded credentials). The recipe is skipped but the server keeps running. **Alertable** — indicates a misconfigured or potentially hostile recipe file. |
 | `recipe_load_error_skipped` | WARN | `recipe/loader.py` lenient loader | A recipe file failed to load for non-security reasons (schema error, YAML parse error). The recipe is skipped. |
 | `size_cap_probe_failed` | WARN | `_size_cap.py` | An fsspec `info()` call on an object-store path failed unexpectedly (not `FileNotFoundError` / `PermissionError`). The size cap check was skipped; the subsequent read proceeds but is unbounded by the pre-read cap. Indicates degraded-but-bounded behavior. |
-| `auth_anonymous_bypass` | DEBUG | `serving/auth.py` | Every request that passes without an API key (when `RECOTEM_API_KEYS` is empty). Emitted on every request for access-log correlation. |
+| `auth_anonymous_bypass` | DEBUG | `serving/auth.py` | Every request that passes without an API key (when `RECOTEM_API_KEYS` is empty). Emitted on every request for access-log correlation. The `mode` field distinguishes `"insecure_no_auth"` (explicit flag) from `"loopback_no_keys"` (no keys configured). |
 | `auth_anonymous_bypass_first_seen` | INFO | `serving/auth.py` | First anonymous request from a given `client_host` (per process). The LRU cache tracking first-seen IPs is bounded to 1024 entries to prevent unbounded memory growth. |
 | `kid_extraction_failed` | WARN | `serving/watcher.py` | An artifact's kid bytes could not be parsed from the raw bytes (too short, out-of-range length, decode error). The kid shown in subsequent log fields is `\x00<unparseable>` — intentionally not collidable with any real kid. |
 | `artifact_stat_timeout` | WARN | `serving/watcher.py` | A stat() future did not complete within the per-future timeout (`min(watch_interval, 30)` seconds). Hung object-store stats no longer block tick progress or delay SIGTERM handling. |
+| `recommender_layout_unexpected` | WARN | `serving/routes.py` | `_any_seed_known` encountered an `AttributeError` on `recommender._mapper.item_id_to_index`. The request is treated as `INTERNAL_ERROR`. Increment counter: `recotem_recommender_layout_unexpected_total`. |
+| `set_load_error_no_entry` | WARN | `serving/watcher.py` | The watcher tried to mark a load error on a recipe with no registry entry. Counter: `recotem_watcher_state_divergence_total`. |
+| `sidecar_disappeared` | WARN | `serving/watcher.py` | A `.sha256` sidecar file was present on the previous poll but raised ENOENT on the current read — emitted once per disappearance transition. |
+| `metadata_index_row_error` | WARN | `metadata/loader.py` | A per-row exception occurred during `build_metadata_index`. The row is skipped. Counted by `recotem_metadata_lookup_errors_total{recipe}`. |
 
 The `train_error` event uses `name=` (not `recipe=`) for the recipe name field and includes `kid=` when the signing kid is known, matching the `train_done` event's field names.
 
@@ -449,15 +453,17 @@ Available metrics:
 | `recotem_v1_batch_size` | Histogram | `recipe`, `verb` | observed batch fan-out (only for `batch-recommend` / `batch-recommend-related`) |
 | `recotem_v1_batch_element_errors_total` | Counter | `recipe`, `verb`, `code` | per-element errors inside batch HTTP-200 responses; `code` ∈ {`UNKNOWN_USER`, `UNKNOWN_SEED_ITEMS`, `NO_CANDIDATES`, `VALIDATION_ERROR`, `INTERNAL_ERROR`} |
 | `recotem_model_loaded` | Gauge | `recipe` | 1 if the recipe is currently loaded |
-| `recotem_artifact_load_failures_total` | Counter | `recipe`, `reason` | artifact-load failures since process start; `reason` ∈ {`read`, `parse`, `hmac`, `header_json`, `deserialize`, `metadata`, `yaml`, `unexpected`} |
+| `recotem_artifact_load_failures_total` | Counter | `recipe`, `reason` | artifact-load failures since process start; `reason` ∈ {`read`, `parse`, `hmac`, `header_json`, `deserialize`, `metadata`, `yaml`, `unexpected`, `dir_scan`} |
 | `recotem_active_recipes` | Gauge | — | total recipes in the registry |
 | `recotem_swap_total` | Counter | `recipe`, `result` | hot-swap attempts (`ok` / `error`) |
 | `recotem_artifact_stat_failures_total` | Counter | `recipe` | watcher stat() failures |
 | `recotem_watcher_unhandled_errors_total` | Counter | — | watcher loop crashes |
-| `recotem_metadata_lookup_errors_total` | Counter | `recipe` | metadata-join lookup failures |
+| `recotem_metadata_lookup_errors_total` | Counter | `recipe` | per-row errors during `build_metadata_index` at artifact-load time |
 | `recotem_recipe_rescan_errors_total` | Counter | `recipe` | recipe rescan failures |
 | `recotem_bigquery_storage_fallback_total` | Counter | `reason` | BQ Storage Read API fell back to REST |
 | `recotem_recipes_dir_scan_failures_total` | Counter | `error_class` | recipes-dir scan failures |
+| `recotem_recommender_layout_unexpected_total` | Counter | `recipe` | `AttributeError` on `recommender._mapper.item_id_to_index` — indicates irspack API incompatibility |
+| `recotem_watcher_state_divergence_total` | Counter | — | watcher tried to mark an error on a non-existent registry entry (ordering bug) |
 
 ---
 

@@ -1716,6 +1716,254 @@ def test_public_reexports_are_bound_and_callable() -> None:
     assert watcher_module.load_metadata is watcher_module._load_metadata
 
 
+# ---------------------------------------------------------------------------
+# Finding 13: Watcher dir_scan failure metric
+# ---------------------------------------------------------------------------
+
+
+def test_scan_dir_permission_error_bumps_per_recipe_dir_scan_metric(
+    tmp_path: Path,
+) -> None:
+    """When iterdir() raises PermissionError, each known recipe must have
+    inc_artifact_load_failure(name, reason='dir_scan') called.
+
+    Patches pathlib.Path.iterdir at the class level because PosixPath
+    instances are immutable C objects that cannot be patched directly.
+    """
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import ArtifactWatcher, _RecipeWatchState
+
+    recipes_dir = tmp_path / "recipes_dir_scan"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    recipe1 = MagicMock()
+    recipe1.name = "scan_recipe1"
+    state1 = _RecipeWatchState(recipe=recipe1, artifact_path=str(artifact_path))
+
+    recipe2 = MagicMock()
+    recipe2.name = "scan_recipe2"
+    state2 = _RecipeWatchState(recipe=recipe2, artifact_path=str(artifact_path))
+
+    # Register stubs so _scan_recipes_dir can call set_load_error on them
+    for name in ("scan_recipe1", "scan_recipe2"):
+        registry.replace(
+            name,
+            ModelEntry(name=name, recommender=None, header={}, kid="", loaded=False),
+        )
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+        initial_states={"scan_recipe1": state1, "scan_recipe2": state2},
+    )
+
+    dir_scan_calls: list[tuple[str, str]] = []
+    original_inc = _metrics.inc_artifact_load_failure
+
+    def _counting_inc(name: str, reason: str = "unexpected") -> None:
+        dir_scan_calls.append((name, reason))
+        original_inc(name, reason=reason)
+
+    def _raising_iterdir(self):  # noqa: ANN001
+        raise PermissionError("permission denied on recipes dir")
+
+    # Patch at the class level — the only way to intercept Path.iterdir
+    # since PosixPath instances are immutable C objects.
+    with patch("pathlib.Path.iterdir", _raising_iterdir):
+        with patch.object(
+            _metrics, "inc_artifact_load_failure", side_effect=_counting_inc
+        ):
+            watcher._scan_recipes_dir()
+
+    watcher._executor.shutdown(wait=False)
+
+    # Each known recipe must have dir_scan failure recorded
+    dir_scan_names = {n for n, r in dir_scan_calls if r == "dir_scan"}
+    assert "scan_recipe1" in dir_scan_names, (
+        "inc_artifact_load_failure(reason='dir_scan') must be called for scan_recipe1"
+    )
+    assert "scan_recipe2" in dir_scan_names, (
+        "inc_artifact_load_failure(reason='dir_scan') must be called for scan_recipe2"
+    )
+
+
+def test_scan_dir_failure_also_bumps_watcher_scan_failure_counter(
+    tmp_path: Path,
+) -> None:
+    """PermissionError on iterdir() must increment the neutral scan-failure counter
+    via _inc_scan_failure (from recotem._metrics_watcher)."""
+    from unittest.mock import patch
+
+    import recotem._metrics_watcher as mw
+    from recotem.serving.watcher import ArtifactWatcher
+
+    recipes_dir = tmp_path / "recipes_scan_fail"
+    recipes_dir.mkdir()
+
+    registry = ModelRegistry()
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=cfg,
+        key_ring=kr,
+    )
+
+    scan_failure_calls: list[str] = []
+    original_inc = mw.inc_recipes_dir_scan_failure
+
+    def _counting_inc(label: str) -> None:
+        scan_failure_calls.append(label)
+        original_inc(label)
+
+    def _raising_iterdir(self):  # noqa: ANN001
+        raise PermissionError("permission denied")
+
+    # Patch the watcher module's local alias, not the source module attribute,
+    # because the function was imported by name at module load time.
+    with patch("pathlib.Path.iterdir", _raising_iterdir):
+        with patch(
+            "recotem.serving.watcher._inc_scan_failure", side_effect=_counting_inc
+        ):
+            watcher._scan_recipes_dir()
+
+    watcher._executor.shutdown(wait=False)
+
+    assert any("PermissionError" in s for s in scan_failure_calls), (
+        "Neutral scan-failure counter must be incremented on PermissionError; "
+        f"got calls: {scan_failure_calls!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finding 14: sidecar_disappeared warning emitted once per transition
+# ---------------------------------------------------------------------------
+
+
+def test_sidecar_disappeared_warning_emitted_once_on_first_enoent(
+    tmp_path: Path,
+) -> None:
+    """When a sidecar exists on poll-1 but raises ENOENT on poll-2,
+    sidecar_disappeared must be emitted ONCE.
+    On poll-3 (still ENOENT) no additional warning fires."""
+    from unittest.mock import patch
+
+    import structlog.testing
+
+    from recotem.serving.watcher import _check_sidecar_changed, _RecipeWatchState
+
+    artifact_path = tmp_path / "model.recotem"
+    sidecar_path = tmp_path / "model.recotem.sha256"
+
+    # Set up state with sidecar previously seen ("v1\n")
+    state = _RecipeWatchState(
+        recipe=MagicMock(),
+        artifact_path=str(artifact_path),
+        last_sidecar_contents="v1\n",  # was seen on poll-1
+    )
+
+    # Poll-2: sidecar.exists() returns True, but read_text raises ENOENT
+    # We patch Path.exists globally so the sidecar check triggers the read_text path,
+    # then patch Path.read_text to raise ENOENT (errno=2).
+    enoent = OSError(2, "No such file or directory")
+    enoent.errno = 2
+
+    with patch("pathlib.Path.exists", return_value=True):
+        with patch("pathlib.Path.read_text", side_effect=enoent):
+            with structlog.testing.capture_logs() as cap:
+                _check_sidecar_changed(state)
+
+    # sidecar_disappeared must fire exactly once on first ENOENT
+    disappeared_events = [e for e in cap if e.get("event") == "sidecar_disappeared"]
+    assert len(disappeared_events) == 1, (
+        f"sidecar_disappeared must fire exactly once on first ENOENT; got {cap!r}"
+    )
+    # state must be reset
+    assert state.last_sidecar_contents is None, (
+        "last_sidecar_contents must be reset to None after sidecar_disappeared"
+    )
+
+    # Poll-3: sidecar still ENOENT — no additional warning (state.last_sidecar_contents is None)
+    with patch("pathlib.Path.exists", return_value=True):
+        with patch("pathlib.Path.read_text", side_effect=enoent):
+            with structlog.testing.capture_logs() as cap2:
+                _check_sidecar_changed(state)
+
+    disappeared2 = [e for e in cap2 if e.get("event") == "sidecar_disappeared"]
+    assert len(disappeared2) == 0, (
+        f"sidecar_disappeared must NOT fire again on repeated ENOENT; got {cap2!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finding 15: metadata_lookup_error counter wired via on_row_error callback
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_lookup_error_counter_incremented_on_row_error(
+    tmp_path: Path,
+) -> None:
+    """build_metadata_index must invoke the on_row_error callback once per
+    row whose processing raises an unexpected exception, and the callback is
+    wired to inc_metadata_lookup_error in the watcher's _build_entry.
+
+    We simulate the error by injecting a ``row`` whose ``.items()`` raises
+    AttributeError (mimicking a non-unique index returning a DataFrame slice
+    rather than a Series — the documented on_row_error trigger scenario).
+    """
+    import pandas as pd
+
+    from recotem.metadata.loader import build_metadata_index
+
+    # Row whose items() raises — mimics the documented scenario where a non-unique
+    # index returns a DataFrame slice instead of a Series row dict.
+    class _ExplodingRow:
+        def items(self):
+            raise AttributeError("simulated non-unique index slice")
+
+    df = pd.DataFrame(
+        {"title": ["Widget A", "Widget B"]},
+        index=pd.Index(["i1", "i2"], name="item_id"),
+    )
+
+    # Patch to_dict to inject a bad row alongside the real rows.
+    from unittest.mock import patch
+
+    original_to_dict = df.to_dict
+
+    def _patched_to_dict(orient=None):
+        raw = original_to_dict(orient=orient)
+        # Inject a bad entry whose row.items() will raise
+        raw["bad-item"] = _ExplodingRow()
+        return raw
+
+    call_count = [0]
+
+    def _on_row_error() -> None:
+        call_count[0] += 1
+
+    with patch.object(df, "to_dict", side_effect=_patched_to_dict):
+        result = build_metadata_index(df, on_row_error=_on_row_error)
+
+    # The bad-item row must have triggered on_row_error
+    assert call_count[0] >= 1, (
+        f"on_row_error must be called for the malformed row; call_count={call_count[0]}"
+    )
+    # Good items must still be present
+    assert "i1" in result
+    assert "i2" in result
+
+
 def test_public_reexports_in_module_all() -> None:
     """``__all__`` must list the public surface so ``from watcher import *``
     in downstream code does not pull private helpers."""

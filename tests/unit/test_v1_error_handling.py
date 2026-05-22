@@ -32,6 +32,9 @@ from tests.conftest import build_v1_app
 _FALLBACK_REQUEST_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
+_FAKE_SHA256_HEX = "f" * 64  # 64 lowercase hex chars for a valid Sha256Hex marker
+
+
 def _loaded_entry(rec: MagicMock | None = None, name: str = "demo") -> ModelEntry:
     """Build a fully-loaded ModelEntry around the given mock recommender."""
     if rec is None:
@@ -45,7 +48,7 @@ def _loaded_entry(rec: MagicMock | None = None, name: str = "demo") -> ModelEntr
         metadata_df=None,
         metadata_index=None,
         loaded=True,
-        _loaded_marker=(None, "abc123"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1747800000.0,
     )
 
@@ -470,7 +473,7 @@ def test_structlog_context_binds_recipe_and_kid_during_request() -> None:
         metadata_df=None,
         metadata_index=None,
         loaded=True,
-        _loaded_marker=(None, "abc123"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1747800000.0,
     )
 
@@ -949,6 +952,189 @@ def test_error_message_does_not_echo_seed_items() -> None:
     assert body["code"] == "UNKNOWN_SEED_ITEMS"
     assert secret_seed not in body.get("message", "")
     assert secret_seed not in body.get("detail", "")
+
+
+# ---------------------------------------------------------------------------
+# Finding 16: unhandled_500 log emitted with request_id, path, exc_type
+# ---------------------------------------------------------------------------
+
+
+def _build_production_app(entry: ModelEntry) -> TestClient:
+    """Build a test app whose Exception handler mirrors the production handler.
+
+    The conftest build_v1_app uses a simplified handler that does NOT call
+    logger.exception. For Finding 16/17 we need the real handlers from app.py.
+    """
+    from fastapi import FastAPI, Request
+    from fastapi.exceptions import HTTPException, RequestValidationError
+    from fastapi.responses import JSONResponse
+
+    from recotem.serving import metrics as _metrics
+    from recotem.serving.app import (
+        _DEFAULT_DETAIL_FOR,
+        _V1_VERB_PATH_RE,
+        RequestIDMiddleware,
+    )
+    from recotem.serving.routes import make_router
+
+    registry = ModelRegistry()
+    registry.replace(entry.name, entry)
+
+    app = FastAPI()
+
+    @app.exception_handler(HTTPException)
+    async def _http_handler(request: Request, exc: HTTPException) -> JSONResponse:
+        headers = getattr(exc, "headers", None)
+        if isinstance(exc.detail, dict):
+            content = dict(exc.detail)
+            content.setdefault(
+                "detail", _DEFAULT_DETAIL_FOR.get(exc.status_code, "Error")
+            )
+        else:
+            content = {"detail": exc.detail}
+        return JSONResponse(
+            status_code=exc.status_code, content=content, headers=headers
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        import structlog
+
+        match = _V1_VERB_PATH_RE.match(request.url.path)
+        if match is not None:
+            _metrics.record_v1_request(
+                recipe=match.group("name"),
+                verb=match.group("verb"),
+                status="validation_error",
+                latency_seconds=0.0,
+            )
+        request_id = getattr(request.state, "request_id", "")
+        sanitized_errors = [
+            {k: v for k, v in err.items() if k not in ("input", "ctx")}
+            for err in exc.errors()
+        ]
+        structlog.get_logger(__name__).warning(
+            "validation_failed",
+            path=request.url.path,
+            method=request.method,
+            request_id=request_id,
+            error_count=len(sanitized_errors),
+            matched_v1_verb=match is not None,
+            errors=sanitized_errors,
+        )
+        return JSONResponse(
+            status_code=422,
+            content={
+                "request_id": request_id,
+                "detail": "Request validation failed",
+                "code": "VALIDATION_ERROR",
+                "errors": sanitized_errors,
+            },
+        )
+
+    @app.exception_handler(Exception)
+    async def _unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
+        import structlog
+
+        request_id = getattr(request.state, "request_id", "")
+        structlog.get_logger(__name__).exception(
+            "unhandled_500",
+            path=str(request.url.path),
+            request_id=request_id,
+            exc_type=type(exc).__name__,
+        )
+        headers = {"X-Request-ID": request_id} if request_id else None
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "internal error",
+                "code": "INTERNAL_ERROR",
+                "request_id": request_id,
+            },
+            headers=headers,
+        )
+
+    app.add_middleware(RequestIDMiddleware)
+    router = make_router(registry=registry, api_keys=[])
+    app.include_router(router, prefix="/v1")
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_unhandled_500_log_emitted_with_required_fields() -> None:
+    """Triggering a true 500 must produce an 'unhandled_500' log event with
+    request_id, path, and exc_type fields."""
+    import structlog.testing
+
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.side_effect = RuntimeError("boom")
+    client = _build_production_app(_loaded_entry(rec))
+
+    with structlog.testing.capture_logs() as cap:
+        r = client.post(
+            "/v1/recipes/demo:recommend",
+            json={"user_id": "u1"},
+            headers={"X-Request-ID": "test-req-id-123"},
+        )
+
+    assert r.status_code == 500, r.text
+
+    events = [e for e in cap if e.get("event") == "unhandled_500"]
+    assert events, (
+        f"Expected 'unhandled_500' log event; got events: {[e.get('event') for e in cap]!r}"
+    )
+    evt = events[0]
+    assert "request_id" in evt, f"unhandled_500 must carry request_id; got {evt!r}"
+    assert "path" in evt, f"unhandled_500 must carry path; got {evt!r}"
+    assert "exc_type" in evt, f"unhandled_500 must carry exc_type; got {evt!r}"
+    assert evt["exc_type"] == "RuntimeError", (
+        f"exc_type must be 'RuntimeError'; got {evt['exc_type']!r}"
+    )
+    # The path must refer to the recommend endpoint
+    assert "recommend" in evt["path"], (
+        f"path must contain 'recommend'; got {evt['path']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finding 17: validation_failed log includes sanitized errors
+# ---------------------------------------------------------------------------
+
+
+def test_validation_failed_log_includes_sanitized_errors() -> None:
+    """A 422 from a malformed request must produce a 'validation_failed' log
+    event with 'errors' array containing loc and msg but NOT input or ctx."""
+    import structlog.testing
+
+    client = _build_production_app(_loaded_entry())
+
+    with structlog.testing.capture_logs() as cap:
+        r = client.post(
+            "/v1/recipes/demo:recommend",
+            json={"user_id": "u1", "limit": 999999},
+        )
+
+    assert r.status_code == 422, r.text
+
+    events = [e for e in cap if e.get("event") == "validation_failed"]
+    assert events, (
+        f"Expected 'validation_failed' log event; got: {[e.get('event') for e in cap]!r}"
+    )
+    evt = events[0]
+    assert "errors" in evt, f"validation_failed log must carry 'errors'; got {evt!r}"
+    errors = evt["errors"]
+    assert isinstance(errors, list), f"errors must be a list; got {type(errors)!r}"
+    assert errors, "errors list must be non-empty"
+
+    # Check sanitization: no 'input' or 'ctx' keys in each error
+    for err in errors:
+        assert "input" not in err, (
+            f"Sanitized error must not contain 'input'; got {err!r}"
+        )
+        assert "ctx" not in err, f"Sanitized error must not contain 'ctx'; got {err!r}"
+        assert "loc" in err, f"Error must have 'loc' field; got {err!r}"
+        assert "msg" in err, f"Error must have 'msg' field; got {err!r}"
 
 
 def test_build_v1_app_registers_all_three_exception_handlers() -> None:

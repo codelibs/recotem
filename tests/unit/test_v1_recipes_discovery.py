@@ -34,6 +34,9 @@ def _client_with_entries(
     return TestClient(build_v1_app(registry, api_keys=api_keys or []))
 
 
+_FAKE_SHA256_HEX = "c" * 64  # 64 lowercase hex chars for a valid Sha256Hex marker
+
+
 def _stub(name: str) -> ModelEntry:
     return ModelEntry(
         name=name,
@@ -43,7 +46,7 @@ def _stub(name: str) -> ModelEntry:
         metadata_df=None,
         metadata_index=None,
         loaded=True,
-        _loaded_marker=(None, "abc"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1747800000.0,
     )
 
@@ -55,7 +58,7 @@ def test_recipes_list_returns_summaries():
     names = {x["name"] for x in body["recipes"]}
     assert names == {"a", "b"}
     a = next(x for x in body["recipes"] if x["name"] == "a")
-    assert a["model_version"] == "sha256:abc"
+    assert a["model_version"] == f"sha256:{_FAKE_SHA256_HEX}"
     assert a["kind"] == "user-item"
     assert "recommend" in a["supported_verbs"]
 
@@ -88,7 +91,7 @@ def test_recipe_detail_returns_full_summary_for_known():
     assert r.status_code == 200
     body = r.json()
     assert body["name"] == "a"
-    assert body["model_version"] == "sha256:abc"
+    assert body["model_version"] == f"sha256:{_FAKE_SHA256_HEX}"
     # algorithms / best_algorithm / config_digest may be empty for the
     # stub but the keys MUST exist (contract).
     assert "algorithms" in body
@@ -156,6 +159,8 @@ def test_recipe_detail_accepts_valid_key() -> None:
 # I. New detail fields from artifact header
 # ---------------------------------------------------------------------------
 
+_FAKE_RECIPE_HASH = "a" * 64  # 64 lowercase hex chars — valid HexHash
+
 _HEADER_FIELDS = {
     "trained_at": "2026-01-01T00:00:00Z",
     "best_class": "TopPopRecommender",
@@ -167,7 +172,7 @@ _HEADER_FIELDS = {
     "data_stats": {"n_users": 100, "n_items": 50},
     "recotem_version": "1.0.0",
     "irspack_version": "0.3.0",
-    "recipe_hash": "aabbcc",
+    "recipe_hash": _FAKE_RECIPE_HASH,
 }
 
 
@@ -180,7 +185,7 @@ def _stub_with_header(name: str, header: dict) -> ModelEntry:
         metadata_df=None,
         metadata_index=None,
         loaded=True,
-        _loaded_marker=(None, "abc"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1747800000.0,
     )
 

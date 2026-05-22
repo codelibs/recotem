@@ -22,6 +22,8 @@ from fastapi.testclient import TestClient
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from tests.conftest import build_v1_app
 
+_FAKE_SHA256_HEX = "2" * 64  # 64 lowercase hex chars for a valid Sha256Hex marker
+
 
 def _loaded_entry(name: str = "demo") -> ModelEntry:
     rec = MagicMock()
@@ -36,7 +38,7 @@ def _loaded_entry(name: str = "demo") -> ModelEntry:
         metadata_df=None,
         metadata_index=None,
         loaded=True,
-        _loaded_marker=(None, "abc"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1747800000.0,
     )
 

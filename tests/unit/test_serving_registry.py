@@ -868,8 +868,6 @@ def test_registry_lock_is_plain_lock_not_rlock() -> None:
 # Plan A Task 3: v1 ModelEntry extensions
 # ---------------------------------------------------------------------------
 
-from datetime import datetime  # noqa: E402
-
 
 def _stub_entry() -> ModelEntry:
     """Return a minimal ModelEntry with a populated sha256 marker for v1 tests.
@@ -904,10 +902,13 @@ def test_model_entry_model_version_sha256_prefixed():
     assert len(e.model_version) > len("sha256:")  # not empty hex
 
 
-def test_model_entry_loaded_at_iso8601_utc():
+def test_model_entry_loaded_at_is_utc_datetime():
+    """loaded_at is now a timezone-aware datetime (not a string)."""
+
     e = _stub_entry()
-    parsed = datetime.fromisoformat(e.loaded_at.replace("Z", "+00:00"))
-    assert parsed.tzinfo is not None
+    loaded_at = e.loaded_at
+    assert loaded_at.tzinfo is not None, "loaded_at must be timezone-aware"
+    assert loaded_at.utcoffset().total_seconds() == 0, "loaded_at must be UTC"
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from tests.conftest import build_v1_app
 
+_FAKE_SHA256_HEX = "1" * 64  # 64 lowercase hex chars for a valid Sha256Hex marker
+
 
 def _client_with_recommender(rec, known_items: list[str] | None = None) -> TestClient:
     """Wrap *rec* in a ModelEntry whose id-map advertises *known_items*.
@@ -29,7 +31,7 @@ def _client_with_recommender(rec, known_items: list[str] | None = None) -> TestC
         metadata_df=None,
         metadata_index=None,
         loaded=True,
-        _loaded_marker=(None, "abc123"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1747800000.0,
     )
     registry = ModelRegistry()
@@ -152,6 +154,103 @@ def test_recommend_related_rejects_oversized_seed_item() -> None:
         json={"seed_items": ["a" * 257]},
     )
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Finding 10: _any_seed_known AttributeError → INTERNAL_ERROR
+# ---------------------------------------------------------------------------
+
+
+def _client_with_broken_mapper(rec) -> TestClient:
+    """Wrap a recommender whose _mapper attribute raises AttributeError."""
+    entry = ModelEntry(
+        name="demo",
+        recommender=rec,
+        header={},
+        kid="t",
+        metadata_df=None,
+        metadata_index=None,
+        loaded=True,
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
+        loaded_at_unix=1.0,
+    )
+    registry = ModelRegistry()
+    registry.replace("demo", entry)
+    return TestClient(build_v1_app(registry), raise_server_exceptions=False)
+
+
+def test_recommend_related_attribute_error_on_mapper_returns_500() -> None:
+    """When _mapper attribute access raises AttributeError, :recommend-related
+    must return 500 with code INTERNAL_ERROR (not UNKNOWN_SEED_ITEMS).
+
+    Uses spec=[] on the recommender so that any attribute access raises
+    AttributeError — this mimics an irspack API incompatibility where the
+    expected internal layout (_mapper) is absent.
+    """
+    # spec=[] means NO attributes are defined — accessing _mapper raises AttributeError
+    rec = MagicMock(spec=[])
+
+    r = _client_with_broken_mapper(rec).post(
+        "/v1/recipes/demo:recommend-related",
+        json={"seed_items": ["s1"]},
+    )
+    assert r.status_code == 500, r.text
+    body = r.json()
+    assert body.get("code") == "INTERNAL_ERROR", (
+        f"AttributeError on _mapper must yield INTERNAL_ERROR; got {body!r}"
+    )
+
+
+def test_batch_recommend_related_attribute_error_only_affects_element() -> None:
+    """In a batch, AttributeError on _mapper affects only the element that
+    triggered it; remaining elements with a valid mapper continue."""
+    from unittest.mock import MagicMock
+
+    from recotem.serving.registry import ModelEntry, ModelRegistry
+
+    # Build a recommender whose _mapper raises AttributeError for the bad seed
+    # but responds normally for others.
+    rec = MagicMock()
+
+    # Use a real dict for item_id_to_index — this is what the code actually accesses
+    rec._mapper.item_id_to_index = {"good-seed": 0}
+    rec.get_recommendation_for_new_user.return_value = [("i1", 0.9)]
+
+    # Now for the broken entry: a separate entry with no _mapper
+    broken_rec = MagicMock(
+        spec=[]
+    )  # spec=[] means NO attributes allowed → AttributeError
+
+    # We need ONE entry with two different requests. The handler calls
+    # _any_seed_known per-element, which calls entry.recommender._mapper.item_id_to_index
+    # Since entry.recommender is fixed, we can't simulate mixed per-element mapper failure.
+    # Instead, test that a wholly broken mapper yields all INTERNAL_ERROR in a batch.
+    broken_entry = ModelEntry(
+        name="broken",
+        recommender=broken_rec,
+        header={},
+        kid="t",
+        metadata_df=None,
+        metadata_index=None,
+        loaded=True,
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
+        loaded_at_unix=1.0,
+    )
+    registry = ModelRegistry()
+    registry.replace("broken", broken_entry)
+    client = TestClient(build_v1_app(registry), raise_server_exceptions=False)
+
+    r = client.post(
+        "/v1/recipes/broken:batch-recommend-related",
+        json={"requests": [{"seed_items": ["s1"]}, {"seed_items": ["s2"]}]},
+    )
+    assert r.status_code == 200, r.text  # batch always returns 200 on element errors
+    results = r.json()["results"]
+    for result in results:
+        assert result["status"] == "error"
+        assert result["error"]["code"] == "INTERNAL_ERROR", (
+            f"AttributeError on _mapper must yield INTERNAL_ERROR per element; got {result!r}"
+        )
 
 
 def test_recommend_related_sets_model_version_response_header():

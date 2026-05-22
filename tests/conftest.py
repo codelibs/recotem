@@ -365,7 +365,6 @@ def movielens_small_df(movielens_df: pd.DataFrame) -> pd.DataFrame:
 def build_v1_app(
     registry,
     api_keys=None,
-    metadata_field_deny=None,
 ):
     """Build a FastAPI app mounting the v1 router with production middleware.
 
@@ -375,8 +374,6 @@ def build_v1_app(
         ``ModelRegistry`` populated with the model entries the test needs.
     api_keys:
         Optional list of ``ApiKeyEntry`` (defaults to []).
-    metadata_field_deny:
-        Optional deny-list passed through to ``make_router``.
 
     Returns
     -------
@@ -449,16 +446,12 @@ def build_v1_app(
     # FastAPI's default 500 response is a plain text "Internal Server Error"
     # string which leaks no details.  We register our own handler to ensure
     # the response is JSON-formatted with a stable structure that clients can
-    # parse, while still NOT leaking stack traces.  HTTPException is
-    # intentionally excluded so the dedicated HTTPException handler above
-    # keeps responsibility for it.
+    # parse, while still NOT leaking stack traces.  Starlette dispatches
+    # HTTPException to its dedicated handler first, so we never receive it here.
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(
         request: Request, exc: Exception
     ) -> JSONResponse:
-        if isinstance(exc, HTTPException):
-            # Let the dedicated HTTPException handler deal with it.
-            raise exc
         request_id = getattr(request.state, "request_id", "")
         headers = {"X-Request-ID": request_id} if request_id else None
         return JSONResponse(
@@ -472,7 +465,6 @@ def build_v1_app(
     router = make_router(
         registry=registry,
         api_keys=api_keys or [],
-        metadata_field_deny=metadata_field_deny,
     )
     app.include_router(router, prefix="/v1")
     return app

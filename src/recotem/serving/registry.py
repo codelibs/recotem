@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -110,16 +110,12 @@ class ModelEntry:
         return f"sha256:{self.artifact_sha256}"
 
     @property
-    def loaded_at(self) -> str:
-        """ISO-8601 UTC timestamp of the last successful (re-)load.
+    def loaded_at(self) -> datetime:
+        """Timezone-aware UTC datetime of the last successful (re-)load.
 
         Falls back to the unix epoch for stub entries.
         """
-        from datetime import datetime
-
-        return datetime.fromtimestamp(self.loaded_at_unix or 0.0, tz=UTC).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
+        return datetime.fromtimestamp(self.loaded_at_unix or 0.0, tz=UTC)
 
     @property
     def kind(self) -> str:

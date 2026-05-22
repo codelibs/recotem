@@ -22,7 +22,6 @@ recipe-name constraint enforced by the recipe loader).
 | `user_id` | string | yes | – | 1-256 chars |
 | `limit` | int | no | 10 | 1..1000 |
 | `exclude_items` | string[] \| null | no | null | ≤1000 items |
-| `context` | object \| null | no | null | reserved |
 
 **Response body:** see `RecommendResponse` in `src/recotem/serving/schemas.py`.
 
@@ -38,7 +37,6 @@ Seed-item → items.
 | `seed_items` | string[] | yes | – | 1-100 items |
 | `limit` | int | no | 10 | 1..1000 |
 | `exclude_items` | string[] \| null | no | null |  |
-| `context` | object \| null | no | null |  |
 
 **Status codes:** 200, 401, 404 (`UNKNOWN_SEED_ITEMS` | `NO_CANDIDATES` | `RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
 
@@ -49,10 +47,15 @@ produce any survivors after its internal filtering — typically a data
 distribution issue rather than a client mistake.
 
 ### `POST /v1/recipes/{name}:batch-recommend`
-Multi-user batch.  Body: `{ "requests": RecommendRequest[] }` (1..256).
+Multi-user batch.  Body: `{ "requests": RecommendRequest[], "include_metadata": bool }` (1..256).
 Response: `BatchRecommendResponse`.  Per-element `status` ∈ {ok, error}.
 HTTP 200 on partial failure; HTTP 503 only when the recipe itself is
 unavailable.
+
+`include_metadata` (default `false`): when `true`, each `ok` result
+includes per-item metadata fields (same join as the single-recommend
+endpoint).  Default `false` preserves the performance-first default for
+bulk callers.
 
 The aggregate `sum(requests[].limit)` must not exceed **5000**.  When a
 sub-request would push the running aggregate over the cap, that element
@@ -64,16 +67,16 @@ so a single bad entry never 422s the whole batch.
 
 **Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR` — only for whole-request shape, e.g. missing `requests` key, list too large), 503 (`RECIPE_UNAVAILABLE`).
 
-> **Note:** batch endpoints (`:batch-recommend` and
-> `:batch-recommend-related`) return items as `{item_id, score}` only —
-> they do **not** include the per-item metadata fields that single
-> recommendations join via `metadata_index`.  If you need enriched
-> items, call the single-recommendation endpoint per user/seed.
+> **Note:** batch endpoints return `{item_id, score}` only by default
+> (`include_metadata=false`).  Set `include_metadata: true` to include
+> per-item metadata fields (same join as single-recommend endpoints).
+> Be aware that metadata enrichment increases response size; for bulk callers
+> that do not need metadata the default `false` is recommended.
 
 ### `POST /v1/recipes/{name}:batch-recommend-related`
-Multi-seed batch.  Body: `{ "requests": RecommendRelatedRequest[] }` (1..256).
-Same aggregate-limit and per-element validation rules as
-`:batch-recommend`.
+Multi-seed batch.  Body: `{ "requests": RecommendRelatedRequest[], "include_metadata": bool }` (1..256).
+Same aggregate-limit, per-element validation rules, and `include_metadata`
+semantics as `:batch-recommend`.
 
 **Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR` — only for whole-request shape), 503 (`RECIPE_UNAVAILABLE`).
 
@@ -157,6 +160,6 @@ in every error case is one of the three forms above.
 | `VALIDATION_ERROR`   | 422 | Pydantic schema rejected the request (also used per-element inside batch responses) |
 | `MISSING_API_KEY`    | 401 | `X-API-Key` header missing |
 | `INVALID_API_KEY`    | 401 | `X-API-Key` header present but did not match any configured digest (also covers short-key / oversize-key rejections so callers cannot fingerprint the guard) |
-| `INTERNAL_ERROR`     | 500 / batch | unhandled server-side exception (status=500 on single endpoints; per-element `status=error` inside batch responses) |
+| `INTERNAL_ERROR`     | 500 / batch | unhandled server-side exception, or unexpected recommender internal layout (`recommender_layout_unexpected`) — status=500 on single endpoints; per-element `status=error` inside batch responses |
 
 All v1 codes use `UPPER_SNAKE_CASE`.

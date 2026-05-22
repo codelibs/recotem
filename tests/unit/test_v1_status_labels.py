@@ -72,6 +72,9 @@ def _enable_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
                 pass
 
 
+_FAKE_SHA256_HEX = "e" * 64  # 64 lowercase hex chars for a valid Sha256Hex marker
+
+
 def _loaded_entry(name: str = "demo") -> ModelEntry:
     rec = MagicMock()
     rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
@@ -86,7 +89,7 @@ def _loaded_entry(name: str = "demo") -> ModelEntry:
         metadata_df=None,
         metadata_index=None,
         loaded=True,
-        _loaded_marker=(None, "abc"),
+        _loaded_marker=(None, _FAKE_SHA256_HEX),
         loaded_at_unix=1747800000.0,
     )
 
@@ -197,6 +200,83 @@ def test_validation_error_records_metric_for_matching_v1_path() -> None:
     r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1", "limit": 0})
     assert r.status_code == 422
     assert _label_value("recommend", "validation_error") == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Finding 4: recipe_not_found metric across all verbs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "verb,path,body",
+    [
+        ("recommend", "ghost:recommend", {"user_id": "u1"}),
+        (
+            "recommend-related",
+            "ghost:recommend-related",
+            {"seed_items": ["i1"]},
+        ),
+        (
+            "batch-recommend",
+            "ghost:batch-recommend",
+            {"requests": [{"user_id": "u1"}]},
+        ),
+        (
+            "batch-recommend-related",
+            "ghost:batch-recommend-related",
+            {"requests": [{"seed_items": ["i1"]}]},
+        ),
+    ],
+)
+def test_recipe_not_found_metric_across_verbs(verb: str, path: str, body: dict) -> None:
+    """404 on missing recipe must record recipe_not_found label for every verb."""
+    registry = ModelRegistry()
+    client = TestClient(build_v1_app(registry))
+    r = client.post(f"/v1/recipes/{path}", json=body)
+    assert r.status_code == 404
+    assert r.json()["code"] == "RECIPE_NOT_FOUND"
+    assert _label_value(verb, "recipe_not_found", recipe="ghost") == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Finding 5: model_version header absent on error responses
+# ---------------------------------------------------------------------------
+
+
+def test_model_version_header_absent_on_404_recipe_not_found() -> None:
+    """When :recommend returns 404 RECIPE_NOT_FOUND, X-Recotem-Model-Version
+    must NOT be present — there is no loaded model to report."""
+    registry = ModelRegistry()
+    client = TestClient(build_v1_app(registry))
+    r = client.post("/v1/recipes/ghost:recommend", json={"user_id": "u1"})
+    assert r.status_code == 404
+    assert "x-recotem-model-version" not in r.headers, (
+        "404 RECIPE_NOT_FOUND must not carry X-Recotem-Model-Version"
+    )
+
+
+def test_model_version_header_absent_on_503_recipe_unavailable() -> None:
+    """503 RECIPE_UNAVAILABLE must not carry X-Recotem-Model-Version."""
+    registry = ModelRegistry()
+    registry.replace("demo", _stub_entry("demo"))
+    client = TestClient(build_v1_app(registry))
+    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
+    assert r.status_code == 503
+    assert "x-recotem-model-version" not in r.headers, (
+        "503 RECIPE_UNAVAILABLE must not carry X-Recotem-Model-Version"
+    )
+
+
+def test_model_version_header_present_on_200_recommend() -> None:
+    """200 response must carry a non-empty X-Recotem-Model-Version header."""
+    registry = ModelRegistry()
+    registry.replace("demo", _loaded_entry())
+    client = TestClient(build_v1_app(registry))
+    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1"})
+    assert r.status_code == 200, r.text
+    assert r.headers.get("x-recotem-model-version"), (
+        "200 :recommend must carry X-Recotem-Model-Version"
+    )
 
 
 def test_batch_recommend_records_outer_ok_when_partial_failure() -> None:

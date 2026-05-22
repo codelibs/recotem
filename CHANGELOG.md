@@ -108,6 +108,13 @@ follows Keep a Changelog (https://keepachangelog.com/en/1.1.0/).
   `status="error"`).  `RECIPE_NOT_FOUND` 404s record
   `status="recipe_not_found"`.
 
+### Migration
+
+See [docs/migration-v1.md](docs/migration-v1.md) for the alpha → v1 migration
+guide (endpoint mapping, field renames, error envelope changes, metrics
+renames, and Prometheus scrape-config update for the now-authenticated
+`/v1/metrics`).
+
 ### Notes
 - Batch endpoints (`:batch-recommend`, `:batch-recommend-related`)
   return items as `{item_id, score}` only — no per-item metadata

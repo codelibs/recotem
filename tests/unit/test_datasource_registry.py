@@ -143,7 +143,7 @@ def test_get_source_class_unknown_type_raises() -> None:
 # ---------------------------------------------------------------------------
 # Third-party plugin load failures remain fatal (DataSourceError).
 # Builtin sources (recotem.datasource.*) that raise ImportError are skipped
-# gracefully so that optional extras (sql, ga4, bigquery) can be absent
+# gracefully so that optional extras (sql, bigquery) can be absent
 # without aborting startup for unrelated sources.
 
 
@@ -302,7 +302,7 @@ def test_builtin_ep_attribute_error_is_fatal() -> None:
 
 
 # ---------------------------------------------------------------------------
-# M7: correct install hints for builtin sources (sql / ga4 / bigquery)
+# M7: correct install hints for builtin sources (sql / bigquery)
 # ---------------------------------------------------------------------------
 
 
@@ -343,33 +343,6 @@ def test_sql_import_error_hint_names_correct_extras() -> None:
             assert "recotem[sql]" not in hint, (
                 f"Misleading 'recotem[sql]' must NOT appear in hint: {hint!r}"
             )
-        finally:
-            registry.get_source_types.cache_clear()
-
-
-def test_ga4_import_error_hint_names_ga4_extra() -> None:
-    """ImportError for the ga4 builtin must hint at recotem[ga4]."""
-    import structlog.testing
-
-    ep = MagicMock()
-    ep.name = "ga4"
-    ep.value = "recotem.datasource.ga4:GA4Source"
-    ep.load.side_effect = ImportError("google-analytics-data not installed")
-
-    with patch("recotem.datasource.registry.entry_points", return_value=[ep]):
-        from recotem.datasource import registry
-
-        registry.get_source_types.cache_clear()
-        try:
-            with structlog.testing.capture_logs() as captured:
-                registry.get_source_types()
-
-            skip_events = [
-                e for e in captured if e.get("event") == "datasource_builtin_skipped"
-            ]
-            assert skip_events, "Expected a datasource_builtin_skipped warning"
-            hint = skip_events[0].get("hint", "")
-            assert "recotem[ga4]" in hint, f"Expected 'recotem[ga4]' in hint: {hint!r}"
         finally:
             registry.get_source_types.cache_clear()
 
@@ -562,13 +535,13 @@ def test_builtin_ep_skipped_other_eps_still_registered() -> None:
 
 
 # ---------------------------------------------------------------------------
-# PR #92 follow-up — sql + ga4 must resolve via the fallback path
+# PR #92 follow-up — sql must resolve via the fallback path
 # ---------------------------------------------------------------------------
 
 
-def test_sql_and_ga4_resolve_via_fallback_with_no_entry_points() -> None:
+def test_sql_resolves_via_fallback_with_no_entry_points() -> None:
     """When ``entry_points`` returns an empty group, the fallback path must
-    register sql → SQLSource and ga4 → GA4Source.
+    register sql → SQLSource.
 
     Editable installs without ``pip install -e .`` exercise this path; the
     positive registration is the primary contract guarantee that exit-3 install
@@ -585,9 +558,5 @@ def test_sql_and_ga4_resolve_via_fallback_with_no_entry_points() -> None:
             "sql must resolve via _FALLBACK_BUILTINS when entry_points is empty"
         )
         assert types["sql"].__name__ == "SQLSource"
-        assert "ga4" in types, (
-            "ga4 must resolve via _FALLBACK_BUILTINS when entry_points is empty"
-        )
-        assert types["ga4"].__name__ == "GA4Source"
     finally:
         registry.get_source_types.cache_clear()

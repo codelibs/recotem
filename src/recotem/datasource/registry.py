@@ -31,7 +31,6 @@ _FALLBACK_BUILTINS: dict[str, str] = {
     "parquet": "recotem.datasource.csv:ParquetSource",
     "bigquery": "recotem.datasource.bigquery:BigQuerySource",
     "sql": "recotem.datasource.sql:SQLSource",
-    "ga4": "recotem.datasource.ga4:GA4Source",
 }
 
 # Correct install hints for builtin sources whose extras do not match the
@@ -39,7 +38,6 @@ _FALLBACK_BUILTINS: dict[str, str] = {
 # Used in both the entry-points ImportError path and the fallback path.
 _BUILTIN_INSTALL_HINTS: dict[str, str] = {
     "sql": "install one of: recotem[postgres], recotem[mysql], recotem[sqlite]",
-    "ga4": "install recotem[ga4]",
     "bigquery": "install recotem[bigquery]",
     # csv and parquet are zero-dependency — they never need an extras hint.
 }
@@ -133,7 +131,7 @@ def get_source_types() -> dict[str, type]:
             try:
                 cls = _load_class(fqcn)
             except (ImportError, ModuleNotFoundError) as exc:
-                # Optional extras (sql, ga4, bigquery) may not be installed.
+                # Optional extras (sql, bigquery) may not be installed.
                 # Skip them gracefully and log a hint; unknown sources are
                 # re-raised as DataSourceError so operators notice breakage.
                 if type_name in _BUILTIN_INSTALL_HINTS:

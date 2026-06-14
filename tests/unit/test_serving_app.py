@@ -1210,7 +1210,7 @@ def test_lifespan_completes_within_drain_window(tmp_path: Path) -> None:
     """
     import asyncio
 
-    from httpx import ASGITransport, AsyncClient
+    from httpx2 import ASGITransport, AsyncClient
 
     from recotem.serving.app import create_app
 
@@ -1854,7 +1854,7 @@ def test_banner_task_cancelled_cleanly_on_shutdown(tmp_path: Path) -> None:
     import asyncio
     import warnings
 
-    from httpx import ASGITransport, AsyncClient
+    from httpx2 import ASGITransport, AsyncClient
 
     from recotem.serving.app import create_app
 

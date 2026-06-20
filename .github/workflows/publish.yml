@@ -21,7 +21,7 @@ jobs:
             *) echo "publish.yml workflow_dispatch requires a v* tag ref"; exit 1 ;;
           esac
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v8.2.0
         with:

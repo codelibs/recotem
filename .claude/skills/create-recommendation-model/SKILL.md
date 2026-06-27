@@ -1,10 +1,8 @@
 ---
 name: create-recommendation-model
 description: >-
-  Create, train, and verify a recotem recommendation model from interaction data
-  (access logs, purchases, ratings) in BigQuery, CSV, Parquet, or SQL. Use when
-  building or training a recommender, authoring a recipe for a new data source,
-  or checking that the recommend API returns results.
+  Create, train, and verify a recotem recommendation model from BigQuery, CSV,
+  Parquet, or SQL data.
 ---
 
 # Create a recommendation model (recotem)

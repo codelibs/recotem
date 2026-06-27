@@ -67,9 +67,18 @@ policy can collapse exact (user, item) repeats).
   query sources (BigQuery/SQL), `validate` is a free dry run — always run it
   first. Keep the date window / row count small while iterating.
 
-## Step 0 — Environment
+## Step 0 — Environment and working directory
+
+**Ask the user where the recipe and model artifact should live** — the working
+directory. Everything this skill writes (the `recipe.yaml`, the `.recotem`
+artifact, and the serve `recipes/` dir) goes there. Default to a scratch
+location outside the repo so private values never land in version control; let
+the user override it.
 
 ```bash
+WORKDIR="<the directory the user chose>"   # e.g. ~/recotem-work
+mkdir -p "$WORKDIR"
+
 # choose $R as above, then:
 $R keygen --type signing
 export RECOTEM_SIGNING_KEYS="<kid>:<hex64>"   # from the keygen env_entry line
@@ -92,10 +101,10 @@ Pick the source, then read the matching reference and gather the inputs it lists
 | SQL database (Postgres / MySQL / SQLite) | `references/sql.md` | DSN env var, query, row volume |
 | Custom source plugin | see `docs/plugin-authoring.md` | the plugin's own config fields |
 
-## Step 2 — Write the recipe (in a scratch directory)
+## Step 2 — Write the recipe
 
-Write the recipe outside the repo. The `source:` block comes from the reference;
-the rest is common:
+Write the recipe to `$WORKDIR/my_reco.yaml`. The `source:` block comes from the
+reference; the rest is common:
 
 ```yaml
 name: my_reco                      # becomes the /v1/recipes/{name}:* verb
@@ -122,7 +131,7 @@ training:
     test_user_ratio: 1.0
     seed: 42
 output:
-  path: /abs/path/scratch/my_reco.recotem
+  path: <WORKDIR>/my_reco.recotem  # a concrete absolute path; recipe files are NOT shell-expanded
   versioning: always_overwrite     # only always_overwrite | append_sha are valid
 ```
 
@@ -142,7 +151,7 @@ Recipe gotchas that bite the first time:
 ## Step 3 — Validate
 
 ```bash
-$R validate /abs/path/scratch/my_reco.yaml
+$R validate $WORKDIR/my_reco.yaml
 ```
 
 What `validate` checks depends on the source: BigQuery runs a free dry run (ADC
@@ -160,7 +169,7 @@ section of the source's reference. Keep the window small while iterating.
 ## Step 5 — Train
 
 ```bash
-$R train /abs/path/scratch/my_reco.yaml
+$R train $WORKDIR/my_reco.yaml
 ```
 
 **Watch the data shape, not just exit 0.** Collaborative filtering needs users
@@ -185,7 +194,7 @@ On success the log reports `train_done` with `best_class`, `best_score`, and
 ## Step 6 — Inspect the artifact
 
 ```bash
-$R inspect /abs/path/scratch/my_reco.recotem
+$R inspect $WORKDIR/my_reco.recotem
 ```
 
 Verifies the HMAC (`HMAC: OK`) and prints the header (`best_class`,
@@ -199,10 +208,10 @@ Do this when the user wants to see the recommend API return results.
 ```bash
 $R keygen --type api                      # note the plaintext AND the env_entry
 export RECOTEM_API_KEYS="<kid>:sha256:<hex64>"
-mkdir -p /abs/path/scratch/recipes
-cp /abs/path/scratch/my_reco.yaml /abs/path/scratch/recipes/   # serve scans *.yaml
+mkdir -p $WORKDIR/recipes
+cp $WORKDIR/my_reco.yaml $WORKDIR/recipes/   # serve scans *.yaml
 export RECOTEM_HOST=127.0.0.1 RECOTEM_PORT=8099
-$R serve --recipes /abs/path/scratch/recipes &
+$R serve --recipes $WORKDIR/recipes &
 ```
 
 The `--recipes` directory holds **recipe YAMLs**, not artifacts; serve reads each
@@ -228,6 +237,55 @@ Behaviors that confirm correct wiring: a scored `items` array on `200`; unknown
 user → `404 UNKNOWN_USER`; missing `X-API-Key` → `401 MISSING_API_KEY`. With
 `RECOTEM_API_KEYS` unset, serve binds to loopback and skips auth. Stop with
 `pkill -f "recotem serve"`.
+
+## Step 8 — Hand off the recommend API usage
+
+After the model is built, **always finish by printing a complete, copy-pasteable
+recommend API reference for the user**, with the placeholders filled in from
+what you actually used — recipe `name`, `$WORKDIR`, host/port, and a couple of
+**real** `user_id` / `item_id` values from the training data so the user can
+call it immediately. (Pull a few known IDs from the source if you do not already
+have them.) This is the deliverable; do not end with just "training done".
+
+Emit a block like this:
+
+```markdown
+### Recommend API — my_reco
+
+Start the server:
+    export RECOTEM_SIGNING_KEYS="<kid>:<hex64>"
+    export RECOTEM_API_KEYS="<kid>:sha256:<hex64>"   # omit to bind loopback with no auth
+    export RECOTEM_HOST=127.0.0.1 RECOTEM_PORT=8099
+    <recotem> serve --recipes <WORKDIR>/recipes
+
+Auth: send the API key plaintext in the `X-API-Key` header (none needed in
+loopback no-auth mode). Base URL: http://127.0.0.1:8099
+
+Health:
+    curl -s http://127.0.0.1:8099/v1/health
+
+User recommendations  (user_id must be one seen in training):
+    curl -s -X POST http://127.0.0.1:8099/v1/recipes/<name>:recommend \
+      -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+      -d '{"user_id": "<real known user>", "limit": 10, "exclude_items": []}'
+
+Related items  (no user; seed with known item_id values):
+    curl -s -X POST http://127.0.0.1:8099/v1/recipes/<name>:recommend-related \
+      -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+      -d '{"seed_items": ["<real known item>"], "limit": 10}'
+
+Response: {"request_id", "recipe", "model_version": "sha256:…",
+           "items": [{"item_id", "score"}, …]}
+
+Errors: 404 UNKNOWN_USER (user not in training) · 404 UNKNOWN_SEED_ITEMS ·
+        401 MISSING_API_KEY / INVALID_API_KEY · 503 RECIPE_UNAVAILABLE
+        (artifact not loaded). Stop the server: pkill -f "recotem serve".
+
+Known IDs to try — users: <id>, <id>  ·  items: <id>, <id>
+```
+
+Substitute the real recipe name, paths, port, and IDs; keep private identifiers
+in this on-screen handoff only (never commit them).
 
 ## Troubleshooting (exit codes and common failures)
 

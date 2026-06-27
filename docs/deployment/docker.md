@@ -8,13 +8,13 @@ Pushed by `.github/workflows/docker.yml` to `ghcr.io/codelibs/recotem`:
 
 | Tag pattern | Mutability | Use for |
 |---|---|---|
-| `2.0.0`, `2.0.1`, ... (semver `{{version}}`) | immutable | production — pin here |
-| `2.0`, `2.1`, ... (semver `{{major}}.{{minor}}`) | mutable within a minor | rolling minor pin |
+| `2.0.0`, `2.0.1`, ... (semver `MAJOR.MINOR.PATCH`) | immutable | production — pin here |
+| `2.0`, `2.1`, ... (semver `MAJOR.MINOR`) | mutable within a minor | rolling minor pin |
 | `latest` | mutable, tracks `main` | quick evaluation; do not use in production |
 | `main` (branch ref) | mutable, head of `main` | smoke-tests only |
 | `sha-<short>` | immutable | reproducing a specific commit |
 
-`:latest` is updated on every push to `main`. The tutorial `compose.yaml` references `:latest`; in production always pin to a semver tag (e.g. `2.0.0a0`). The Helm chart and `examples/k8s/` already pin `2.0.0a0`.
+`:latest` is updated on every push to `main`. The tutorial `compose.yaml` references `:latest`; in production always pin to a semver tag (e.g. `2.0.0`). The Helm chart and `examples/k8s/` already pin `2.0.0`.
 
 The image is multi-arch (`linux/amd64`, `linux/arm64`). SBOM and SLSA
 provenance attestations are attached at push time (`provenance: mode=max`,

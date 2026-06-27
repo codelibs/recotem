@@ -5,8 +5,8 @@ description: >
   Provides a stateless serve Deployment with optional CronJob for training,
   NetworkPolicy, PodDisruptionBudget, and HorizontalPodAutoscaler.
 type: application
-version: 2.0.0-alpha.0
-appVersion: "2.0.0a0"
+version: 2.0.0
+appVersion: "2.0.0"
 keywords:
   - recommendation
   - machine-learning

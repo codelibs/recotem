@@ -2159,7 +2159,7 @@ wheels = [
 
 [[package]]
 name = "recotem"
-version = "2.0.0a1.dev0"
+version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
@@ -2263,7 +2263,7 @@ requires-dist = [
     { name = "starlette", specifier = ">=1.0.0,<1.4" },
     { name = "structlog", specifier = ">=24,<26" },
     { name = "typer", specifier = ">=0.12,<0.27" },
-    { name = "urllib3", specifier = ">=2.7.0" },
+    { name = "urllib3", specifier = ">=2.7.0,<3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<0.50" },
 ]
 provides-extras = ["bigquery", "s3", "gcs", "azure", "metrics", "postgres", "mysql", "sqlite", "all"]

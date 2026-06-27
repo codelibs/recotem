@@ -205,7 +205,7 @@ See `docs/data-sources/sql.md` for PostgreSQL / MySQL recipes.
 |---|---|---|
 | `RecipeError: 'source.path' uses a network scheme … requires a 'sha256' integrity pin` | Recipe edited; sha256 removed | Re-add the `sha256:` line in the recipe |
 | `DataSourceError: sha256 mismatch` | Upstream rotated the file | Re-compute with `curl -sL <url> \| shasum -a 256` and update the recipe |
-| `DataSourceError: HTTP 404 fetching …` | URL changed | Verify the URL in a browser; restore the v1.0.0 tag |
+| `DataSourceError: HTTP 404 fetching …` | Upstream `source.path` URL moved or was removed | Verify the URL resolves in a browser; update the recipe `source.path` (and its `sha256:` pin) to the current location or a stable mirror |
 | `ArtifactError: RECOTEM_SIGNING_KEYS not set` | Step 1 not exported | Re-run the export and try again |
 | `401 Unauthorized` on `:recommend` | Wrong API key plaintext | Use the `plaintext` line from `keygen --type api`, not the `hash` |
 | `503 recipe_unavailable` on `:recommend` immediately after train | Watcher has not polled yet | Wait up to `RECOTEM_WATCH_INTERVAL` seconds (default 5; tutorial sets 10). Check `/v1/health`. |

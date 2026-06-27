@@ -7,11 +7,13 @@
 ## Reference
 
 - [Recipe reference](recipe-reference.md) — every field, type, default, validation rule
+- [API reference](api-reference.md) — `/v1` endpoints, inference verbs, request/response shapes
 
 ## Data sources
 
 - [CSV / Parquet](data-sources/csv.md) — local files, fsspec paths (S3, GCS), dtype overrides
 - [BigQuery](data-sources/bigquery.md) — ADC auth, GA4 query patterns, parameter binding
+- [SQL](data-sources/sql.md) — PostgreSQL / MySQL / SQLite recipes, row caps, SSRF guard
 
 ## Deployment
 

@@ -722,6 +722,36 @@ def test_idmap_neutral_fqcn_in_allow_list() -> None:
     )
 
 
+def test_recommender_internal_fqcns_in_allow_list() -> None:
+    """Embedded recommender internals must be allow-listed for serve to load.
+
+    A trained recommender pickle embeds the trainer/config/enum/estimator
+    objects it holds as attributes; these are distinct FQCNs from the top-level
+    ``*Recommender`` class.  Omitting any of them makes the artifact unloadable
+    at serve time (``class not allowed: ...``) even though train + sign
+    succeeded.  See test_serve_predict_e2e.test_every_algorithm_artifact_serve_roundtrip
+    for the end-to-end guard; this is the cheap, always-run assertion.
+    """
+    from recotem.artifact.signing import _ALLOWED_CLASSES
+
+    required = {
+        # IALS internals
+        ("irspack.recommenders.ials", "IALSTrainer"),
+        ("irspack.recommenders.ials", "IALSConfigScaling"),
+        ("irspack.recommenders._ials_core", "IALSTrainer"),
+        ("irspack.recommenders._ials_core", "IALSModelConfig"),
+        ("irspack.recommenders._ials_core", "IALSSolverConfig"),
+        ("irspack.recommenders._ials_core", "LossType"),
+        ("irspack.recommenders._ials_core", "SolverType"),
+        # CosineKNN internals
+        ("irspack.recommenders.knn", "FeatureWeightingScheme"),
+        # TruncatedSVD delegates to scikit-learn's estimator
+        ("sklearn.decomposition._truncated_svd", "TruncatedSVD"),
+    }
+    missing = sorted(required - _ALLOWED_CLASSES)
+    assert not missing, f"FQCNs missing from _ALLOWED_CLASSES: {missing}"
+
+
 def test_kid_bytes_tampered_rejected() -> None:
     """Replacing the kid field bytes in a valid artifact (keeping same length)
     must cause HMAC verification to fail with ArtifactError.

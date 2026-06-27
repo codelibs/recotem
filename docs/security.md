@@ -197,6 +197,15 @@ irspack.recommenders.rp3.RP3betaRecommender
 irspack.recommenders.dense_slim.DenseSLIMRecommender
 irspack.recommenders.truncsvd.TruncatedSVDRecommender
 irspack.recommenders.bpr.BPRFMRecommender
+irspack.recommenders.ials.IALSTrainer
+irspack.recommenders.ials.IALSConfigScaling
+irspack.recommenders._ials_core.IALSTrainer
+irspack.recommenders._ials_core.IALSModelConfig
+irspack.recommenders._ials_core.IALSSolverConfig
+irspack.recommenders._ials_core.LossType
+irspack.recommenders._ials_core.SolverType
+irspack.recommenders.knn.FeatureWeightingScheme
+sklearn.decomposition._truncated_svd.TruncatedSVD
 numpy.ndarray
 numpy.dtype
 numpy.core.multiarray._reconstruct
@@ -220,7 +229,13 @@ builtins.frozenset
 collections.OrderedDict
 ```
 
-This list is frozen per Recotem release.
+This list is frozen per Recotem release. It includes the `*Recommender`
+classes **and** the trainer, config, enum, and scikit-learn estimator objects
+those recommenders embed as attributes (e.g. `IALSTrainer`, `LossType`,
+`FeatureWeightingScheme`, scikit-learn's `TruncatedSVD`). A trained artifact is
+a single pickle graph: if any embedded class is absent the artifact is rejected
+at serve time even though training and signing succeeded, so the list must
+cover the full object graph, not just the entry-point recommender.
 
 In addition to the FQCN list, classes whose defining module sits under
 one of the following narrow prefixes are permitted via the prefix

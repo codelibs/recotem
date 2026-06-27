@@ -69,6 +69,33 @@ _ALLOWED_CLASSES: frozenset[tuple[str, str]] = frozenset(
         ("irspack.recommenders.dense_slim", "DenseSLIMRecommender"),
         ("irspack.recommenders.truncsvd", "TruncatedSVDRecommender"),
         ("irspack.recommenders.bpr", "BPRFMRecommender"),
+        # irspack recommender *internals*.  A trained recommender is not a
+        # single object: the pickle graph also embeds the trainer, config, and
+        # enum instances the recommender holds as attributes.  These FQCNs are
+        # NOT covered by listing the top-level *Recommender class, so omitting
+        # them makes the artifact unloadable at serve time even though training
+        # + signing succeeded (the recommender pickles fine, but SafeUnpickler
+        # rejects the embedded class on load).  Enumerated by training each
+        # algorithm and recording every find_class the payload triggers; see
+        # tests/unit/test_artifact_signing.py::test_<algo>_artifact_roundtrip.
+        #
+        # IALS — IALSRecommender embeds an IALSTrainer plus its model/solver
+        # config dataclasses and Loss/Solver enums (defined in the compiled
+        # _ials_core extension), and an IALSConfigScaling enum.
+        ("irspack.recommenders.ials", "IALSTrainer"),
+        ("irspack.recommenders.ials", "IALSConfigScaling"),
+        ("irspack.recommenders._ials_core", "IALSTrainer"),
+        ("irspack.recommenders._ials_core", "IALSModelConfig"),
+        ("irspack.recommenders._ials_core", "IALSSolverConfig"),
+        ("irspack.recommenders._ials_core", "LossType"),
+        ("irspack.recommenders._ials_core", "SolverType"),
+        # CosineKNN — stores the feature-weighting scheme as an enum.
+        ("irspack.recommenders.knn", "FeatureWeightingScheme"),
+        # TruncatedSVD — irspack delegates to scikit-learn's TruncatedSVD,
+        # whose fitted estimator is embedded in the recommender.  Its numpy
+        # array attributes are already covered by the numpy.* prefix list; only
+        # the estimator class itself needs an explicit FQCN entry.
+        ("sklearn.decomposition._truncated_svd", "TruncatedSVD"),
         # numpy.  Both numpy 1.x (numpy.core.*) and numpy 2.x
         # (numpy._core.*) reconstruction helpers are pinned explicitly
         # — these are the FQCNs every artifact references via the

@@ -6,11 +6,19 @@
 pip install "recotem[bigquery]"
 ```
 
-Without this extra, `recotem train` exits with:
+Without this extra, `recotem train` exits with exit code 3 (`DataSourceError`).
+The `bigquery` extra pulls in two packages that are checked independently, so
+the message names whichever is missing first:
 
 ```
-DataSourceError: BigQuery source requires 'recotem[bigquery]'. Install with: pip install "recotem[bigquery]"
+DataSourceError: google-cloud-bigquery is required for BigQuerySource. Install it with: pip install recotem[bigquery]
 ```
+
+```
+DataSourceError: db-dtypes is required for BigQuerySource. Install it with: pip install recotem[bigquery]
+```
+
+Installing `recotem[bigquery]` resolves both.
 
 ## Authentication
 
@@ -135,7 +143,7 @@ schema:
 | Permission denied on dataset | 3 | `DataSourceError: Access Denied: Dataset my-project:analytics_123456789` |
 | Query syntax error | 3 | `DataSourceError: Syntax error: ...` |
 | Column missing after query | 2 | `RecipeError: column 'item_id' not found in query result` |
-| Extra not installed | 3 | `DataSourceError: BigQuery source requires 'recotem[bigquery]'` |
+| Extra not installed | 3 | `DataSourceError: google-cloud-bigquery is required for BigQuerySource` (or `db-dtypes ...`) |
 
 All BigQuery exceptions are wrapped in `DataSourceError` and produce exit 3. The full BigQuery error message is included in the stderr JSON line.
 

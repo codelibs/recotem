@@ -1,13 +1,9 @@
 ---
 name: release-recotem
 description: >-
-  Cut a recotem release end to end — audit readiness, bump the version, update
-  the CHANGELOG, open the prep PR, create the GitHub Release, and open the next
-  dev cycle. Use this whenever the user wants to release, ship, publish, or cut
-  a new recotem version (e.g. "release 2.0.0", "let's ship the next version",
-  "prepare a release", "publish to PyPI", "create a GitHub release"), bump the
-  version for a release or for the next dev cycle, or sync the recotem-docs site
-  after a release — even if they don't say the word "release".
+  Release a recotem version end to end. Use when cutting, shipping, or
+  publishing a recotem release, bumping the version, or creating a GitHub
+  Release / publishing to PyPI.
 ---
 
 # Release recotem

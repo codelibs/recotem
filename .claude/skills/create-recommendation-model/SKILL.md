@@ -1,20 +1,10 @@
 ---
 name: create-recommendation-model
 description: >-
-  Create and verify a recotem recommendation model end to end — decide what
-  counts as a user–item interaction, gather the data-source connection details,
-  write a recipe, validate it (a cost-free dry run for query sources), estimate
-  the scan/row volume, train the model, inspect the signed artifact, and
-  optionally serve it and confirm the recommend API with curl. Use this skill
-  whenever the user wants to build, train, or generate a recommender or recotem
-  model from any interaction data — web/access logs, purchases, ratings, plays,
-  clicks — held in BigQuery (GA4 export or a custom dataset), CSV, Parquet, or a
-  SQL database, or wants to author a recipe for a new source or check that a
-  trained model actually returns recommendations. Triggers even when the user
-  only says "make a model from this GA4 data", "train a recommender on our
-  purchase log", or "see if the recommend endpoint returns anything". Prefer this
-  skill over ad-hoc commands so the runtime, cost, and privacy rules below always
-  apply.
+  Create, train, and verify a recotem recommendation model from interaction data
+  (access logs, purchases, ratings) in BigQuery, CSV, Parquet, or SQL. Use when
+  building or training a recommender, authoring a recipe for a new data source,
+  or checking that the recommend API returns results.
 ---
 
 # Create a recommendation model (recotem)

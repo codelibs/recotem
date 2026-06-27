@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from recotem.config import ApiKeyEntry
@@ -323,6 +324,134 @@ def test_train_then_serve_full_artifact_roundtrip(tmp_path: Path) -> None:
     # Each recommendation is a (item_id, score) pair.
     assert isinstance(recs[0][0], str)
     assert isinstance(recs[0][1], float)
+
+
+# Every algorithm recotem advertises (see training.algorithms.SUPPORTED_CLASS_NAMES).
+_ROUNDTRIP_ALGOS = [
+    "TopPop",
+    "IALS",
+    "CosineKNN",
+    "RP3beta",
+    "DenseSLIM",
+    "TruncatedSVD",
+    "BPRFM",
+]
+
+
+def _irspack_has_recommender(class_name: str) -> bool:
+    """True when the installed irspack build exposes ``class_name``.
+
+    Some recommenders (e.g. BPRFMRecommender) are gated behind optional irspack
+    dependencies such as ``lightfm``; when the dependency is absent irspack does
+    not export the class and recotem cannot train it.
+    """
+    import irspack.recommenders as irspack_recommenders
+
+    import recotem.training._compat  # noqa: F401  (installs IPython stub)
+
+    return hasattr(irspack_recommenders, class_name)
+
+
+def _make_clustered_synthetic_csv(tmp_path: Path) -> Path:
+    """Deterministic, non-degenerate interaction matrix for cross-algorithm tests.
+
+    A fully-dense grid (every user interacts with every item) is rank-deficient
+    and makes matrix-factorisation algorithms emit divide-by-zero warnings that
+    the warnings-as-error suite turns into failures.  Instead lay out users in
+    overlapping clusters with a few per-user idiosyncratic items, giving a matrix
+    with real low-rank structure that every algorithm can factorise cleanly.
+    """
+    n_users, n_items, n_clusters, band = 60, 40, 6, 12
+    pairs: set[tuple[str, str]] = set()
+    for u in range(n_users):
+        cluster = u % n_clusters
+        for k in range(band):
+            pairs.add(
+                (f"u{u}", f"i{(cluster * (n_items // n_clusters) + k) % n_items}")
+            )
+        # idiosyncratic items so users within a cluster are not identical
+        pairs.add((f"u{u}", f"i{(u * 7) % n_items}"))
+        pairs.add((f"u{u}", f"i{(u * 13 + 3) % n_items}"))
+    rows = ["user_id,item_id"]
+    rows.extend(f"{u},{i}" for u, i in sorted(pairs))
+    csv_file = tmp_path / "clustered.csv"
+    csv_file.write_text("\n".join(rows) + "\n")
+    return csv_file
+
+
+# irspack's TruncatedSVD tunes n_components over [4, 512]; on a small item
+# catalogue Optuna may pick a value >= n_items, which irspack clamps with a
+# UserWarning.  The suite runs warnings-as-error, but production training does
+# not, so silence only this specific clamp warning rather than aborting the trial.
+@pytest.mark.filterwarnings("ignore:n_components >= than:UserWarning")
+@pytest.mark.parametrize("algo", _ROUNDTRIP_ALGOS)
+def test_every_algorithm_artifact_serve_roundtrip(tmp_path: Path, algo: str) -> None:
+    """Each supported algorithm must train -> sign -> SafeUnpickler-load.
+
+    Regression for the FQCN allow-list: a trained recommender is a pickle graph
+    that embeds not just the top-level ``*Recommender`` class but the trainer,
+    config dataclasses, enums, and (for TruncatedSVD) the scikit-learn estimator
+    it holds as attributes.  If any of those embedded classes is missing from
+    ``_ALLOWED_CLASSES`` the artifact is unloadable at serve time even though
+    training + signing succeeded — the failure mode that left IALS models
+    permanently stuck in ``RECIPE_UNAVAILABLE`` (503) at the serve layer.
+    """
+    from recotem.artifact.io import read_artifact
+    from recotem.artifact.signing import KeyRing, unpickle_payload
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+    from recotem.training._compat import IDMappedRecommender
+    from recotem.training.algorithms import resolve_algorithm_name
+    from recotem.training.pipeline import run_training
+
+    class_name = resolve_algorithm_name(algo)
+    if not _irspack_has_recommender(class_name):
+        pytest.skip(
+            f"installed irspack build lacks {class_name} "
+            "(optional dependency not installed)"
+        )
+
+    csv_file = _make_clustered_synthetic_csv(tmp_path)
+    artifact_path = str(tmp_path / f"{algo}.recotem")
+
+    recipe = Recipe(
+        name=f"roundtrip-{algo}",
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        training=TrainingConfig(
+            algorithms=[algo],
+            n_trials=2,
+            cutoff=5,  # must be < n_items to avoid irspack ValueError
+            split=SplitConfig(scheme="random", heldout_ratio=0.2, seed=0),
+        ),
+        output=OutputConfig(path=artifact_path, versioning="always_overwrite"),
+    )
+
+    kr = KeyRing("dev:" + ("0" * 64))
+    result = run_training(
+        recipe,
+        key_ring=kr,
+        signing_key="dev",
+        no_lock=True,
+        dev_allow_unsigned=True,
+        quiet=True,
+    )
+    assert result is not None, f"{algo}: run_training returned None (zero score?)"
+    assert resolve_algorithm_name(result.best_class) == class_name
+
+    # The serve-side load path: HMAC verify, then SafeUnpickler with the FQCN
+    # allow-list.  This must NOT raise ArtifactError("class not allowed: ...").
+    _, payload_bytes = read_artifact(result.artifact_path, kr)
+    recommender = unpickle_payload(payload_bytes)
+    assert isinstance(recommender, IDMappedRecommender)
+    assert len(recommender.user_ids) > 0
+    assert len(recommender.item_ids) > 0
 
 
 def test_train_append_sha_then_serve_resolves_pointer(tmp_path: Path) -> None:

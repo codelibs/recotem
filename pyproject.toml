@@ -29,6 +29,13 @@ dependencies = [
     "rich>=13,<15",
 ]
 
+[project.urls]
+Homepage = "https://recotem.org"
+Documentation = "https://recotem.org"
+Repository = "https://github.com/codelibs/recotem"
+Issues = "https://github.com/codelibs/recotem/issues"
+Changelog = "https://github.com/codelibs/recotem/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 bigquery = ["google-cloud-bigquery>=3.25,<4", "google-cloud-bigquery-storage>=2.38.0,<3", "db-dtypes>=1.2,<2"]
 s3 = ["s3fs>=2024.6,<2026"]

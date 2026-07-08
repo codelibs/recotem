@@ -1,9 +1,20 @@
 # Recotem
 
+> **Recipe-driven recommender systems — one YAML = one model = one recommendation API.**
+
 [![PyPI](https://img.shields.io/pypi/v/recotem.svg)](https://pypi.org/project/recotem/)
 [![Python](https://img.shields.io/pypi/pyversions/recotem.svg)](https://pypi.org/project/recotem/)
+[![Docker](https://img.shields.io/badge/ghcr.io-codelibs%2Frecotem-2496ED?logo=docker&logoColor=white)](https://github.com/codelibs/recotem/pkgs/container/recotem)
+[![Downloads](https://static.pepy.tech/badge/recotem)](https://pepy.tech/project/recotem)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://github.com/codelibs/recotem/actions/workflows/test.yml/badge.svg)](https://github.com/codelibs/recotem/actions/workflows/test.yml)
+[![Docs](https://img.shields.io/badge/docs-recotem.org-3fb950)](https://recotem.org)
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/codelibs/recotem/main/assets/demo.gif"
+       alt="recotem quickstart — train a model, serve it, get recommendations over HTTP"
+       width="640">
+</p>
 
 Recipe-driven recommender training and serving, built on
 [irspack](https://github.com/tohtsky/irspack). One YAML recipe describes
@@ -146,6 +157,8 @@ can run on different machines; the watcher swaps models per recipe based
 on file mtime.
 
 ## Documentation
+
+Full documentation site: **[recotem.org](https://recotem.org)**.
 
 - [Getting started](docs/getting-started.md) — Docker Compose / pip walkthrough end-to-end
 - [Recipe reference](docs/recipe-reference.md) — every field documented

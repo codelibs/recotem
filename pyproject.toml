@@ -6,6 +6,36 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [{ name = "CodeLibs, Inc.", email = "info@codelibs.co" }]
+keywords = [
+    "recommender-system",
+    "recommendation-system",
+    "recommendation-api",
+    "recommender",
+    "recsys",
+    "collaborative-filtering",
+    "matrix-factorization",
+    "implicit-feedback",
+    "personalization",
+    "ranking",
+    "irspack",
+    "optuna",
+    "machine-learning",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 
 dependencies = [
     "fastapi>=0.120,<0.140",

@@ -848,13 +848,16 @@ def _try_load_artifact(
             "header_json",
         )
 
-    # Preflight the irspack version before deserializing: a skewed artifact
-    # fails inside the C++ __setstate__ with an error that names neither the
-    # recipe nor the remedy.
+    # Preflight the irspack version before deserializing: an unverified
+    # (algorithm, version) combination may fail inside the C++ __setstate__
+    # with an error that names neither the recipe nor the remedy.
+    # WARNING rather than ERROR per the rule above -- skew is operational, not
+    # a security signal. The guard already logged the versions; this line adds
+    # the kid, which it cannot see.
     try:
         check_artifact_irspack_version(header_dict, name=recipe.name)
     except ArtifactError as exc:
-        logger.error(
+        logger.warning(
             "initial_artifact_version_skew",
             name=recipe.name,
             kid=hdr.kid,

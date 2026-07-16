@@ -9,14 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **irspack version-skew guard.** `serve` now compares an artifact header's
-  `irspack_version` against the running irspack at major.minor granularity
-  *before* deserializing, and refuses a mismatch with an `ArtifactError` naming
-  both versions and the remedy. Previously the skew surfaced from irspack's C++
-  layer as a bare `TypeError: __setstate__(): incompatible function arguments`,
-  which identified neither the recipe nor the fix. The affected recipe is marked
-  `loaded: false` (reason `version_skew`); serve does not crash and other
-  recipes keep serving. Patch-level drift is tolerated.
+- **irspack version-skew guard.** `serve` now checks an artifact header's
+  `irspack_version` against the running irspack *before* deserializing, and
+  refuses an unverified combination with an `ArtifactError` naming the
+  algorithm, both versions, and the remedy. Previously the skew surfaced from
+  irspack's C++ layer as a bare `TypeError: __setstate__(): incompatible
+  function arguments`, which identified neither the recipe nor the fix. The
+  rule is an **allow-list**, not a deny-list: matching major.minor is always
+  accepted (patch drift within a minor is tolerated), and a differing
+  major.minor is accepted only for an `(algorithm, transition)` pair Recotem
+  has empirically verified. Everything else is refused — including artifacts
+  whose `best_class` is missing or unreadable, and every future irspack minor
+  until it is verified. The affected recipe is marked `loaded: false` (reason
+  `version_skew`); serve does not crash and other recipes keep serving.
 - `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW` — truthy downgrades the skew check to a
   warning, for operators who know their artifact's algorithm is unaffected.
 - `recotem_artifact_load_failures_total` gained a `version_skew` reason label.
@@ -28,7 +33,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Optuna itself and does not call `BaseRecommender.tune`, so none of irspack's
   documented breaking changes (`tune_with_study` removal, `fixed_params` →
   keyword arguments, `random_seed` → `tuning_random_seed`) affect Recotem.
-  **IALS models trained on 0.4.x must be retrained** — see below.
+  **IALS and BPRFM models trained on 0.4.x must be retrained** — see below.
+- **scikit-learn is now a direct, range-pinned dependency** (`>=1.8,<1.10`).
+  It was already reachable transitively via irspack, which asks only for
+  `>=0.21.0`. `TruncatedSVDRecommender` pickles an sklearn estimator into the
+  artifact payload, and sklearn does not guarantee correctness when unpickling
+  across its own minors (`InconsistentVersionWarning`: "might lead to breaking
+  code or invalid results"). The range keeps train and serve inside a tested
+  window and forces a deliberate bump plus retest at the next sklearn minor.
+  **A range narrows this axis but does not close it:** two installs inside the
+  range can still differ, and the irspack version-skew guard does not check the
+  sklearn axis at all. If you need TruncatedSVD artifacts to be reproducible
+  bit-exact, pin sklearn exactly or build train and serve from the same lock
+  file.
 
 ### Migrating to irspack 0.5.0
 
@@ -40,17 +57,41 @@ changelog does not mention; Recotem cannot migrate such artifacts in place,
 because the missing fields are internal C++ state that only a retrain produces
 correctly.
 
-- **Action required:** retrain every recipe whose `best_class` is
-  `IALSRecommender` and redeploy the artifact.
+- **Action required:** retrain and redeploy every recipe whose `best_class` is
+  `IALSRecommender` (the known break). `BPRFMRecommender` is refused too, for a
+  different reason: irspack gates it behind the separately installed `lightfm`
+  package, which has no Python 3.12-compatible release, so irspack never
+  exports the class and we could not verify it either way. In practice no
+  recotem 2.x deployment can hold a BPRFM artifact — recotem requires Python
+  3.12+ — so this line is a completeness note rather than real migration work.
+  Its absence from the verified table means **unproven**, not
+  known-broken — but the guard refuses the unproven rather than risk loading a
+  model that serves subtly wrong scores.
 - The break is **bidirectional**: 0.5.x-trained IALS artifacts also fail to load
   on 0.4.x. Upgrade `train` and `serve` together — the upgrade cannot be staged
   serve-first, and serve cannot be rolled back to 0.4.x once artifacts have been
   retrained on 0.5.x.
-- **Only IALS is affected.** `CosineKNN`, `TopPop`, `RP3beta`, `DenseSLIM`, and
-  `TruncatedSVD` artifacts load unchanged in both directions.
+- **Verified compatible across 0.4 ↔ 0.5, in both directions:** `CosineKNN`,
+  `TopPop`, `RP3beta`, `DenseSLIM`, and `TruncatedSVD`. These artifacts load
+  unchanged and need no retrain. "Verified" here means an artifact trained under
+  one version was loaded under the other, with irspack as the only variable, and
+  the recommendation scores compared bit-exact.
+- **Every future irspack minor starts out refused.** The guard consults a table
+  of verified pairs, so a later 0.5 → 0.6 upgrade will refuse artifacts for
+  *all* algorithms — including the five above — until that transition is
+  verified and its rows are added. Patch upgrades within a minor (e.g.
+  0.5.0 → 0.5.3) are unaffected: matching major.minor short-circuits before the
+  table is consulted.
 - Artifacts that skew are refused with an actionable error rather than a raw
   `TypeError` (see the version-skew guard above). Runbook:
   [docs/operations.md](docs/operations.md#irspack-version-skew).
+- **Escape hatch.** `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW=1` downgrades the
+  refusal to an `irspack_version_skew_allowed` warning and lets the payload
+  reach the deserializer. It does not make an incompatible payload loadable — a
+  genuinely broken artifact then fails with the bare `TypeError` the guard
+  exists to replace. It is for operators who know their artifact is unaffected
+  (e.g. an algorithm we simply have not verified yet), not a way to skip a
+  needed retrain.
 
 ## [2.0.0] - 2026-06-27
 

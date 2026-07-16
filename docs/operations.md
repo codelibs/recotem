@@ -409,7 +409,7 @@ Full list of environment variables recognised by Recotem. Variables marked `serv
 | `RECOTEM_LOCK_DIR` | (empty) | train | Override directory for per-recipe training lock files. Needed when `output.path` is a remote URI (`s3://`, `gs://`, …); falls back to `<tempdir>/recotem-locks/`. |
 | `RECOTEM_STARTUP_PARALLELISM` | (auto) | serve | Threads used to load artifacts at startup (clamped [1, 32]). Default: `min(len(recipes), 8)`. Setting to `0` clamps to 1 with a warning. |
 | `RECOTEM_BQ_REQUIRE_STORAGE_API` | (unset) | train | Truthy raises `DataSourceError` instead of falling back to the REST path when the BigQuery Storage Read API fails. |
-| `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW` | (unset) | serve | Truthy downgrades the irspack version-skew check to a warning. See [irspack version skew](#irspack-version-skew). |
+| `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW` | (unset) | serve | Truthy downgrades the irspack version-skew refusal to a warning and lets the payload reach the deserializer. Does not make an incompatible payload loadable. See [irspack version skew](#irspack-version-skew). |
 | `RECOTEM_RECIPE_*` | — | train | Allow-listed prefix for `${...}` recipe env-var expansion. See [recipe-reference.md](recipe-reference.md#environment-variable-expansion). |
 
 > **Note on `signing_key_status` in logs.** The `security.posture` log line emitted at every `recotem serve` startup includes a `signing_key_status` field: `configured` (keys present), `dev_allow_unsigned` (no keys, dev-unsigned mode), or `missing` (keys absent; startup will fail). Use this in SIEM rules to alert on misconfigured deployments.
@@ -528,6 +528,7 @@ The startup-only event variants are:
 | `initial_artifact_read_failed` / `initial_artifact_read_error` | I/O failure or cap exceeded |
 | `initial_artifact_parse_failed` | Magic / version / header structural error |
 | `initial_artifact_hmac_failed` | HMAC mismatch or unknown kid |
+| `initial_artifact_version_skew` | WARNING. The artifact's `(best_class, irspack transition)` is not verified compatible with the running irspack. Reason label `version_skew`; see [irspack version skew](#irspack-version-skew). The guard emits its own `irspack_version_skew` WARNING carrying both versions; this event adds the `kid`. Skew is operational, so neither is ERROR — alert on the `version_skew` metric, not on log level. |
 | `initial_artifact_deserialize_failed` | FQCN allow-list rejection or payload decode error |
 | `initial_artifact_hmac_skipped_dev` | `--dev-allow-unsigned` |
 
@@ -559,6 +560,7 @@ The high-signal metrics for production alerting:
 | Hot-swap failures | `rate(recotem_swap_total{result="error"}[5m]) > 0` | warn |
 | Artifact load failures since restart | `recotem_artifact_load_failures_total{recipe=...}` increase | warn (often paired with the unloaded alert above) |
 | HMAC verification failures | `rate(recotem_artifact_load_failures_total{reason="hmac"}[5m])` | page — security signal (wrong key or tampered artifact) |
+| irspack version skew | `rate(recotem_artifact_load_failures_total{reason="version_skew"}[5m])` | warn — train and serve have drifted apart. A hot-swap skew keeps serving the old model, but the same artifact fails the recipe at the next restart; see [irspack version skew](#irspack-version-skew) |
 | Batch per-element error rate | `rate(recotem_v1_batch_element_errors_total[5m]) / rate(recotem_v1_requests_total{verb=~"batch-.*"}[5m])` | warn at sustained > 1% per recipe |
 | Artifact stat failures (watcher poll) | `recotem_artifact_stat_failures_total{recipe=...}` increase | warn |
 | Watcher unhandled errors | `recotem_watcher_unhandled_errors_total` increase | warn |
@@ -583,10 +585,32 @@ Recotem follows semver. Within a major version (`2.x`):
   upgrading the writer; readers can be upgraded first.
 - The FQCN allow-list is frozen per release. Re-train if your artifacts
   encode a class that has been removed.
+- **The irspack pickle format is not covered by any of the above.** irspack
+  does not keep its pickle format stable across its own minors, so a Recotem
+  upgrade that moves irspack across a minor can refuse existing artifacts —
+  by algorithm, per transition. This axis is **bidirectional**: it cannot be
+  staged serve-first, and it does not roll back. See
+  [irspack version skew](#irspack-version-skew) for the allow-list rule, which
+  algorithms are refused, and the upgrade procedure.
+- **scikit-learn is a further axis, unguarded.** `TruncatedSVD` artifacts embed
+  an sklearn estimator; sklearn does not guarantee correctness when unpickling
+  across its own minors. Recotem range-pins `scikit-learn>=1.8,<1.10`, which
+  narrows the window but does not close it (two installs inside the range can
+  differ), and no runtime check covers it.
 
 For zero-downtime upgrade of the serve fleet, deploy new pods with both
 the old and new signing kids configured (rotation-style), let new pods
 become healthy, then drain old pods (relying on `RECOTEM_DRAIN_SECONDS`).
+
+> **This procedure assumes the new pods can load the existing artifacts.**
+> It holds for a signing-key rotation, but not across an irspack minor: new
+> pods running irspack 0.5.0 will never become healthy against 0.4.x-trained
+> IALS or BPRFM artifacts — they are refused before deserialization, the
+> recipe stays `loaded: false`, and `/v1/health` returns 503. Retrain those
+> recipes on the new irspack version *first*, or upgrade train and serve
+> together and accept the retrain window. Check
+> [irspack version skew](#irspack-version-skew) before any upgrade that moves
+> irspack.
 
 ## Troubleshooting
 
@@ -610,32 +634,60 @@ Causes and fixes:
 | `magic bytes mismatch` | Corrupt or truncated artifact | Retrain |
 | `payload exceeds max bytes` | Payload exceeds `RECOTEM_MAX_PAYLOAD_BYTES` (512 MiB default) or artifact exceeds `RECOTEM_MAX_ARTIFACT_BYTES` (2 GiB default) | Increase the relevant cap or reduce model size. Note: `RECOTEM_MAX_PAYLOAD_BYTES` must remain ≤ `RECOTEM_MAX_ARTIFACT_BYTES`. |
 | `header JSON too large` | Malformed artifact | Retrain |
-| `irspack version skew: ...` | The artifact was trained with a different irspack **major.minor** than the serving process runs | Retrain the recipe on the serving host's irspack version. See [irspack version skew](#irspack-version-skew). |
+| `irspack version skew: ...` | The artifact's algorithm is not verified compatible across the irspack **major.minor** transition between train and serve (e.g. an IALS or BPRFM artifact across 0.4 ↔ 0.5) | Retrain the recipe on the serving host's irspack version. See [irspack version skew](#irspack-version-skew). |
 
 ### irspack version skew
 
-irspack does not guarantee a stable pickle format across minor releases. Recotem records the training-time `irspack_version` in every artifact header and compares it, at **major.minor** granularity, against the running irspack **before** deserializing the payload. On a mismatch the recipe is marked `loaded: false` with reason `version_skew` and this error:
+irspack does not guarantee a stable pickle format across minor releases. Recotem records the training-time `irspack_version` in every artifact header and checks it against the running irspack **before** deserializing the payload.
+
+The rule is an **allow-list**, not a deny-list:
+
+- **Same major.minor** → always loaded. Patch drift (`0.5.0` → `0.5.3`) is tolerated and the verified table is never consulted.
+- **Different major.minor** → loaded only if the artifact's `best_class` *and* that exact transition appear in Recotem's verified-compatible table. Anything absent is refused.
+
+Verified compatible across **0.4 ↔ 0.5, in both directions**: `CosineKNNRecommender`, `TopPopRecommender`, `RP3betaRecommender`, `DenseSLIMRecommender`, `TruncatedSVDRecommender`. A row earns its place only when an artifact trained under one version was loaded under the other — irspack the only variable — and the recommendation scores compared bit-exact.
+
+Refused across 0.4 ↔ 0.5:
+
+| `best_class` | Why |
+|--------------|-----|
+| `IALSRecommender` | **Known break**, both directions. 0.5.0 added feature-aware iALS, growing `IALSModelConfig`'s pickled state from a 7-tuple to a 10-tuple; `__setstate__` is a strict-arity binding. |
+| `BPRFMRecommender` | **Unverifiable** — irspack gates it behind the separately installed `lightfm` package, which has no Python 3.12-compatible release, so irspack does not export the class and recotem cannot train it. Absence from the table means *unproven*, not known-broken. |
+| missing / non-string `best_class` | Fails **closed**: a header that cannot name its algorithm cannot match the table. |
+
+On a refusal the recipe is marked `loaded: false` with reason `version_skew` and this error (recipe `news`, an IALS artifact trained on 0.4.2, served by 0.5.0):
 
 ```
-irspack version skew: artifact was trained with irspack 0.4.2 but this process
-runs irspack 0.5.0. ... Retrain recipe 'news' with irspack 0.5.0 and redeploy
-the artifact.
+irspack version skew: retrain recipe 'news' with irspack 0.5.0 — IALSRecommender
+0.4.2→0.5.0 is not verified compatible. Recotem allows only (algorithm, irspack
+transition) pairs it has empirically verified load correctly; unverified is not
+proof of breakage — the one known break is IALSRecommender at irspack 0.5.0,
+whose pickled model state changed shape. Retrain and redeploy, or if you know
+this artifact is unaffected set RECOTEM_ALLOW_IRSPACK_VERSION_SKEW=1 to
+downgrade this to a warning.
 ```
 
-Serve does not crash: the affected recipe is marked failed and every other recipe keeps serving. During a hot-swap the previously loaded model stays in memory, so a skewed artifact dropped into a running fleet degrades to "still serving the old model" rather than an outage.
+The remedy is deliberately front-loaded: serve truncates the stored `last_load_error` to 200 characters before it surfaces as `error` in `/v1/health/details`, so the fix, the recipe name, the algorithm, and both versions all have to land inside that budget. The full text still reaches the logs.
+
+**Every future irspack minor starts out refused.** Because the guard consults a table of *verified* pairs, a later 0.5 → 0.6 upgrade refuses artifacts for **all** algorithms — including the five listed above — until someone verifies that transition and adds the rows. This is intended: it keeps the safety default of refusing what has not been tested.
+
+**Fail-open cases.** A header with no `irspack_version` (pre-2.0 artifacts) or an unparseable version on either side logs a warning and loads: an unverifiable version is not evidence of incompatibility, and the deserializer remains the backstop. Note the asymmetry — an unusable *version* fails open, an unusable *`best_class`* on a real skew fails closed.
 
 **Why the check exists.** Without it the failure surfaces from inside irspack's C++ layer as a bare `TypeError: __setstate__(): incompatible function arguments`, which names neither the recipe nor the remedy.
 
-**The concrete case (irspack 0.4.x → 0.5.x).** 0.5.0 added feature-aware iALS, growing `IALSModelConfig`'s pickled state from a 7-tuple to a 10-tuple. `__setstate__` has a strict arity, so:
+**Upgrade procedure.** Upgrade train and serve together, then retrain every IALS and BPRFM recipe. The break is bidirectional, so you cannot stage the upgrade by moving serve first, and you cannot roll serve back to 0.4.x once artifacts are retrained on 0.5.x. There is no in-place artifact migration: the missing fields are internal C++ state that only a retrain produces correctly.
 
-- **IALS artifacts trained on 0.4.x cannot be loaded on 0.5.x**, and 0.5.x artifacts cannot be loaded on 0.4.x. The break is **bidirectional** — you cannot stage the upgrade by moving serve first, and you cannot roll serve back to 0.4.x once artifacts are retrained on 0.5.x.
-- Other algorithms (CosineKNN, TopPop, RP3beta, DenseSLIM, TruncatedSVD) are unaffected in both directions.
+**Blast radius — degraded now, down later.** Serve does not crash; the affected recipe is marked failed and every other recipe keeps serving. During a **hot-swap** the previously loaded model stays in memory (the load error is annotated onto the entry without clearing its `loaded` flag), so a skewed artifact dropped into a running fleet degrades to "still serving the old model" rather than an outage, and the count-based `/v1/health` stays `200`. Only `/v1/health/details`, which also scans error strings, reports `degraded`.
 
-**Upgrade procedure.** Upgrade train and serve together, then retrain every IALS recipe. There is no in-place artifact migration: the missing fields are internal C++ state that only a retrain can produce correctly.
+That resilience is **per-process and does not survive a restart.** At startup there is no previously loaded model to fall back on: the recipe is registered as a stub with `loaded: false`, `/v1/health` returns **503**, and any readiness or liveness probe pointed at `/v1/health` fails. So a skewed artifact sits harmless in a running fleet and takes pods down at the next restart, node drain, or scale-up — potentially long after the deploy that introduced it.
 
-**Escape hatch.** `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW=1` downgrades the refusal to an `irspack_version_skew_allowed` warning. Use it only when you know the artifact's algorithm is unaffected (e.g. a TopPop model across 0.4→0.5). It does not make an incompatible payload loadable — it only returns you to the bare `TypeError`.
+For the shipped Helm chart (`replicaCount: 2`, no `strategy:` block) Kubernetes' rolling-update defaults give `maxUnavailable = floor(0.25 × 2) = 0`, so a rolling update **stalls** with the old pods still serving rather than causing an immediate outage — new pods never become ready, and no old pod may be torn down to make room. The hazard is not the stalled rollout; it is that the degraded state ends at the next *involuntary* restart. The chart also ships `pdb.enabled: false`, so a node drain can take both replicas at once.
+
+**Escape hatch.** `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW=1` downgrades the refusal to an `irspack_version_skew_allowed` warning and lets the payload reach the deserializer. Use it only when you know the artifact is unaffected — most defensibly for an algorithm that is merely *unverified* rather than known-broken. It does not make an incompatible payload loadable: a genuinely broken artifact then fails with the bare `TypeError` this guard exists to replace.
 
 Monitor `recotem_artifact_load_failures_total{reason="version_skew"}` to catch fleets where train and serve have drifted apart.
+
+**A separate axis the guard does not cover: scikit-learn.** `TruncatedSVDRecommender` pickles an sklearn estimator into the payload, and sklearn warns (`InconsistentVersionWarning`) that unpickling across its own minors "might lead to breaking code or invalid results". Recotem range-pins `scikit-learn>=1.8,<1.10` to bound this, but a range **narrows the axis without closing it** — two installs inside the range can still differ, and the irspack guard never inspects the sklearn version. If TruncatedSVD artifacts must be reproducible bit-exact, pin sklearn exactly or build train and serve from the same lock file.
 
 ### `recotem train` exits 3 (DataSourceError)
 

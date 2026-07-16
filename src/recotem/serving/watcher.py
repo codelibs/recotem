@@ -1144,7 +1144,9 @@ def _classify_artifact_error(err_msg: str) -> str:
     lower = err_msg.lower()
     # Must precede the "parse" branch below: the skew message contains the
     # word "version", which that branch's catch-all would otherwise claim.
-    if lower.startswith(SKEW_MSG_PREFIX):
+    # `.lower()` on the prefix so a future capitalisation of SKEW_MSG_PREFIX
+    # cannot silently drop the message through to that catch-all.
+    if lower.startswith(SKEW_MSG_PREFIX.lower()):
         return "version_skew"
     if lower.startswith("deserialization failed:"):
         return "deserialize"

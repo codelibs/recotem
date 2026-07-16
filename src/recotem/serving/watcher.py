@@ -37,6 +37,10 @@ from typing import TYPE_CHECKING, Any
 import fsspec
 import structlog
 
+from recotem._irspack_compat import (
+    SKEW_MSG_PREFIX,
+    check_artifact_irspack_version,
+)
 from recotem._log_safe import format_kid_for_log as _format_kid_for_log
 from recotem._metrics_watcher import inc_recipes_dir_scan_failure as _inc_scan_failure
 from recotem.artifact.format import ArtifactError
@@ -1032,6 +1036,11 @@ class ArtifactWatcher(threading.Thread):
         except (ValueError, UnicodeDecodeError) as exc:
             raise ArtifactError(f"header JSON decode failed: {exc}") from exc
 
+        # Preflight the irspack version before deserializing: a skewed artifact
+        # fails inside the C++ __setstate__ with an error that names neither
+        # the recipe nor the remedy.
+        check_artifact_irspack_version(header_dict, name=name)
+
         recommender = unpickle_payload(payload_bytes)
 
         metadata_df = None
@@ -1133,6 +1142,10 @@ def _classify_artifact_error(err_msg: str) -> str:
     ``artifact/signing.py``.
     """
     lower = err_msg.lower()
+    # Must precede the "parse" branch below: the skew message contains the
+    # word "version", which that branch's catch-all would otherwise claim.
+    if lower.startswith(SKEW_MSG_PREFIX):
+        return "version_skew"
     if lower.startswith("deserialization failed:"):
         return "deserialize"
     if lower.startswith("metadata load failed:"):

@@ -39,6 +39,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
+from recotem._irspack_compat import check_artifact_irspack_version
 from recotem.artifact.format import ArtifactError, parse_header_from_bytes
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
 from recotem.config import ConfigError, ServeConfig
@@ -846,6 +847,20 @@ def _try_load_artifact(
             _failed_entry(recipe, f"header JSON decode failed: {exc}"),
             "header_json",
         )
+
+    # Preflight the irspack version before deserializing: a skewed artifact
+    # fails inside the C++ __setstate__ with an error that names neither the
+    # recipe nor the remedy.
+    try:
+        check_artifact_irspack_version(header_dict, name=recipe.name)
+    except ArtifactError as exc:
+        logger.error(
+            "initial_artifact_version_skew",
+            name=recipe.name,
+            kid=hdr.kid,
+            error=str(exc),
+        )
+        return _failed_entry(recipe, str(exc)), "version_skew"
 
     try:
         recommender = unpickle_payload(payload_bytes)

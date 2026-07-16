@@ -1214,7 +1214,7 @@ wheels = [
 
 [[package]]
 name = "irspack"
-version = "0.4.2"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorlog" },
@@ -1229,18 +1229,18 @@ dependencies = [
     { name = "scipy" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fa/5c/83c9d21bd624b168a771944422ec71d32b6ecd4e63b9cb26019cdfc5399d/irspack-0.4.2-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:eb0d5c13be6af3ed4e48b1737adea421e17fa7fb9c546f59291494ea52e942fb", size = 396325, upload-time = "2026-05-15T00:53:31.848Z" },
-    { url = "https://files.pythonhosted.org/packages/34/be/3bc5d5872610f562f93540819a7c9a5a8d8c9a89b78873b3a999534de2a4/irspack-0.4.2-cp312-abi3-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:8b04f6655483f8f2bc55ecf0466b2e8dc57db16cdba9f03e9de56f705a96c2af", size = 478551, upload-time = "2026-05-15T00:53:33.064Z" },
-    { url = "https://files.pythonhosted.org/packages/12/ef/a074dc6b166c4cfb83c54f697a4819efce6bd47f44ce465de7a739f7eab6/irspack-0.4.2-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:cd6bf77e4dc04fb3b10f8795d7ab9c1895cfb1d51780385d284e9bc91bdfed89", size = 512888, upload-time = "2026-05-15T00:53:34.436Z" },
-    { url = "https://files.pythonhosted.org/packages/0b/55/6a2c563a3b8a0845a323ac7b76dd484e256b105f39fe410b9c7de22ec265/irspack-0.4.2-cp312-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:35b6058048c1ae14f7d03175206bbe1d4bcd0c999cede24658e28464d76d79f6", size = 2252996, upload-time = "2026-05-15T00:53:35.821Z" },
-    { url = "https://files.pythonhosted.org/packages/20/ef/daffd3f85012497dbc638649021b0e1b1190277d34ea235ae866c4832024/irspack-0.4.2-cp312-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:dd6216d0ac574136d975b15f2385eb893059a0ac23d275c198b170865dd5df97", size = 2358038, upload-time = "2026-05-15T00:53:37.749Z" },
-    { url = "https://files.pythonhosted.org/packages/ee/67/c5b7564c89478f766365ef51d6cf11045277eed59535456b9f94aa29841b/irspack-0.4.2-cp312-abi3-win_amd64.whl", hash = "sha256:1c07395cc3b5deba9eaff43c5a0963c7db0c38a032220c6e023e25116fe04752", size = 486857, upload-time = "2026-05-15T00:53:39.416Z" },
-    { url = "https://files.pythonhosted.org/packages/c3/80/b4ea1f43cd4c742b5322ca46a39d2b92b5b553ddaa6f95253fcea5c8f4a1/irspack-0.4.2-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:d1bb242d81e0cdd8c2c576cda1f8adc676264c1f7850e72bdb735b2eb0c858b7", size = 410781, upload-time = "2026-05-15T00:53:40.765Z" },
-    { url = "https://files.pythonhosted.org/packages/8a/9d/670cd042a0469792e0143b933a0fef597c7dbba0913aa5ec815abdc3a040/irspack-0.4.2-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f73750ad7ca6f28fbf6332beef7674e29bc11dfe8543b26f1007b46e12fb64f3", size = 501886, upload-time = "2026-05-15T00:53:42.367Z" },
-    { url = "https://files.pythonhosted.org/packages/9b/b9/b699b51a69501878b3e1ca7ccc03600f91bf34c49bcda604d02bd6556ce3/irspack-0.4.2-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3bb492b0795bb56a53abe2622e9994de83332e8491b158daafcce3b0ecc19dd8", size = 537533, upload-time = "2026-05-15T00:53:43.917Z" },
-    { url = "https://files.pythonhosted.org/packages/5f/43/63e09d2521f5733e02cff2351e1778e8cc81b0c77e645cc3c45a557a78e2/irspack-0.4.2-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:cb54882aa4121d50ec500744d575d7e1e15b1e349e0aa0cbcbcaafa0b7bfd053", size = 2277780, upload-time = "2026-05-15T00:53:45.302Z" },
-    { url = "https://files.pythonhosted.org/packages/37/08/a6a147fca7b473eddbe4bc0ca3f6da43c01d1e131ada84f91a07b3fa6e5e/irspack-0.4.2-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:d17a1cc08c9abbbc1d293f7e9af26e6ed0e7505be035d2713cb421652d10dd5f", size = 2381875, upload-time = "2026-05-15T00:53:47.129Z" },
-    { url = "https://files.pythonhosted.org/packages/c5/aa/a3087387b3f757ab75c3c95a989e3ef87f327f577ced0287f9b3cb755fa5/irspack-0.4.2-cp314-cp314t-win_amd64.whl", hash = "sha256:bd32dd2bc1a1c29a2fae59dc50e6b34c7bde97b4024e6e287e88a397a33b998f", size = 530862, upload-time = "2026-05-15T00:53:48.769Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/69/df2979e24a2977a98a84cda31c368c125a830450032113a4490a7dee6937/irspack-0.5.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:a3dcfbd5cf269ff2910b4c586f2d7ddde7ea4b3fa1b2f0047b71aa985bff6da6", size = 478125, upload-time = "2026-07-16T05:32:11.969Z" },
+    { url = "https://files.pythonhosted.org/packages/05/04/9ccbae1753e2e724b8325bc2beb99f083e582b717c8a0a44209613b27c3a/irspack-0.5.0-cp312-abi3-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:98803856a5279292d8dc84676fca1f282e8733143b5b9f3d121d197acf157545", size = 582678, upload-time = "2026-07-16T05:32:13.51Z" },
+    { url = "https://files.pythonhosted.org/packages/40/da/631ca32281cbe2ed531cc35cc1d5e4d9391ba6c10796f6a633222d2780b7/irspack-0.5.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d40d0daeab652b52639a47bc99b9c51111c8ad126317f858c74a8f9735df7010", size = 632894, upload-time = "2026-07-16T05:32:15.033Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/ff/5e06bf165f11020a42789bd8424b1415d455c5d969f4fa5c65683f5aeb85/irspack-0.5.0-cp312-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:189506c09a52ecf6ee57d99699ce6a22aea8c46c1cc5486a8b1af7cc49321bbc", size = 2357067, upload-time = "2026-07-16T05:32:17.137Z" },
+    { url = "https://files.pythonhosted.org/packages/5a/e1/28eb13db55662f82e6c6864da3f87356a7a45102dc10d563e1a222f7188d/irspack-0.5.0-cp312-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:be396f7bc4b6c7c07a59dc7088f70e90ef6706a0af0c5158fc52b47ef13a915e", size = 2478532, upload-time = "2026-07-16T05:32:18.737Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/1e/ec1bcf2435187c83d28129b84100d02afec538393a6889a6c287ba14f6fe/irspack-0.5.0-cp312-abi3-win_amd64.whl", hash = "sha256:32a10c624b27de9a2beabf92e37a04e2a01cae1bbbd65d09b648977c017d00bb", size = 538050, upload-time = "2026-07-16T05:32:20.31Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/13/402af2c5ff66789a11721e13e2658fd1ebbca7596a7cc0d240b86725a99c/irspack-0.5.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:3dc9f95850c7678ac85be918e6b077b0533111e90415afc23c08f146f1c933a0", size = 492541, upload-time = "2026-07-16T05:32:21.746Z" },
+    { url = "https://files.pythonhosted.org/packages/af/0e/d2b3eaba595d76f71aa9184a2548e606e5d5885f182b638c66a1c9580305/irspack-0.5.0-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:4f095efacbdfbf651ec071453401ae803f0e7766adc45a8c7f4d8c064e5a591a", size = 608286, upload-time = "2026-07-16T05:32:23.3Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/9a/aa312499791951933919246a688114e45657ee5803eebfc59e36ef712a78/irspack-0.5.0-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8d5097de93803a8c8592e08d0dec2f0da8d2c06f61bdb22311544174452dcd82", size = 659496, upload-time = "2026-07-16T05:32:25.015Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/5c/0ed379991526eaeade6f773d1df9695fc73574c04a95ddcb539c048359b5/irspack-0.5.0-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:686a29da3ccf7533cd8cdc4a28552722a317be31af9edc02c4545c43e9d47c88", size = 2385162, upload-time = "2026-07-16T05:32:26.904Z" },
+    { url = "https://files.pythonhosted.org/packages/77/db/64a3d07596cbeb6533fe4b6f6c7a9f911fae76d111659f45e43e3c8c988d/irspack-0.5.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:288bdb72f984b249ce476ea837decdefd72e25b1ffe8316378131eacc93f6204", size = 2505284, upload-time = "2026-07-16T05:32:28.653Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/9d/1b8333f87fc42c3f0638d481d4c9780c89bed3e834d4d2f5b26ee45115e7/irspack-0.5.0-cp314-cp314t-win_amd64.whl", hash = "sha256:5eff0847f1e4acac3c0f260049532d56b3bd334c2fd25ae1c28fe822d5a839bc", size = 569629, upload-time = "2026-07-16T05:32:30.691Z" },
 ]
 
 [[package]]
@@ -2236,7 +2236,7 @@ requires-dist = [
     { name = "gcsfs", marker = "extra == 'gcs'", specifier = ">=2024.6,<2026" },
     { name = "google-cloud-bigquery", marker = "extra == 'bigquery'", specifier = ">=3.25,<4" },
     { name = "google-cloud-bigquery-storage", marker = "extra == 'bigquery'", specifier = ">=2.38.0,<3" },
-    { name = "irspack", specifier = "==0.4.2" },
+    { name = "irspack", specifier = "==0.5.0" },
     { name = "numpy", specifier = ">=2.1,<3" },
     { name = "optuna", specifier = ">=4.1,<5" },
     { name = "pandas", specifier = ">=3.0.3,<4" },

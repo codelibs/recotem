@@ -5,6 +5,53 @@ All notable changes to Recotem are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - Unreleased
+
+### Added
+
+- **irspack version-skew guard.** `serve` now compares an artifact header's
+  `irspack_version` against the running irspack at major.minor granularity
+  *before* deserializing, and refuses a mismatch with an `ArtifactError` naming
+  both versions and the remedy. Previously the skew surfaced from irspack's C++
+  layer as a bare `TypeError: __setstate__(): incompatible function arguments`,
+  which identified neither the recipe nor the fix. The affected recipe is marked
+  `loaded: false` (reason `version_skew`); serve does not crash and other
+  recipes keep serving. Patch-level drift is tolerated.
+- `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW` — truthy downgrades the skew check to a
+  warning, for operators who know their artifact's algorithm is unaffected.
+- `recotem_artifact_load_failures_total` gained a `version_skew` reason label.
+
+### Changed
+
+- **irspack upgraded from 0.4.2 to 0.5.0.** irspack 0.5.0 adds feature-aware
+  iALS, cache/Eigen performance work, and a reworked tuning API. Recotem drives
+  Optuna itself and does not call `BaseRecommender.tune`, so none of irspack's
+  documented breaking changes (`tune_with_study` removal, `fixed_params` →
+  keyword arguments, `random_seed` → `tuning_random_seed`) affect Recotem.
+  **IALS models trained on 0.4.x must be retrained** — see below.
+
+### Migrating to irspack 0.5.0
+
+irspack 0.5.0 changed `IALSModelConfig`'s pickled state from a 7-tuple to a
+10-tuple (the three new fields back feature-aware iALS). Its `__setstate__` is
+a strict-arity binding, so **IALS artifacts trained with irspack 0.4.x cannot be
+loaded under 0.5.x**. This is an upstream format change that irspack's own
+changelog does not mention; Recotem cannot migrate such artifacts in place,
+because the missing fields are internal C++ state that only a retrain produces
+correctly.
+
+- **Action required:** retrain every recipe whose `best_class` is
+  `IALSRecommender` and redeploy the artifact.
+- The break is **bidirectional**: 0.5.x-trained IALS artifacts also fail to load
+  on 0.4.x. Upgrade `train` and `serve` together — the upgrade cannot be staged
+  serve-first, and serve cannot be rolled back to 0.4.x once artifacts have been
+  retrained on 0.5.x.
+- **Only IALS is affected.** `CosineKNN`, `TopPop`, `RP3beta`, `DenseSLIM`, and
+  `TruncatedSVD` artifacts load unchanged in both directions.
+- Artifacts that skew are refused with an actionable error rather than a raw
+  `TypeError` (see the version-skew guard above). Runbook:
+  [docs/operations.md](docs/operations.md#irspack-version-skew).
+
 ## [2.0.0] - 2026-06-27
 
 Recotem 2.0 is a **complete rewrite**. The 1.x multi-service web application

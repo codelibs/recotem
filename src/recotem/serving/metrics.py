@@ -184,6 +184,11 @@ _LOAD_FAILURE_REASONS: frozenset[str] = frozenset(
         "yaml",
         "unexpected",
         "dir_scan",
+        # Artifact's irspack major.minor differs from the running irspack.
+        # Distinct from "deserialize" because the payload was never decoded:
+        # this is a fleet-consistency signal (train and serve disagree) whose
+        # remedy is a retrain, not a corrupt-bytes investigation.
+        "version_skew",
         # Stat hung in the executor thread (object-store non-responsive).
         # Distinct from "read" (file could not be opened/parsed) because stat
         # timeouts are an infrastructure signal rather than a data signal.
@@ -197,7 +202,8 @@ def inc_artifact_load_failure(recipe: str, reason: str = "unexpected") -> None:
 
     *reason* must be one of the values in ``_LOAD_FAILURE_REASONS``
     (``read | parse | hmac | header_json | deserialize | metadata | yaml |
-    unexpected | dir_scan | timeout``); any other value is silently coerced
+    unexpected | dir_scan | timeout | version_skew``); any other value is
+    silently coerced
     to ``"unexpected"`` so callers cannot accidentally explode the cardinality
     of the label.
     """

@@ -46,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # irspack 0.4.2 ships abi3 (stable ABI) wheels tagged cp312-abi3 that
+        # irspack 0.5.0 ships abi3 (stable ABI) wheels tagged cp312-abi3 that
         # also satisfy Python 3.13 and 3.14 (non-free-threaded), plus dedicated
         # cp314t wheels for free-threaded builds.  Matrix below covers the
         # supported GIL builds.

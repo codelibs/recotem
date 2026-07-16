@@ -183,7 +183,7 @@ The four layered controls:
 
 The FQCN allow-list in `SafeUnpickler.find_class` is a secondary layer that operates independently of HMAC. Its purpose is to bound the blast radius if HMAC is ever bypassed (e.g. a signing-key compromise that has not yet been rotated, or a future HMAC vulnerability). It does **not** guarantee safety by itself: a sufficiently broad allow-list still exposes whatever API surface the permitted libraries expose.
 
-The allow-list is frozen per irspack 0.4.x. If irspack adds or renames recommender classes, the list is updated with the corresponding Recotem release.
+The allow-list is frozen per irspack 0.5.x. If irspack adds or renames recommender classes, the list is updated with the corresponding Recotem release.
 
 The FQCN allow-list permits only these classes. Any other class outside both this list and the module-prefix allow-list triggers `ArtifactError` before construction:
 

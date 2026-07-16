@@ -1,7 +1,24 @@
 # Version locations and verification
 
 Every place a version string lives, plus the commands to bump them and prove
-they are consistent. `X.Y.Z` is the release version (e.g. `2.0.0`); replace it.
+they are consistent.
+
+Throughout, set both variables first and use them — **never paste `X.Y.Z`
+literally**. An unsubstituted placeholder writes `tag: "X.Y.Z"` and
+`version: X.Y.Z` (invalid SemVer) into the manifests, and no CI job lints the
+Helm chart, so only a human reading the diff would catch it.
+
+```bash
+PREV=2.0.0     # the currently-pinned released version — check it, don't assume
+NEW=2.1.0      # the version being released
+```
+
+`PREV` is whatever the manifests pin *today*, which after any release is the
+**last released final**, not a pre-release. Read it, don't guess:
+
+```bash
+grep -oE 'recotem:[0-9][^ "]*' examples/k8s/serve-deployment.yaml
+```
 
 ## Package version — the source of truth (always bump together)
 
@@ -23,9 +40,8 @@ shipped in 2.0.0 — always change both.
 
 ## Deployment image tags — bump at release, NOT for dev cycles
 
-These pin a *published* Docker image, so they only move to a real released tag.
-At release, replace the pre-release tag (`2.0.0a0`, `2.0.0-alpha.0`) with
-`X.Y.Z`. During Phase 5 (dev bump) leave them on the last released tag.
+These pin a *published* Docker image, so they only ever move to a real released
+version. During Phase 5 (dev bump) leave them on the last released tag.
 
 | File | What to change |
 |------|----------------|
@@ -33,31 +49,72 @@ At release, replace the pre-release tag (`2.0.0a0`, `2.0.0-alpha.0`) with
 | `helm/recotem/values.yaml` | `image.tag` |
 | `examples/k8s/serve-deployment.yaml` | `image:` tag + `app.kubernetes.io/version` label |
 | `examples/k8s/cronjob.yaml` | `image:` tag |
-| `docs/deployment/docker.md` | the "already pin ..." note |
 | `docs/deployment/k8s.md` | `image:` tags + the `values.yaml` excerpt |
+| `docs/deployment/docker.md` | the "already pin ..." sentence — **only that one** |
 
-Mechanical replacement (run from repo root, macOS `sed`):
+### Real pins vs. illustrative examples
+
+`docs/deployment/docker.md` contains version strings that are *examples*, not
+pins, and they must not be bumped:
+
+- the tag table: ``| `2.0.0`, `2.0.1`, ... (semver `MAJOR.MINOR.PATCH`)`` — a
+  blanket replace turns this into ``| `2.1.0`, `2.0.1`, ...``, which is nonsense.
+- the same paragraph's "always pin to a semver tag (e.g. `2.0.0`)" — an
+  illustration of the *form*, not a claim about the current release.
+
+Only "The Helm chart and `examples/k8s/` already pin `2.0.0`" is a factual claim
+that must track the release. **A blanket `s/$PREV/$NEW/g` over this file is
+wrong.** The commands below are targeted for that reason.
+
+### Bump the pins
+
+Portable across BSD (macOS) and GNU userland, and safe in both `bash` and `zsh`.
+Two traps this avoids: GNU `sed -i` takes its suffix *attached* (`-i.bak`), so
+the BSD form `sed -i ''` breaks on Linux — it reads the next argument as a script
+file and dies with `sed: can't read ...: No such file or directory` (exit 2),
+which in the `-e` form still applies the edit partially. Using `perl -pi -e`
+sidesteps the whole BSD-vs-GNU `-i` divergence. Second trap: `zsh` does not
+word-split unquoted variables, so `for f in $FILES` iterates once on the whole
+string. An array subscripted with `[@]` behaves identically in both shells.
 
 ```bash
-sed -i '' 's|recotem:2.0.0a0|recotem:X.Y.Z|g; s|tag: "2.0.0a0"|tag: "X.Y.Z"|g' \
-  docs/deployment/k8s.md examples/k8s/cronjob.yaml helm/recotem/values.yaml
-sed -i '' 's|recotem:2.0.0a0|recotem:X.Y.Z|g; s|version: "2.0.0a0"|version: "X.Y.Z"|g' \
-  examples/k8s/serve-deployment.yaml
-sed -i '' 's|^version: 2.0.0-alpha.0|version: X.Y.Z|; s|^appVersion: "2.0.0a0"|appVersion: "X.Y.Z"|' \
+PINS=(helm/recotem/values.yaml helm/recotem/Chart.yaml \
+      examples/k8s/serve-deployment.yaml examples/k8s/cronjob.yaml \
+      docs/deployment/k8s.md)
+
+# guards: refuse to run on an unsubstituted placeholder or a wrong PREV
+[ "$NEW" != "X.Y.Z" ] || { echo "substitute NEW first"; exit 1; }
+grep -q "$PREV" helm/recotem/values.yaml || { echo "PREV=$PREV is not pinned"; exit 1; }
+
+perl -pi -e "s/\Qrecotem:$PREV\E/recotem:$NEW/g; \
+             s/\Qtag: \"$PREV\"\E/tag: \"$NEW\"/g; \
+             s/\Qapp.kubernetes.io\/version: \"$PREV\"\E/app.kubernetes.io\/version: \"$NEW\"/g" \
+  "${PINS[@]}"
+
+perl -pi -e "s/^version: \Q$PREV\E$/version: $NEW/; \
+             s/^appVersion: \"\Q$PREV\E\"$/appVersion: \"$NEW\"/" \
   helm/recotem/Chart.yaml
+
+perl -pi -e "s/\Qalready pin \`$PREV\`\E/already pin \`$NEW\`/g" \
+  docs/deployment/docker.md
+
+git diff --stat "${PINS[@]}" docs/deployment/docker.md   # MUST be non-empty
 ```
 
-Adjust the search pattern to whatever the current pre-release tag actually is.
+**An empty diff means the replacement missed — that is a failure, not a pass.**
 
 ## Leave these alone
 
 Historical references in code comments and test docstrings (e.g. "since
 2.0.0a0", "old pre-2.0.0a0 path" in `src/recotem/_idmap.py`,
 `src/recotem/artifact/signing.py`, `tests/unit/test_artifact_signing.py`)
-document the migration history and must stay. A `grep` will surface them — do
-not "fix" them.
+document the migration history and must stay. They live in `*.py`, which the pin
+check below never reads, so they cannot collide with it.
 
-## Verification block (run before committing)
+## Verification block (run before committing — Phase 2 only)
+
+Do **not** run the pin check during Phase 5: the dev bump deliberately leaves the
+manifests on the last released version, and this block would flag them.
 
 ```bash
 # 1. all three package-version locations agree
@@ -66,44 +123,71 @@ grep . src/recotem/version.py
 grep -A1 'name = "recotem"' uv.lock | grep version
 
 # 2. the installed package reports the right version
-uv run python -c "from recotem.version import __version__; print('__version__ =', __version__)"
+uv run python -c "from recotem.version import __version__; print(__version__)"
 
-# 3. no stale pre-release image tag remains (historical comments are fine)
-grep -rn '2\.0\.0a0\|2\.0\.0-alpha\|\.dev0' \
-  --include='*.yaml' --include='*.yml' --include='*.md' --include='*.toml' . \
-  | grep -v '/.git/'
+# 3. every deployment pin equals the release version
+PINS=(helm/recotem/values.yaml helm/recotem/Chart.yaml \
+      examples/k8s/serve-deployment.yaml examples/k8s/cronjob.yaml \
+      docs/deployment/k8s.md docs/deployment/docker.md)
+PAT='ghcr\.io/codelibs/recotem:[0-9][^ "]*|^ *tag: "[0-9][^"]*"|^version: [0-9][^ ]*'
+PAT="$PAT"'|^appVersion: "[0-9][^"]*"|app\.kubernetes\.io/version: "[0-9][^"]*"'
+PAT="$PAT"'|already pin `[0-9][^`]*`'
+
+ALL=$(grep -onE "$PAT" "${PINS[@]}")
+[ -n "$ALL" ] || { echo "FAIL: no pins matched — the check itself is broken"; exit 1; }
+echo "$ALL" | grep -v "$NEW" && { echo "FAIL: stale pins above"; exit 1; } \
+                            || echo "OK: all $(echo "$ALL" | wc -l | tr -d ' ') pins = $NEW"
 
 # 4. quality gates
 uv run ruff check src tests
 uv run ruff format --check src tests
-uv run pytest tests
+uv run pytest tests            # ~50s, 1800+ tests
+uv run pytest tests -m slow    # the tier CI never runs
 ```
 
-Step 3 should print nothing (or only intentional historical comment lines).
-The full suite without `-m slow` is ~50s and should report all-passed.
+Step 3 must print `OK: all <n> pins = <NEW>`. **An empty match list is a
+failure, not a pass** — it means the patterns no longer match the tree, which is
+exactly how a stale-pin bug hides. Never treat "no output" as success.
 
 ## recotem-docs version locations (Phase 4)
 
-In the separate `recotem-docs` repo, the same kind of pins live in EN + JA:
+In the separate `recotem-docs` repo the same pins live in EN + JA:
 
 - `docs/deployment/docker.md`, `ja/docs/deployment/docker.md` — the "already
-  pin ..." note
+  pin ..." sentence (JA: "すでに `X.Y.Z` にピン留め")
 - `docs/deployment/kubernetes.md`, `ja/docs/deployment/kubernetes.md` — image
   tags and the `values.yaml` excerpt
 
-Use the same `sed` replacement (it covers the JA "ピン留め" sentence too):
-
 ```bash
-sed -i '' 's|recotem:2.0.0a0|recotem:X.Y.Z|g; s|tag: "2.0.0a0"|tag: "X.Y.Z"|g; \
-  s|already pin `2.0.0a0`|already pin `X.Y.Z`|g; \
-  s|すでに `2.0.0a0` にピン留め|すでに `X.Y.Z` にピン留め|g' \
-  docs/deployment/kubernetes.md ja/docs/deployment/kubernetes.md \
-  docs/deployment/docker.md ja/docs/deployment/docker.md
+DOCS=(docs/deployment/kubernetes.md ja/docs/deployment/kubernetes.md \
+      docs/deployment/docker.md ja/docs/deployment/docker.md)
+
+perl -pi -e "s/\Qrecotem:$PREV\E/recotem:$NEW/g; \
+             s/\Qtag: \"$PREV\"\E/tag: \"$NEW\"/g; \
+             s/\Qalready pin \`$PREV\`\E/already pin \`$NEW\`/g; \
+             s/\Qすでに \`$PREV\` にピン留め\E/すでに \`$NEW\` にピン留め/g" \
+  "${DOCS[@]}"
+
+git diff --stat "${DOCS[@]}"    # MUST be non-empty
 ```
 
-Then confirm nothing remains outside the archive:
+The `docker.md` files share the "already pin" / "すでに...ピン留め" sentence with
+an illustrative "e.g. `2.0.0`" / "例: `2.0.0`" on the same line — the targeted
+`perl` above moves only the assertion, not the example. Do not use a blanket
+`s/$PREV/$NEW/g` here.
+
+Then confirm nothing stale remains outside the archive. The check must cover
+**all four** pin forms the bump touches, not just `recotem:` — a grep that
+verifies fewer forms than the replacement edits is how a stale pin slips through
+while the check prints `OK`:
 
 ```bash
-grep -rn '2\.0\.0a0\|2\.0\.0-alpha' --include='*.md' . \
-  | grep -v node_modules | grep -v '/1.0/'
+PAT='recotem:[0-9][^ "]*|tag: "[0-9][^"]*"|already pin `[0-9][^`]*`|すでに `[0-9][^`]*` にピン留め'
+ALL=$(grep -rnoE "$PAT" --include='*.md' . | grep -v node_modules | grep -v '/1.0/')
+[ -n "$ALL" ] || { echo "FAIL: no pins matched — the check itself is broken"; exit 1; }
+echo "$ALL" | grep -v "$NEW" && { echo "FAIL: stale pins above"; exit 1; } \
+                            || echo "OK: all $(echo "$ALL" | wc -l | tr -d ' ') doc pins = $NEW"
 ```
+
+An empty match list is a failure, not a pass — same rule as the main
+verification block.

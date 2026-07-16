@@ -3142,7 +3142,7 @@ def test_extract_kid_safe_malformed_utf8_kid_returns_sentinel_and_reason() -> No
     # UnicodeDecodeError shouldn't propagate.  Either way, the function
     # returns a tuple without raising.
     assert isinstance(kid_log, str), "_extract_kid_safe must return a str for kid_log"
-    assert isinstance(reason, (str, type(None))), "reason must be str or None"
+    assert isinstance(reason, str | None), "reason must be str or None"
     # The result must contain \\x00 in the sentinel OR no reason (decoded OK).
     # Either outcome is acceptable; this test verifies no exception is raised.
 
@@ -5052,4 +5052,154 @@ def test_generic_except_resets_post_hmac_streak(
 
     assert "m9_test" not in watcher._post_hmac_failure_streak, (
         "Generic except must reset the post-HMAC failure streak (M9)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hot-swap of an irspack-version-skewed artifact keeps the old model serving
+# ---------------------------------------------------------------------------
+
+
+def _write_skewed_artifact(path: Path) -> None:
+    """Write a signed artifact the irspack guard must refuse.
+
+    ``IALSRecommender`` is deliberately absent from ``_VERIFIED_COMPATIBLE``
+    (its pickled model state changed shape at irspack 0.5.0), so a 0.4.2 header
+    under a running 0.5.x is refused. The pair matters: a ``TopPopRecommender``
+    header at the same versions is on the allow-list and would load fine, which
+    is why this cannot reuse ``_write_valid_artifact``'s header.
+    """
+    import pickle  # noqa: S403
+
+    payload = pickle.dumps({"key": "test"}, protocol=4)  # noqa: S301
+    data = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={
+            "recipe_name": "skew_real",
+            "best_class": "IALSRecommender",
+            "irspack_version": "0.4.2",
+            "trained_at": "2026-01-01T00:00:00Z",
+        },
+        payload_bytes=payload,
+    )
+    path.write_bytes(data)
+
+
+def test_hot_swap_version_skewed_artifact_keeps_serving_old_model(
+    tmp_path: Path,
+) -> None:
+    """A skewed hot-swap must degrade to "still serving the old model".
+
+    docs/operations.md promises operators that a version-skewed artifact
+    appearing under a live serve degrades rather than causing an outage. Three
+    things have to hold together for that promise to be true, and this pins all
+    three against a REAL ModelRegistry / ModelEntry / ArtifactWatcher:
+
+    1. The swap does not happen (the skewed payload never reaches the model).
+    2. The failure is counted as exactly ``version_skew`` — the label
+       operator alerting keys off.
+    3. The previously loaded recommender is still in memory and still marked
+       loaded, so in-flight recommend calls keep being served.
+    """
+    from unittest.mock import patch
+
+    import irspack
+
+    from recotem.serving.registry import ModelEntry
+
+    assert irspack.__version__.startswith("0.5."), (
+        "precondition: this test builds a 0.4.2 header to skew against a "
+        f"running 0.5.x irspack; got {irspack.__version__}"
+    )
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+
+    yaml_path = _write_recipe_yaml(recipes_dir, "skew_real", artifact_path)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+
+    original_recommender = MagicMock()
+    original_recommender.get_recommendation_for_known_user_id.return_value = [
+        ("item_x", 0.99)
+    ]
+
+    good_entry = ModelEntry(
+        name="skew_real",
+        recommender=original_recommender,
+        header={"best_class": "TopPop", "trained_at": "2026-01-01T00:00:00Z"},
+        kid="active",
+        loaded=True,
+        last_load_error=None,
+    )
+    good_entry.artifact_path = str(artifact_path)
+
+    registry = ModelRegistry()
+    registry.replace("skew_real", good_entry)
+
+    cfg = _make_serve_config()
+    kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
+
+    initial_states = build_initial_states([recipe], {"skew_real": good_entry})
+    initial_states["skew_real"].last_sha256 = ""  # force reload
+
+    reasons: list[str] = []
+    original_inc = _metrics.inc_artifact_load_failure
+
+    def _capturing_inc(name: str, reason: str = "unexpected") -> None:
+        if name == "skew_real":
+            reasons.append(reason)
+        original_inc(name, reason=reason)
+
+    # Swap in an artifact whose header records an irspack the guard refuses.
+    _write_skewed_artifact(artifact_path)
+
+    with patch.object(
+        _metrics, "inc_artifact_load_failure", side_effect=_capturing_inc
+    ):
+        watcher = ArtifactWatcher(
+            registry=registry,
+            recipes_dir=recipes_dir,
+            serve_config=cfg,
+            key_ring=kr,
+            initial_states=initial_states,
+        )
+        watcher.start()
+        try:
+            time.sleep(0.5)
+        finally:
+            watcher.stop()
+            watcher.join(timeout=2.0)
+
+    entry = registry.get("skew_real")
+    assert entry is not None, "Entry must remain in registry after a skewed hot-swap"
+
+    # 2. The operator-facing alert contract: exactly "version_skew", not a
+    #    neighbouring label such as "parse" or "unexpected". The watcher retries
+    #    the still-skewed artifact once per tick, so the count is timing-bound
+    #    and only the label is asserted.
+    assert reasons, "a skewed hot-swap must count an artifact load failure"
+    assert set(reasons) == {"version_skew"}, (
+        f"skewed hot-swap must be counted as version_skew; got {reasons!r}"
+    )
+
+    # 1. + 3. The swap was refused AND the old model is still serving.
+    assert entry.recommender is original_recommender, (
+        "The skewed artifact must not swap in; the original recommender object "
+        "must still be the one in the registry"
+    )
+    assert entry.loaded is True, (
+        "A refused hot-swap must leave the entry loaded — serve degrades to "
+        "'still serving the old model', not to an outage (docs/operations.md)"
+    )
+    assert entry.last_load_error is not None, (
+        "last_load_error must be set so /health/details surfaces the skew"
+    )
+    assert "retrain" in entry.last_load_error.lower(), (
+        f"the remedy must survive into last_load_error: {entry.last_load_error!r}"
     )

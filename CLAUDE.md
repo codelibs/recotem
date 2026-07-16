@@ -42,6 +42,7 @@ src/recotem/
 ├── metadata/           item metadata loader (CSV/Parquet via fsspec)
 ├── serving/            FastAPI app, ModelRegistry, ArtifactWatcher
 ├── _idmap.py           Neutral home for IDMappedRecommender (canonical FQCN)
+├── _irspack_compat.py  Verified-compatible allow-list guarding irspack pickle skew
 ├── _http_fetch.py      SSRF-guarded HTTP/HTTPS fetcher with sha256 verify
 ├── _size_cap.py        Shared download-size cap helper (used by csv source + metadata loader)
 ├── _metrics_bigquery.py  Neutral Prometheus counter for BQ Storage API fallbacks (no serving dep)
@@ -128,7 +129,9 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
 - Header JSON carries `recipe_name`, `recipe_hash`, `best_class`, `best_params`,
   `best_score`, `metric`, `cutoff`, `tuning`, `data_stats`, `recotem_version`,
   `irspack_version`, `trained_at`. Inspectable without deserialisation via
-  `recotem inspect`.
+  `recotem inspect`. `best_class` + `irspack_version` are the two fields
+  `_irspack_compat.py` reads to decide whether the payload is safe to
+  deserialize on this host.
 - Multi-kid `KeyRing` (env: `RECOTEM_SIGNING_KEYS=kid1:hex,kid2:hex`) enables
   zero-downtime key rotation. Operations doc has the four-step procedure (Step 4 includes verification).
 - Payload uses Python's native binary serialisation because irspack's
@@ -214,7 +217,7 @@ uv run ruff format --check src tests
 | `RECOTEM_METRICS_ENABLED` | (empty) | Opt-in Prometheus `/metrics` endpoint. Truthy values: `1`, `true`, `yes`, `on`. Requires `recotem[metrics]` extra. |
 | `RECOTEM_LOCK_DIR` | (empty) | Override directory for per-recipe training lock files. Local outputs always lock at `<output_path>.lock`; remote outputs (`s3://`, `gs://`, ...) need a host-local path and fall back to `<tempdir>/recotem-locks/`. `flock` is host-local — across hosts use scheduler-level mutex (`concurrencyPolicy: Forbid`). |
 | `RECOTEM_BQ_REQUIRE_STORAGE_API` | (empty) | When truthy (`1`/`true`/`yes`/`on`), the BigQuery source raises `DataSourceError` instead of falling back to the REST path when the Storage Read API fails. Requires the service account to hold `bigquery.readSessions.create`. |
-| `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW` | (empty) | Truthy downgrades the serve-side irspack version-skew check from `ArtifactError` to a warning. By default an artifact whose header `irspack_version` differs from the running irspack at **major.minor** is refused before deserialization (irspack's pickle format is not stable across minors — 0.5.0 changed the IALS model state). The remedy is to retrain; this flag is for operators who know their algorithm is unaffected. |
+| `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW` | (empty) | Truthy downgrades the serve-side irspack version-skew check from `ArtifactError` to a warning. The default rule is an **allow-list** (`_irspack_compat.py`): same **major.minor** always loads (patch drift tolerated); a differing major.minor loads only when `(best_class, header_mm, running_mm)` is in the verified table — CosineKNN / TopPop / RP3beta / DenseSLIM / TruncatedSVD across (0,4)↔(0,5), both directions. IALS (known break: `IALSModelConfig.__setstate__` arity 7→10 at 0.5.0) and BPRFM (unverifiable: gated behind the separately installed `lightfm` package, which has no py3.12 release, so irspack never exports it) are refused, as is a missing/non-str `best_class` on a real skew (fail-closed) and every not-yet-verified future transition. Missing/unparseable version fails **open**. The remedy is to retrain; this flag is for operators who know their artifact is unaffected. |
 | `RECOTEM_STARTUP_PARALLELISM` | (empty = auto) | Number of parallel threads used to load artifacts at `recotem serve` startup. Leave unset (default) for auto-sizing (`min(len(recipes), 8)`). Setting to `0` is NOT a sentinel — it clamps to 1 and emits an `env_var_clamped` warning. Clamped [1, 32]. Set to `1` to force sequential loading for debugging. |
 | `RECOTEM_MAX_SQL_ROWS` | 50_000_000 | Hard cap on rows returned by the SQL data source. Clamped [1_000, 500_000_000]. Caps **row count**, not DataFrame resident memory — see `docs/data-sources/sql.md` for the memory-bound caveat. |
 | `RECOTEM_SQL_ALLOW_PRIVATE` | (empty) | Truthy opts the SQL source into private/loopback DSN hosts (default deny, for SSRF). Covers every driver-routing form — netloc, `?host=`, `?hostaddr=`, `?service=`, `?unix_socket=`, absolute-path host, and network DSNs with no host info — all default-deny without this flag. Also disables the DNS-rebinding re-check before each probe/fetch — opting in means trusting the host end-to-end. |

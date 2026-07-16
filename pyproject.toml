@@ -55,6 +55,16 @@ dependencies = [
     "numpy>=2.1,<3",
     "scipy>=1.11,<2",
     "irspack==0.5.0",
+    # Direct pin despite being reachable transitively via irspack (which asks
+    # only for >=0.21.0).  TruncatedSVDRecommender pickles an sklearn estimator
+    # into the artifact payload, and sklearn refuses to guarantee correctness
+    # when unpickling across its own minors (InconsistentVersionWarning:
+    # "might lead to breaking code or invalid results").  Bounding the range
+    # keeps train and serve inside a tested window and forces a deliberate bump
+    # + retest for the next sklearn minor.  NOTE: a range narrows this axis but
+    # does not close it -- two installs inside the range can still differ.  The
+    # irspack version-skew guard does NOT cover the sklearn axis.
+    "scikit-learn>=1.8,<1.10",
     "optuna>=4.1,<5",
     "rich>=13,<16",
 ]

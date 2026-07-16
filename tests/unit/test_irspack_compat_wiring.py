@@ -29,12 +29,27 @@ def _skew_message() -> str:
 
     Built from the guard rather than hand-written so the test cannot drift
     away from the wording the guard actually emits.
+
+    ``best_class`` is explicit because the guard is an allow-list keyed on
+    ``(best_class, header_mm, running_mm)``: IALSRecommender is the one class
+    known to break across 0.4/0.5, so this is the headline refusal an operator
+    actually hits. Omitting ``best_class`` would also raise (unknown misses the
+    allow-list and fails closed), but would pin that corner case instead.
     """
     with pytest.raises(ArtifactError) as excinfo:
         check_artifact_irspack_version(
-            {"irspack_version": "0.4.2"}, name="news", running="0.5.0"
+            {"irspack_version": "0.4.2", "best_class": "IALSRecommender"},
+            name="news",
+            running="0.5.0",
         )
     return str(excinfo.value)
+
+
+# Header of an artifact the guard must refuse: IALSRecommender is absent from
+# the verified-compatible table, so a 0.4.2 header under a running 0.5.x is a
+# real skew. Note TopPopRecommender (conftest's default best_class) is on the
+# allow-list for this transition and would LOAD — the class is load-bearing.
+_REFUSED_HEADER = {"irspack_version": "0.4.2", "best_class": "IALSRecommender"}
 
 
 def test_skew_message_classifies_as_version_skew() -> None:
@@ -60,7 +75,7 @@ def test_version_skew_is_an_allowed_metric_label() -> None:
 
 def test_classifier_prefix_matches_guard_prefix() -> None:
     """The classifier keys off the guard's prefix; keep them in sync."""
-    assert _skew_message().lower().startswith(SKEW_MSG_PREFIX)
+    assert _skew_message().lower().startswith(SKEW_MSG_PREFIX.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +100,7 @@ def test_startup_path_reports_version_skew(
     tmp_path: Path, make_artifact, single_key_ring
 ) -> None:
     entry, reason = _load_with_header(
-        tmp_path, make_artifact, single_key_ring, {"irspack_version": "0.4.2"}
+        tmp_path, make_artifact, single_key_ring, dict(_REFUSED_HEADER)
     )
     assert reason == "version_skew"
     assert entry.loaded is False
@@ -101,12 +116,13 @@ def test_skew_remedy_survives_health_error_truncation(
     operator reads it, so the guard front-loads the remedy and both versions.
     """
     entry, _ = _load_with_header(
-        tmp_path, make_artifact, single_key_ring, {"irspack_version": "0.4.2"}
+        tmp_path, make_artifact, single_key_ring, dict(_REFUSED_HEADER)
     )
     surfaced = entry.last_load_error or ""
     assert "retrain" in surfaced.lower(), f"remedy truncated away: {surfaced!r}"
     assert "0.4.2" in surfaced, "artifact's irspack version truncated away"
     assert "news" in surfaced, "recipe name truncated away"
+    assert "IALSRecommender" in surfaced, "best_class truncated away"
 
 
 def test_startup_version_skew_reason_is_not_coerced(
@@ -120,25 +136,63 @@ def test_startup_version_skew_reason_is_not_coerced(
     the metric to "unexpected" and the skew becomes invisible to alerting.
     """
     _, reason = _load_with_header(
-        tmp_path, make_artifact, single_key_ring, {"irspack_version": "0.4.2"}
+        tmp_path, make_artifact, single_key_ring, dict(_REFUSED_HEADER)
     )
     assert reason in _LOAD_FAILURE_REASONS
 
 
-def test_startup_path_passes_guard_on_matching_version(
+def test_startup_path_loads_when_header_records_running_version(
     tmp_path: Path, make_artifact, single_key_ring
 ) -> None:
-    """A header recording the running irspack must clear the guard.
+    """A header recording the running irspack must load, not merely miss `skew`.
 
-    The payload is a bare dict rather than a recommender, so the load still
-    fails downstream — but it must not fail as `version_skew`.
+    The payload is a bare pickled dict, which the SafeUnpickler accepts: it
+    contains no GLOBAL opcode, so `find_class` is never consulted and the load
+    SUCCEEDS with the dict standing in for a recommender. That makes this a real
+    positive test — `reason == "ok"` and the entry is loaded.
+
+    Asserting only `reason != "version_skew"` would be vacuous: every other
+    outcome, including deleting the guard entirely, satisfies it.
     """
     import irspack
 
-    _, reason = _load_with_header(
+    entry, reason = _load_with_header(
         tmp_path,
         make_artifact,
         single_key_ring,
-        {"irspack_version": irspack.__version__},
+        {"irspack_version": irspack.__version__, "best_class": "TopPopRecommender"},
     )
-    assert reason != "version_skew"
+    assert reason == "ok", f"matching-version artifact must load; got {reason!r}"
+    assert entry.loaded is True
+
+
+def test_startup_path_loads_verified_compatible_class_across_minors(
+    tmp_path: Path, make_artifact, single_key_ring
+) -> None:
+    """The allow-list must actually let verified-compatible pairs through.
+
+    TopPopRecommender is in `_VERIFIED_COMPATIBLE` for (0,4)<->(0,5), so a 0.4.2
+    artifact must still load under a running 0.5.x. This is the counterpart to
+    `test_startup_path_reports_version_skew`, which uses the same versions with
+    IALSRecommender and is refused — together they pin that the guard
+    discriminates on `best_class` rather than blanket-refusing the transition
+    (its behaviour before the allow-list, and the regression it would be to
+    revert to).
+    """
+    import irspack
+
+    assert irspack.__version__.startswith("0.5."), (
+        f"precondition: this asserts a 0.4->0.5 transition; got {irspack.__version__}"
+    )
+
+    entry, reason = _load_with_header(
+        tmp_path,
+        make_artifact,
+        single_key_ring,
+        {"irspack_version": "0.4.2", "best_class": "TopPopRecommender"},
+    )
+    assert reason == "ok", (
+        f"TopPopRecommender 0.4.2->0.5.x is verified compatible and must load; "
+        f"got {reason!r}"
+    )
+    assert entry.loaded is True

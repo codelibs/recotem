@@ -39,7 +39,7 @@ Metric inventory (matches docs/operations.md):
 
 Artifact-load reason taxonomy (``recotem_artifact_load_failures_total``):
 ``read``, ``parse``, ``hmac``, ``header_json``, ``deserialize``, ``metadata``,
-``yaml``, ``unexpected``, ``dir_scan``, ``timeout``.
+``yaml``, ``unexpected``, ``dir_scan``, ``timeout``, ``version_skew``.
 """
 
 from __future__ import annotations
@@ -108,7 +108,7 @@ def _ensure_initialized() -> None:
         "recotem_artifact_load_failures_total",
         "Total artifact load failures (initial load and watcher reloads). "
         "reason ∈ {read, parse, hmac, header_json, deserialize, metadata, "
-        "yaml, unexpected, dir_scan, timeout}.",
+        "yaml, unexpected, dir_scan, timeout, version_skew}.",
         ["recipe", "reason"],
     )
     _ACTIVE_RECIPES = Gauge(

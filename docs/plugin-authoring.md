@@ -119,7 +119,17 @@ class EchoSource:
    - For most plugins, declare `no_expand_fields: ClassVar[frozenset[str]] = frozenset()` — the global baseline (`query`, `query_parameters`) is already guarded unconditionally by the recipe loader.
    - For plugins with SQL or parameterised-query fields, list them explicitly: `no_expand_fields: ClassVar[frozenset[str]] = frozenset({"sql", "bind_params"})`. This provides defence-in-depth and documents the security intent for future maintainers.
 
-5. **`fetch(ctx)`** must return a `pandas.DataFrame`. The DataFrame must contain at least the columns referenced in `recipe.schema` (`user_column`, `item_column`, and optionally `time_column`). The training pipeline accesses those columns by name immediately after fetch — a missing column surfaces as a `KeyError` and exits the train run.
+5. **`fetch(ctx)`** must return a `pandas.DataFrame`. **This rule applies to
+   the interaction `source` only.** For that source, the DataFrame must
+   contain at least the columns referenced in `recipe.schema`
+   (`user_column`, `item_column`, and optionally `time_column`) — the
+   training pipeline accesses those columns by name immediately after
+   fetch, and a missing column surfaces as a `KeyError` and exits the train
+   run. A plugin used as a `features.item.source` / `features.user.source`
+   feature table satisfies none of this: it is read against `id_column` and
+   the declared `columns` list on the feature side config instead, and has
+   no `recipe.schema` columns to satisfy at all (see
+   [recipe-reference.md](recipe-reference.md#features)).
 
 6. **`fetch()` must raise `DataSourceError`** for any external or transient failure (auth errors, network errors, query errors, empty results). `DataSourceError` is mapped to exit code 3. Any other exception surfaces as exit code 1. Wrap third-party exceptions explicitly:
 
@@ -309,7 +319,10 @@ its `type_name`.
 
 `recotem validate recipes/my_recipe.yaml` instantiates the source class
 (which exercises the `__init__` deferred-import / extras check) but does
-**not** call `fetch()`. If the source defines an optional `probe()` method,
+**not** call `fetch()`. This runs for the top-level `source` **and** for
+`features.item.source` / `features.user.source` when the recipe declares a
+`features:` block — every configured source is probed, not just the
+interaction source. If the source defines an optional `probe()` method,
 `recotem validate` calls it for a lightweight connectivity / auth check:
 
 ```python
@@ -324,9 +337,14 @@ def probe(self) -> dict:
 ```
 
 When `probe()` is defined, `recotem validate` reports `DataSource: probe OK
-(<type_name>)`; when it is not, it reports `DataSource: extras OK
-(<type_name>, no probe defined)`. The builtin `CSVSource` / `ParquetSource`
-use `fsspec` `exists()`, and `BigQuerySource` uses a dry-run query job.
+(<type_name>) [<where>]`; when it is not, it reports `DataSource: extras OK
+(<type_name>, no probe defined) [<where>]`. `<where>` names which source the
+line describes — `source`, `features.item.source`, or
+`features.user.source` — so a failure or a missing-probe notice is
+unambiguous even when a recipe configures more than one source. A probe
+failure is reported the same way: `DataSource probe failed [<where>]:
+<error>`. The builtin `CSVSource` / `ParquetSource` use `fsspec` `exists()`,
+and `BigQuerySource` uses a dry-run query job.
 
 ## Testing
 

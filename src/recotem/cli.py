@@ -29,7 +29,7 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import structlog
 import typer
@@ -611,32 +611,53 @@ def validate(
         code = _map_exception_to_exit(exc)
         _exit(code, f"Recipe validation failed: {exc}")
 
-    try:
+    def _probe_source(source_cfg: Any, where: str) -> None:
         from recotem.datasource.registry import get_source_class
 
-        source_cfg = loaded_recipe.source
         type_name = getattr(source_cfg, "type", None)
         if type_name is None:
-            raise RuntimeError("Recipe source is missing the 'type' discriminator.")
+            raise RuntimeError(f"{where} is missing the 'type' discriminator.")
 
         source_cls = get_source_class(type_name)
-        # Instantiate the source.  Plugins defer optional-dependency imports
-        # to __init__, so this catches missing extras (e.g. google-cloud-bigquery)
-        # and config / Config-class mismatches.  We do NOT call .fetch() here —
-        # full data loads can be expensive (BigQuery scans, large CSV reads).
+        # Instantiate the source.  Plugins defer optional-dependency
+        # imports to __init__, so this catches missing extras (e.g.
+        # google-cloud-bigquery) and config / Config-class mismatches.
+        # We do NOT call .fetch() here — full data loads can be
+        # expensive (BigQuery scans, large CSV reads).
         source = source_cls(source_cfg)
 
-        # Optional connectivity probe — plugin-authoring.md documents this hook.
-        # Built-ins implement it; third-party plugins may opt in.
+        # Optional connectivity probe — plugin-authoring.md documents
+        # this hook.  Built-ins implement it; third-party plugins may
+        # opt in.
         probe = getattr(source, "probe", None)
         if callable(probe):
             probe()
-            typer.echo(f"DataSource: probe OK ({type_name})")
+            typer.echo(f"DataSource: probe OK ({type_name}) [{where}]")
         else:
-            typer.echo(f"DataSource: extras OK ({type_name}, no probe defined)")
-    except Exception as exc:
-        code = _map_exception_to_exit(exc)
-        _exit(code, f"DataSource probe failed: {exc}")
+            typer.echo(
+                f"DataSource: extras OK ({type_name}, no probe defined) [{where}]"
+            )
+
+    # (source_cfg, where) pairs to probe: the top-level source plus any
+    # configured feature-side sources.  ``where`` is carried by the *caller*
+    # (this loop), not by mutating the exception's .args in place -- some
+    # exception types (e.g. pydantic_core.ValidationError) implement __str__
+    # in Rust and ignore .args entirely, which would silently drop the
+    # ``where`` tag.  Building the message here works for any exception type
+    # from any plugin, regardless of its __str__.
+    sources: list[tuple[Any, str]] = [(loaded_recipe.source, "source")]
+    if loaded_recipe.features is not None:
+        for side_name in ("item", "user"):
+            side = getattr(loaded_recipe.features, side_name)
+            if side is not None:
+                sources.append((side.source, f"features.{side_name}.source"))
+
+    for source_cfg, where in sources:
+        try:
+            _probe_source(source_cfg, where)
+        except Exception as exc:
+            code = _map_exception_to_exit(exc)
+            _exit(code, f"DataSource probe failed [{where}]: {exc}")
 
     typer.echo("Validation passed.")
 
@@ -668,13 +689,34 @@ def schema() -> None:
         from pydantic import create_model
 
         from recotem.datasource.registry import build_source_config_union
-        from recotem.recipe.models import Recipe
+        from recotem.recipe.models import FeaturesConfig, FeatureSideConfig, Recipe
 
         source_union = build_source_config_union()
+
+        # ``create_model(__base__=X)`` can only override fields declared
+        # directly on X — it cannot reach into a nested model's fields.  Both
+        # ``FeatureSideConfig.source`` and ``Recipe.source`` are typed ``Any``
+        # for the same circular-import reason (the union is built dynamically
+        # from entry points), so the nesting has to be rebuilt bottom-up:
+        # FeatureSideConfig first, then FeaturesConfig referencing the
+        # rebuilt side config, then Recipe referencing both the top-level
+        # union and the rebuilt features config.
+        schema_side = create_model(
+            "FeatureSideConfig",
+            __base__=FeatureSideConfig,
+            source=(source_union, ...),
+        )
+        schema_features = create_model(
+            "FeaturesConfig",
+            __base__=FeaturesConfig,
+            item=(schema_side | None, None),
+            user=(schema_side | None, None),
+        )
         schema_recipe = create_model(
             "Recipe",
             __base__=Recipe,
             source=(source_union, ...),
+            features=(schema_features | None, None),
         )
         schema_dict = schema_recipe.model_json_schema()
         typer.echo(json.dumps(schema_dict, indent=2))

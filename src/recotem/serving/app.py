@@ -39,6 +39,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
+from recotem._features import check_artifact_feature_version
 from recotem._irspack_compat import check_artifact_irspack_version
 from recotem.artifact.format import ArtifactError, parse_header_from_bytes
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
@@ -864,6 +865,21 @@ def _try_load_artifact(
             error=str(exc),
         )
         return _failed_entry(recipe, str(exc)), "version_skew"
+
+    # Preflight the feature-encoder state version for the same reason: an
+    # unknown shape would otherwise be silently mis-encoded rather than
+    # refused, and the failure would surface as wrong recommendations, not an
+    # exception.
+    try:
+        check_artifact_feature_version(header_dict, name=recipe.name)
+    except ArtifactError as exc:
+        logger.warning(
+            "initial_artifact_feature_version_refused",
+            name=recipe.name,
+            kid=hdr.kid,
+            error=str(exc),
+        )
+        return _failed_entry(recipe, str(exc)), "feature_version"
 
     try:
         recommender = unpickle_payload(payload_bytes)

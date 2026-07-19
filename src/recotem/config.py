@@ -35,6 +35,9 @@ Environment variables:
                                  accepting private/loopback host addresses.
                                  Default refuses RFC1918 / 127.0.0.0/8 to
                                  block SSRF via crafted DSNs.
+  RECOTEM_MAX_FEATURE_DIM      Max encoded side-feature dimension for
+                                 feature-aware iALS (default 5000; clamped
+                                 16-100000)
 """
 
 from __future__ import annotations
@@ -504,6 +507,31 @@ def get_http_timeout_seconds() -> int:
         DEFAULT_HTTP_TIMEOUT_SECONDS,
         _MIN_HTTP_TIMEOUT_SECONDS,
         _MAX_HTTP_TIMEOUT_SECONDS,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Feature-encoding cap (used by recotem._features for feature-aware iALS)
+# ---------------------------------------------------------------------------
+
+DEFAULT_MAX_FEATURE_DIM = 5000
+_MIN_FEATURE_DIM = 16
+_MAX_FEATURE_DIM = 100_000
+
+
+def get_max_feature_dim() -> int:
+    """Return RECOTEM_MAX_FEATURE_DIM, clamped to [16, 100000].
+
+    irspack forms a dense ``F.T @ F`` and solves it by Cholesky, so cost is
+    cubic in the feature dimension and it never errors -- it only degrades.
+    Measured per trial: 5k -> 0.6 s / 200 MB; 10k -> 4.2 s / 771 MB;
+    20k -> 43 s / 3 GB.  Multiplies with training.parallelism.
+    """
+    return _clamped_int_env(
+        "RECOTEM_MAX_FEATURE_DIM",
+        DEFAULT_MAX_FEATURE_DIM,
+        _MIN_FEATURE_DIM,
+        _MAX_FEATURE_DIM,
     )
 
 

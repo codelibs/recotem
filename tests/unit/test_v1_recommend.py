@@ -277,7 +277,7 @@ def test_recommend_sets_model_version_response_header():
 
 
 # ---------------------------------------------------------------------------
-# F4: user_known AttributeError path — mirrors _any_seed_known sentinel
+# F4: user_known AttributeError path (unexpected recommender layout)
 # ---------------------------------------------------------------------------
 
 

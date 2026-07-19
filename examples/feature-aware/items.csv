@@ -1,0 +1,16 @@
+item_id,category,release_year,tags
+i01,action,2002,heist|thriller
+i02,comedy,2009,romance|slapstick
+i03,drama,2016,romance|period
+i04,action,1995,heist|thriller
+i05,comedy,2002,
+i06,drama,2009,crime|period
+i07,action,2016,space|thriller
+i08,comedy,1995,satire
+i09,drama,2002,crime|period
+i10,action,2009,
+i11,comedy,2016,romance|slapstick
+i12,drama,1995,crime
+i13,action,2002,heist|thriller
+i14,comedy,2009,satire
+i15,drama,2016,

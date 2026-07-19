@@ -222,7 +222,7 @@ logic instead of grepping stderr.
 | 1 | Unknown error | Bug, environment issue, schema generation failure |
 | 2 | RecipeError | YAML syntax, schema violation, invalid `--env-var`, `--dev-allow-unsigned` without companion confirmation flag, `--dev-allow-unsigned` outside `RECOTEM_ENV=development` |
 | 3 | DataSourceError | Source-layer failure NOT during HTTP fetch — CSV/Parquet format error, required column missing, local-FS path not found, BigQuery schema mismatch |
-| 4 | TrainingError | Includes subcodes `signing_key_missing`, `min_data_violation`, `time_column_parse_error`, `final_training_error`, `no_completed_trials`, `zero_score`, `excessive_per_trial_timeouts` |
+| 4 | TrainingError | Includes subcodes `signing_key_missing`, `min_data_violation`, `time_column_parse_error`, `final_training_error`, `no_completed_trials`, `zero_score`, `excessive_per_trial_timeouts`, `feature_table_error`, `feature_axis_error`, `feature_cholesky_error` |
 | 5 | ArtifactError | Magic mismatch, kid unknown, HMAC mismatch, payload over cap, disallowed FQCN, header JSON over cap |
 | 6 | LockContestedError | Recipe lock held by another process when `--fail-on-busy` is set |
 | 7 | HttpFetchError | Any failure during HTTP/HTTPS source fetch — SSRF guard refused the destination, connect/read timeout, HTTP 4xx/5xx, body cap exceeded, redirect cap, scheme-changing redirect, sha256 mismatch on a network-fetched source |
@@ -249,8 +249,10 @@ as the basis for SLO and alerting rules.
 | `training_started` | start | `recipe`, `run_id` |
 | `fetching_data` | datasource | — |
 | `data_fetched` | datasource | `n_rows` |
+| `feature_table_loaded` | features | `side`, `n_rows`, `n_features`, `columns` (names only — feature values are user PII and are never logged). Only with a `features:` block; emitted before cleansing, since the feature tables are fetched up front. |
 | `data_cleansed` | cleansing | `n_rows`, `drop_count` |
 | `splitting_data` / `split_done` | split | `val_offset` |
+| `feature_axis_coverage` | features | `side`, `matched`, `total` — how many ids of the axis being encoded the feature table covers. Emitted per side per phase (once for search, once for the final refit). Zero coverage does not emit this event; it aborts with `feature_axis_error` instead. |
 | `search_started` | tuning | `algorithms`, `n_trials` |
 | `search_done` | tuning | `best_class`, `best_score`, `n_completed` |
 | `training_final_model` / `final_model_trained` | refit | `recommender` |
@@ -276,7 +278,7 @@ Additional events emitted by the watcher, recipe loader, and size-cap helper tha
 | `auth_anonymous_bypass_first_seen` | INFO | `serving/auth.py` | First anonymous request from a given `client_host` (per process). The LRU cache tracking first-seen IPs is bounded to 1024 entries to prevent unbounded memory growth. |
 | `kid_extraction_failed` | WARN | `serving/watcher.py` | An artifact's kid bytes could not be parsed from the raw bytes (too short, out-of-range length, decode error). The kid shown in subsequent log fields is `\x00<unparseable>` — intentionally not collidable with any real kid. |
 | `artifact_stat_timeout` | WARN | `serving/watcher.py` | A stat() future did not complete within the per-future timeout (`min(watch_interval, 30)` seconds). Hung object-store stats no longer block tick progress or delay SIGTERM handling. |
-| `recommender_layout_unexpected` | WARN | `serving/routes.py` | `_any_seed_known` encountered an `AttributeError` on `recommender._mapper.item_id_to_index`. The request is treated as `INTERNAL_ERROR`. Increment counter: `recotem_recommender_layout_unexpected_total`. |
+| `recommender_layout_unexpected` | WARN | `serving/routes.py` | `_resolve_recommend` / `_resolve_recommend_related` encountered an `AttributeError` on `recommender._mapper.user_id_to_index` / `item_id_to_index`. The request is treated as `INTERNAL_ERROR`. Increment counter: `recotem_recommender_layout_unexpected_total`. |
 | `set_load_error_no_entry` | WARN | `serving/watcher.py` | The watcher tried to mark a load error on a recipe with no registry entry. Counter: `recotem_watcher_state_divergence_total`. |
 | `sidecar_disappeared` | WARN | `serving/watcher.py` | A `.sha256` sidecar file was present on the previous poll but raised ENOENT on the current read — emitted once per disappearance transition. |
 | `metadata_index_row_error` | WARN | `metadata/loader.py` | A per-row exception occurred during `build_metadata_index`. The row is skipped. Counted by `recotem_metadata_index_build_errors_total{recipe}`. |
@@ -382,6 +384,103 @@ For large models (IALS with many components, large item sets), use `recotem insp
 
 ---
 
+## Feature-aware iALS sizing
+
+A recipe's [`features:`](recipe-reference.md#features) block adds costs that
+scale differently from the rest of a recotem recipe. All four points below
+apply only when `features:` is present.
+
+### Vocabulary scales with catalog size, not interaction count
+
+The most surprising operational property of this feature: the encoded
+dimension is built from the **whole fetched feature table**, not from the
+subset of items/users that actually appear in the interaction data — this is
+what lets a cold-start item or user be scored at serve time even though it
+never appears in training. The consequence is that a 1M-item catalog whose
+interactions cover only 1,000 of those items still pays the full encoded
+dimension — and the full per-trial training cost below — for the other
+999,000 items, even though their columns are only ever useful for cold-start
+requests that may never arrive.
+
+`RECOTEM_MAX_FEATURE_DIM` (default 5000, clamped [16, 100000]) caps the
+encoded dimension per side (item and user are checked independently);
+exceeding it raises `TrainingError` (exit 4) at the point the encoder state is
+built. `min_frequency` (recipe-level, per column; see
+[recipe-reference.md](recipe-reference.md#features)) is the operator's
+**only** lever against this cap — raise it on high-cardinality `categorical` /
+`multi_label` columns to shrink the vocabulary. There is no way to restrict
+the vocabulary to interaction-covered rows from the recipe.
+
+Be precise about what that lever moves: `min_frequency` bounds the resulting
+**dimension**, not the memory spent discovering it. `_vocabulary` counts every
+token of the fetched column into a dict and only then prunes, and the
+`multi_label` branch first flattens every row's tokens into a single list, so
+a high-cardinality column pays its full transient counting cost no matter how
+aggressive `min_frequency` is — a column with hundreds of thousands of
+distinct values costs tens of MB to count even when the pruned vocabulary
+comes back empty. The `RECOTEM_MAX_FEATURE_DIM` check runs **after** every
+column's vocabulary is built, so that transient is paid in full even on the
+run the cap then rejects. `min_frequency` protects the trials; it does not
+protect the encoder-state build.
+
+### Per-trial time is cubic, memory is quadratic, and both multiply with `training.parallelism`
+
+irspack forms a dense `Fᵀ F` Gram matrix per side and solves it by Cholesky
+decomposition. The two costs scale differently and are worth keeping apart
+when sizing a host: **time** grows **cubically** with the encoded dimension
+(the decomposition itself), while **memory** grows only **quadratically** —
+the Gram matrix is `dim² × 8` bytes at float64, which is exactly what the
+Memory column below reports. irspack never errors from either — it only
+degrades. Measured per trial:
+
+| Encoded dimension | Time | Memory |
+|---|---|---|
+| 5,000 | ~0.6 s | ~200 MB |
+| 10,000 | ~4.2 s | ~771 MB |
+| 20,000 | ~43 s | ~3 GB |
+
+`training.parallelism` is Optuna `n_jobs` — **in-process threads**, not
+processes — so each concurrently-running trial builds and solves its own
+dense Gram matrix independently. At `parallelism=4, dim=10k` that is roughly
+4 × 771 MB ≈ 3 GB of Gram matrices alone, on top of everything else the
+search holds in memory. Size training hosts (or set `parallelism` and
+`RECOTEM_MAX_FEATURE_DIM`) with this multiplication in mind.
+
+### Payload and serve-side RSS grow with catalog size, not just dimension
+
+irspack retains `self.item_features` (and `self.user_features`) on the
+trained recommender and defines no `__getstate__`, so the encoded feature
+matrix is pickled into the artifact payload verbatim. Size scales with
+`n_items × nnz_per_row`, not with the encoded dimension alone: projected,
+1M items × 500 encoded dimensions × 5 non-zero entries/row ≈ 42 MiB; 1M items
+× 5,000 dimensions × 10 non-zero entries/row ≈ 80 MiB — material against the
+512 MiB `RECOTEM_MAX_PAYLOAD_BYTES` default but not by itself fatal.
+`RECOTEM_MAX_FEATURE_DIM` caps **columns**; nothing caps `n_items ×
+nnz_per_row`, so a very large catalog with dense per-row encodings (many
+`multi_label` tags, low `min_frequency`) can still produce a large payload
+even with a modest encoded dimension. The identical bytes also count against
+serve-side resident memory (see
+[Sizing `recotem serve` memory](#sizing-recotem-serve-memory) above) once the
+artifact is loaded.
+
+### Cold-start latency, and `n_threads`
+
+Cold-start scoring is an iterative CG solve, not a matrix lookup. Measured
+latency (1,000 items, 64 components): a single cold-start request takes
+300–500 µs median; batching amortizes this to **8–12 µs/user** — a 30–40×
+per-user improvement, which is why the batch verbs
+(`:batch-recommend` / `:batch-recommend-related`) are the recommended path
+for any bulk cold-start workload.
+
+The recommender's default `n_threads=16` measurably hurts **single-request**
+latency: median 734–857 µs and p95 2.0–2.2 ms at the default, versus faster
+at `n_threads` 1–4. `n_threads` is baked into the pickled model at training
+time, and there is currently no serve-time override — if single-request
+cold-start latency matters for your workload, this is a training-time
+decision, not a serving-time one.
+
+---
+
 ## Environment variable reference
 
 Full list of environment variables recognised by Recotem. Variables marked `serve` apply only to `recotem serve`; those marked `train` apply only to `recotem train`; those with no marking apply to both.
@@ -410,6 +509,7 @@ Full list of environment variables recognised by Recotem. Variables marked `serv
 | `RECOTEM_STARTUP_PARALLELISM` | (auto) | serve | Threads used to load artifacts at startup (clamped [1, 32]). Default: `min(len(recipes), 8)`. Setting to `0` clamps to 1 with a warning. |
 | `RECOTEM_BQ_REQUIRE_STORAGE_API` | (unset) | train | Truthy raises `DataSourceError` instead of falling back to the REST path when the BigQuery Storage Read API fails. |
 | `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW` | (unset) | serve | Truthy downgrades the irspack version-skew refusal to a warning and lets the payload reach the deserializer. Does not make an incompatible payload loadable. See [irspack version skew](#irspack-version-skew). |
+| `RECOTEM_MAX_FEATURE_DIM` | 5000 | train | Cap on the encoded feature dimension per side (item and user are checked independently), clamped [16, 100000]. See [Feature-aware iALS sizing](#feature-aware-ials-sizing). |
 | `RECOTEM_RECIPE_*` | — | train | Allow-listed prefix for `${...}` recipe env-var expansion. See [recipe-reference.md](recipe-reference.md#environment-variable-expansion). |
 
 > **Note on `signing_key_status` in logs.** The `security.posture` log line emitted at every `recotem serve` startup includes a `signing_key_status` field: `configured` (keys present), `dev_allow_unsigned` (no keys, dev-unsigned mode), or `missing` (keys absent; startup will fail). Use this in SIEM rules to alert on misconfigured deployments.
@@ -459,14 +559,17 @@ Available metrics:
 
 | Metric | Type | Labels | Purpose |
 |--------|------|--------|---------|
-| `recotem_v1_requests_total` | Counter | `recipe`, `verb`, `status` | v1 request volume; `status` ∈ {`ok`, `unknown_user`, `unknown_seed_items`, `no_candidates`, `recipe_not_found`, `unavailable`, `validation_error`, `error`} |
+| `recotem_v1_requests_total` | Counter | `recipe`, `verb`, `status` | v1 request volume; `status` ∈ {`ok`, `unknown_user`, `unknown_seed_items`, `no_candidates`, `recipe_not_found`, `unavailable`, `validation_error`, `features_not_supported`, `feature_value_unusable`, `error`}. Every value except `error` is client-caused and expected in normal operation; `error` is reserved for genuine server faults (HTTP 500) — see [Monitoring SLIs](#monitoring-slis) |
 | `recotem_v1_request_latency_seconds` | Histogram | `recipe`, `verb` | per-verb end-to-end latency |
 | `recotem_v1_batch_size` | Histogram | `recipe`, `verb` | observed batch fan-out (only for `batch-recommend` / `batch-recommend-related`) |
-| `recotem_v1_batch_element_errors_total` | Counter | `recipe`, `verb`, `code` | per-element errors inside batch HTTP-200 responses; `code` ∈ {`UNKNOWN_USER`, `UNKNOWN_SEED_ITEMS`, `NO_CANDIDATES`, `VALIDATION_ERROR`, `INTERNAL_ERROR`} |
+| `recotem_v1_batch_element_errors_total` | Counter | `recipe`, `verb`, `code` | per-element errors inside batch HTTP-200 responses; `code` ∈ {`UNKNOWN_USER`, `UNKNOWN_SEED_ITEMS`, `NO_CANDIDATES`, `VALIDATION_ERROR`, `FEATURES_NOT_SUPPORTED`, `FEATURE_VALUE_UNUSABLE`, `INTERNAL_ERROR`} |
 | `recotem_v1_metadata_degraded_items_total` | Counter | `recipe`, `verb`, `kind` | items served with degraded metadata; `kind` ∈ {`fallback` (item_id/score only), `dropped` (omitted entirely)} |
 | `recotem_v1_validation_errors_outside_verb_total` | Counter | — | 422 errors on non-inference paths (e.g. `/v1/recipes` list with bad query) |
+| `recotem_v1_feature_unknown_value_total` | Counter | `recipe`, `side`, `column` | `side` ∈ {`item`, `user`}. Fires on a `categorical` value absent from the training vocabulary, a `multi_label` value where any supplied token misses, or a non-finite `numerical` value (`+inf`/`-inf`, or a `NaN` reached via a string); a `numerical` value that is missing or fails to parse as a number at all still degrades the recommendation silently and is **not** counted — see [Feature-aware cold start](api-reference.md#feature-aware-cold-start) for the per-encoding breakdown |
+| `recotem_v1_feature_unknown_column_total` | Counter | `recipe`, `side` | cold-start requests carrying at least one feature key the recipe does not declare (e.g. a typo). The encoder never reads such a key, so the request degrades toward a bias-only profile and still returns 200 — this counter is the only signal. Counted **once per request per side**, not per key. Deliberately **not** labelled by column name: unlike `..._unknown_value_total`'s `column` (bounded by your recipe), an undeclared name is unbounded request input and would be a cardinality DoS. To find the offending key, diff the client payload against the recipe's `features:` block |
+| `recotem_v1_cold_start_requests_total` | Counter | `recipe`, `case` | cold-start requests served from side features; `case` ∈ {`features_only` (A), `features_and_history` (B), `cold_seeds` (C)} |
 | `recotem_model_loaded` | Gauge | `recipe` | 1 if the recipe is currently loaded |
-| `recotem_artifact_load_failures_total` | Counter | `recipe`, `reason` | artifact-load failures since process start; `reason` ∈ {`read`, `parse`, `hmac`, `header_json`, `deserialize`, `metadata`, `yaml`, `unexpected`, `dir_scan`, `timeout`, `version_skew`} |
+| `recotem_artifact_load_failures_total` | Counter | `recipe`, `reason` | artifact-load failures since process start; `reason` ∈ {`read`, `parse`, `hmac`, `header_json`, `deserialize`, `metadata`, `yaml`, `unexpected`, `dir_scan`, `timeout`, `version_skew`, `feature_version`} |
 | `recotem_active_recipes` | Gauge | — | total recipes in the registry |
 | `recotem_swap_total` | Counter | `recipe`, `result` | hot-swap attempts (`ok` / `error`) |
 | `recotem_artifact_stat_failures_total` | Counter | `recipe` | watcher stat() failures |
@@ -476,7 +579,7 @@ Available metrics:
 | `recotem_recipe_rescan_errors_total` | Counter | `recipe` | recipe rescan failures |
 | `recotem_bigquery_storage_fallback_total` | Counter | `reason` | BQ Storage Read API fell back to REST |
 | `recotem_recipes_dir_scan_failures_total` | Counter | `error_class` | recipes-dir scan failures |
-| `recotem_recommender_layout_unexpected_total` | Counter | `recipe` | `AttributeError` on `recommender._mapper.item_id_to_index` — indicates irspack API incompatibility |
+| `recotem_recommender_layout_unexpected_total` | Counter | `recipe` | `AttributeError` on `recommender._mapper.user_id_to_index` (user axis) or `recommender._mapper.item_id_to_index` (item axis) — indicates irspack API incompatibility. Both axes increment the same counter and it carries no axis label, so it cannot tell you which one fired; the accompanying `recommender_layout_unexpected` log event names the `verb` |
 | `recotem_watcher_state_divergence_total` | Counter | — | watcher tried to mark an error on a non-existent registry entry (ordering bug) |
 
 ---
@@ -529,6 +632,7 @@ The startup-only event variants are:
 | `initial_artifact_parse_failed` | Magic / version / header structural error |
 | `initial_artifact_hmac_failed` | HMAC mismatch or unknown kid |
 | `initial_artifact_version_skew` | WARNING. The artifact's `(best_class, irspack transition)` is not verified compatible with the running irspack. Reason label `version_skew`; see [irspack version skew](#irspack-version-skew). The guard emits its own `irspack_version_skew` WARNING carrying both versions; this event adds the `kid`. Skew is operational, so neither is ERROR — alert on the `version_skew` metric, not on log level. |
+| `initial_artifact_feature_version_refused` | The artifact header has a `features` object, but its `version` sub-field is missing, non-integer, or does not equal this build's known `FEATURE_STATE_VERSION`. Reason label `feature_version`. Fails closed — an unrecognized encoder-state shape would otherwise be silently mis-encoded rather than refused, producing wrong (not missing) recommendations. A header with **no `features` key at all** fails **open** (old artifact, or a model trained without a `features:` block) — it has no state to mis-encode. See [Feature-aware iALS sizing](#feature-aware-ials-sizing). |
 | `initial_artifact_deserialize_failed` | FQCN allow-list rejection or payload decode error |
 | `initial_artifact_hmac_skipped_dev` | `--dev-allow-unsigned` |
 
@@ -564,7 +668,8 @@ The high-signal metrics for production alerting:
 | Batch per-element error rate | `rate(recotem_v1_batch_element_errors_total[5m]) / rate(recotem_v1_requests_total{verb=~"batch-.*"}[5m])` | warn at sustained > 1% per recipe |
 | Artifact stat failures (watcher poll) | `recotem_artifact_stat_failures_total{recipe=...}` increase | warn |
 | Watcher unhandled errors | `recotem_watcher_unhandled_errors_total` increase | warn |
-| Recommend error rate | `rate(recotem_v1_requests_total{status="error"}[5m]) / rate(recotem_v1_requests_total[5m])` | warn at 1%, page at 10% |
+| Recommend error rate | `rate(recotem_v1_requests_total{status="error"}[5m]) / rate(recotem_v1_requests_total[5m])` | warn at 1%, page at 10%. `status="error"` is **only** genuine server faults (HTTP 500) — filter on it exactly, never on `status!="ok"`. Client-caused outcomes (`unknown_user`, `features_not_supported`, `feature_value_unusable`, `validation_error`, ...) carry their own labels precisely so a malformed client cannot page on-call |
+| Cold-start client errors | `rate(recotem_v1_requests_total{status=~"features_not_supported\|feature_value_unusable"}[5m])` | warn only, never page — a sustained rate means a client is sending `user_features`/`item_features` to a recipe without a matching `features:` block, or values that cannot be standardized. The remedy is on the caller's side; the model is healthy |
 | Recommend latency | `histogram_quantile(0.99, sum by (le, recipe, verb) (rate(recotem_v1_request_latency_seconds_bucket[5m])))` | per-recipe, per-verb SLO |
 | Batch fan-out | `histogram_quantile(0.95, sum by (le, recipe, verb) (rate(recotem_v1_batch_size_bucket[5m])))` | watch for clients approaching the 256-element cap |
 | Active recipes | `recotem_active_recipes` drop > 0 since last scrape | warn (recipe removed or all stub) |
@@ -727,6 +832,28 @@ All Optuna trials scored 0.0. Common causes:
 
 - The split produced an empty test set (too few users or interactions). Try `split.scheme: random` or lower `split.heldout_ratio`.
 - The data after cleansing has too few items for the cutoff. Lower `training.cutoff`.
+
+### `recotem train` exits 4 with `feature_axis_error`
+
+A [`features:`](recipe-reference.md#features) side's feature table has **zero** id overlap with the interaction data — not one id matched. This aborts a run that previously succeeded if the id column's type changed at the source, so it is worth recognising on sight. The message samples ids from both sides, which usually names the cause by itself:
+
+```
+features.item: none of the 1200 item ids in the interaction data were found in
+the feature table's 'item_id' column, so every item would encode to the bias
+column alone ... feature-table ids look like ['1.0', '2.0', '3.0']; interaction
+ids look like ['1', '2', '3'].
+```
+
+It is fatal rather than a warning because the failure is otherwise **silent**: every entity would encode to the bias column alone, so training would run to completion and sign an artifact whose header advertises `features` for what is really plain iALS. The model would serve, and score worse, with nothing in the logs to say why.
+
+Two causes account for essentially all occurrences:
+
+- **Id dtype mismatch** — what the sample above shows. A single blank cell in an otherwise-integer id column makes pandas infer `float64`, so `1` reads back as `1.0` while the interaction axis carries `"1"`. Pin the type at the source rather than cleaning the data: on a `csv` feature table add `dtype: {item_id: str}`. `dtype` is csv-only — on `bigquery` / `sql` cast in the query (`CAST(item_id AS STRING)`), and on `parquet` fix the type in the file's schema.
+- **A wrong-but-existing `id_column`** — a column that exists but does not hold the entity id passes the presence check at fetch time and fails only here. Check that `features.<side>.id_column` names the same id space as `schema.item_column` / `schema.user_column`.
+
+recotem deliberately does not coerce the id column for you. By the time the frame is fetched, pandas has already inferred `float64` and the original text is unrecoverable — a column reading `1.0` is indistinguishable from one whose ids are literally `"1.0"` — so reformatting integral floats back to ints would silently rewrite ids on a catalog that legitimately uses that form, trading a detectable failure for a quiet corruption. It would also not catch the wrong-`id_column` case at all.
+
+Only **zero** overlap aborts. Partial coverage is legitimate and expected: an id absent from the feature table encodes to bias-only and degrades to plain iALS for that one entity, which is the same mechanism that makes cold-start scoring possible. There is deliberately no low-coverage warning threshold — a dtype or `id_column` mistake is a property of the whole column and always lands at exactly 0%, so any threshold above zero would fire on correct configurations. Alert on the `feature_axis_coverage` event (`side`, `matched`, `total`) yourself if you want to track coverage.
 
 ### 401 on `/v1/recipes/{name}:recommend`
 

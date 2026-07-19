@@ -10,6 +10,11 @@ Tests:
 - zero-score -> ZeroScoreError
 - per_algorithm_trials partitioning
 - one structured log per trial
+- Task 9: feature-aware iALS wiring -- header/payload carry the encoder
+  state when a features: block is configured, the header omits the key
+  entirely otherwise, and the final refit re-encodes onto its OWN item
+  order rather than reusing the search phase's (a regression guard for the
+  one bug irspack will not raise an error for: a misordered feature matrix)
 """
 
 from __future__ import annotations
@@ -84,6 +89,204 @@ def _make_recipe(
         output=OutputConfig(path=str(tmp_path / "pipeline_test.recotem")),
     )
     return recipe
+
+
+# ---------------------------------------------------------------------------
+# Task 9: feature-aware iALS fixtures
+#
+# IALS's default tune range samples n_components from [4, 300] and needs a
+# matrix with real (non-degenerate) low-rank structure to factorise cleanly
+# without divide-by-zero warnings; a couple of interaction rows is not
+# enough. This mirrors the clustered synthetic dataset that
+# tests/integration/test_serve_predict_e2e.py already uses to exercise IALS
+# outside the `slow` mark.
+# ---------------------------------------------------------------------------
+
+
+def _make_clustered_synthetic_csv(tmp_path: Path) -> Path:
+    """Deterministic interaction matrix with real low-rank cluster structure.
+
+    A fully-dense grid is rank-deficient and makes IALS warn/divide-by-zero;
+    laying users out in overlapping clusters with a few idiosyncratic items
+    each gives a matrix every algorithm (including IALS) factorises cleanly.
+    """
+    n_users, n_items, n_clusters, band = 60, 40, 6, 12
+    pairs: set[tuple[str, str]] = set()
+    for u in range(n_users):
+        cluster = u % n_clusters
+        for k in range(band):
+            pairs.add(
+                (f"u{u}", f"i{(cluster * (n_items // n_clusters) + k) % n_items}")
+            )
+        pairs.add((f"u{u}", f"i{(u * 7) % n_items}"))
+        pairs.add((f"u{u}", f"i{(u * 13 + 3) % n_items}"))
+    rows = ["user_id,item_id"]
+    rows.extend(f"{u},{i}" for u, i in sorted(pairs))
+    csv_file = tmp_path / "clustered.csv"
+    csv_file.write_text("\n".join(rows) + "\n")
+    return csv_file
+
+
+@pytest.fixture
+def plain_recipe(tmp_path: Path):
+    """A features-less recipe: the header must omit "features" entirely."""
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+
+    csv_file = _make_clustered_synthetic_csv(tmp_path)
+    return Recipe(
+        name="plain_pipeline_test",
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        training=TrainingConfig(
+            algorithms=["TopPop"],
+            n_trials=1,
+            cutoff=5,  # must be < n_items to avoid irspack ValueError
+            split=SplitConfig(scheme="random", heldout_ratio=0.2, seed=0),
+        ),
+        output=OutputConfig(
+            path=str(tmp_path / "plain_pipeline_test.recotem"),
+            versioning="always_overwrite",
+        ),
+    )
+
+
+@pytest.fixture
+def feature_recipe(tmp_path: Path):
+    """An IALS recipe with an item `features:` block (genre + year)."""
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        FeatureColumn,
+        FeaturesConfig,
+        FeatureSideConfig,
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+
+    csv_file = _make_clustered_synthetic_csv(tmp_path)
+
+    items_csv = tmp_path / "item_features.csv"
+    genres = ["action", "drama", "comedy"]
+    pd.DataFrame(
+        {
+            "item_id": [f"i{i}" for i in range(40)],
+            "genre": [genres[i % len(genres)] for i in range(40)],
+            "year": [2000 + i for i in range(40)],
+        }
+    ).to_csv(items_csv, index=False)
+
+    return Recipe(
+        name="feature_pipeline_test",
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        features=FeaturesConfig(
+            item=FeatureSideConfig(
+                source=CSVConfig(type="csv", path=str(items_csv)),
+                id_column="item_id",
+                columns=[
+                    FeatureColumn(name="genre", encoding="categorical"),
+                    FeatureColumn(name="year", encoding="numerical"),
+                ],
+            )
+        ),
+        training=TrainingConfig(
+            algorithms=["IALS"],
+            n_trials=2,
+            cutoff=5,  # must be < n_items to avoid irspack ValueError
+            split=SplitConfig(scheme="random", heldout_ratio=0.2, seed=0),
+        ),
+        output=OutputConfig(
+            path=str(tmp_path / "feature_pipeline_test.recotem"),
+            versioning="always_overwrite",
+        ),
+    )
+
+
+@pytest.fixture
+def feature_recipe_both_axes(tmp_path: Path):
+    """An IALS recipe with BOTH an item and a USER `features:` block.
+
+    ``feature_recipe`` above (used by most Task 9 tests) is item-only, which
+    means no pipeline fixture ever exercised the search-phase alignment
+    test's ``user_features`` row order -- a mutation of the search-phase
+    call site's ``user_order`` argument (e.g. reversing it) was therefore
+    invisible to the whole suite. This fixture exists specifically to close
+    that gap: it is deliberately NOT a drop-in replacement for
+    ``feature_recipe`` (several other tests assert ``"user" not in
+    parsed["features"]`` against that fixture and must keep passing).
+    """
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        FeatureColumn,
+        FeaturesConfig,
+        FeatureSideConfig,
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+
+    csv_file = _make_clustered_synthetic_csv(tmp_path)
+
+    items_csv = tmp_path / "item_features_both_axes.csv"
+    genres = ["action", "drama", "comedy"]
+    pd.DataFrame(
+        {
+            "item_id": [f"i{i}" for i in range(40)],
+            "genre": [genres[i % len(genres)] for i in range(40)],
+            "year": [2000 + i for i in range(40)],
+        }
+    ).to_csv(items_csv, index=False)
+
+    users_csv = tmp_path / "user_features_both_axes.csv"
+    bands = ["young", "old"]
+    pd.DataFrame(
+        {
+            "user_id": [f"u{u}" for u in range(60)],
+            "band": [bands[u % len(bands)] for u in range(60)],
+        }
+    ).to_csv(users_csv, index=False)
+
+    return Recipe(
+        name="feature_pipeline_both_axes_test",
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        features=FeaturesConfig(
+            item=FeatureSideConfig(
+                source=CSVConfig(type="csv", path=str(items_csv)),
+                id_column="item_id",
+                columns=[
+                    FeatureColumn(name="genre", encoding="categorical"),
+                    FeatureColumn(name="year", encoding="numerical"),
+                ],
+            ),
+            user=FeatureSideConfig(
+                source=CSVConfig(type="csv", path=str(users_csv)),
+                id_column="user_id",
+                columns=[FeatureColumn(name="band", encoding="categorical")],
+            ),
+        ),
+        training=TrainingConfig(
+            algorithms=["IALS"],
+            n_trials=2,
+            cutoff=5,  # must be < n_items to avoid irspack ValueError
+            split=SplitConfig(scheme="random", heldout_ratio=0.2, seed=0),
+        ),
+        output=OutputConfig(
+            path=str(tmp_path / "feature_pipeline_both_axes_test.recotem"),
+            versioning="always_overwrite",
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1845,3 +2048,656 @@ def test_cleanse_memory_error_in_time_column_parse_propagates_unwrapped(
     with patch("recotem.training.pipeline.pd.to_datetime", side_effect=_oom):
         with pytest.raises(MemoryError):
             _cleanse(df, recipe)
+
+
+# ---------------------------------------------------------------------------
+# Task 9: feature-aware iALS end-to-end wiring
+# ---------------------------------------------------------------------------
+
+
+def test_feature_aware_training_writes_state_and_header(
+    tmp_path: Path, feature_recipe, key_ring
+) -> None:
+    """End-to-end: a features: recipe produces an artifact carrying both the
+    encoder state (payload) and the descriptor (header)."""
+    import json
+
+    from recotem.artifact.io import read_artifact
+    from recotem.artifact.signing import unpickle_payload
+    from recotem.training.pipeline import run_training
+
+    result = run_training(
+        feature_recipe,
+        key_ring=key_ring,
+        signing_key="active",
+        no_lock=True,
+        quiet=True,
+    )
+    assert result is not None
+
+    header, payload = read_artifact(result.artifact_path, key_ring)
+    parsed = json.loads(header.header_data)
+
+    assert parsed["features"]["version"] == 1
+    assert parsed["features"]["item"]["columns"] == ["genre", "year"]
+    assert "user" not in parsed["features"]
+
+    model = unpickle_payload(payload)
+    assert model.item_feature_state["version"] == 1
+    assert model.user_feature_state is None
+    # The matrix must NOT ride in best_params: that is JSON-serialized into a
+    # 64 KiB-capped header.
+    assert "item_features" not in parsed["best_params"]
+    assert "lambda_item_feature" in parsed["best_params"]
+
+
+def test_no_features_recipe_omits_header_key(
+    tmp_path: Path, plain_recipe, key_ring
+) -> None:
+    """A recipe with no features: block must keep the header byte-identical
+    to today's -- no "features" key at all, not even null."""
+    import json
+
+    from recotem.artifact.io import read_artifact
+    from recotem.training.pipeline import run_training
+
+    result = run_training(
+        plain_recipe,
+        key_ring=key_ring,
+        signing_key="active",
+        no_lock=True,
+        quiet=True,
+    )
+    assert result is not None
+
+    header, _ = read_artifact(result.artifact_path, key_ring)
+    assert "features" not in json.loads(header.header_data)
+
+
+def test_train_final_reencodes_features_for_its_own_axis_not_search_phase() -> None:
+    """Regression / mutation guard for the single most dangerous mistake in
+    feature-aware training: irspack raises on a feature-matrix ROW-COUNT
+    mismatch but accepts a MISORDERED matrix silently -- no shape error, no
+    value error, just a silently-wrong model. That means the header/payload
+    smoke test above cannot detect it: ``item_feature_state`` and the header
+    descriptor are built from ``feature_tables`` directly and do not depend
+    on whether ``_train_final`` actually re-encoded onto the right axis.
+
+    This test makes the row order itself observable. Each item's "genre"
+    value IS its own item id, so the encoder's vocabulary index for item X
+    equals X's rank in the *sorted* item id list -- exactly
+    ``df_to_sparse``'s own row/column order (``pd.Categorical`` sorts its
+    categories). A correctly re-encoded matrix is therefore the identity
+    permutation: row i's lone non-bias one-hot sits at column i. Reusing a
+    matrix built for any other ordering -- e.g. the search phase's
+    ``list(set(...))`` order, which is neither sorted nor stable across
+    processes for string ids -- breaks that identity and fails the
+    assertion below.
+    """
+    from recotem._features import build_encoder_state
+    from recotem.recipe.models import FeatureColumn
+    from recotem.training.features import FeatureTables
+    from recotem.training.pipeline import _train_final
+
+    item_ids = ["i5", "i1", "i9", "i3"]  # deliberately unsorted input order
+    df = pd.DataFrame(
+        {
+            "user_id": ["u1", "u2", "u1", "u2"],
+            "item_id": item_ids,
+        }
+    )
+    # The feature table's "genre" value for each item IS its own id, so the
+    # vocab index is a stand-in for "which item is this row".
+    item_df = pd.DataFrame({"genre": item_ids}, index=item_ids)
+    item_state = build_encoder_state(
+        item_df, [FeatureColumn(name="genre", encoding="categorical")]
+    )
+    tables = FeatureTables(item_state=item_state, item_df=item_df)
+
+    captured: dict = {}
+
+    class FakeIALS:
+        """Stand-in for IALSRecommender: records the matrix it was given."""
+
+        def __init__(
+            self, X, lambda_item_feature: float = 0.0, item_features=None
+        ) -> None:
+            captured["item_features"] = item_features
+
+        def learn(self):
+            return self
+
+    with patch(
+        "recotem.training.pipeline.get_recommender_cls",
+        return_value=FakeIALS,
+    ):
+        # class_name must be a REAL, feature-capable canonical class name
+        # ("IALSRecommender") -- not an arbitrary fake string -- because
+        # _train_final now gates final_feature_kwargs on
+        # is_feature_capable(class_name) (Finding 1 fix), which resolves the
+        # string through the real alias table. get_recommender_cls is
+        # patched above so the actual class instantiated is still FakeIALS
+        # regardless of this string.
+        result = _train_final(
+            df,
+            user_column="user_id",
+            item_column="item_id",
+            class_name="IALSRecommender",
+            best_params={"lambda_item_feature": 0.1},
+            feature_tables=tables,
+        )
+
+    dense = captured["item_features"].toarray()
+    vocab = item_state["columns"][0]["vocab"]
+    bias_col = item_state["bias_offset"]
+
+    for row_idx, iid in enumerate(result.item_ids):
+        expected_col = vocab[iid]
+        nonzero_cols = set(dense[row_idx].nonzero()[0].tolist())
+        assert nonzero_cols == {expected_col, bias_col}, (
+            f"row {row_idx} (item {iid!r}): expected the one-hot at column "
+            f"{expected_col} (plus the always-on bias column {bias_col}), "
+            f"got nonzero columns {nonzero_cols}. _train_final must "
+            "re-encode features against df_to_sparse's OWN item order -- "
+            "it must never reuse/cache a matrix built for a different "
+            "ordering (e.g. the search phase's)."
+        )
+
+
+def test_train_final_feature_cholesky_error_message_does_not_blame_a_column() -> None:
+    """A Cholesky failure during the FINAL refit must map to TrainingError
+    with an actionable message -- and that message must NOT tell the user to
+    drop a column. recotem's own always-on bias column is deliberately
+    collinear with the categorical one-hots (see recotem._features's module
+    docstring) and is the single most likely structural cause, and the user
+    cannot remove it from the recipe.
+    """
+    from recotem._features import build_encoder_state
+    from recotem.recipe.models import FeatureColumn
+    from recotem.training.errors import TrainingError
+    from recotem.training.features import FeatureTables
+    from recotem.training.pipeline import _train_final
+
+    df = pd.DataFrame(
+        {
+            "user_id": ["u1", "u2"],
+            "item_id": ["i1", "i2"],
+        }
+    )
+    item_df = pd.DataFrame({"genre": ["a", "b"]}, index=["i1", "i2"])
+    item_state = build_encoder_state(
+        item_df, [FeatureColumn(name="genre", encoding="categorical")]
+    )
+    tables = FeatureTables(item_state=item_state, item_df=item_df)
+
+    class RankDeficientRec:
+        def __init__(
+            self, X, lambda_item_feature: float = 0.0, item_features=None
+        ) -> None:
+            pass
+
+        def learn(self):
+            raise RuntimeError(
+                "Feature ridge Cholesky decomposition failed: matrix is not "
+                "positive definite"
+            )
+
+    with patch(
+        "recotem.training.pipeline.get_recommender_cls",
+        return_value=RankDeficientRec,
+    ):
+        # class_name must be a REAL, feature-capable canonical class name
+        # ("IALSRecommender") so is_feature_capable(class_name) (Finding 1
+        # fix) lets final_feature_kwargs be built; get_recommender_cls is
+        # patched above so RankDeficientRec is still what actually gets
+        # instantiated.
+        with pytest.raises(TrainingError, match="Cholesky") as exc_info:
+            _train_final(
+                df,
+                user_column="user_id",
+                item_column="item_id",
+                class_name="IALSRecommender",
+                best_params={"lambda_item_feature": 0.1},
+                feature_tables=tables,
+            )
+
+    assert exc_info.value.code == "feature_cholesky_error"
+    message = str(exc_info.value)
+    assert "drop" not in message.lower(), (
+        f"the error message must not tell the user to drop a column "
+        f"(recotem's own bias column is the most likely structural cause "
+        f"and cannot be removed from the recipe); got: {message!r}"
+    )
+    assert "min_frequency" in message
+
+
+def test_train_final_without_features_is_unaffected_by_feature_tables_param() -> None:
+    """Back-compat: omitting ``feature_tables`` (the pre-Task-9 call shape)
+    must behave exactly as before -- no feature kwargs, no feature state on
+    the returned wrapper."""
+    from recotem.training.pipeline import _train_final
+
+    df = pd.DataFrame(
+        {"user_id": ["u1", "u2", "u1", "u3"], "item_id": ["i1", "i1", "i2", "i2"]}
+    )
+
+    class PlainRec:
+        def __init__(self, X) -> None:
+            self.X = X
+
+        def learn(self):
+            return self
+
+    with patch("recotem.training.pipeline.get_recommender_cls", return_value=PlainRec):
+        result = _train_final(
+            df,
+            user_column="user_id",
+            item_column="item_id",
+            class_name="PlainRec",
+            best_params={},
+        )
+
+    assert result.item_feature_state is None
+    assert result.user_feature_state is None
+
+
+# ---------------------------------------------------------------------------
+# Review finding 1 (CRITICAL): _train_final must not crash when the search
+# winner is a features:-enabled recipe's non-feature-capable algorithm.
+#
+# Recipe._validate_features_algorithms only requires that AT LEAST ONE
+# listed algorithm be feature-capable (see recipe/models.py); an
+# `algorithms: ["TopPop", "IALS"]` recipe with a `features:` block is
+# explicitly valid, and the search may legitimately pick TopPop as the
+# winner. Pre-fix, `_train_final` built `final_feature_kwargs` whenever
+# `feature_tables.enabled`, with no check on whether `class_name` accepts
+# feature kwargs -- splatting `item_features` into TopPop's constructor
+# (which only accepts `X_train`) raised
+# `TypeError: TopPopRecommender.__init__() got an unexpected keyword
+# argument 'item_features'`, wrapped as
+# TrainingError(code="final_training_error"). search.py's run_search
+# already gated its analogous `trial_features` on `is_feature_capable`
+# (search.py:398-402); that gate was never replicated for the final refit.
+# ---------------------------------------------------------------------------
+
+
+def test_train_final_with_non_feature_capable_winner_does_not_crash() -> None:
+    """``_train_final`` must produce a valid (non-feature) artifact, not
+    raise, when ``class_name`` resolves to a real, non-patched,
+    non-feature-capable irspack class (``TopPopRecommender``) alongside an
+    enabled ``feature_tables``.
+
+    Uses the REAL irspack ``TopPopRecommender`` (not a mock/fake class) so
+    the constructor-signature mismatch this test guards against is genuine,
+    matching the reviewer's exact reproduction.
+    """
+    from recotem._features import build_encoder_state
+    from recotem.recipe.models import FeatureColumn
+    from recotem.training.features import FeatureTables
+    from recotem.training.pipeline import _train_final
+
+    df = pd.DataFrame(
+        {
+            "user_id": ["u1", "u2", "u1", "u2"],
+            "item_id": ["i1", "i2", "i3", "i4"],
+        }
+    )
+    item_df = pd.DataFrame(
+        {"genre": ["a", "b", "a", "b"]}, index=["i1", "i2", "i3", "i4"]
+    )
+    item_state = build_encoder_state(
+        item_df, [FeatureColumn(name="genre", encoding="categorical")]
+    )
+    tables = FeatureTables(item_state=item_state, item_df=item_df)
+
+    # class_name="TopPopRecommender" resolves via get_recommender_cls to the
+    # real irspack class -- no patch("...get_recommender_cls", ...) here.
+    result = _train_final(
+        df,
+        user_column="user_id",
+        item_column="item_id",
+        class_name="TopPopRecommender",
+        best_params={},
+        feature_tables=tables,
+    )
+
+    assert result is not None
+    assert sorted(result.item_ids) == ["i1", "i2", "i3", "i4"]
+
+    # Decision (see task report for full rationale): item_feature_state is
+    # STILL persisted even though TopPop never received item_features at
+    # construction time. The header's "features" descriptor is already
+    # unconditional on feature_tables.enabled (independent of best_class --
+    # see _run_training_locked's header-building step below the search),
+    # so nulling the payload side out here would make the payload silently
+    # disagree with the header for the very same artifact. The encoder
+    # state is descriptive metadata about what the recipe configured, not a
+    # claim that the winning model consumed it.
+    assert result.item_feature_state is not None
+    assert result.item_feature_state["version"] == 1
+
+
+def test_multi_algorithm_features_recipe_with_toppop_winner_produces_valid_artifact(
+    tmp_path: Path, key_ring
+) -> None:
+    """Full run_training proof of the reviewer's exact scenario: a legal
+    multi-algorithm recipe (``algorithms: ["TopPop", "IALS"]``) with a
+    ``features:`` block, where TopPop -- not IALS -- wins the search.
+
+    ``per_algorithm_trials={"IALS": 0, "TopPop": 1}`` forces TopPop to be
+    the only algorithm that actually runs (budget 0 means "skip", per
+    ``_compute_budgets``), while the recipe-level validator is satisfied
+    because IALS is still *listed* in ``training.algorithms``. Pre-fix, this
+    is a 100%-reproducible hard failure for any operator running exactly
+    this configuration; post-fix it must produce a normal, non-feature
+    artifact.
+    """
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        FeatureColumn,
+        FeaturesConfig,
+        FeatureSideConfig,
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+    from recotem.training.pipeline import run_training
+
+    csv_file = _make_clustered_synthetic_csv(tmp_path)
+
+    items_csv = tmp_path / "item_features_toppop_winner.csv"
+    genres = ["action", "drama", "comedy"]
+    pd.DataFrame(
+        {
+            "item_id": [f"i{i}" for i in range(40)],
+            "genre": [genres[i % len(genres)] for i in range(40)],
+        }
+    ).to_csv(items_csv, index=False)
+
+    recipe = Recipe(
+        name="toppop_winner_features_test",
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        features=FeaturesConfig(
+            item=FeatureSideConfig(
+                source=CSVConfig(type="csv", path=str(items_csv)),
+                id_column="item_id",
+                columns=[FeatureColumn(name="genre", encoding="categorical")],
+            )
+        ),
+        training=TrainingConfig(
+            algorithms=["TopPop", "IALS"],
+            n_trials=1,
+            per_algorithm_trials={"IALS": 0, "TopPop": 1},
+            cutoff=5,
+            split=SplitConfig(scheme="random", heldout_ratio=0.2, seed=0),
+        ),
+        output=OutputConfig(
+            path=str(tmp_path / "toppop_winner_features_test.recotem"),
+            versioning="always_overwrite",
+        ),
+    )
+
+    result = run_training(
+        recipe,
+        key_ring=key_ring,
+        signing_key="active",
+        no_lock=True,
+        quiet=True,
+    )
+
+    assert result is not None
+    assert result.best_class == "TopPopRecommender", (
+        "test setup invariant: IALS must have budget 0 so TopPop is "
+        f"guaranteed to win; got best_class={result.best_class!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review finding 2 (Important): the SEARCH-phase feature encoding call site
+# (pipeline.py, immediately after split_interactions, before run_search) had
+# no misordering regression test of its own -- only the final-refit
+# re-encoding did (test_train_final_reencodes_features_for_its_own_axis_not_
+# search_phase above). Because the final refit re-encodes independently, a
+# search-phase-only misordering bug (e.g. `sorted(split_result.item_ids)`
+# instead of `split_result.item_ids`) would not corrupt the shipped model,
+# but WOULD silently corrupt the hyperparameter search: lambda tuned against
+# a mismatched item<->feature correspondence, with no error and (pre-fix) no
+# failing test.
+# ---------------------------------------------------------------------------
+
+
+def test_search_phase_feature_kwargs_match_split_result_axis_order_exactly(
+    feature_recipe_both_axes, key_ring
+) -> None:
+    """Spy on run_search's ``feature_kwargs`` argument and assert its row
+    order matches ``split_result.item_ids`` / ``row_user_ids`` EXACTLY -- by
+    order, not merely by set -- for BOTH the item and the user axis.
+
+    Strategy: wrap (not replace) ``split_interactions`` and
+    ``load_feature_tables`` so the REAL split result and REAL feature tables
+    are captured alongside whatever ``run_search`` actually received, then
+    independently recompute the expected encoding from the captured
+    ``split_result.item_ids`` / ``row_user_ids`` and assert it is row-for-row
+    identical to what ``run_search`` was given. ``run_search`` itself is
+    replaced with a stub that raises immediately after capturing its
+    ``feature_kwargs``, so this test does not need a real, successful Optuna
+    search to complete.
+
+    A same-SET-but-different-ORDER mutation of the search-phase call site
+    (e.g. ``item_order=sorted(split_result.item_ids)`` or
+    ``user_order=list(reversed(split_result.row_user_ids))``) changes the
+    actual encoding's row order without changing which items/users are
+    present, so it is invisible to any assertion that only checks set
+    membership or matrix shape -- exactly the gap this test targets.
+
+    Uses ``feature_recipe_both_axes`` (not the item-only ``feature_recipe``):
+    a prior version of this test only configured ``features.item``, so
+    ``feature_kwargs`` never contained ``user_features`` at all and no
+    assertion here could ever have observed a misordered user axis --
+    verified by mutating ``pipeline.py``'s search-phase call site from
+    ``user_order=split_result.row_user_ids`` to
+    ``user_order=list(reversed(split_result.row_user_ids))`` and confirming
+    the full suite still passed (the exact mirror of the item-axis hazard
+    this whole feature is built to prevent).
+    """
+    from recotem.training import pipeline as pipeline_mod
+    from recotem.training.features import encode_for_axis
+    from recotem.training.pipeline import run_training
+    from recotem.training.split import split_interactions as real_split_interactions
+
+    captured: dict = {}
+
+    def _spy_split_interactions(*args, **kwargs):
+        result = real_split_interactions(*args, **kwargs)
+        captured["split_result"] = result
+        return result
+
+    real_load_feature_tables = pipeline_mod.load_feature_tables
+
+    def _spy_load_feature_tables(*args, **kwargs):
+        tables = real_load_feature_tables(*args, **kwargs)
+        captured["feature_tables"] = tables
+        return tables
+
+    class _StopAfterCapture(Exception):
+        """Sentinel raised to short-circuit the pipeline right after
+        run_search is invoked, so no real search need complete."""
+
+    def _spy_run_search(*args, feature_kwargs=None, **kwargs):
+        captured["feature_kwargs"] = feature_kwargs
+        raise _StopAfterCapture
+
+    with (
+        patch(
+            "recotem.training.pipeline.split_interactions",
+            side_effect=_spy_split_interactions,
+        ),
+        patch(
+            "recotem.training.pipeline.load_feature_tables",
+            side_effect=_spy_load_feature_tables,
+        ),
+        patch(
+            "recotem.training.pipeline.run_search",
+            side_effect=_spy_run_search,
+        ),
+    ):
+        with pytest.raises(_StopAfterCapture):
+            run_training(
+                feature_recipe_both_axes,
+                key_ring=key_ring,
+                signing_key="active",
+                no_lock=True,
+                quiet=True,
+            )
+
+    split_result = captured["split_result"]
+    feature_tables = captured["feature_tables"]
+    actual_kwargs = captured["feature_kwargs"]
+
+    assert actual_kwargs is not None and "item_features" in actual_kwargs, (
+        f"run_search must have received item_features; got {actual_kwargs!r}"
+    )
+    assert "user_features" in actual_kwargs, (
+        f"run_search must have received user_features; got {actual_kwargs!r}"
+    )
+
+    # Test-setup invariant: split_result.item_ids must not already be sorted,
+    # or a sorted(...) mutation would be unobservable by coincidence and this
+    # test would pass whether or not the mutation guard is present.
+    assert split_result.item_ids != sorted(split_result.item_ids), (
+        "test setup invariant violated: split_result.item_ids is already in "
+        "sorted order, so this test cannot distinguish correct code from "
+        "the sorted(...) mutation it targets"
+    )
+
+    # Test-setup invariant for the USER axis. Unlike item_ids (built from
+    # irspack's `list(set(...))`, hash-order-dependent and not sorted for a
+    # typical string-id fixture), row_user_ids is built from pandas
+    # Categorical-backed user indexing and comes out ALREADY sorted for a
+    # typical "u0".."u59" fixture -- confirmed empirically, not assumed. That
+    # makes a `sorted(...)` mutation of user_order a value-level NO-OP here
+    # (indistinguishable from correct code), so the mutation this guards
+    # against is `reversed(...)`, not `sorted(...)`, and the vacuity check
+    # must match: assert the row order differs from its own reversal.
+    assert split_result.row_user_ids != list(reversed(split_result.row_user_ids)), (
+        "test setup invariant violated: split_result.row_user_ids is a "
+        "palindrome under reversal, so this test cannot distinguish correct "
+        "code from the reversed(...) mutation it targets"
+    )
+
+    # Recompute independently from the SAME feature_tables and the split
+    # phase's OWN (real, unsorted) axis labels.
+    expected_kwargs = encode_for_axis(
+        feature_tables,
+        item_order=split_result.item_ids,
+        user_order=split_result.row_user_ids,
+    )
+
+    actual_dense = actual_kwargs["item_features"].toarray()
+    expected_dense = expected_kwargs["item_features"].toarray()
+    assert actual_dense.shape == expected_dense.shape
+    assert (actual_dense == expected_dense).all(), (
+        "run_search's feature_kwargs['item_features'] must be row-for-row "
+        "identical to encode_for_axis(feature_tables, "
+        "item_order=split_result.item_ids, user_order=split_result."
+        "row_user_ids) -- a same-SET-but-different-ORDER item_order (e.g. "
+        "sorted(split_result.item_ids)) must fail this assertion."
+    )
+
+    actual_user_dense = actual_kwargs["user_features"].toarray()
+    expected_user_dense = expected_kwargs["user_features"].toarray()
+    assert actual_user_dense.shape == expected_user_dense.shape
+    assert (actual_user_dense == expected_user_dense).all(), (
+        "run_search's feature_kwargs['user_features'] must be row-for-row "
+        "identical to encode_for_axis(feature_tables, "
+        "item_order=split_result.item_ids, user_order=split_result."
+        "row_user_ids) -- a same-SET-but-different-ORDER user_order (e.g. "
+        "list(reversed(split_result.row_user_ids))) must fail this "
+        "assertion. This is the exact mirror of the item-axis hazard above, "
+        "on the axis that had no coverage at all before this test."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review finding 4: the feature-aware iALS design spec ("Testing" + "Risks")
+# promises the alignment test above "must run under multiple PYTHONHASHSEED
+# values to catch any
+# reintroduced 'build once, reuse' shortcut". That promise was fulfilled by a
+# manual `for seed in 0 1 2; do PYTHONHASHSEED=$seed uv run pytest ...`
+# shell loop run once during implementation -- not a standing guard a future
+# regression would ever trip, and outside the test suite entirely.
+#
+# Worse: the vacuity guard inside the alignment test itself (`assert
+# split_result.item_ids != sorted(split_result.item_ids)`, a few lines
+# above) is itself hash-order-dependent. Python randomizes PYTHONHASHSEED
+# per process by default, so whether that guard's precondition is even
+# satisfied -- and therefore whether the alignment test exercises a
+# non-sorted order at all -- varies run to run, uncontrolled.
+#
+# This test converts the promise into a standing, in-suite guard: it
+# re-executes the alignment test above, as a subprocess, under each of the
+# three PYTHONHASHSEED values the spec's own worked example (Hazard 1,
+# "Silent misalignment") demonstrates produce three DIFFERENT
+# `list(set(...))` orderings for string item ids -- so this is not merely
+# "run under several arbitrary seeds", it specifically covers the seeds the
+# design doc already showed to be non-sorted, guaranteeing real coverage
+# rather than leaving it to chance on whatever seed pytest happens to start
+# with.
+#
+# Re-invokes pytest on the single node id rather than duplicating the
+# alignment test's spy/compare logic here: any future edit to that test
+# keeps being exactly what this guard re-runs, with no second copy that
+# could silently drift out of sync (the same "kept in sync by hand" risk
+# this codebase calls out elsewhere, e.g.
+# `_idmap._FEATURE_CAPABLE_CLASS_NAMES`).
+#
+# A CI matrix entry was considered instead (running the alignment test
+# under a PYTHONHASHSEED matrix in .github/workflows/test.yml) and rejected:
+# a workflow YAML edit is invisible to `uv run pytest` and easy for someone
+# tuning CI runtime to delete without realizing what guarantee it was
+# providing, whereas this test fails the same `pytest tests` invocation
+# every contributor already runs locally and in CI.
+# ---------------------------------------------------------------------------
+
+
+def test_search_phase_feature_alignment_holds_across_hash_seeds() -> None:
+    """Standing guard: re-run the alignment test above under three fixed
+    PYTHONHASHSEED values so a reintroduced 'build once, reuse' shortcut
+    (e.g. ``item_order=sorted(split_result.item_ids)`` at the search-phase
+    feature-encoding call site in ``pipeline.py``) cannot slip back in
+    unnoticed just because one particular process's random hash seed
+    happened to produce an order the vacuity guard was happy with.
+    """
+    import os
+    import subprocess
+    import sys
+
+    node_id = (
+        f"{__file__}::"
+        "test_search_phase_feature_kwargs_match_split_result_axis_order_exactly"
+    )
+    # The exact three seeds the feature-aware iALS design spec's Hazard 1
+    # demonstrates produce three DIFFERENT `list(set(...))` orderings for
+    # string item ids -- not an arbitrary choice of "a few seeds".
+    failures: list[str] = []
+    for seed in ("0", "1", "2"):
+        env = {**os.environ, "PYTHONHASHSEED": seed}
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", node_id, "-q", "--no-header"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            failures.append(
+                f"PYTHONHASHSEED={seed} FAILED (exit {result.returncode}):\n"
+                f"{result.stdout}\n{result.stderr}"
+            )
+    assert not failures, (
+        "alignment test failed under one or more fixed hash seeds:\n\n"
+        + "\n\n".join(failures)
+    )

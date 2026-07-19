@@ -112,6 +112,206 @@ def test_validate_probe_ok_for_existing_csv(tmp_path: Path) -> None:
     assert "probe OK (csv)" in result.stdout
 
 
+def _feature_recipe_yaml(
+    tmp_path: Path, feature_source_path: Path, side: str = "item"
+) -> Path:
+    """A recipe with a features.<side> source pointing at *feature_source_path*.
+
+    ``side`` is ``"item"`` or ``"user"`` -- both share the single
+    ``FeatureSideConfig`` model, so the generated block only differs in its
+    key and ``id_column``.
+    """
+    interactions = tmp_path / "i.csv"
+    interactions.write_text("user_id,item_id\nu1,i1\nu2,i2\n")
+    id_column = "item_id" if side == "item" else "user_id"
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        f"""\
+name: probe
+source:
+  type: csv
+  path: {interactions}
+schema:
+  user_column: user_id
+  item_column: item_id
+features:
+  {side}:
+    source:
+      type: csv
+      path: {feature_source_path}
+    id_column: {id_column}
+    columns:
+      - {{name: genre, encoding: categorical}}
+training:
+  algorithms: [IALS]
+output:
+  path: {tmp_path / "out.recotem"}
+"""
+    )
+    return recipe
+
+
+def test_validate_probes_feature_sources(tmp_path: Path) -> None:
+    """validate must probe features.item.source, not just the top-level source.
+
+    A missing feature-source CSV must fail validate (exit 3) with the
+    ``features.item.source`` label so an operator with multiple sources
+    knows exactly which one failed -- rather than surviving validate only to
+    die mid-train.
+    """
+    recipe = _feature_recipe_yaml(tmp_path, tmp_path / "does_not_exist.csv")
+    result = runner.invoke(app, ["validate", str(recipe)])
+    assert result.exit_code == 3, (
+        f"missing features.item.source CSV must exit 3; got {result.exit_code}. "
+        f"Output: {result.stdout}"
+    )
+    assert "features.item.source" in (result.stdout + result.stderr)
+
+
+def test_validate_passes_with_reachable_feature_source(tmp_path: Path) -> None:
+    """validate exits 0 and probes features.item.source when it is reachable."""
+    items = tmp_path / "items.csv"
+    items.write_text("item_id,genre\ni1,action\ni2,drama\n")
+    recipe = _feature_recipe_yaml(tmp_path, items)
+    result = runner.invoke(app, ["validate", str(recipe)])
+    assert result.exit_code == 0, result.stdout
+    assert "Validation passed." in result.stdout
+    assert "probe OK (csv) [features.item.source]" in result.stdout
+
+
+def test_validate_probes_user_feature_source(tmp_path: Path) -> None:
+    """validate must probe features.user.source symmetrically with item.
+
+    Only ``features.item.source`` was covered above; ``features.user.source``
+    shares the exact same ``FeatureSideConfig`` code path (same loop body in
+    ``validate``) but was previously unpinned by any test.
+    """
+    recipe = _feature_recipe_yaml(
+        tmp_path, tmp_path / "does_not_exist.csv", side="user"
+    )
+    result = runner.invoke(app, ["validate", str(recipe)])
+    assert result.exit_code == 3, (
+        f"missing features.user.source CSV must exit 3; got {result.exit_code}. "
+        f"Output: {result.stdout}"
+    )
+    assert "features.user.source" in (result.stdout + result.stderr)
+
+
+def test_validate_passes_with_reachable_user_feature_source(tmp_path: Path) -> None:
+    """validate exits 0 and probes features.user.source when it is reachable."""
+    users = tmp_path / "users.csv"
+    users.write_text("user_id,genre\nu1,action\nu2,drama\n")
+    recipe = _feature_recipe_yaml(tmp_path, users, side="user")
+    result = runner.invoke(app, ["validate", str(recipe)])
+    assert result.exit_code == 0, result.stdout
+    assert "Validation passed." in result.stdout
+    assert "probe OK (csv) [features.user.source]" in result.stdout
+
+
+def test_validate_reports_where_for_exception_whose_str_ignores_args(
+    tmp_path: Path,
+) -> None:
+    """``where`` must reach the operator even when str(exc) ignores .args.
+
+    ``pydantic_core.ValidationError.__str__`` is implemented in Rust and
+    reads the error's own internal list, not ``.args`` -- so tagging
+    ``where`` by mutating ``exc.args`` in place (as an earlier version of
+    this fix did) is silently invisible for this exception type. A plugin
+    author who re-validates its config via a nested pydantic model inside
+    ``__init__`` (a plausible pattern per ``docs/plugin-authoring.md`` --
+    nothing enforces the "always raise DataSourceError" convention) would
+    trigger exactly this. The fix must carry ``where`` in the caller's error
+    message instead, which works regardless of what ``str(exc)`` returns.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from pydantic import BaseModel, ValidationError
+
+    from recotem.datasource.bigquery import BigQueryConfig
+    from recotem.datasource.registry import get_source_class as _real_get_source_class
+
+    class _NestedConfig(BaseModel):
+        x: int
+
+    class _StubFeatureSource:
+        extras_required: list = []
+        # Real Config so ``load_recipe`` (which also calls
+        # ``get_source_class``) resolves ``features.item.source`` into a
+        # valid ``BigQueryConfig`` and never itself raises -- the
+        # ValidationError below must come from *this* class's __init__,
+        # reached only via the CLI's own probe step, not from recipe loading.
+        Config = BigQueryConfig
+
+        def __init__(self, config: object) -> None:
+            _NestedConfig(x="not-an-int")  # raises pydantic_core.ValidationError
+
+    # Sanity-check the test's own premise: this exception type's __str__
+    # really does ignore .args, so the test cannot pass for the wrong reason
+    # (e.g. against a pydantic version that changed this behaviour).
+    try:
+        _NestedConfig(x="not-an-int")
+    except ValidationError as probe_exc:
+        before = str(probe_exc)
+        probe_exc.args = ("MUTATED-MARKER",)
+        assert "MUTATED-MARKER" not in str(probe_exc), (
+            "test premise broken: this pydantic version's ValidationError."
+            "__str__ now reads .args -- the blind spot this test targets no "
+            "longer exists as designed"
+        )
+        assert str(probe_exc) == before
+
+    interactions = tmp_path / "i.csv"
+    interactions.write_text("user_id,item_id\nu1,i1\nu2,i2\n")
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(
+        f"""\
+name: probe_validation_error
+source:
+  type: csv
+  path: {interactions}
+schema:
+  user_column: user_id
+  item_column: item_id
+features:
+  item:
+    source:
+      type: bigquery
+      query: "SELECT item_id, genre FROM t"
+    id_column: item_id
+    columns:
+      - {{name: genre, encoding: categorical}}
+training:
+  algorithms: [IALS]
+output:
+  path: {tmp_path / "out.recotem"}
+"""
+    )
+
+    # Only intercept the "bigquery" lookup (the feature source) so the
+    # top-level "csv" source resolves and probes normally through the real
+    # registry -- isolating the failure to features.item.source alone.
+    def _fake_get_source_class(type_name: str) -> type:
+        if type_name == "bigquery":
+            return _StubFeatureSource
+        return _real_get_source_class(type_name)
+
+    with patch(
+        "recotem.datasource.registry.get_source_class",
+        MagicMock(side_effect=_fake_get_source_class),
+    ):
+        result = runner.invoke(app, ["validate", str(recipe)])
+
+    combined = result.stdout + (result.stderr or "")
+    assert result.exit_code != 0, (
+        f"validate must exit non-zero when a feature source's __init__ "
+        f"raises a ValidationError; got {result.exit_code}. Output: {combined!r}"
+    )
+    assert "features.item.source" in combined, (
+        "validate must name WHICH source failed even when the raised "
+        f"exception's __str__ ignores .args; got: {combined!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # recotem schema
 # ---------------------------------------------------------------------------
@@ -123,6 +323,42 @@ def test_schema_command_emits_valid_jsonschema() -> None:
     assert result.exit_code == 0
     schema_dict = json.loads(result.stdout)
     assert "properties" in schema_dict or "title" in schema_dict
+
+
+def test_schema_emits_discriminated_union_for_feature_sources() -> None:
+    """features.item.source (via FeatureSideConfig) must be the same
+    discriminated source union as the top-level ``source`` field, not the
+    bare ``{"title": "Source"}`` that ``create_model(__base__=Recipe, ...)``
+    emits for a nested ``Any``-typed field it cannot override.
+
+    Asserts the actual discriminator mapping is present and lists every
+    registered built-in source type -- a weaker assertion (e.g. merely
+    ``"source" in properties``) would also pass against the unfixed bug.
+    """
+    result = runner.invoke(app, ["schema"])
+    assert result.exit_code == 0, result.stdout
+    schema_dict = json.loads(result.stdout)
+
+    defs = schema_dict.get("$defs", {})
+    assert "FeatureSideConfig" in defs, sorted(defs.keys())
+    side_source = defs["FeatureSideConfig"]["properties"]["source"]
+
+    # Must be a real discriminated union, not a bare {"title": "Source"}.
+    assert "oneOf" in side_source or "anyOf" in side_source, side_source
+    assert "discriminator" in side_source, side_source
+    assert side_source["discriminator"]["propertyName"] == "type"
+
+    mapping = side_source["discriminator"]["mapping"]
+    for expected_type in ("csv", "parquet", "bigquery", "sql"):
+        assert expected_type in mapping, (
+            f"expected {expected_type!r} in features.item.source discriminator "
+            f"mapping; got {sorted(mapping.keys())}"
+        )
+
+    # The mapping must match the top-level source union exactly (same
+    # registered types, not a coincidentally-similar unrelated union).
+    top_level_source = schema_dict["properties"]["source"]
+    assert mapping == top_level_source["discriminator"]["mapping"]
 
 
 # ---------------------------------------------------------------------------

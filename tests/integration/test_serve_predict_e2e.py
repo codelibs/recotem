@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import time
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -336,6 +337,30 @@ _ROUNDTRIP_ALGOS = [
     "TruncatedSVD",
     "BPRFM",
 ]
+
+
+def test_roundtrip_algos_covers_every_supported_class_name() -> None:
+    """Pin ``_ROUNDTRIP_ALGOS`` to the real source of truth.
+
+    The list above is hand-maintained and its comment claims completeness
+    ("every algorithm recotem advertises") without deriving from
+    ``training.algorithms.SUPPORTED_CLASS_NAMES`` -- so an algorithm added to
+    the supported set but forgotten here would silently stop being covered by
+    ``test_every_algorithm_artifact_serve_roundtrip`` below. Resolving each
+    alias to its canonical class name and comparing sets closes that gap
+    cheaply without touching the (working) parametrized test itself.
+    """
+    from recotem.training.algorithms import (
+        SUPPORTED_CLASS_NAMES,
+        resolve_algorithm_name,
+    )
+
+    resolved = {resolve_algorithm_name(alias) for alias in _ROUNDTRIP_ALGOS}
+    assert resolved == SUPPORTED_CLASS_NAMES, (
+        f"_ROUNDTRIP_ALGOS (resolved: {sorted(resolved)}) has drifted from "
+        f"SUPPORTED_CLASS_NAMES ({sorted(SUPPORTED_CLASS_NAMES)}); update "
+        "_ROUNDTRIP_ALGOS to add/remove the alias."
+    )
 
 
 def _irspack_has_recommender(class_name: str) -> bool:
@@ -897,3 +922,500 @@ def test_recipes_discovery_list_and_detail() -> None:
         headers={"x-api-key": plaintext},
     )
     assert missing_resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Task 16: feature-aware iALS -- integration and compatibility coverage
+# ---------------------------------------------------------------------------
+#
+# The three tests below prove, at the integration level, that the whole
+# feature-aware stack (recipe -> training -> artifact -> serving) works
+# TOGETHER, and that old and new artifacts interoperate:
+#
+# 1. test_feature_aware_artifact_serve_roundtrip -- a features.item AND
+#    features.user recipe trains a real IALS, the resulting artifact is
+#    served through the real v1 HTTP surface, and a known user, a cold user
+#    (case A), and a cold seed (case C) all succeed.
+# 2. test_old_artifact_loads_on_feature_aware_serve -- an artifact with no
+#    "features" header key at all (pre-Task-9 shape) loads and serves
+#    normally through create_app()'s real startup loader.
+# 3. test_feature_version_2_artifact_fails_closed -- a hand-written artifact
+#    declaring features.version=2 is refused with reason "feature_version",
+#    visible through /v1/health and /v1/health/details.
+
+
+def _make_item_features_csv(tmp_path: Path, n_items: int = 40) -> Path:
+    """Item feature table: alternating categorical "genre" by item parity.
+
+    Matches the id space of ``_make_clustered_synthetic_csv`` (item ids
+    ``i0``..``i{n_items - 1}``).
+    """
+    rows = ["item_id,genre"]
+    for i in range(n_items):
+        genre = "action" if i % 2 else "drama"
+        rows.append(f"i{i},{genre}")
+    p = tmp_path / "item_features.csv"
+    p.write_text("\n".join(rows) + "\n")
+    return p
+
+
+def _make_user_features_csv(tmp_path: Path, n_users: int = 60) -> Path:
+    """User feature table: alternating categorical "band" by user parity.
+
+    Matches the id space of ``_make_clustered_synthetic_csv`` (user ids
+    ``u0``..``u{n_users - 1}``).
+    """
+    rows = ["user_id,band"]
+    for u in range(n_users):
+        band = "young" if u % 2 else "old"
+        rows.append(f"u{u},{band}")
+    p = tmp_path / "user_features.csv"
+    p.write_text("\n".join(rows) + "\n")
+    return p
+
+
+def test_feature_aware_artifact_serve_roundtrip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Train an IALS recipe with features.item AND features.user end to end,
+    serve the resulting artifact through the real v1 HTTP surface, and
+    exercise a known user, a cold user with ``user_features`` (case A), and
+    a cold seed with ``item_features`` (case C).
+
+    Mutation guard
+    --------------
+    ``lambda_item_feature`` / ``lambda_user_feature`` are tuned over a
+    log-uniform ``[5e-2, 1e6]`` range (``training/search.py``); the top of
+    that range drives the feature contribution toward zero -- close to plain
+    iALS. That means "the cold-start calls below returned 200" proves
+    nothing about features actually being used: the exact same 200s would
+    come back from a model that quietly trained close to plain iALS (e.g.
+    because Optuna's sampler landed near the top of the range), or from a
+    future regression that silently stopped threading the encoded feature
+    matrix through to irspack -- routes.py's case A/C branches only check
+    that the model *carries* feature state, not that the request's feature
+    values reach it. To make the assertions mean something, ``suggest_float``
+    is patched to pin *only* those two parameter names to ``0.1`` -- the same
+    order of magnitude ``tests/unit/test_idmap.py``'s ``fa_model`` fixture
+    uses to get a genuinely feature-sensitive model -- while every other
+    hyperparameter is still sampled by the real (seeded) TPESampler. The
+    fetch, cleanse, split, search loop, final refit, artifact write, HMAC
+    signing, and deserialization all run for real, unmocked.
+
+    The proof itself: cold-start recommendations are requested twice, once
+    per category value (``band: young`` vs ``band: old``; ``genre: action``
+    vs ``genre: drama``), and the ITEM-ID sequences (not the raw score-
+    bearing dicts) are asserted to DIFFER. Comparing item ids rather than
+    scores matters: irspack's underlying BLAS calls are not bit-reproducible
+    across two separate calls even with an UNCHANGED encoded feature vector
+    (observed empirically -- repeated identical calls differ at the float32
+    rounding level, ~1e-7 relative), so comparing raw scores would make this
+    assertion pass on noise alone regardless of whether the feature value
+    was ever used. Confirmed by temporarily forcing
+    ``recotem._features.encode_one`` to ignore its ``values`` argument
+    (simulating a request's feature dict never reaching the encoder): every
+    call in this test still returned 200, but the item-id sequences for
+    band='young' vs band='old' and genre='action' vs genre='drama' came out
+    IDENTICAL while the raw per-item scores still jittered in the 7th
+    decimal digit -- exactly the false-negative a naive "200 and the dicts
+    differ" check would have missed.
+    """
+    import json
+
+    import optuna
+
+    from recotem.artifact.io import read_artifact
+    from recotem.artifact.signing import KeyRing, unpickle_payload
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        FeatureColumn,
+        FeaturesConfig,
+        FeatureSideConfig,
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+    from recotem.training.pipeline import run_training
+
+    original_suggest_float = optuna.trial.Trial.suggest_float
+
+    def _pinned_suggest_float(
+        self: Any, name: str, low: float, high: float, *args: Any, **kwargs: Any
+    ) -> float:
+        if name in ("lambda_item_feature", "lambda_user_feature"):
+            # Collapse the sampled range to a single point (0.1) rather than
+            # short-circuiting the call entirely: a bare early-return skips
+            # Optuna's own bookkeeping, so the value would never land in
+            # ``trial.params`` / ``best_trial.params`` -- and pipeline.py's
+            # final refit builds its params from exactly that dict. A refit
+            # missing lambda_item_feature/lambda_user_feature while still
+            # receiving item_features/user_features hits irspack's "Feature
+            # weight regularization must be positive" (its constructor
+            # default is 0.0, invalid whenever a feature matrix is given) --
+            # a real failure this monkeypatch must not manufacture. Routing
+            # through the REAL suggest_float with low==high keeps every bit
+            # of that bookkeeping intact while still being deterministic.
+            return original_suggest_float(self, name, 0.1, 0.1, *args, **kwargs)
+        return original_suggest_float(self, name, low, high, *args, **kwargs)
+
+    monkeypatch.setattr(optuna.trial.Trial, "suggest_float", _pinned_suggest_float)
+
+    csv_file = _make_clustered_synthetic_csv(tmp_path)
+    items_csv = _make_item_features_csv(tmp_path)
+    users_csv = _make_user_features_csv(tmp_path)
+    artifact_path = str(tmp_path / "feature_roundtrip.recotem")
+
+    recipe = Recipe(
+        name="feature-aware-roundtrip",
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        features=FeaturesConfig(
+            item=FeatureSideConfig(
+                source=CSVConfig(type="csv", path=str(items_csv)),
+                id_column="item_id",
+                columns=[FeatureColumn(name="genre", encoding="categorical")],
+            ),
+            user=FeatureSideConfig(
+                source=CSVConfig(type="csv", path=str(users_csv)),
+                id_column="user_id",
+                columns=[FeatureColumn(name="band", encoding="categorical")],
+            ),
+        ),
+        training=TrainingConfig(
+            algorithms=["IALS"],
+            n_trials=2,
+            cutoff=5,  # must be < n_items to avoid irspack ValueError
+            split=SplitConfig(scheme="random", heldout_ratio=0.2, seed=0),
+        ),
+        output=OutputConfig(path=artifact_path, versioning="always_overwrite"),
+    )
+
+    kr = KeyRing("dev:" + ("0" * 64))
+    result = run_training(
+        recipe,
+        key_ring=kr,
+        signing_key="dev",
+        no_lock=True,
+        dev_allow_unsigned=True,
+        quiet=True,
+    )
+    assert result is not None
+    assert result.best_class == "IALSRecommender", (
+        "test setup invariant: IALS is the only listed algorithm, so it must win"
+    )
+
+    header, payload_bytes = read_artifact(result.artifact_path, kr)
+    header_dict = json.loads(header.header_data)
+    assert header_dict["features"]["version"] == 1
+    assert header_dict["features"]["item"]["columns"] == ["genre"]
+    assert header_dict["features"]["user"]["columns"] == ["band"]
+
+    recommender = unpickle_payload(payload_bytes)
+    assert recommender.item_feature_state is not None
+    assert recommender.user_feature_state is not None
+
+    # --- serve the REAL trained artifact through the real v1 HTTP surface ---
+    entry = ModelEntry(
+        name=recipe.name,
+        recommender=recommender,
+        header=header_dict,
+        kid=header.kid,
+        _loaded_marker=(None, hashlib.sha256(payload_bytes).hexdigest()),
+        loaded_at_unix=time.time(),
+    )
+    registry = ModelRegistry()
+    registry.replace(recipe.name, entry)
+
+    plaintext = "feature_roundtrip_api_key_32byte"
+    api_entry = _make_api_entry(plaintext)
+    app = build_v1_app(registry, api_keys=[api_entry])
+    client = TestClient(app)
+    headers = {"x-api-key": plaintext}
+
+    # 1. Known user -> 200 (unchanged path; not a cold start at all).
+    known = client.post(
+        f"/v1/recipes/{recipe.name}:recommend",
+        json={"user_id": "u0", "limit": 5},
+        headers=headers,
+    )
+    assert known.status_code == 200, known.text
+
+    # 2. Unknown user + user_features -> 200 (case A).
+    cold_young = client.post(
+        f"/v1/recipes/{recipe.name}:recommend",
+        json={
+            "user_id": "brand_new_user",
+            "limit": 5,
+            "user_features": {"band": "young"},
+        },
+        headers=headers,
+    )
+    assert cold_young.status_code == 200, cold_young.text
+
+    # 3. :recommend-related with a cold seed + item_features -> 200 (case C).
+    cold_action = client.post(
+        f"/v1/recipes/{recipe.name}:recommend-related",
+        json={
+            "seed_items": ["brand_new_item"],
+            "limit": 5,
+            "item_features": {"brand_new_item": {"genre": "action"}},
+        },
+        headers=headers,
+    )
+    assert cold_action.status_code == 200, cold_action.text
+
+    # --- mutation guard: prove genuine feature-dependence, not just plumbing ---
+    cold_old = client.post(
+        f"/v1/recipes/{recipe.name}:recommend",
+        json={
+            "user_id": "brand_new_user",
+            "limit": 5,
+            "user_features": {"band": "old"},
+        },
+        headers=headers,
+    )
+    assert cold_old.status_code == 200, cold_old.text
+
+    # Compare item-ID SEQUENCES, not the raw score-bearing dicts: irspack's
+    # underlying BLAS calls are not guaranteed bit-reproducible across two
+    # separate calls (observed empirically: repeated calls with an
+    # UNCHANGED encoded feature vector still differ at the float32 rounding
+    # level, ~1e-7 relative). Comparing full score dicts would make this
+    # assertion pass on noise alone regardless of whether the feature value
+    # was used. The item-id ranking, in contrast, only reorders when the
+    # underlying embeddings differ by much more than that noise floor --
+    # confirmed by re-running this exact scenario with the feature-blind
+    # mutation described in this test's docstring: the item-id sequences
+    # came out IDENTICAL while the scores still jittered in the 7th decimal
+    # digit.
+    young_ids = [item["item_id"] for item in cold_young.json()["items"]]
+    old_ids = [item["item_id"] for item in cold_old.json()["items"]]
+    assert young_ids != old_ids, (
+        "cold-start recommendations for band='young' vs band='old' must "
+        "differ -- otherwise the served model is not actually using "
+        "user_feature_state (e.g. lambda_user_feature landed at the top of "
+        "its tuned range, or the feature vector never reached irspack)."
+    )
+
+    cold_drama = client.post(
+        f"/v1/recipes/{recipe.name}:recommend-related",
+        json={
+            "seed_items": ["brand_new_item"],
+            "limit": 5,
+            "item_features": {"brand_new_item": {"genre": "drama"}},
+        },
+        headers=headers,
+    )
+    assert cold_drama.status_code == 200, cold_drama.text
+    action_ids = [item["item_id"] for item in cold_action.json()["items"]]
+    drama_ids = [item["item_id"] for item in cold_drama.json()["items"]]
+    assert action_ids != drama_ids, (
+        "cold-seed recommendations for genre='action' vs genre='drama' must "
+        "differ -- otherwise the served model is not actually using "
+        "item_feature_state."
+    )
+
+
+def test_old_artifact_loads_on_feature_aware_serve(tmp_path: Path) -> None:
+    """An artifact with NO feature state (pre-Task-9 shape) must load and
+    serve normally through this feature-aware build.
+
+    Trains a real, features-less TopPop recipe (its header omits the
+    "features" key entirely -- see ``test_no_features_recipe_omits_header_key``
+    in ``tests/unit/test_training_pipeline.py``), then drives the artifact
+    through ``create_app()``'s real startup loader -- the same code path
+    ``test_feature_version_2_artifact_fails_closed`` below proves fails
+    CLOSED for a version mismatch. This is the positive control: the
+    "features absent -> pass" branch of ``check_artifact_feature_version``
+    must not regress backward compatibility for the (huge) population of
+    already-deployed artifacts trained before this feature existed.
+    """
+    import json
+
+    from recotem.artifact.io import read_artifact
+    from recotem.artifact.signing import KeyRing, unpickle_payload
+    from recotem.config import ServeConfig
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+    from recotem.serving.app import create_app
+    from recotem.training.pipeline import run_training
+
+    # A dense "every user rates every item" grid (_make_tiny_synthetic_csv)
+    # would leave a known user with nothing left to recommend (every item
+    # already seen), so the final :recommend assertion below needs the
+    # partial-density clustered dataset instead.
+    csv_file = _make_clustered_synthetic_csv(tmp_path)
+    artifact_path = str(tmp_path / "old_style.recotem")
+    recipe_name = "old-style-no-features"
+
+    recipe = Recipe(
+        name=recipe_name,
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        training=TrainingConfig(
+            algorithms=["TopPop"],
+            n_trials=1,
+            cutoff=5,  # must be < n_items to avoid irspack ValueError
+            split=SplitConfig(scheme="random", heldout_ratio=0.2, seed=0),
+        ),
+        output=OutputConfig(path=artifact_path, versioning="always_overwrite"),
+    )
+
+    signing_hex = "0" * 64
+    kr = KeyRing("dev:" + signing_hex)
+    result = run_training(
+        recipe,
+        key_ring=kr,
+        signing_key="dev",
+        no_lock=True,
+        dev_allow_unsigned=True,
+        quiet=True,
+    )
+    assert result is not None
+
+    header, payload_bytes = read_artifact(result.artifact_path, kr)
+    header_dict = json.loads(header.header_data)
+    assert "features" not in header_dict, (
+        "test setup invariant: a features-less recipe must omit the "
+        "'features' header key entirely"
+    )
+    # Sanity: the artifact really does deserialize (would raise otherwise).
+    assert unpickle_payload(payload_bytes) is not None
+
+    # Drive it through the REAL startup loader, not a hand-built ModelEntry --
+    # this is what actually calls check_artifact_feature_version.
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    _write_minimal_recipe_yaml(recipes_dir, recipe_name, result.artifact_path)
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = f"dev:{signing_hex}"
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1", "*"]
+
+    app = create_app(cfg)
+    client = TestClient(app)
+
+    health = client.get("/v1/health")
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok", "total": 1, "loaded": 1}
+
+    details = client.get("/v1/health/details")
+    assert details.status_code == 200
+    details_body = details.json()
+    assert details_body["recipes"][recipe_name]["loaded"] is True
+    assert not details_body["recipes"][recipe_name].get("error")
+
+    predict = client.post(
+        f"/v1/recipes/{recipe_name}:recommend",
+        json={"user_id": "u0", "limit": 3},
+    )
+    assert predict.status_code == 200, predict.text
+    assert len(predict.json()["items"]) == 3
+
+
+def test_feature_version_2_artifact_fails_closed(tmp_path: Path) -> None:
+    """A hand-written artifact declaring ``features.version: 2`` must be
+    refused by serve's startup loader with reason ``"feature_version"``, and
+    that refusal must be visible through the real ``/v1/health`` and
+    ``/v1/health/details`` endpoints -- not just as a raised Python
+    exception from calling ``check_artifact_feature_version`` directly
+    (``tests/unit/test_features_compat.py`` already covers the gate function
+    and both loader call sites in isolation; this proves the wiring holds
+    all the way through ``create_app()``).
+
+    Fails for the RIGHT reason, not merely fails: asserts the /health/details
+    error text names the version-check gate specifically (not e.g. an HMAC
+    or a deserialize failure), and separately asserts
+    ``_classify_artifact_error`` -- the same function the watcher's hot-swap
+    path uses to label the ``recotem_artifact_load_failures_total`` metric --
+    maps that exact message to ``"feature_version"``, not the "parse"
+    catch-all (the message contains the word "version", the same trap the
+    irspack skew guard's message has).
+    """
+    from recotem.artifact.io import write_artifact
+    from recotem.artifact.signing import KeyRing
+    from recotem.config import ServeConfig
+    from recotem.serving.app import create_app
+    from recotem.serving.watcher import _classify_artifact_error
+
+    kid_hex = "ab" * 32
+    kr = KeyRing("probe:" + kid_hex)
+
+    artifact_path = str(tmp_path / "feature_v2.recotem")
+    recipe_name = "feature_v2_recipe"
+    header_dict = {
+        "recipe_name": recipe_name,
+        "best_class": "TopPopRecommender",
+        "trained_at": "2026-01-01T00:00:00Z",
+        # No "irspack_version" key: the irspack skew guard (which runs
+        # BEFORE the feature-version gate in the real loader) fails OPEN on
+        # a missing version, so this artifact is refused for exactly one
+        # reason -- the feature-version gate -- not two entangled ones.
+        "features": {
+            "version": 2,
+            "item": {"n_features": 4, "columns": ["genre"]},
+        },
+    }
+    write_artifact(
+        {"dummy": "payload"},
+        header_dict,
+        kr,
+        artifact_path,
+        versioning="always_overwrite",
+    )
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    _write_minimal_recipe_yaml(recipes_dir, recipe_name, artifact_path)
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = f"probe:{kid_hex}"
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1", "*"]
+
+    app = create_app(cfg)
+    client = TestClient(app)
+
+    health = client.get("/v1/health")
+    assert health.status_code == 503
+    health_body = health.json()
+    assert health_body["status"] == "degraded"
+    assert health_body["loaded"] == 0
+    assert health_body["total"] == 1
+
+    details = client.get("/v1/health/details")
+    assert details.status_code == 503
+    details_body = details.json()
+    recipe_health = details_body["recipes"][recipe_name]
+    assert recipe_health["loaded"] is False
+    error = (recipe_health.get("error") or "").lower()
+    assert "feature version check failed" in error, (
+        f"expected the feature-version gate's message prefix; got {error!r}"
+    )
+    assert "declares feature encoder version 2" in error, (
+        f"expected the refusal to name the offending version; got {error!r}"
+    )
+
+    # The reason must classify as "feature_version" specifically -- proving
+    # the failure is the version gate, not e.g. a coincidental deserialize
+    # or HMAC failure that also happens to yield loaded=False.
+    assert _classify_artifact_error(error) == "feature_version"
+
+    predict = client.post(
+        f"/v1/recipes/{recipe_name}:recommend",
+        json={"user_id": "u1", "limit": 5},
+    )
+    assert predict.status_code == 503

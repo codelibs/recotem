@@ -24,7 +24,7 @@ import pytest
 import scipy.sparse as sps
 
 from recotem.training.errors import SearchError, TrainingError
-from recotem.training.search import _compute_budgets, _make_storage
+from recotem.training.search import _compute_budgets, _construct, _make_storage
 
 # ---------------------------------------------------------------------------
 # B1. n_trials smaller than number of explicit-positive classes
@@ -1180,6 +1180,121 @@ def test_trial_learn_failed_log_event_emitted_on_exception() -> None:
     assert "deliberate trial failure" in evt.get("error", "")
 
 
+# ---------------------------------------------------------------------------
+# Task 7 finding: a Cholesky-triggered TrialPruned must not be logged as a
+# trial_learn_failed WARNING under the threaded (per_trial_timeout_seconds)
+# path. optuna.TrialPruned subclasses Exception, so the generic
+# `except Exception` handler in `_learn()` used to catch it on its way out
+# and log it exactly like a genuine failure, even though search.py converts
+# the rank-deficient-feature-Gram RuntimeError into TrialPruned by design.
+# ---------------------------------------------------------------------------
+
+
+def test_cholesky_prune_does_not_log_trial_learn_failed() -> None:
+    """A Cholesky-triggered prune in the threaded path must stay silent.
+
+    Reproduces the reviewer's finding with a fake recommender whose
+    ``learn_with_optimizer`` raises the exact Cholesky RuntimeError message
+    that search.py's RuntimeError handler recognises and converts into
+    ``optuna.TrialPruned``. With ``per_trial_timeout_seconds`` set (the
+    threaded ``_learn()`` path), the prune must propagate to the caller
+    without a spurious ``trial_learn_failed`` WARNING -- the by-design prune
+    must read identically to the non-threaded path, which logs nothing.
+    """
+    import structlog.testing
+
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    class _CholeskyFailingRecommender:
+        learnt_config: dict = {}
+
+        def __init__(self, X, **kwargs):
+            pass
+
+        @staticmethod
+        def default_suggest_parameter(trial, space):
+            return {}
+
+        def learn_with_optimizer(self, evaluator, trial):
+            raise RuntimeError(
+                "Feature ridge Cholesky decomposition failed: rank deficient"
+            )
+
+        def learn(self):
+            return self
+
+    def _make_fake_completed(number: int) -> MagicMock:
+        t = MagicMock(spec=optuna.trial.FrozenTrial)
+        t.state = optuna.trial.TrialState.COMPLETE
+        t.value = -0.5
+        t.number = number
+        t.params = {"recommender_class_name": "TopPopRecommender"}
+        t.user_attrs = {"recommender_class_name": "TopPopRecommender"}
+        return t
+
+    fake_completed = [_make_fake_completed(i) for i in range(3)]
+    pruned_raised = [False]
+
+    with patch(
+        "recotem.training.search.get_recommender_cls",
+        return_value=_CholeskyFailingRecommender,
+    ):
+        with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+            mock_study = MagicMock()
+
+            def _optimize_one_prune(objective, n_trials, **kwargs):
+                fake_t = MagicMock(spec=optuna.Trial)
+                fake_t.number = 0
+                fake_t.suggest_categorical.return_value = "TopPopRecommender"
+                fake_t.set_user_attr = MagicMock()
+                try:
+                    objective(fake_t)
+                except optuna.TrialPruned:
+                    pruned_raised[0] = True
+                except Exception:  # noqa: BLE001
+                    pass
+                mock_study.trials = fake_completed
+                mock_study.best_trial = fake_completed[0]
+
+            mock_study.trials = []
+            mock_study.optimize = _optimize_one_prune
+            mock_study_fn.return_value = mock_study
+
+            X = sps.csr_matrix(np.ones((5, 3)))
+            evaluator = MagicMock()
+
+            with structlog.testing.capture_logs() as cap:
+                with ProgressReporter(
+                    n_trials=1, recipe_name="cholesky_prune_test", run_id="rcp1"
+                ) as rep:
+                    run_search(
+                        algorithms=["TopPopRecommender"],
+                        X_tv_train=X,
+                        evaluator=evaluator,
+                        n_trials=1,
+                        per_algorithm_trials=None,
+                        per_trial_timeout_seconds=1,  # use thread path
+                        timeout_seconds=None,
+                        parallelism=1,
+                        storage_path="",
+                        random_seed=42,
+                        reporter=rep,
+                        recipe_name="cholesky_prune_test",
+                        run_id="rcp1",
+                    )
+
+    assert pruned_raised[0], (
+        "objective must raise optuna.TrialPruned for the Cholesky RuntimeError"
+    )
+
+    fail_events = [e for e in cap if e.get("event") == "trial_learn_failed"]
+    assert not fail_events, (
+        f"Cholesky-triggered prune must NOT emit trial_learn_failed; "
+        f"got events: {fail_events}"
+    )
+
+
 def test_unknown_algorithm_in_per_algorithm_trials_raises() -> None:
     """A typo in per_algorithm_trials (e.g. 'IALSS') must raise TrainingError
     with code='unknown_algorithm_in_budget' — not silently drop to zero budget.
@@ -1310,3 +1425,312 @@ def test_per_algorithm_budget_not_exceeded_with_parallel_jobs() -> None:
         f"Expected exactly {BUDGET_PER_ALGO * len(ALGO_NAMES)} total trials "
         f"(O(N) budget enforcement), got {result.n_completed}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 7: feature-aware construction -- single construction-site guard
+#
+# search.py constructs a recommender in TWO places (the per-trial-timeout
+# thread path and the default else-branch), and irspack fails asymmetrically:
+# a feature matrix with lambda=0 raises loudly, but a lambda with NO feature
+# matrix trains silently as plain iALS. _construct is the single point both
+# sites must route through so that asymmetry becomes an unconditional
+# AssertionError instead of a silently-wrong shipped model.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRec:
+    def __init__(self, X, **kwargs):
+        self.X = X
+        self.kwargs = kwargs
+
+
+def test_construct_injects_feature_matrices() -> None:
+    X = sps.csr_matrix(np.ones((2, 3)))
+    F = sps.csr_matrix(np.ones((3, 2), dtype=np.float32))
+    rec = _construct(_FakeRec, X, {"lambda_item_feature": 0.1}, {"item_features": F})
+    assert rec.kwargs["item_features"] is F
+
+
+def test_construct_rejects_lambda_without_matrix() -> None:
+    """irspack does NOT raise for lambda-without-features: it silently trains
+    plain iALS. Convert that silent asymmetry into a loud one.
+    """
+    X = sps.csr_matrix(np.ones((2, 3)))
+    with pytest.raises(AssertionError, match="lambda_item_feature"):
+        _construct(_FakeRec, X, {"lambda_item_feature": 0.1}, {})
+
+
+def test_construct_rejects_user_lambda_without_matrix() -> None:
+    X = sps.csr_matrix(np.ones((2, 3)))
+    with pytest.raises(AssertionError, match="lambda_user_feature"):
+        _construct(_FakeRec, X, {"lambda_user_feature": 0.1}, None)
+
+
+def test_construct_without_features_is_unchanged() -> None:
+    X = sps.csr_matrix(np.ones((2, 3)))
+    rec = _construct(_FakeRec, X, {"n_components": 4}, None)
+    assert rec.kwargs == {"n_components": 4}
+
+
+# ---------------------------------------------------------------------------
+# The guard above is only worth anything if it cannot be compiled away. A bare
+# `assert` is exactly the statement `-O` / PYTHONOPTIMIZE strips, which would
+# silently restore the plain-iALS bug _construct exists to prevent -- the
+# failure mode is a wrong model shipped with no error and no warning, so a
+# guard against it must not be one environment variable away from a no-op.
+#
+# The three tests above run under the suite's own interpreter, which never has
+# -O set, so they cannot see that difference: they pass identically whether the
+# guard is a strippable `assert` or an unconditional `raise`. This test closes
+# that gap by re-checking the guard in a subprocess that really is optimized,
+# mirroring the subprocess-under-fixed-interpreter-flags pattern already used
+# by test_search_phase_feature_alignment_holds_across_hash_seeds in
+# tests/unit/test_training_pipeline.py.
+#
+# The script drives _construct directly rather than re-running a pytest node
+# under -O: pytest's assertion rewriting compiles test-module asserts into
+# explicit raises, so a rewritten `pytest.raises(AssertionError)` keeps passing
+# under -O regardless of what src/ does. That would make the whole test vacuous
+# -- it would pass even against the stripped `assert` it is meant to catch.
+# ---------------------------------------------------------------------------
+
+_MINUS_O_GUARD_SCRIPT = """
+import sys
+
+import numpy as np
+import scipy.sparse as sps
+
+from recotem.training.search import _construct
+
+
+class _FakeRec:
+    def __init__(self, X, **kwargs):
+        self.kwargs = kwargs
+
+
+# Vacuity guard: prove -O actually took effect in this process, so that a
+# subprocess that silently ran unoptimized cannot report a false pass. This
+# deliberately is not an `assert` -- that is the very statement -O removes,
+# which would make the vacuity guard itself vanish under the condition it is
+# checking for.
+if __debug__:
+    print("NOT_OPTIMIZED", file=sys.stderr)
+    sys.exit(2)
+
+X = sps.csr_matrix(np.ones((2, 3)))
+
+for lam in ("lambda_item_feature", "lambda_user_feature"):
+    try:
+        _construct(_FakeRec, X, {lam: 0.5}, {})
+    except AssertionError:
+        continue
+    # Reached only if the guard did not fire: _construct returned a
+    # recommender built with the lambda and no feature matrix, which is
+    # exactly the silent plain-iALS training the helper exists to prevent.
+    print("GUARD_STRIPPED:" + lam, file=sys.stderr)
+    sys.exit(3)
+
+print("OK")
+"""
+
+
+def test_construct_guard_survives_python_optimize() -> None:
+    """The lambda-without-matrix guard must still fire under ``-O``.
+
+    Standing guard against the guard itself being written as a bare ``assert``:
+    under ``-O`` those are stripped at compile time, and _construct would then
+    hand ``lambda_item_feature`` to irspack with no matrix and silently train
+    plain iALS.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", _MINUS_O_GUARD_SCRIPT],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, (
+        f"_construct's guard did not hold under -O (exit {result.returncode}); "
+        "exit 2 = subprocess was not actually optimized (test would have been "
+        "vacuous), exit 3 = guard was stripped and construction silently "
+        f"succeeded.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+
+@pytest.mark.parametrize("per_trial_timeout", [None, 1])
+def test_both_search_paths_receive_feature_matrices(per_trial_timeout) -> None:
+    """search.py constructs in two places and per_trial_timeout_seconds picks
+    which. Patching only one is silent: irspack trains plain iALS for a
+    lambda with no matrix, so the search would score models unlike the one
+    shipped.
+
+    Parametrizing over per_trial_timeout drives both construction sites --
+    ``None`` takes the default else-branch (search.py's non-threaded path),
+    ``1`` takes the per-trial-timeout thread path. A guard that only patched
+    one site would pass for one parametrization and fail for the other.
+    """
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    seen: list[dict] = []
+
+    class _RecordingRecommender:
+        learnt_config: dict = {}
+
+        def __init__(self, X, **kwargs):
+            seen.append(dict(kwargs))
+
+        @staticmethod
+        def default_suggest_parameter(trial, space):
+            return {}
+
+        def learn_with_optimizer(self, evaluator, trial):
+            return None
+
+        def learn(self):
+            return self
+
+    F = sps.csr_matrix(np.ones((4, 2), dtype=np.float32))
+    X = sps.csr_matrix(np.eye(4, dtype=np.float64))
+
+    with patch(
+        "recotem.training.search.get_recommender_cls",
+        return_value=_RecordingRecommender,
+    ):
+        with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+            mock_study = MagicMock()
+
+            def _optimize(objective, n_trials, **kwargs):
+                fake_t = MagicMock(spec=optuna.Trial)
+                fake_t.number = 0
+                fake_t.suggest_categorical.return_value = "IALSRecommender"
+                fake_t.suggest_float.return_value = 0.5
+                fake_t.set_user_attr = MagicMock()
+                try:
+                    objective(fake_t)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            mock_study.optimize.side_effect = _optimize
+            mock_study_fn.return_value = mock_study
+
+            with ProgressReporter(
+                n_trials=1, recipe_name="feature_construct_test", run_id="fc1"
+            ) as rep:
+                try:
+                    run_search(
+                        algorithms=["IALSRecommender"],
+                        X_tv_train=X,
+                        evaluator=MagicMock(),
+                        n_trials=1,
+                        per_algorithm_trials=None,
+                        per_trial_timeout_seconds=per_trial_timeout,
+                        timeout_seconds=None,
+                        parallelism=1,
+                        storage_path="",
+                        random_seed=42,
+                        reporter=rep,
+                        recipe_name="feature_construct_test",
+                        run_id="fc1",
+                        feature_kwargs={"item_features": F},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass  # we assert on construction, not on a usable SearchResult
+
+    assert seen, "no trial was constructed"
+    assert all("item_features" in kwargs for kwargs in seen), (
+        f"per_trial_timeout={per_trial_timeout} path did not inject features: {seen}"
+    )
+
+
+def test_non_feature_capable_algorithm_does_not_receive_feature_kwargs() -> None:
+    """A class outside FEATURE_CAPABLE_CLASS_NAMES (e.g. TopPop) must never
+    receive item_features/user_features kwargs, even when feature_kwargs is
+    supplied at the run_search level (e.g. a multi-algorithm search that
+    also includes IALS).
+    """
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    seen: list[dict] = []
+
+    class _RecordingRecommender:
+        learnt_config: dict = {}
+
+        def __init__(self, X, **kwargs):
+            seen.append(dict(kwargs))
+
+        @staticmethod
+        def default_suggest_parameter(trial, space):
+            return {}
+
+        def learn_with_optimizer(self, evaluator, trial):
+            return None
+
+        def learn(self):
+            return self
+
+    F = sps.csr_matrix(np.ones((4, 2), dtype=np.float32))
+    X = sps.csr_matrix(np.eye(4, dtype=np.float64))
+
+    with patch(
+        "recotem.training.search.get_recommender_cls",
+        return_value=_RecordingRecommender,
+    ):
+        with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+            mock_study = MagicMock()
+
+            def _optimize(objective, n_trials, **kwargs):
+                fake_t = MagicMock(spec=optuna.Trial)
+                fake_t.number = 0
+                fake_t.suggest_categorical.return_value = "TopPopRecommender"
+                fake_t.set_user_attr = MagicMock()
+                try:
+                    objective(fake_t)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            mock_study.optimize.side_effect = _optimize
+            mock_study_fn.return_value = mock_study
+
+            with ProgressReporter(
+                n_trials=1, recipe_name="non_feature_capable_test", run_id="nfc1"
+            ) as rep:
+                try:
+                    run_search(
+                        algorithms=["TopPopRecommender"],
+                        X_tv_train=X,
+                        evaluator=MagicMock(),
+                        n_trials=1,
+                        per_algorithm_trials=None,
+                        per_trial_timeout_seconds=None,
+                        timeout_seconds=None,
+                        parallelism=1,
+                        storage_path="",
+                        random_seed=42,
+                        reporter=rep,
+                        recipe_name="non_feature_capable_test",
+                        run_id="nfc1",
+                        feature_kwargs={"item_features": F},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+    assert seen, "no trial was constructed"
+    assert all("item_features" not in kwargs for kwargs in seen), (
+        f"non-feature-capable class must not receive item_features: {seen}"
+    )
+
+
+def test_run_search_feature_kwargs_defaults_to_none() -> None:
+    """Existing callers that omit feature_kwargs must keep working unchanged."""
+    import inspect
+
+    from recotem.training.search import run_search
+
+    sig = inspect.signature(run_search)
+    assert "feature_kwargs" in sig.parameters
+    assert sig.parameters["feature_kwargs"].default is None

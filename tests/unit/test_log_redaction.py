@@ -886,3 +886,34 @@ def test_redact_value_recurses_into_sets() -> None:
     scrubbed = [s for s in out if s.startswith("postgresql://")]
     assert scrubbed and "***" in scrubbed[0]
     assert all(":p@" not in s for s in out)
+
+
+# ---------------------------------------------------------------------------
+# Feature-aware iALS cold-start: user_features / item_features are PII by
+# construction (e.g. age_band, country) and must be redacted by key name.
+#
+# This is defence in depth, not the primary control -- the primary rule is
+# that callers must never pass a feature dict to a logger in the first
+# place.  This backstop exists in case one does anyway.
+# ---------------------------------------------------------------------------
+
+
+def test_user_features_values_are_redacted() -> None:
+    event = {"event": "x", "user_features": {"band": "35-44", "country": "JP"}}
+    out = _invoke(dict(event))
+    assert "35-44" not in repr(out)
+    assert "JP" not in repr(out)
+
+
+def test_item_features_values_are_redacted() -> None:
+    event = {"event": "x", "item_features": {"new1": {"genre": "action"}}}
+    out = _invoke(dict(event))
+    assert "action" not in repr(out)
+
+
+def test_unrelated_keys_still_pass_through() -> None:
+    """The new redaction must not swallow ordinary fields."""
+    event = {"event": "x", "recipe": "movies", "limit": 10}
+    out = _invoke(dict(event))
+    assert out["recipe"] == "movies"
+    assert out["limit"] == 10

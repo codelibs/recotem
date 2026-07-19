@@ -157,7 +157,7 @@ def test_recommend_related_rejects_oversized_seed_item() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Finding 10: _any_seed_known AttributeError → INTERNAL_ERROR
+# Finding 10: _resolve_recommend_related AttributeError → INTERNAL_ERROR
 # ---------------------------------------------------------------------------
 
 
@@ -222,8 +222,9 @@ def test_batch_recommend_related_attribute_error_only_affects_element() -> None:
     )  # spec=[] means NO attributes allowed → AttributeError
 
     # We need ONE entry with two different requests. The handler calls
-    # _any_seed_known per-element, which calls entry.recommender._mapper.item_id_to_index
-    # Since entry.recommender is fixed, we can't simulate mixed per-element mapper failure.
+    # _resolve_recommend_related per-element, which accesses
+    # entry.recommender._mapper.item_id_to_index. Since entry.recommender is
+    # fixed, we can't simulate mixed per-element mapper failure.
     # Instead, test that a wholly broken mapper yields all INTERNAL_ERROR in a batch.
     broken_entry = ModelEntry(
         name="broken",

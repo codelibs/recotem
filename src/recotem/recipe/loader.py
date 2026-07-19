@@ -272,19 +272,127 @@ def _check_recipe_file_containment(recipe_path: Path, recipes_root: Path) -> Non
 _NO_EXPAND_KEYS: frozenset[str] = frozenset({"query", "query_parameters"})
 
 
+# The only three schema positions where a ``source`` mapping is a genuine
+# DataSource subtree: the recipe root (top-level ``source``), and
+# ``features.item`` / ``features.user`` (``features.item.source`` /
+# ``features.user.source``).  Each entry is the ancestor-key path of the
+# dict that *contains* the ``source`` key, expressed as a tuple from the
+# recipe root (``()`` for the root itself).
+_SOURCE_NODE_PATHS: frozenset[tuple[str, ...]] = frozenset(
+    {(), ("features", "item"), ("features", "user")}
+)
+
+
+def _is_source_node(key: str, value: Any, path: tuple[str, ...]) -> bool:
+    """True when *value* is a source mapping at a legitimate schema position.
+
+    *path* is the ancestor-key tuple of the dict currently being walked (the
+    dict that contains *key*), e.g. ``()`` at the recipe root or
+    ``("features", "item")`` inside ``features.item``. Matching requires both
+    the key name (``"source"``) and the position (``path in
+    _SOURCE_NODE_PATHS``) so that only the recipe's real ``source``,
+    ``features.item.source``, and ``features.user.source`` subtrees are
+    treated as DataSource nodes.
+
+    Matching on the key name alone at *any* depth (the previous behaviour)
+    false-positived on freeform fields such as
+    ``BigQueryConfig.query_parameters: dict[str, Any]``, where a caller's
+    query may legitimately bind a parameter literally named ``source`` whose
+    value is an unrelated nested mapping (e.g. a struct-typed parameter). That
+    mapping would be mistaken for a DataSource subtree and trigger a spurious
+    plugin-type lookup, failing recipe load with a confusing "Unknown
+    DataSource type" error even though no DataSource was ever referenced.
+    """
+    return key == "source" and isinstance(value, dict) and path in _SOURCE_NODE_PATHS
+
+
+def _resolve_extra_no_expand(
+    source_node: dict[str, Any], where: str, recipe_path: Path | str
+) -> frozenset[str]:
+    """Resolve a source plugin's declared ``no_expand_fields`` for *source_node*.
+
+    *source_node* is a raw (pre-expansion) ``source`` mapping — top-level or
+    nested under ``features.item`` / ``features.user``.  Looks up the plugin
+    class via its ``type`` discriminator and returns the lower-cased
+    ``no_expand_fields`` set declared on it.
+
+    *where* is the dotted position of *source_node* and *recipe_path* the file
+    it came from; both are named in errors.  The type name alone identified
+    the offending source back when a recipe had exactly one, but a recipe now
+    carries up to three, so two recipes differing only in which subtree holds
+    a typo would otherwise raise byte-identical errors.
+
+    Returns an empty set when ``type`` is absent (later validation reports the
+    missing discriminator).  A genuinely unknown ``type`` (``DataSourceError``)
+    or any other lookup failure is NOT swallowed here: silently falling back
+    to the global ``_NO_EXPAND_KEYS`` baseline would weaken plugin-declared
+    protection (e.g. SQL injection via env expansion into ``dsn_env`` /
+    ``query``), so both are re-raised as ``RecipeError``.
+    """
+    type_name = source_node.get("type")
+    if not type_name:
+        return frozenset()
+    try:
+        from recotem.datasource.registry import get_source_class
+
+        src_cls = get_source_class(str(type_name))
+        # Normalise to lowercase so that a plugin declaring 'SQL' and a YAML
+        # key 'sql:' are both blocked — matching is case-insensitive (see
+        # _expand_node).
+        return frozenset(
+            f.lower() for f in getattr(src_cls, "no_expand_fields", frozenset())
+        )
+    except DataSourceError as exc:
+        # Unknown source type during expansion: fail explicitly so the
+        # operator sees the error at recipe-load time rather than silently
+        # proceeding with only the global _NO_EXPAND_KEYS baseline.
+        raise RecipeError(
+            f"Recipe '{recipe_path}' {where}: plugin source discovery failed "
+            f"for type {type_name!r}: {exc}",
+            category="schema",
+        ) from exc
+    except Exception as exc:
+        logger.warning(
+            "source_class_lookup_failed_during_expand",
+            type=type_name,
+            error_class=type(exc).__name__,
+            where=where,
+            recipe=str(recipe_path),
+        )
+        raise RecipeError(
+            f"Recipe '{recipe_path}' {where}: failed to resolve source plugin "
+            f"{type_name!r} during recipe load: {exc}"
+        ) from exc
+
+
 def _expand_node(
     node: Any,
     *,
     extra_allowed: dict[str, str] | None,
+    recipe_path: Path | str,
     _in_no_expand: bool = False,
     _extra_no_expand: frozenset[str] = frozenset(),
+    _path: tuple[str, ...] = (),
 ) -> Any:
     """Recursively walk a parsed YAML node and expand env-var references.
 
     Expansion is skipped entirely inside ``query`` and ``query_parameters``
     keys at any nesting level, plus any keys listed in *_extra_no_expand*
-    (populated from the source plugin's ``no_expand_fields`` class variable
-    when processing the ``source`` subtree).
+    (populated from the source plugin's ``no_expand_fields`` class variable).
+
+    *recipe_path* is the file *node* was parsed from, carried solely so that
+    a plugin-discovery failure can name it (see ``_resolve_extra_no_expand``).
+
+    *_path* tracks the ancestor-key tuple of *node* itself (``()`` at the
+    recipe root, ``("features", "item")`` inside ``features.item``, etc.). A
+    mapping keyed literally ``source`` has its plugin's ``no_expand_fields``
+    resolved fresh, via ``_resolve_extra_no_expand``, before the walk
+    descends into it — but only when ``_is_source_node`` confirms both the
+    key name AND the position (see ``_SOURCE_NODE_PATHS``): the recipe root,
+    ``features.item``, or ``features.user``. Restricting on position as well
+    as name prevents a freeform field (e.g.
+    ``BigQueryConfig.query_parameters``) that happens to contain a key named
+    ``source`` from being mistaken for a DataSource subtree.
     """
     if isinstance(node, str):
         if _in_no_expand:
@@ -299,12 +407,35 @@ def _expand_node(
             k.lower() for k in (_NO_EXPAND_KEYS | _extra_no_expand)
         )
         for k, v in node.items():
+            if _is_source_node(k, v, _path):
+                # A 'source' mapping at a legitimate schema position
+                # (top-level, or nested under features.item/features.user):
+                # consult the plugin's no_expand_fields before descending so
+                # protected fields (e.g. SQLSource's dsn_env) are shielded
+                # regardless of which of the two positions this subtree lives
+                # at. The parent's _extra_no_expand does not carry into a
+                # source subtree — each source is governed solely by its own
+                # plugin's declaration.
+                source_path = _path + (k,)
+                result[k] = _expand_node(
+                    v,
+                    extra_allowed=extra_allowed,
+                    recipe_path=recipe_path,
+                    _in_no_expand=_in_no_expand,
+                    _extra_no_expand=_resolve_extra_no_expand(
+                        v, ".".join(source_path), recipe_path
+                    ),
+                    _path=source_path,
+                )
+                continue
             in_no_expand = _in_no_expand or (k.lower() in combined_no_expand)
             result[k] = _expand_node(
                 v,
                 extra_allowed=extra_allowed,
+                recipe_path=recipe_path,
                 _in_no_expand=in_no_expand,
                 _extra_no_expand=_extra_no_expand,
+                _path=_path + (k,),
             )
         return result
     if isinstance(node, list):
@@ -312,75 +443,14 @@ def _expand_node(
             _expand_node(
                 item,
                 extra_allowed=extra_allowed,
+                recipe_path=recipe_path,
                 _in_no_expand=_in_no_expand,
                 _extra_no_expand=_extra_no_expand,
+                _path=_path,
             )
             for item in node
         ]
     return node
-
-
-def _expand_with_source_no_expand(
-    raw_data: dict[str, Any],
-    *,
-    extra_allowed: dict[str, str] | None,
-) -> dict[str, Any]:
-    """Expand env-var references in *raw_data*, honouring plugin ``no_expand_fields``.
-
-    The ``source`` subtree is expanded separately so that the source plugin's
-    ``no_expand_fields`` class attribute can be consulted before the recursive
-    walk descends into source-specific fields.
-
-    All other top-level keys are expanded with no additional restrictions
-    beyond the global ``_NO_EXPAND_KEYS``.
-    """
-    result: dict[str, Any] = {}
-    for key, value in raw_data.items():
-        if key == "source" and isinstance(value, dict):
-            # Determine extra protected fields from the plugin's class var.
-            extra_no_expand: frozenset[str] = frozenset()
-            type_name = value.get("type")
-            if type_name:
-                try:
-                    from recotem.datasource.registry import get_source_class
-
-                    src_cls = get_source_class(str(type_name))
-                    # Normalise to lowercase so that a plugin declaring
-                    # 'SQL' and a YAML key 'sql:' are both blocked —
-                    # matching is case-insensitive (see _expand_node).
-                    extra_no_expand = frozenset(
-                        f.lower()
-                        for f in getattr(src_cls, "no_expand_fields", frozenset())
-                    )
-                except DataSourceError as exc:
-                    # Unknown source type during expansion: fail explicitly so
-                    # the operator sees the error at recipe-load time rather than
-                    # silently proceeding with only the global _NO_EXPAND_KEYS
-                    # baseline.  Silent fallback weakens plugin-declared
-                    # no_expand_fields protection and could allow SQL injection
-                    # via env expansion into a query field.
-                    raise RecipeError(
-                        f"plugin source discovery failed for type {type_name!r}: {exc}",
-                        category="schema",
-                    ) from exc
-                except Exception as exc:
-                    logger.warning(
-                        "source_class_lookup_failed_during_expand",
-                        type=type_name,
-                        error_class=type(exc).__name__,
-                    )
-                    raise RecipeError(
-                        f"Failed to resolve source plugin {type_name!r} "
-                        f"during recipe load: {exc}"
-                    ) from exc
-            result[key] = _expand_node(
-                value,
-                extra_allowed=extra_allowed,
-                _extra_no_expand=extra_no_expand,
-            )
-        else:
-            result[key] = _expand_node(value, extra_allowed=extra_allowed)
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +472,72 @@ def _format_pydantic_errors(exc: pydantic.ValidationError) -> str:
         msg = error.get("msg", "")
         lines.append(f"  - {loc}: {msg}" if loc else f"  - {msg}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Typed source resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_source_node(raw: Any, where: str, recipe_path: Path | str) -> Any:
+    """Validate a raw source mapping into its typed DataSource Config.
+
+    *where* is a dotted path used in error messages (``"source"``,
+    ``"features.item.source"``, ``"features.user.source"``) and
+    *recipe_path* is the file the mapping came from; every message names
+    both, since a recipe carries up to three source subtrees and
+    ``load_recipes_directory`` (public API) does not re-add the filename.
+    *raw* is returned unchanged when it is not a dict (e.g. ``None`` for a
+    missing ``source`` key — later Recipe/FeatureSideConfig validation
+    reports that).
+
+    Shared by the top-level ``source`` and every ``features.<side>.source``
+    subtree so both get identical typed-resolution treatment: the same
+    ``type`` discriminator lookup, the same pydantic validation, and the same
+    error formatting.
+
+    The ``model_validate`` + reassignment shape performed by the caller is
+    load-bearing: assigning the raw dict onto an already-built Recipe and
+    relying on ``validate_assignment`` would let an ``object.__setattr__``
+    caller bypass re-validation. Building the Recipe once, with every typed
+    source already in place, avoids that bypass.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    try:
+        from recotem.datasource.registry import get_source_class
+
+        type_name = raw.get("type")
+        if not type_name:
+            raise RecipeError(
+                f"Recipe '{recipe_path}' {where} is missing the 'type' discriminator.",
+                category="schema",
+            )
+        source_cls = get_source_class(str(type_name))
+        config_cls = source_cls.Config
+        try:
+            return config_cls.model_validate(raw)
+        except pydantic.ValidationError as exc:
+            detail = _format_pydantic_errors(exc)
+            raise RecipeError(
+                f"Recipe '{recipe_path}' {where} failed validation:\n{detail}"
+            ) from exc
+        except RecipeError:
+            raise
+        except (MemoryError, RecursionError):
+            raise
+        except Exception as exc:
+            raise RecipeError(
+                f"Recipe '{recipe_path}' {where} failed validation: {exc}"
+            ) from exc
+    except RecipeError:
+        raise
+    except (MemoryError, RecursionError):
+        raise
+    except Exception as exc:
+        raise RecipeError(
+            f"Recipe '{recipe_path}' {where} resolution failed: {exc}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -481,9 +617,10 @@ def load_recipe(
         )
 
     # Env expansion (never touches query / query_parameters, and honours
-    # plugin-declared no_expand_fields for the source subtree).
+    # plugin-declared no_expand_fields for every source subtree, including
+    # nested features.item.source / features.user.source).
     try:
-        expanded = _expand_with_source_no_expand(raw_data, extra_allowed=extra_allowed)
+        expanded = _expand_node(raw_data, extra_allowed=extra_allowed, recipe_path=p)
     except RecipeError:
         raise
     except (MemoryError, RecursionError):
@@ -511,47 +648,27 @@ def load_recipe(
     # Path security checks.
     _validate_path_fields(expanded)
 
-    # Resolve the typed DataSource Config BEFORE building the Recipe so that
-    # pydantic's extra="forbid" is enforced on the source and the Recipe is
-    # constructed once with the typed source in place (no object.__setattr__
-    # bypass of re-validation).
+    # Resolve the typed DataSource Config(s) BEFORE building the Recipe so
+    # that pydantic's extra="forbid" is enforced on every source and the
+    # Recipe is constructed once with all typed sources already in place (no
+    # object.__setattr__ bypass of re-validation). This covers the top-level
+    # source and every features.<side>.source subtree identically.
     raw_source = expanded.get("source")
-    if isinstance(raw_source, dict):
-        try:
-            from recotem.datasource.registry import get_source_class
+    expanded = {**expanded, "source": _resolve_source_node(raw_source, "source", p)}
 
-            type_name = raw_source.get("type")
-            if not type_name:
-                raise RecipeError(
-                    f"Recipe '{p}' source is missing the 'type' discriminator.",
-                    category="schema",
-                )
-            source_cls = get_source_class(str(type_name))
-            config_cls = source_cls.Config
-            try:
-                typed_source = config_cls.model_validate(raw_source)
-            except pydantic.ValidationError as exc:
-                detail = _format_pydantic_errors(exc)
-                raise RecipeError(
-                    f"Recipe '{p}' source failed validation:\n{detail}"
-                ) from exc
-            except RecipeError:
-                raise
-            except (MemoryError, RecursionError):
-                raise
-            except Exception as exc:
-                raise RecipeError(
-                    f"Recipe '{p}' source failed validation: {exc}"
-                ) from exc
-        except RecipeError:
-            raise
-        except (MemoryError, RecursionError):
-            raise
-        except Exception as exc:
-            raise RecipeError(f"Recipe '{p}' source resolution failed: {exc}") from exc
-        # Replace the raw dict with the validated typed config before passing
-        # to Recipe.model_validate — this prevents object.__setattr__ bypass.
-        expanded = {**expanded, "source": typed_source}
+    raw_features = expanded.get("features")
+    if isinstance(raw_features, dict):
+        typed_features = dict(raw_features)
+        for side in ("item", "user"):
+            side_node = typed_features.get(side)
+            if isinstance(side_node, dict) and "source" in side_node:
+                typed_features[side] = {
+                    **side_node,
+                    "source": _resolve_source_node(
+                        side_node["source"], f"features.{side}.source", p
+                    ),
+                }
+        expanded = {**expanded, "features": typed_features}
 
     # Build Recipe via pydantic (validates all sub-schemas).
     try:
@@ -587,43 +704,50 @@ def load_recipe(
     return recipe
 
 
+def _require_sha256_for_network_path(node: Any, field_name: str) -> None:
+    """Raise if *node* (a typed Config with ``.path`` / ``.sha256``) needs a pin.
+
+    Shared by ``_enforce_sha256_for_network_paths`` for ``source``,
+    ``item_metadata``, and every ``features.<side>.source`` node.
+    """
+    path = getattr(node, "path", None)
+    if (
+        isinstance(path, str)
+        and _network_scheme(path)
+        and not getattr(node, "sha256", None)
+    ):
+        raise RecipeError(
+            f"'{field_name}' uses a network scheme "
+            f"({urlparse(path).scheme}://) and requires a 'sha256' "
+            "integrity pin. Compute it with `shasum -a 256 <file>` and "
+            f"set `{field_name.rsplit('.', 1)[0]}.sha256: <hex>`.",
+            category="security",
+        )
+
+
 def _enforce_sha256_for_network_paths(recipe: Recipe) -> None:
-    """For source / item_metadata paths using a network scheme, require sha256.
+    """For source / item_metadata / feature-source paths on a network scheme,
+    require sha256.
 
     Raises
     ------
     RecipeError
         If a network-scheme path is missing the integrity pin.
     """
-    src = recipe.source
-    src_path = getattr(src, "path", None)
-    if (
-        isinstance(src_path, str)
-        and _network_scheme(src_path)
-        and not getattr(src, "sha256", None)
-    ):
-        raise RecipeError(
-            f"'source.path' uses a network scheme "
-            f"({urlparse(src_path).scheme}://) and requires a 'sha256' "
-            "integrity pin. Compute it with `shasum -a 256 <file>` and "
-            "set `source.sha256: <hex>`.",
-            category="security",
-        )
+    _require_sha256_for_network_path(recipe.source, "source.path")
 
     meta = recipe.item_metadata
     if meta is not None:
-        meta_path = getattr(meta, "path", None)
-        if (
-            isinstance(meta_path, str)
-            and _network_scheme(meta_path)
-            and not getattr(meta, "sha256", None)
-        ):
-            raise RecipeError(
-                f"'item_metadata.path' uses a network scheme "
-                f"({urlparse(meta_path).scheme}://) and requires a "
-                "'sha256' integrity pin.",
-                category="security",
-            )
+        _require_sha256_for_network_path(meta, "item_metadata.path")
+
+    features = recipe.features
+    if features is not None:
+        for side_name in ("item", "user"):
+            side = getattr(features, side_name)
+            if side is not None:
+                _require_sha256_for_network_path(
+                    side.source, f"features.{side_name}.source.path"
+                )
 
 
 def _validate_path_fields(data: dict[str, Any]) -> None:
@@ -645,6 +769,20 @@ def _validate_path_fields(data: dict[str, Any]) -> None:
         meta_path = item_metadata.get("path")
         if isinstance(meta_path, str):
             _validate_input_path(meta_path, "item_metadata.path")
+
+    features = data.get("features")
+    if isinstance(features, dict):
+        for side_name in ("item", "user"):
+            side_node = features.get(side_name)
+            if not isinstance(side_node, dict):
+                continue
+            side_source = side_node.get("source")
+            if isinstance(side_source, dict):
+                side_source_path = side_source.get("path")
+                if isinstance(side_source_path, str):
+                    _validate_input_path(
+                        side_source_path, f"features.{side_name}.source.path"
+                    )
 
 
 def load_recipes_directory(

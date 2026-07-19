@@ -1166,6 +1166,51 @@ def test_feature_aware_artifact_serve_roundtrip(
     )
     assert cold_action.status_code == 200, cold_action.text
 
+    # 4. :recommend-related with a KNOWN seed + user_features -> 200 (case B).
+    # This endpoint carries no user_id at all, so "cold user" here just means
+    # the profile prior is not backed by any known user's learned embedding
+    # -- routes.py's case B branch (_resolve_recommend_related) adds it as a
+    # prior alongside the ad-hoc seed-history solve. "i0" is a known/
+    # in-training item id from _make_clustered_synthetic_csv (u0's cluster).
+    known_seed_young = client.post(
+        f"/v1/recipes/{recipe.name}:recommend-related",
+        json={
+            "seed_items": ["i0"],
+            "limit": 5,
+            "user_features": {"band": "young"},
+        },
+        headers=headers,
+    )
+    assert known_seed_young.status_code == 200, known_seed_young.text
+
+    # Paired request, same known seed, opposite user_features value -- same
+    # differential guard as cases A/C (see docstring): 200 alone proves
+    # nothing here, since a feature-blind regression (encode_one silently
+    # dropping its ``values`` argument) would return 200 too. Case B mixes a
+    # strong known-seed signal with the user_features signal, so this also
+    # confirms empirically that the seed doesn't drown out the profile prior.
+    known_seed_old = client.post(
+        f"/v1/recipes/{recipe.name}:recommend-related",
+        json={
+            "seed_items": ["i0"],
+            "limit": 5,
+            "user_features": {"band": "old"},
+        },
+        headers=headers,
+    )
+    assert known_seed_old.status_code == 200, known_seed_old.text
+    known_seed_young_ids = [
+        item["item_id"] for item in known_seed_young.json()["items"]
+    ]
+    known_seed_old_ids = [item["item_id"] for item in known_seed_old.json()["items"]]
+    assert known_seed_young_ids != known_seed_old_ids, (
+        "case-B recommendations (:recommend-related, known seed 'i0') for "
+        "band='young' vs band='old' must differ -- otherwise the served "
+        "model is not actually using user_feature_state for the case-B "
+        "profile-prior solve (get_recommendation_for_new_user with "
+        "user_features=...)."
+    )
+
     # --- mutation guard: prove genuine feature-dependence, not just plumbing ---
     cold_old = client.post(
         f"/v1/recipes/{recipe.name}:recommend",

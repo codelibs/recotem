@@ -654,7 +654,8 @@ def load_recipe(
     # object.__setattr__ bypass of re-validation). This covers the top-level
     # source and every features.<side>.source subtree identically.
     raw_source = expanded.get("source")
-    expanded = {**expanded, "source": _resolve_source_node(raw_source, "source", p)}
+    if isinstance(raw_source, dict):
+        expanded = {**expanded, "source": _resolve_source_node(raw_source, "source", p)}
 
     raw_features = expanded.get("features")
     if isinstance(raw_features, dict):

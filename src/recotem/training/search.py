@@ -417,6 +417,13 @@ def run_search(
             if (feature_kwargs and is_feature_capable(class_name))
             else {}
         )
+        # NB: this reuses the ONE feature-matrix object built per phase, so
+        # under parallelism>1 (Optuna n_jobs = threads, one process) every
+        # concurrent trial shares it. Safe because irspack 0.5.0 reads the
+        # feature matrices read-only -- unlike the interaction matrix X, which
+        # it defensively copies via .astype(). Do NOT add a per-trial .copy()
+        # (pure cost, no correctness gain today); if a future irspack ever
+        # mutates the feature buffers in place, that reliance breaks here.
 
         params: dict[str, Any] = rec_cls.default_suggest_parameter(trial, {})
 

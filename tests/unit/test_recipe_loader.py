@@ -583,6 +583,48 @@ output:
         load_recipe(p)
 
 
+def test_missing_and_other_schema_error_both_reported(tmp_path: Path) -> None:
+    """A recipe with no 'source:' key AND an unrelated schema error must
+    report BOTH problems in a single validation round, not just one.
+
+    Regression guard: pydantic v2's aggregatable field-required error for a
+    genuinely-absent key is what surfaces the "source" complaint here. If the
+    loader instead writes ``source: None`` into the expanded dict before
+    validation, the complaint moves to the ``_check_source_value``
+    model_validator(mode="after") in models.py, which pydantic v2 SKIPS
+    whenever another field already has a validation error -- silently
+    dropping the source complaint from this combined-error case.
+
+    Note: this asserts on the formatted "- source:" error line rather than a
+    bare substring match for "source", because pytest's ``tmp_path`` embeds
+    the test's own function name in the recipe's file path, and that name
+    itself contains "source" -- a bare match would pass even when the loader
+    drops the real complaint.
+    """
+    content = """\
+name: missing_and_bogus
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+  bogus_unknown_field: 123
+output:
+  path: /tmp/out.recotem
+"""
+    p = _write_recipe(tmp_path, content, filename="missing_and_bogus.yaml")
+    with pytest.raises(RecipeError) as exc_info:
+        load_recipe(p)
+    message = str(exc_info.value)
+    assert "- source:" in message, (
+        f"expected the missing 'source' field to be reported; got: {message}"
+    )
+    assert "bogus_unknown_field" in message, (
+        f"expected the OTHER schema error to be reported too; got: {message}"
+    )
+
+
 def test_recipe_name_revalidated_before_filesystem_use(tmp_path: Path) -> None:
     """validate_for_filesystem raises ValueError for names with slashes."""
     from recotem.recipe.models import validate_for_filesystem
@@ -2430,6 +2472,32 @@ features:
 """,
     )
     with pytest.raises(RecipeError, match="scheme"):
+        load_recipe(p)
+
+
+def test_feature_source_rejects_chained_scheme(tmp_path: Path) -> None:
+    """The ``::``-chain rejection must also cover features.item.source.
+
+    Mirrors ``test_input_source_disallowed_scheme_rejected``'s
+    ``simplecache::https://...`` case for the top-level source: the same
+    shared path-scheme validator is reused for ``features.*.source.path``, so
+    a chained fsspec protocol string must be rejected there too.
+    """
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_chained_scheme",
+        """\
+features:
+  item:
+    source:
+      type: csv
+      path: simplecache::https://example.com/items.csv
+    id_column: item_id
+    columns:
+      - {name: genre, encoding: categorical}
+""",
+    )
+    with pytest.raises(RecipeError, match="chain"):
         load_recipe(p)
 
 

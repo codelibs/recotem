@@ -115,10 +115,14 @@ def test_null_and_empty_ids_are_dropped(tmp_path: Path) -> None:
     than mistaken for a missing id.
     """
     p = tmp_path / "items_with_nulls.csv"
+    # The two SURVIVING rows (i_a, i_c) carry DISTINCT genres so the block stays
+    # live -- were they identical, the (correct) whole-block-dead guard would
+    # refuse a bias-only block, which is a different test's concern
+    # (test_constant_categorical_whole_block_raises), not this one's.
     pd.DataFrame(
         {
             "item_id": ["i_a", None, "i_c", ""],
-            "genre": ["action", "drama", "action", "comedy"],
+            "genre": ["action", "drama", "sci-fi", "comedy"],
             "year": [2000, 2010, 2020, 2030],
         }
     ).to_csv(p, index=False)
@@ -567,17 +571,28 @@ def test_one_dead_column_among_several_does_not_raise(tmp_path: Path) -> None:
     assert t.item_state["n_features"] == 4
 
 
-def test_constant_feature_column_warns_at_training_time(tmp_path: Path) -> None:
-    """Gap 3 at the TRAINING level: a constant categorical column (every item
-    the same genre) is dead (collinear with bias) and must warn when the
-    feature table is loaded, not only when `build_encoder_state` is called by
-    hand. n_features stays 2 (one one-hot + bias), so it warns but does not
-    raise."""
-    import structlog.testing
+# ---------------------------------------------------------------------------
+# Constant-categorical refusal: the whole-block-dead guard was WIDTH-based, so
+# a constant-but-present categorical/multi_label column (non-empty vocab,
+# `width > 0`, yet every row emits the SAME one-hot) counted as live and slipped
+# past the refusal -- even though it is collinear with the bias and byte-
+# identical to plain iALS, exactly what the per-column warning already flags and
+# what the numerical branch's zero-variance refusal already refuses. The guard
+# now keys on whether the encoded block VARIES across rows, so it agrees with
+# both. A varying column, and a mixed block with one live column, must still
+# load: the refusal fires only when EVERY spec is dead.
+# ---------------------------------------------------------------------------
 
-    p = tmp_path / "items_constant.csv"
+
+def test_constant_categorical_whole_block_raises(tmp_path: Path) -> None:
+    """A block whose ONLY column is a CONSTANT categorical (every item the same
+    value; full id overlap so this is not the coverage check) keeps a non-empty
+    vocab and `width == 1`, so the old width-based guard passed it -- yet every
+    row emits the same one-hot, collinear with the bias, so the model is plain
+    iALS. It must be refused like the all-dead-numerical block."""
+    p = tmp_path / "items_constant_cat.csv"
     pd.DataFrame(
-        {"item_id": ["i_a", "i_b", "i_c"], "genre": ["action", "action", "action"]}
+        {"item_id": ["i_a", "i_b", "i_c"], "genre": ["book", "book", "book"]}
     ).to_csv(p, index=False)
     cfg = FeaturesConfig(
         item=FeatureSideConfig(
@@ -586,14 +601,131 @@ def test_constant_feature_column_warns_at_training_time(tmp_path: Path) -> None:
             columns=[FeatureColumn(name="genre", encoding="categorical")],
         )
     )
+    with pytest.raises(TrainingError) as exc_info:
+        load_feature_tables(cfg, recipe_name="r", run_id="run")
+    assert exc_info.value.code == "feature_table_error"  # -> exit 4
+    msg = str(exc_info.value)
+    assert "item" in msg
+    assert "bias" in msg
+
+
+def test_constant_multi_label_whole_block_raises(tmp_path: Path) -> None:
+    """The multi_label analogue: every row carries the same single token, so its
+    multi-hot block is identical across rows (constant), collinear with the
+    bias. Non-empty vocab and `width == 1` again fooled the width-based guard;
+    the varies-based guard refuses it."""
+    p = tmp_path / "items_constant_ml.csv"
+    pd.DataFrame(
+        {"item_id": ["i_a", "i_b", "i_c"], "tags": ["rock", "rock", "rock"]}
+    ).to_csv(p, index=False)
+    cfg = FeaturesConfig(
+        item=FeatureSideConfig(
+            source={"type": "csv", "path": str(p)},
+            id_column="item_id",
+            columns=[FeatureColumn(name="tags", encoding="multi_label")],
+        )
+    )
+    with pytest.raises(TrainingError) as exc_info:
+        load_feature_tables(cfg, recipe_name="r", run_id="run")
+    assert exc_info.value.code == "feature_table_error"  # -> exit 4
+    msg = str(exc_info.value)
+    assert "item" in msg
+    assert "bias" in msg
+
+
+def test_varying_categorical_whole_block_loads(tmp_path: Path) -> None:
+    """Vacuity control: a VARYING categorical column carries real signal and
+    must load, so the refusal cannot be trivially satisfied (it must not fire
+    on every categorical-only block)."""
+    p = tmp_path / "items_varying_cat.csv"
+    pd.DataFrame(
+        {"item_id": ["i_a", "i_b", "i_c"], "genre": ["action", "drama", "comedy"]}
+    ).to_csv(p, index=False)
+    cfg = FeaturesConfig(
+        item=FeatureSideConfig(
+            source={"type": "csv", "path": str(p)},
+            id_column="item_id",
+            columns=[FeatureColumn(name="genre", encoding="categorical")],
+        )
+    )
+    t = load_feature_tables(cfg, recipe_name="r", run_id="run")
+    # 3 one-hots + bias == 4; the block is live.
+    assert t.item_state["n_features"] == 4
+
+
+def test_mixed_constant_and_varying_categorical_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    """A constant categorical column ALONGSIDE a varying one: the varying column
+    is a live spec, so the whole block is not dead and must load -- the refusal
+    fires only when EVERY spec is dead. This is the constant-column route to
+    "one dead column among several", distinct from the min_frequency-pruning
+    route in test_one_dead_column_among_several_does_not_raise (the dead column
+    here keeps a non-empty vocab)."""
+    p = tmp_path / "items_mixed_constant.csv"
+    pd.DataFrame(
+        {
+            "item_id": ["i_a", "i_b", "i_c"],
+            "genre": ["book", "book", "book"],  # constant -> dead
+            "brand": ["x", "y", "z"],  # varying -> live
+        }
+    ).to_csv(p, index=False)
+    cfg = FeaturesConfig(
+        item=FeatureSideConfig(
+            source={"type": "csv", "path": str(p)},
+            id_column="item_id",
+            columns=[
+                FeatureColumn(name="genre", encoding="categorical"),
+                FeatureColumn(name="brand", encoding="categorical"),
+            ],
+        )
+    )
+    t = load_feature_tables(cfg, recipe_name="r", run_id="run")
+    # constant genre one-hot (1) + varying brand's 3 one-hots + bias == 5.
+    assert t.item_state["n_features"] == 5
+
+
+def test_constant_feature_column_warns_at_training_time(tmp_path: Path) -> None:
+    """Gap 3 at the TRAINING level: a constant categorical column (every item
+    the same genre) is dead (collinear with bias) and must warn when the
+    feature table is loaded, not only when `build_encoder_state` is called by
+    hand. Here the constant `genre` sits ALONGSIDE a varying `brand`, so the
+    block as a whole stays live (the varying column keeps it off the
+    whole-block-dead refusal) and the load succeeds -- letting us observe the
+    per-column warning in isolation from the whole-block guard. A block whose
+    ONLY column is constant is refused instead; see
+    test_constant_categorical_whole_block_raises."""
+    import structlog.testing
+
+    p = tmp_path / "items_constant.csv"
+    pd.DataFrame(
+        {
+            "item_id": ["i_a", "i_b", "i_c"],
+            "genre": ["action", "action", "action"],
+            "brand": ["x", "y", "z"],
+        }
+    ).to_csv(p, index=False)
+    cfg = FeaturesConfig(
+        item=FeatureSideConfig(
+            source={"type": "csv", "path": str(p)},
+            id_column="item_id",
+            columns=[
+                FeatureColumn(name="genre", encoding="categorical"),
+                FeatureColumn(name="brand", encoding="categorical"),
+            ],
+        )
+    )
     with structlog.testing.capture_logs() as cap:
         t = load_feature_tables(cfg, recipe_name="r", run_id="run")
-    assert t.item_state["n_features"] == 2  # one one-hot + bias, not a raise
+    # constant genre one-hot (1) + varying brand's 3 one-hots + bias == 5.
+    assert t.item_state["n_features"] == 5  # not a raise: brand keeps it live
     events = [e for e in cap if e.get("event") == "feature_empty_vocabulary_column"]
     assert events, (
         f"a constant column must warn as dead at load time; "
         f"got {[e.get('event') for e in cap]}"
     )
+    # The warning must name the constant column, not the varying one.
+    assert any(e.get("column") == "genre" for e in events)
     # PII: the genre value must not be logged.
     for e in cap:
         for value in e.values():

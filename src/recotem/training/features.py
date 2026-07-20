@@ -81,7 +81,12 @@ import pandas as pd
 import scipy.sparse as sps
 import structlog
 
-from recotem._features import FeatureEncodeError, build_encoder_state, encode
+from recotem._features import (
+    FeatureEncodeError,
+    build_encoder_state,
+    encode,
+    spec_is_live,
+)
 from recotem.datasource.base import FetchContext
 from recotem.datasource.registry import get_source_class
 from recotem.recipe.models import FeaturesConfig, FeatureSideConfig
@@ -120,21 +125,6 @@ class FeatureTables:
     @property
     def enabled(self) -> bool:
         return self.item_state is not None or self.user_state is not None
-
-
-def _spec_is_live(spec: dict) -> bool:
-    """True if an encoder-state column spec can emit a non-bias feature.
-
-    A ``numerical`` spec always reserves ``width == 1`` even when it is dead
-    (std floored to 0.0, emitting nothing at encode time), so its width is not
-    a reliable liveness signal -- its ``std`` is. A ``categorical`` /
-    ``multi_label`` spec, by contrast, prunes to ``width == 0`` when dead, so
-    its width is exactly right. The whole-block-dead guard in ``_fetch_side``
-    keys on this rather than on ``n_features``.
-    """
-    if spec["encoding"] == "numerical":
-        return spec["std"] != 0.0
-    return spec["width"] > 0
 
 
 def _resolve_source(source_cfg: Any, *, which: str) -> tuple[type, Any]:
@@ -258,15 +248,23 @@ def _fetch_side(
     # shared with serving and must not raise a training error); this
     # training-side check is where the whole-block refusal belongs.
     #
-    # Liveness is per encoding, NOT ``n_features``: a categorical/multi_label
-    # spec that pruned to width 0 contributes nothing, but a NUMERICAL spec
-    # always reserves width 1 even when its std was floored to 0.0 (dead) and
-    # it emits nothing at encode time. Keying on ``n_features == 1`` therefore
-    # missed an all-dead-NUMERICAL block (n_features stays 2). A single dead
-    # column among several live ones is NOT refused -- pruning one column via
-    # ``min_frequency`` is a legitimate operator choice -- so this fires only
-    # when EVERY spec is dead.
-    if not any(_spec_is_live(s) for s in state["columns"]):
+    # Liveness is VARIES-based, NOT ``n_features`` and NOT width. ``spec_is_live``
+    # keys on exactly what the per-column dead-column warning and the numerical
+    # branch already compute: a numerical spec is live iff its std is non-zero,
+    # and a categorical/multi_label spec is live iff its encoded block VARIES
+    # across rows. Keying on ``n_features == 1`` missed an all-dead-NUMERICAL
+    # block, because a numerical spec reserves width 1 even when its std was
+    # floored to 0.0 and it emits nothing at encode time (n_features stays 2).
+    # A width-only test would miss the symmetric categorical case: a
+    # constant-but-present column (e.g. every item shares one genre) keeps a
+    # non-empty vocab and ``width > 0``, yet every row emits the SAME one-hot,
+    # collinear with the bias -- signal-free, identical to plain iALS. Reading
+    # ``frame[s["name"]]`` per column (the same series ``build_encoder_state``
+    # saw) catches it, so the refusal now agrees with the per-column warning and
+    # the numerical branch. A single dead column among several live ones is NOT
+    # refused -- pruning one column via ``min_frequency`` is a legitimate
+    # operator choice -- so this fires only when EVERY spec is dead.
+    if not any(spec_is_live(frame[s["name"]], s) for s in state["columns"]):
         raise TrainingError(
             f"features.{which}: every declared feature column encodes to "
             f"nothing, so the whole block collapses to the bias column alone "

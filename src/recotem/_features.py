@@ -352,6 +352,30 @@ def _column_block_varies(
     return False
 
 
+def spec_is_live(series: pd.Series, spec: dict) -> bool:
+    """True if an encoded column *spec* can contribute signal beyond the bias.
+
+    Unifies the two liveness signals ``build_encoder_state`` already computes:
+    a ``numerical`` spec is live iff its recorded ``std`` is non-zero; a
+    ``categorical`` / ``multi_label`` spec is live iff its encoded block
+    varies across rows (``_column_block_varies``) -- i.e. it is not constant,
+    and therefore not collinear with the always-1 bias. A width-only test
+    cannot see a constant-but-present categorical column (non-empty vocab,
+    ``width > 0``, yet every row emits the same one-hot); this can, because it
+    re-reads *series*. The training-side whole-block-dead refusal keys on this
+    so it agrees with the per-column dead-column warning and with the
+    numerical branch's zero-variance refusal.
+    """
+    if spec["encoding"] == "numerical":
+        return spec["std"] != 0.0
+    return _column_block_varies(
+        series,
+        spec["vocab"],
+        encoding=spec["encoding"],
+        delimiter=spec.get("delimiter", ""),
+    )
+
+
 def _warn_if_column_dead(
     col: FeatureColumn,
     tokens: Sequence[str],

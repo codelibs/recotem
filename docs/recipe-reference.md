@@ -279,13 +279,25 @@ The `multi_label` distinction matters: `genres: "Action|Zzz"` with `Action`
 known yields `Action=1` and drops `Zzz` — it is not an all-zero segment.
 "Row missing" and "value unknown" coincide only for `categorical`.
 
+The same `str()`-matching caveat that applies to `id_column` above also
+applies to a `categorical` **value** column. If a blank cell makes pandas
+infer `float64` for an otherwise-integer column, its vocabulary is trained as
+`"1990.0"`, and a serve-time request sending the JSON integer `1990` (matched
+as `"1990"`) misses every key and is silently counted as an unknown value.
+Unlike the id axis, this is **not** refused at train time — the column varies
+across rows, so training stays self-consistent — so pin the type at the source
+(`dtype: {year: str}` on `csv`; `CAST(... AS STRING)` on `bigquery` / `sql`;
+fix the schema on `parquet`) exactly as for the id column.
+
 At serve time, each cold-start feature value supplied to `:recommend` /
 `:recommend-related` (`user_features`, and each `item_features` seed mapping) is
 length-capped: a string value longer than **8192 characters** is rejected with
 `422` (the error names the offending column, never the value). This bounds the
 `multi_label` tokenization work per request — 8192 characters is generous for a
-real token list while blocking megabyte-scale amplification — and applies to
-the batch verbs too. Non-string scalar values are unaffected.
+real token list while blocking megabyte-scale amplification. The same cap
+applies on the batch verbs, but a violation there surfaces as a per-element
+`VALIDATION_ERROR` inside the `200` batch response rather than failing the
+whole batch with `422`. Non-string scalar values are unaffected.
 
 If a `numerical` column is constant — or merely **near**-constant — in the
 training data, its segment is emitted as zeros and a warning is logged

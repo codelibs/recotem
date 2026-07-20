@@ -314,8 +314,9 @@ limit is worth stating precisely, because it is what makes those coercions
 load-bearing. A stray `pandas.Index` really would be refused at load time
 (`pandas.core.indexes.base._new_Index` is not allow-listed — verified). A
 `numpy.str_` would **not**: it pickles via `numpy._core.multiarray.scalar`
-plus `numpy.dtype`, both reachable through the narrow `numpy.*`
-module-prefix allow-list, so it loads and keeps its type (verified). Nothing
+plus `numpy.dtype`, both allow-listed (the former via the `numpy._core.*`
+module-prefix list, the latter via its explicit FQCN entry), so it loads and
+keeps its type (verified). Nothing
 downstream catches it either — `numpy.str_` subclasses `str` and hashes and
 compares equal to it, so every vocabulary lookup keeps working and the leak
 stays invisible at runtime. The `str()` coercions in `build_encoder_state`

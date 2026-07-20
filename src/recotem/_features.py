@@ -32,13 +32,22 @@ allow-listed, so it round-trips through ``SafeUnpickler`` keeping its type
 and compares equal to ``str``, so every vocabulary lookup keeps working and
 the leak stays invisible at runtime.
 
-So the ``str()`` coercions in ``build_encoder_state`` are load-bearing on
+So the plainness coercions in ``build_encoder_state`` are load-bearing on
 their own for the numpy scalar types, not a belt-and-braces gesture on top
-of an allow-list that would fail closed anyway. They are total (every
-vocabulary key is constructed through ``str()``), and
-``tests/unit/test_features.py::test_vocabulary_keys_are_exactly_str_not_
-numpy_str`` enforces the result by asserting the EXACT key type -- an
-``isinstance`` check cannot do it, because ``numpy.str_`` subclasses ``str``.
+of an allow-list that would fail closed anyway. There are two, one per scalar
+kind, and neither is cosmetic:
+
+- the ``str()`` coercions on vocabulary keys (categorical / multi_label):
+  total -- every key is constructed through ``str()`` -- and enforced by
+  ``tests/unit/test_features.py::test_vocabulary_keys_are_exactly_str_not_
+  numpy_str``, which asserts the EXACT key type (an ``isinstance`` check
+  cannot, because ``numpy.str_`` subclasses ``str``).
+- the ``float()`` coercions on the numerical branch's ``mean`` / ``std``:
+  ``numeric.mean()`` / ``numeric.std()`` return ``np.float64`` scalars, which
+  leak into the state and unpickle via the same allow-listed
+  ``numpy._core.multiarray.scalar`` if the wrapping ``float(...)`` is dropped.
+  Do NOT refactor ``float(numeric.mean())`` back to ``numeric.mean()``: it
+  silently reintroduces a numpy scalar the allow-list will happily load.
 
 Why ``encode`` demands ``index_order``
 ----------------------------------------
@@ -525,9 +534,31 @@ def build_encoder_state(
                         f"cannot be standardized; declare it categorical or "
                         f"drop it"
                     )
-                has_values = bool(numeric.notna().any())
-                mean = float(numeric.mean()) if has_values else 0.0
-                std = float(numeric.std(ddof=0)) if has_values else 0.0
+                # Compute mean/std over the FINITE values only. A single
+                # non-finite cell must not poison the whole column's
+                # statistics: `pd.to_numeric(..., errors="coerce")` maps an
+                # overflow token like "1e400" to +inf (NOT NaN --
+                # `float("1e400") == inf`), and pandas `mean()`/`std()` do NOT
+                # skip +-inf, so without this restriction one such cell would
+                # make mean=+inf (reset below) and std=nan (floored below),
+                # silently marking a column with usable finite values like
+                # [1,2,3] dead. `encode()` already routes a per-row non-finite
+                # standardized value to `unknown` (see the non-finite guard in
+                # `_row_values`), so restricting the fit to the finite values
+                # keeps the two paths consistent -- the "1e400" cell degrades
+                # to `unknown` at encode time, not the whole column at fit time.
+                # Excluding non-finite values also subsumes the NaN exclusion
+                # `notna()` gave before.
+                finite = numeric[np.isfinite(numeric)]
+                has_finite = bool(finite.size)
+                # The `float()` coercions are load-bearing plainness guards,
+                # not cosmetic -- see the module docstring. `mean()` / `std()`
+                # return `np.float64` scalars that would otherwise leak into the
+                # persisted state and unpickle via the allow-listed
+                # `numpy._core.multiarray.scalar`; they are the numerical-branch
+                # counterpart of the vocabulary `str()` coercions.
+                mean = float(finite.mean()) if has_finite else 0.0
+                std = float(finite.std(ddof=0)) if has_finite else 0.0
             except OverflowError as exc:
                 # `pd.to_numeric(..., errors="coerce")` does NOT suppress
                 # OverflowError for an object-dtype Python int above float64's
@@ -541,11 +572,27 @@ def build_encoder_state(
                 ) from exc
             if not np.isfinite(mean):
                 mean = 0.0
-            # See _NUMERICAL_STD_RELATIVE_FLOOR's module-level comment: a
-            # std that is merely tiny relative to the column's own scale is
-            # treated the same as an exact 0.0, not just a literal 0.0.
             scale = max(abs(mean), 1.0)
-            if not np.isfinite(std) or std <= _NUMERICAL_STD_RELATIVE_FLOOR * scale:
+            if not has_finite:
+                # Distinct cause from zero variance: the column parsed to NO
+                # finite value at all -- every cell was NaN/unparseable or a
+                # non-finite overflow like "1e400". Name that cause rather than
+                # blaming "divide by zero" (finding M2): the two are different,
+                # and a stray non-finite cell must not misattribute the death of
+                # a column that in fact has no usable values.
+                _logger.warning(
+                    "feature_zero_variance_column",
+                    column=col.name,
+                    detail="no finite parseable values to standardize; emitting zeros",
+                )
+                std = 0.0
+            # See _NUMERICAL_STD_RELATIVE_FLOOR's module-level comment: a std
+            # that is merely tiny relative to the column's own scale is treated
+            # the same as an exact 0.0, not just a literal 0.0. This is genuine
+            # (near-)zero variance AMONG the finite values -- a distinct cause
+            # from the no-finite-values case above, so it keeps the original
+            # divide-by-zero wording.
+            elif not np.isfinite(std) or std <= _NUMERICAL_STD_RELATIVE_FLOOR * scale:
                 _logger.warning(
                     "feature_zero_variance_column",
                     column=col.name,

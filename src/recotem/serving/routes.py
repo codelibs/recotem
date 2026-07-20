@@ -371,6 +371,17 @@ def _resolve_recommend_related(
             if str(seed) in supplied
         ):
             _metrics.inc_feature_unknown_column(name, "item")
+        # Empty ranker result is NO_CANDIDATES, same as the plain path below.
+        # Placed after the metric increments (not before): a cold-start
+        # request that produced no survivors was still a cold-start attempt
+        # and may still have carried an unknown feature value/column -- those
+        # counters describe the request's inputs, which are true regardless of
+        # whether the ranker returned anything, so suppressing them on an empty
+        # result would under-count real cold-start traffic and diverge from the
+        # non-empty case. The plain path has no such counters to preserve, so
+        # "mirror the plain path" means only "raise _NoCandidates on empty".
+        if not raw_results:
+            raise _NoCandidates()
         return raw_results
 
     if not any(str(s) in id_map for s in body.seed_items):
@@ -398,6 +409,12 @@ def _resolve_recommend_related(
             entry.recommender.user_feature_state, body.user_features
         ):
             _metrics.inc_feature_unknown_column(name, "user")
+        # Empty ranker result is NO_CANDIDATES, same as the plain path below.
+        # Placed after the metric increments for the same reason as case C:
+        # the cold-start / unknown-feature counters describe request inputs
+        # that hold whether or not the ranker returned survivors.
+        if not raw_results:
+            raise _NoCandidates()
         return raw_results
 
     # All seeds known, no user_features: byte-for-byte the pre-existing

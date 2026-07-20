@@ -137,6 +137,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sklearn axis at all. If you need TruncatedSVD artifacts to be reproducible
   bit-exact, pin sklearn exactly or build train and serve from the same lock
   file.
+- **`recotem validate` labels each probed data source.** Because a recipe may
+  now declare feature-side sources (`features.item.source` /
+  `features.user.source`) alongside the top-level `source:`, the probe output
+  tags which one it is (`DataSource: probe OK (csv) [source]`, `DataSource probe
+  failed [features.item.source]: ...`) and the missing-discriminator message
+  reads `source is missing the 'type' discriminator.` rather than `Recipe
+  source is missing the 'type' discriminator.`. Exit codes are unchanged;
+  tooling that greps the exact `validate` output lines should update.
 
 ### Fixed
 
@@ -171,6 +179,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Recipe load rejects a `features.<side>.id_column` that also names a feature
   column.** The collision is guaranteed to fail at train time (the id column is
   consumed as the index); it is now caught at recipe load with a clear message.
+- **Feature-aware iALS: a non-finite value no longer silently kills an
+  otherwise-usable `numerical` column.** `pd.to_numeric` maps an overflow token
+  like `1e400` to `+inf`, and pandas `mean` / `std` do not skip `±inf`, so a
+  single such cell made the column's `std` non-finite and routed the whole
+  column to the zero-variance path — silently dropping a column that still held
+  usable finite values (like `[1, 2, 3]`) while the artifact continued to
+  advertise `features`, and emitting a `feature_zero_variance_column` warning
+  that misattributed the cause as "divide by zero." `build_encoder_state` now
+  computes mean/std over the finite values only, so a stray overflow cell
+  degrades to `unknown` at encode time — exactly as it already did per request —
+  instead of killing the column at fit time. A column that parses to no finite
+  value at all is still dropped, now with a distinct, accurate warning detail.
+  This changes training-time encoding for any feature table with such a column;
+  retrain to pick it up.
+- **`:recommend-related` cold-start paths now return `404 NO_CANDIDATES`
+  consistently.** The pre-existing all-seeds-known path raised `NO_CANDIDATES`
+  when the ranker produced no survivors, but the two cold-start branches (the
+  `user_features` profile prior, and `item_features` for a seed absent from
+  training) returned `200` with an empty `items` list for the identical
+  condition. Both branches now raise the same `NO_CANDIDATES`, so every path of
+  the verb — single and batch — reports an empty result the same way.
 
 ### Migrating to irspack 0.5.0
 

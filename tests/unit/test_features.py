@@ -340,6 +340,129 @@ def test_small_but_real_variance_numerical_std_is_not_floored() -> None:
     assert state["columns"][0]["std"] == pytest.approx(raw_std)
 
 
+# ---------------------------------------------------------------------------
+# Review finding M2: a single non-finite/overflow cell poisoned the WHOLE
+# column's statistics. `pd.to_numeric(..., errors="coerce")` maps a token like
+# "1e400" to +inf (NOT NaN, because `float("1e400") == inf`), and pandas
+# `mean()`/`std()` do NOT skip +-inf -- so one such cell made mean=inf (reset
+# to 0.0) and std=nan (routed into the zero-variance branch), silently marking
+# a column with usable finite values like [1,2,3] DEAD (std=0.0, emits zeros)
+# and MISATTRIBUTING the cause as "standardization would divide by zero". The
+# fit must instead compute mean/std over the FINITE values only -- consistent
+# with `encode()`, which already routes a per-row non-finite standardized
+# value to `unknown` (see the `not isfinite`/`abs > FLOAT32_MAX` guard in
+# `_row_values`). Only a column with NO finite values, or genuine zero variance
+# AMONG the finite values, is dead, and the two causes must warn distinctly.
+# ---------------------------------------------------------------------------
+
+
+def test_numerical_column_with_one_overflow_cell_stays_live() -> None:
+    """A numerical column with usable finite values plus one overflow cell
+    ("1e400" -> +inf) must stay LIVE, with mean/std computed over the finite
+    values only.
+
+    Pre-fix, `pd.to_numeric` mapped "1e400" to +inf, which pandas did NOT skip
+    in `mean()`/`std()`: mean came back +inf (reset to 0.0) and std came back
+    nan (routed into the zero-variance branch), so `std` was floored to 0.0 and
+    the whole column emitted zeros -- as though [1,2,3] carried no signal --
+    while the warning blamed "divide by zero". This test pins the fixed
+    behavior: the finite rows [1,2,3] set mean=2.0/std=sqrt(2/3), the column is
+    live, and no zero-variance warning fires.
+    """
+    import structlog.testing
+
+    d = pd.DataFrame(
+        {"item_id": ["a", "b", "c", "d"], "price": ["1.0", "2.0", "3.0", "1e400"]}
+    ).set_index("item_id")
+    with structlog.testing.capture_logs() as cap:
+        state = build_encoder_state(
+            d, [FeatureColumn(name="price", encoding="numerical")]
+        )
+    spec = state["columns"][0]
+
+    # Statistics are computed over the finite values [1,2,3] alone.
+    assert spec["mean"] == pytest.approx(2.0)
+    assert spec["std"] == pytest.approx(math.sqrt(2.0 / 3.0))
+    assert spec["std"] != 0.0, (
+        "one overflow cell must not mark a column with finite values dead; "
+        "pre-fix std was floored to 0.0"
+    )
+
+    # The column is live -> NO zero-variance warning.
+    assert not [e for e in cap if e.get("event") == "feature_zero_variance_column"], (
+        "a live column must not warn as zero-variance"
+    )
+
+    # End-to-end consistency with encode(): the "1e400" row degrades like a
+    # missing value (contributes 0) while a finite row contributes its
+    # standardized value.
+    m = encode(state, d, index_order=["a", "d"]).toarray()
+    assert m[0, spec["offset"]] == pytest.approx((1.0 - 2.0) / math.sqrt(2.0 / 3.0))
+    assert m[1, spec["offset"]] == 0.0, "the overflow row must encode to zero"
+
+    # And encode_one routes the same overflow token to `unknown` -- an unknown
+    # value must not also be invisible.
+    _, unknown = encode_one(state, {"price": "1e400"})
+    assert unknown == ["price"]
+
+
+def test_numerical_column_all_nonfinite_is_dead_with_accurate_message() -> None:
+    """A column with NO finite parseable values is dead, and warns with a
+    message that names the real cause -- not "divide by zero".
+
+    Every cell is either an overflow token ("1e400" -> +inf) or unparseable
+    ("nope" -> NaN), so there is nothing finite to fit. Pre-fix this still
+    reported the zero-variance "standardization would divide by zero" detail,
+    misattributing the cause; the fix emits a distinct, accurate message.
+    """
+    import structlog.testing
+
+    d = pd.DataFrame({"item_id": ["a", "b"], "price": ["1e400", "nope"]}).set_index(
+        "item_id"
+    )
+    with structlog.testing.capture_logs() as cap:
+        state = build_encoder_state(
+            d, [FeatureColumn(name="price", encoding="numerical")]
+        )
+    spec = state["columns"][0]
+
+    assert spec["std"] == 0.0, "no finite values -> dead column (std == 0.0)"
+
+    events = [e for e in cap if e.get("event") == "feature_zero_variance_column"]
+    assert events, "a no-finite-values column must still warn"
+    detail = events[0]["detail"]
+    assert "divide by zero" not in detail, (
+        f"an all-non-finite column must not blame zero variance; got {detail!r}"
+    )
+    assert "finite" in detail, (
+        f"the warning must name the real cause (no finite values); got {detail!r}"
+    )
+
+
+def test_constant_finite_numerical_column_uses_zero_variance_message() -> None:
+    """A genuinely constant finite column [5,5,5] still hits the zero-variance
+    path and keeps the ORIGINAL "divide by zero" wording -- the fix must not
+    relabel real zero-variance-among-finite-values as the no-finite case.
+    """
+    import structlog.testing
+
+    d = pd.DataFrame({"item_id": ["a", "b", "c"], "price": [5.0, 5.0, 5.0]}).set_index(
+        "item_id"
+    )
+    with structlog.testing.capture_logs() as cap:
+        state = build_encoder_state(
+            d, [FeatureColumn(name="price", encoding="numerical")]
+        )
+    assert state["columns"][0]["std"] == 0.0
+
+    events = [e for e in cap if e.get("event") == "feature_zero_variance_column"]
+    assert events, "a constant finite column must warn as zero-variance"
+    assert "divide by zero" in events[0]["detail"], (
+        "genuine zero variance among finite values must keep the original "
+        "divide-by-zero wording"
+    )
+
+
 def test_numerical_missing_becomes_mean(
     df: pd.DataFrame, columns: list[FeatureColumn]
 ) -> None:

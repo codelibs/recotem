@@ -219,6 +219,7 @@ uv run ruff format --check src tests
 | `RECOTEM_DRAIN_SECONDS` | 30 | SIGTERM grace window. Clamped [1, 300]. |
 | `RECOTEM_LOG_FORMAT` | auto | `auto` / `json` / `console`. |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | 512 MiB | Per-payload cap (post-HMAC-verify) for serve-side deserialization. Clamped [1 MiB, 16 GiB]. Smaller than `RECOTEM_MAX_ARTIFACT_BYTES` to bound deserialization memory expansion. |
+| `RECOTEM_MAX_BODY_BYTES` | 128 MiB | Max serve-side HTTP **request** body size. Clamped [1 MiB, 2 GiB]. A `BodySizeLimitMiddleware` returns `413 PAYLOAD_TOO_LARGE` when the declared `Content-Length` exceeds the cap, and enforces a running byte count on chunked/streamed bodies with no `Content-Length` so the header cannot be omitted to bypass it. Default preserves the entire legitimate request space (largest well-formed body main accepts is ~72 MiB) while blocking GB-scale bodies that Starlette would buffer and parse before validation. |
 | `RECOTEM_ARTIFACT_ROOT` | (empty) | If set, local `output.path` must lie under it. |
 | `RECOTEM_RECIPE_*` | — | Allow-listed for `${...}` recipe expansion. |
 | `RECOTEM_METADATA_FIELD_DENY` | (empty) | Comma-separated columns stripped from `/v1/recipes/{name}:recommend` and `:recommend-related` responses. |

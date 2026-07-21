@@ -26,6 +26,8 @@ Environment variables:
                                  (default 256 MiB; clamped 1 MiB–16 GiB)
   RECOTEM_HTTP_TIMEOUT_SECONDS Timeout in seconds for HTTP/HTTPS datasource
                                  fetch (default 30; clamped 1–600)
+  RECOTEM_MAX_BODY_BYTES       Max serve-side request body size in bytes
+                                 (default 128 MiB; clamped 1 MiB–2 GiB)
   RECOTEM_STARTUP_PARALLELISM  Number of parallel threads used to load
                                  artifacts at startup (default min(recipes, 8);
                                  clamped 1–32)
@@ -507,6 +509,30 @@ def get_http_timeout_seconds() -> int:
         DEFAULT_HTTP_TIMEOUT_SECONDS,
         _MIN_HTTP_TIMEOUT_SECONDS,
         _MAX_HTTP_TIMEOUT_SECONDS,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Request-body cap (used by serving/app.py's body-size middleware)
+# ---------------------------------------------------------------------------
+
+# Default is chosen to preserve the entire existing legitimate request space:
+# the largest well-formed body serve already accepts is ~72 MiB (a 256-element
+# batch, each sub-request carrying 1000 exclude_items of up to 256 chars). 128
+# MiB clears that with headroom while still blocking GB-scale bodies that would
+# otherwise be buffered and parsed in full before validation.
+DEFAULT_MAX_BODY_BYTES = 128 * 1024 * 1024  # 128 MiB
+_MIN_BODY_BYTES = 1 * 1024 * 1024  # 1 MiB
+_MAX_BODY_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
+
+
+def get_max_body_bytes() -> int:
+    """Return RECOTEM_MAX_BODY_BYTES, clamped to [1 MiB, 2 GiB]."""
+    return _clamped_int_env(
+        "RECOTEM_MAX_BODY_BYTES",
+        DEFAULT_MAX_BODY_BYTES,
+        _MIN_BODY_BYTES,
+        _MAX_BODY_BYTES,
     )
 
 

@@ -280,14 +280,27 @@ known yields `Action=1` and drops `Zzz` — it is not an all-zero segment.
 "Row missing" and "value unknown" coincide only for `categorical`.
 
 The same `str()`-matching caveat that applies to `id_column` above also
-applies to a `categorical` **value** column. If a blank cell makes pandas
-infer `float64` for an otherwise-integer column, its vocabulary is trained as
-`"1990.0"`, and a serve-time request sending the JSON integer `1990` (matched
-as `"1990"`) misses every key and is silently counted as an unknown value.
-Unlike the id axis, this is **not** refused at train time — the column varies
-across rows, so training stays self-consistent — so pin the type at the source
-(`dtype: {year: str}` on `csv`; `CAST(... AS STRING)` on `bigquery` / `sql`;
-fix the schema on `parquet`) exactly as for the id column.
+applies to a `categorical` or `multi_label` **value** column — the vocabulary
+is fit from each value's string rendering, and a serve-time request value is
+matched the same way. If a blank cell makes pandas infer `float64` for an
+otherwise-integer column, its vocabulary is trained from `"1990.0"` (a
+`multi_label` column's tokens the same way), and a serve-time request sending
+the JSON integer `1990` (matched as `"1990"`) misses every key. So **declare
+id-like or numeric-looking attribute columns as strings at the source** — one
+blank cell is enough to flip the whole column to `float64` inference. Prefer
+consistent types over relying on the counter after the fact. Unlike the id
+axis, this is **not** refused at train time — the column varies across rows, so
+training stays self-consistent — so pin the type at the source (`dtype: {year:
+str}` on `csv`; `CAST(... AS STRING)` on `bigquery` / `sql`; fix the schema on
+`parquet`) exactly as for the id column. The mismatch is not silent, though: at
+serve time each such miss increments
+`recotem_v1_feature_unknown_value_total` (labelled by recipe / side / column —
+see [operations.md](operations.md#feature-aware-ials-sizing)), so a spike on a
+column you expected to match is the signal to check its source dtype. The **id
+axis** dtype trap is the stricter, train-time analogue: there the same `"1.0"`
+vs `"1"` mismatch drives coverage to 0% and aborts training with the
+[zero-overlap refusal](#ids-are-matched-as-strings-and-zero-overlap-is-fatal)
+(`feature_axis_error`, exit 4) rather than degrading silently at serve time.
 
 At serve time, each cold-start feature value supplied to `:recommend` /
 `:recommend-related` (`user_features`, and each `item_features` seed mapping) is

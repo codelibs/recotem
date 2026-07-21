@@ -395,6 +395,87 @@ def test_feature_value_cap_covers_batch_reparse_path() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Feature-dict KEY length caps. `_FeatureValues`' `Field(max_length=64)` caps
+# the key COUNT and `_MAX_FEATURE_VALUE_CHARS` caps each string VALUE, but the
+# KEYS themselves were length-unbounded: `user_features` column names, the
+# `item_features` outer seed-id keys, and the nested per-seed feature keys.
+# All three are now capped at 256 chars (parity with `_ItemStr`), empty keys
+# rejected.
+# ---------------------------------------------------------------------------
+
+# Mirrors schemas._MAX_FEATURE_KEY_CHARS; the sync test below pins them equal.
+_FEATURE_KEY_CAP = 256
+
+
+def test_feature_key_cap_matches_module_constant() -> None:
+    from recotem.serving.schemas import _MAX_FEATURE_KEY_CHARS
+
+    assert _MAX_FEATURE_KEY_CHARS == _FEATURE_KEY_CAP
+
+
+def test_recommend_request_user_features_key_over_cap_rejected() -> None:
+    with pytest.raises(ValidationError):
+        RecommendRequest(
+            user_id="u1", user_features={"k" * (_FEATURE_KEY_CAP + 1): "v"}
+        )
+
+
+def test_recommend_request_user_features_key_at_cap_accepted() -> None:
+    req = RecommendRequest(user_id="u1", user_features={"k" * _FEATURE_KEY_CAP: "v"})
+    assert "k" * _FEATURE_KEY_CAP in req.user_features
+
+
+def test_recommend_request_user_features_empty_key_rejected() -> None:
+    with pytest.raises(ValidationError):
+        RecommendRequest(user_id="u1", user_features={"": "v"})
+
+
+def test_recommend_related_request_item_features_outer_key_over_cap_rejected() -> None:
+    """The `item_features` OUTER keys are seed item ids, capped like seed_items
+    (`_ItemStr`, 1..256)."""
+    with pytest.raises(ValidationError):
+        RecommendRelatedRequest(
+            seed_items=["s1"],
+            item_features={"s" * (_FEATURE_KEY_CAP + 1): {"g": "v"}},
+        )
+
+
+def test_recommend_related_request_item_features_empty_outer_key_rejected() -> None:
+    with pytest.raises(ValidationError):
+        RecommendRelatedRequest(
+            seed_items=["s1"],
+            item_features={"": {"g": "v"}},
+        )
+
+
+def test_recommend_related_request_item_features_inner_key_over_cap_rejected() -> None:
+    """The nested per-seed feature mapping's KEYS are also capped."""
+    with pytest.raises(ValidationError):
+        RecommendRelatedRequest(
+            seed_items=["s1"],
+            item_features={"s1": {"k" * (_FEATURE_KEY_CAP + 1): "v"}},
+        )
+
+
+def test_feature_key_over_cap_error_does_not_echo_key_text() -> None:
+    """An over-length key must report only its length, never its (possibly huge)
+    text, so it cannot amplify into the 422 body / logs."""
+    huge_key = "k" * (_FEATURE_KEY_CAP + 5000)
+    with pytest.raises(ValidationError) as exc_info:
+        RecommendRequest(user_id="u1", user_features={huge_key: "v"})
+    assert huge_key not in str(exc_info.value)
+
+
+def test_feature_key_cap_covers_batch_reparse_path() -> None:
+    """Batch verbs re-parse each element via `model_validate`; the key cap must
+    cover that path too."""
+    with pytest.raises(ValidationError):
+        RecommendRequest.model_validate(
+            {"user_id": "u1", "user_features": {"k" * (_FEATURE_KEY_CAP + 1): "v"}}
+        )
+
+
+# ---------------------------------------------------------------------------
 # Finding 6: Discriminated union extra-field enforcement
 # ---------------------------------------------------------------------------
 

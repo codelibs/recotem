@@ -88,6 +88,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New example: `examples/feature-aware/` — a small interactions CSV, an item
   feature table exercising all three encodings, and a README walking
   train → serve → cold-start `:recommend-related`.
+- **Request-body size cap.** `serve` now bounds the raw HTTP request body via a
+  `BodySizeLimitMiddleware` before Starlette buffers and JSON-parses it: a
+  declared `Content-Length` over the cap is rejected outright, and bodies with
+  no `Content-Length` (chunked / streamed) are counted as they arrive so the
+  header cannot be omitted to bypass the limit. Over-cap requests get a
+  `413 PAYLOAD_TOO_LARGE` in the standard error envelope. Previously an
+  authenticated client could make the process buffer and parse a multi-GB body.
+- `RECOTEM_MAX_BODY_BYTES` (default 128 MiB, clamped [1 MiB, 2 GiB]) tunes the
+  cap. The default clears the largest well-formed request `serve` already
+  accepts (~72 MiB) with headroom while blocking GB-scale bodies. A new
+  `PAYLOAD_TOO_LARGE` error code is added to the v1 API's `ErrorCode` union.
+- **Cold-start feature-dict key-length caps.** Every feature-mapping KEY is now
+  bounded to 1–256 characters (parity with other identifier fields):
+  `user_features` column names, the `item_features` outer seed-id keys, and the
+  nested per-seed feature keys. Previously only string VALUES were capped and
+  `Field(max_length=64)` bounded only the key COUNT, leaving key length
+  unbounded. Over-length or empty keys now get a `422`; an over-length key
+  reports only its length, never its (possibly huge) text.
 
 ### Changed
 

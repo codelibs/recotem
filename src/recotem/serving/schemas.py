@@ -52,6 +52,7 @@ ErrorCode = Literal[
     "INTERNAL_ERROR",
     "FEATURES_NOT_SUPPORTED",
     "FEATURE_VALUE_UNUSABLE",
+    "PAYLOAD_TOO_LARGE",
 ]
 
 # ---------------------------------------------------------------------------
@@ -70,21 +71,40 @@ _ItemStr = Annotated[str, Field(min_length=1, max_length=256)]
 # yet blocks MB-scale amplification, restoring parity with every other field.
 _MAX_FEATURE_VALUE_CHARS = 8192
 
+# Per-KEY length cap for cold-start feature mappings. `Field(max_length=64)` on
+# `_FeatureValues` caps the key COUNT; `_MAX_FEATURE_VALUE_CHARS` caps each
+# string VALUE; this caps each KEY's length. Without it the dict keys
+# (`user_features` column names and the nested `item_features` per-seed feature
+# keys) were unbounded even while every other identifier field is length-capped
+# (_ItemStr is 1..256). 256 keeps parity with `_ItemStr`. An over-length key
+# reports only its length, never its text, so a multi-MB key cannot amplify into
+# the 422 body / logs; the `item_features` OUTER keys (seed ids) are capped
+# separately by typing that dict's keys as `_ItemStr`.
+_MAX_FEATURE_KEY_CHARS = 256
+
 
 def _check_feature_value_lengths(
     values: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """Reject any string feature value longer than ``_MAX_FEATURE_VALUE_CHARS``.
+    """Reject over-length feature-dict KEYS and string VALUES.
 
     Shared by every place a cold-start feature mapping appears: ``user_features``
     on both request models and each nested ``item_features`` mapping (this
-    validator runs per ``_FeatureValues``, so a nested dict of values is checked
-    too). Names the offending column key but never echoes the value, which is
-    treated as personal data. Non-string scalars are unaffected.
+    validator runs per ``_FeatureValues``, so a nested dict of keys/values is
+    checked too). KEYS are bounded to ``1..._MAX_FEATURE_KEY_CHARS``; string
+    VALUES to ``_MAX_FEATURE_VALUE_CHARS``. The value check names the offending
+    column key but never echoes the value (treated as personal data); the key
+    check reports only the length, never the key text. Non-string scalar values
+    are unaffected by the value cap.
     """
     if values is None:
         return values
     for key, val in values.items():
+        if not 1 <= len(key) <= _MAX_FEATURE_KEY_CHARS:
+            raise ValueError(
+                f"feature key length {len(key)} is outside the permitted "
+                f"1..{_MAX_FEATURE_KEY_CHARS} characters"
+            )
         if isinstance(val, str) and len(val) > _MAX_FEATURE_VALUE_CHARS:
             raise ValueError(
                 f"feature value for column {key!r} exceeds the "
@@ -161,8 +181,12 @@ class RecommendRelatedRequest(BaseModel):
     # seed item id. Takes precedence over ``user_features`` when a seed named
     # here is also cold: a cold seed has no row in the seed interaction
     # matrix, so the case-B solve would silently drop it.
+    # Outer keys are seed item ids, so they are typed ``_ItemStr`` (1..256) to
+    # bound key length exactly like ``seed_items`` -- ``Field(max_length=100)``
+    # caps only the key COUNT. The nested ``_FeatureValues`` validator bounds
+    # each cold-seed mapping's own keys and values.
     item_features: Annotated[
-        dict[str, _FeatureValues] | None,
+        dict[_ItemStr, _FeatureValues] | None,
         Field(
             max_length=100,
             description=(

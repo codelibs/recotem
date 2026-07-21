@@ -804,3 +804,61 @@ def test_zero_overlap_message_does_not_hardcode_csv_only_dtype_key(
     # Still diagnosable: names the side, the id_column, and points at the docs.
     assert "sku" in msg
     assert "operations.md" in msg
+
+
+# ---------------------------------------------------------------------------
+# Zero-row feature table: a header-only table (columns declared, no data rows)
+# flowing into the training feature path. The built-in csv/parquet sources
+# reject a header-only file at FETCH time with DataSourceError (exit 3), so
+# they never hand a 0-row frame to the encoder. To pin what the training
+# feature path ITSELF does with an empty frame -- the state a 0-row sql query
+# or a custom plugin can still reach -- a stub source that returns an empty
+# (but correctly-columned) frame is injected via the registry lookup
+# ``load_feature_tables`` uses. The encoder then finds every declared column
+# dead (empty categorical vocab, zero-variance numerical), so the whole-block-
+# dead guard refuses it exactly as the constant/all-null blocks above do.
+# ---------------------------------------------------------------------------
+
+
+def test_zero_row_feature_table_refused_as_bias_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 0-row (header-only) feature table reaching the encoder collapses to the
+    bias column alone and is refused with ``feature_table_error`` (exit 4) --
+    NOT signed as a features-advertising plain-iALS artifact."""
+    import recotem.training.features as tf
+
+    class _EmptyFrameSource:
+        class Config:
+            @classmethod
+            def model_validate(cls, raw: object) -> _EmptyFrameSource.Config:
+                return cls()
+
+        def __init__(self, config: object) -> None:
+            pass
+
+        def fetch(self, ctx: object) -> pd.DataFrame:
+            # Columns declared (header present), zero data rows.
+            return pd.DataFrame({"item_id": [], "genre": [], "year": []})
+
+    monkeypatch.setattr(tf, "get_source_class", lambda _name: _EmptyFrameSource)
+
+    cfg = FeaturesConfig(
+        item=FeatureSideConfig(
+            source={"type": "stub_empty"},
+            id_column="item_id",
+            columns=[
+                FeatureColumn(name="genre", encoding="categorical"),
+                FeatureColumn(name="year", encoding="numerical"),
+            ],
+        )
+    )
+    with pytest.raises(TrainingError) as exc_info:
+        load_feature_tables(cfg, recipe_name="r", run_id="run")
+    # Whole-block-dead guard fires in _fetch_side, before any axis is known --
+    # so this is feature_table_error, not the encode-time feature_axis_error.
+    assert exc_info.value.code == "feature_table_error"  # -> exit 4
+    assert exc_info.value.code != "signing_key_missing"
+    msg = str(exc_info.value)
+    assert "item" in msg
+    assert "bias" in msg

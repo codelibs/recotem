@@ -39,6 +39,7 @@ The internet-facing boundary is `recotem serve`. `recotem train` has no inbound 
 | Malicious artifact file (serialization RCE) | HMAC-SHA256 verify before any deserialization; signing key required; no legacy unsigned fallback |
 | HMAC bypass leading to arbitrary class construction | Hand-enumerated FQCN allow-list as backstop (see below) |
 | Artifact-size DoS | `RECOTEM_MAX_ARTIFACT_BYTES` cap (default 2 GiB); header length cap (64 KiB); both enforced before deserialization |
+| Request-body DoS (multi-GB body buffered before validation) | `RECOTEM_MAX_BODY_BYTES` cap (default 128 MiB) enforced by `BodySizeLimitMiddleware` before Starlette buffers/parses the body — on both `Content-Length` and chunked bodies; over-cap → `413 PAYLOAD_TOO_LARGE`. All request fields (ids, `exclude_items`, `seed_items`, batch size, and feature-dict key/value lengths + key count) are individually bounded. See [Rate limiting and DoS](#rate-limiting-and-dos) |
 | Stat-then-read TOCTOU on artifact | Read-once protocol: bytes read into memory once, sha256 computed, then HMAC-verified from the same buffer |
 | Key material in logs | structlog redaction processor runs first in chain; unit test asserts no key material at any log level |
 | API key brute-force / timing attack | `hmac.compare_digest` constant-time compare; no logging of plaintext or hash |
@@ -703,6 +704,36 @@ structurally bounded at 100 solves by `seed_items`' `max_length`. As with
 everything else in this section, that bounds the work a **single request** can
 demand and says nothing about the rate; sustained rates remain the proxy's
 job.
+
+**Request body is size-capped before it is parsed.** A `BodySizeLimitMiddleware`
+(`serving/app.py`) rejects any request body larger than `RECOTEM_MAX_BODY_BYTES`
+(default 128 MiB, clamped [1 MiB, 2 GiB]) with a `413 PAYLOAD_TOO_LARGE`
+**before** Starlette buffers and JSON-parses it. Without this an authenticated
+client could send a multi-GB body and force the process to allocate and parse it
+in full ahead of any pydantic validation. The middleware enforces the cap at two
+points so the header cannot be omitted to bypass it: a declared `Content-Length`
+over the cap is refused outright, and a chunked/streamed body with no
+`Content-Length` is counted as it arrives and cut off the moment the running
+total crosses the cap. The default preserves the entire legitimate request space
+— the largest well-formed body the API accepts is ~72 MiB (a 256-element batch,
+each sub-request carrying 1000 `exclude_items` of up to 256 chars) — while
+blocking GB-scale bodies. This bounds a **single request**; sustained rates are
+still the proxy's job.
+
+**Per-request input fields are all length- and count-bounded.** Every
+client-controlled request field has an explicit cap so a well-formed but huge
+body cannot amplify inside validation or the recommender: `user_id` / item ids
+are 1–256 chars (`_ItemStr`), `exclude_items` ≤ 1000, `seed_items` ≤ 100, batch
+`requests` ≤ 256. The cold-start feature mappings are bounded on all three axes:
+`Field(max_length=64)` caps the number of keys, each string **value** is capped
+at 8192 chars (`_MAX_FEATURE_VALUE_CHARS`), and each **key** is capped at 1–256
+chars (`_MAX_FEATURE_KEY_CHARS`) — covering `user_features` column names, the
+`item_features` outer seed-id keys (typed `_ItemStr`), and the nested per-seed
+feature keys. Before the key cap the dict keys were the one length-unbounded
+field left: `max_length` bounded only the key *count*, and only *values* were
+length-checked, so an attacker could send megabyte-scale keys. An over-length
+key now yields a `422` reporting only its length, never its text, so it cannot
+amplify into the error body or logs.
 
 **Recommended nginx configuration:**
 

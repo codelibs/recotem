@@ -26,7 +26,7 @@ recipe-name constraint enforced by the recipe loader).
 
 **Response body:** see `RecommendResponse` in `src/recotem/serving/schemas.py`.
 
-**Status codes:** 200, 400 (`FEATURES_NOT_SUPPORTED` | `FEATURE_VALUE_UNUSABLE`), 401, 404 (`UNKNOWN_USER` | `RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
+**Status codes:** 200, 400 (`FEATURES_NOT_SUPPORTED` | `FEATURE_VALUE_UNUSABLE`), 401, 404 (`UNKNOWN_USER` | `RECIPE_NOT_FOUND`), 413 (`PAYLOAD_TOO_LARGE`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
 
 ### `POST /v1/recipes/{name}:recommend-related`
 Seed-item → items.
@@ -41,7 +41,7 @@ Seed-item → items.
 | `user_features` | object \| null | no | null | Raw feature values, keyed by the recipe's `features.user` column names. Adds a profile prior to the seed-history solve. See [Feature-aware cold start](#feature-aware-cold-start). ≤64 keys. |
 | `item_features` | object[string, object] \| null | no | null | Raw feature values for seed items absent from training, keyed by seed item id. ≤100 keys; each value ≤64 keys. See [Feature-aware cold start](#feature-aware-cold-start). |
 
-**Status codes:** 200, 400 (`FEATURES_NOT_SUPPORTED` | `FEATURE_VALUE_UNUSABLE`), 401, 404 (`UNKNOWN_SEED_ITEMS` | `NO_CANDIDATES` | `RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
+**Status codes:** 200, 400 (`FEATURES_NOT_SUPPORTED` | `FEATURE_VALUE_UNUSABLE`), 401, 404 (`UNKNOWN_SEED_ITEMS` | `NO_CANDIDATES` | `RECIPE_NOT_FOUND`), 413 (`PAYLOAD_TOO_LARGE`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
 
 `UNKNOWN_SEED_ITEMS` means none of the supplied `seed_items` were known
 to the model id-map (typically a client-side data issue).
@@ -77,7 +77,7 @@ list size cap (1..256) is enforced at the schema level (whole-request
 422 if violated); per-element schema failures are surfaced per-element
 so a single bad entry never 422s the whole batch.
 
-**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR` — only for whole-request shape, e.g. missing `requests` key, list too large), 503 (`RECIPE_UNAVAILABLE`).
+**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 413 (`PAYLOAD_TOO_LARGE`), 422 (`VALIDATION_ERROR` — only for whole-request shape, e.g. missing `requests` key, list too large), 503 (`RECIPE_UNAVAILABLE`).
 
 > **Note:** batch endpoints return `{item_id, score}` only by default
 > (`include_metadata=false`).  Set `include_metadata: true` to include
@@ -115,7 +115,7 @@ precedence rules and the `200 {"items": []}` vs `NO_CANDIDATES` asymmetry
 described in [Feature-aware cold start](#feature-aware-cold-start) — both
 apply per-element here.
 
-**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR` — only for whole-request shape), 503 (`RECIPE_UNAVAILABLE`).
+**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 413 (`PAYLOAD_TOO_LARGE`), 422 (`VALIDATION_ERROR` — only for whole-request shape), 503 (`RECIPE_UNAVAILABLE`).
 
 ### `GET /v1/recipes`
 Authenticated.  Returns `RecipesListResponse` with one entry per loaded
@@ -174,6 +174,26 @@ dominates a profile prior, so the server always prefers it and simply
 **ignores** the supplied `user_features` — it does not reject the request.
 This lets a client always send the user's profile on every request without
 needing to know in advance whether the user is new or returning.
+
+**A feature key that names no declared column is silently ignored — it is
+not an error.** `_row_values` (`_features.py`) drives the encode from the
+model's *declared* `features:` columns and does `values.get(name)`, so a key
+in `user_features` / `item_features` that matches no declared column on that
+side is never read. The request returns `200` with no error field and nothing
+in the body marking the key as rejected. The only server-side signal is the
+`recotem_v1_feature_unknown_column_total` metric (see
+[operations.md](operations.md#feature-aware-ials-sizing)), labelled by recipe
+and **side only — never by the key name** — and incremented once per side per
+request that carried at least one such key. This is distinct from an unknown
+*value* in a *declared* column (next section), which also returns `200` but is
+counted separately, by `recotem_v1_feature_unknown_value_total`. A mapping in
+which *every* key is mistyped (or is aimed at the wrong side) therefore
+encodes to the bias column alone and comes back with **population-prior
+results** — the same output an empty `user_features` would produce, and
+indistinguishable from it in the response. **This is current behavior: clients
+must not rely on the API to validate feature keys.** A silently-ignored key is
+byte-for-byte identical, in the response, to a correct request that happened
+to add no signal.
 
 **Unknown feature values degrade, they do not fail the request.** What
 "degrade" means, and whether `recotem_v1_feature_unknown_value_total` (see
@@ -307,6 +327,31 @@ the more defensible response. If your client treats an empty
 popularity-based recommendations), branch on `items == []` rather than on
 HTTP status for this verb.
 
+**Length and size bounds on cold-start fields.** A cold-start feature mapping
+is bounded on three axes, each rejected before the model is consulted:
+
+- **Key count** — each `user_features` / `item_features` mapping accepts at
+  most **64 keys** (`item_features` additionally caps its outer seed-id keys at
+  **100**). Over the cap is `422 VALIDATION_ERROR`.
+- **Key length** — each feature-dict key (a `user_features` column name, an
+  `item_features` outer seed id, or a nested per-seed feature key) must be
+  **1..256 characters**. Over the cap is `422`; the error reports only the
+  offending length, never the key text.
+- **Value length** — each *string* feature value must be **≤ 8192 characters**
+  (this bounds `multi_label` tokenization work). Over the cap is `422`; the
+  error names the offending column but never echoes the value. Non-string
+  scalar values are unaffected.
+
+On the batch verbs a key- or value-length violation surfaces as a per-element
+`VALIDATION_ERROR` inside the `200` batch response rather than failing the
+whole batch.
+
+Independently of these per-field caps, the **entire request body** is bounded
+by `RECOTEM_MAX_BODY_BYTES` (default **128 MiB**, clamped to
+`[1 MiB, 2 GiB]`). A body over that limit is rejected with `413
+PAYLOAD_TOO_LARGE` **before** the JSON is parsed, so it applies to every POST
+endpoint regardless of which fields the body carries.
+
 ## Headers
 
 - `X-Request-ID` — accepted (regex `^[A-Za-z0-9_-]{1,128}$`) or generated;
@@ -369,6 +414,7 @@ in every error case is one of the three forms above.
 | `VALIDATION_ERROR`   | 422 | Pydantic schema rejected the request (also used per-element inside batch responses) |
 | `FEATURES_NOT_SUPPORTED` | 400 | `user_features` / `item_features` supplied but the model has no matching feature state, or its search winner is not feature-capable (also used per-element inside batch responses) |
 | `FEATURE_VALUE_UNUSABLE` | 400 | a supplied `numerical` feature value, once standardized against the column's training mean/std, is large enough to make irspack's cold-start solver itself fail (the exact threshold is std/BLAS-dependent, not a fixed constant, and depends on the column's std as much as the raw value — see [Feature-aware cold start](#feature-aware-cold-start)) — the model and feature side both support cold start, but this particular value does not. Values large enough to be meaningless but not large enough to break the solver degrade silently as `200` instead (also used per-element inside batch responses) |
+| `PAYLOAD_TOO_LARGE`  | 413 | request body exceeds `RECOTEM_MAX_BODY_BYTES` (default 128 MiB, clamped `[1 MiB, 2 GiB]`); rejected before the body is parsed, so it applies to every POST endpoint |
 | `MISSING_API_KEY`    | 401 | `X-API-Key` header missing |
 | `INVALID_API_KEY`    | 401 | `X-API-Key` header present but did not match any configured digest (also covers short-key / oversize-key rejections so callers cannot fingerprint the guard) |
 | `INTERNAL_ERROR`     | 500 / batch | unhandled server-side exception, or unexpected recommender internal layout (`recommender_layout_unexpected`) — status=500 on single endpoints; per-element `status=error` inside batch responses |

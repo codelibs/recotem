@@ -368,6 +368,7 @@ Each model replica holds every loaded model in RAM. Plan accordingly.
 |--------|--------|
 | `RECOTEM_MAX_ARTIFACT_BYTES` | Hard cap per artifact file (default 2 GiB, clamped [1 MiB, 16 GiB]). Reduce this if you have many small models. |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | Cap on the deserialised payload per artifact (default 512 MiB, post-HMAC-verify). Must be ≤ `RECOTEM_MAX_ARTIFACT_BYTES`; if not, `recotem serve` fails at startup with `ConfigError` (exit 8). Reduces the memory spike from deserialization relative to the raw file size. |
+| `RECOTEM_MAX_BODY_BYTES` | Hard cap on each HTTP **request** body (default 128 MiB, clamped [1 MiB, 2 GiB]). A `413 PAYLOAD_TOO_LARGE` is returned before Starlette buffers/parses the body, so a single authenticated client cannot make the process allocate a multi-GB request. The default clears the largest well-formed request `serve` accepts (~72 MiB: a 256-element batch, each carrying 1000 exclude_items of up to 256 chars) with headroom. Reduce it if your legitimate batch sizes are small and you want a tighter bound; the cap applies both to a declared `Content-Length` and to chunked bodies with no length header. |
 | Number of recipes | Each recipe loads one model. 10 recipes × 500 MiB = 5 GiB baseline. |
 | Number of replicas | Each replica is independent. 2 replicas = 2× memory. |
 | Item metadata | DataFrame in-memory per recipe. Size ≈ rows × columns × 8 bytes. |
@@ -494,6 +495,7 @@ Full list of environment variables recognised by Recotem. Variables marked `serv
 | `RECOTEM_WATCH_INTERVAL` | 5 | serve | Artifact watcher poll interval in seconds (clamped 1–30). |
 | `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | serve | Per-artifact size cap (clamped [1 MiB, 16 GiB]). |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | 512 MiB | serve | Per-payload cap post-HMAC-verify (clamped [1 MiB, 16 GiB]). Must be ≤ `RECOTEM_MAX_ARTIFACT_BYTES`. |
+| `RECOTEM_MAX_BODY_BYTES` | 128 MiB | serve | Max HTTP request body size (clamped [1 MiB, 2 GiB]). Over-cap requests get `413 PAYLOAD_TOO_LARGE` before the body is buffered/parsed. See [Sizing `recotem serve` memory](#sizing-recotem-serve-memory). |
 | `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | train | Raw I/O bytes cap for HTTP/HTTPS, local, and object-store source reads (clamped [1 MiB, 16 GiB]). Does **not** cap the decompressed DataFrame. |
 | `RECOTEM_HTTP_TIMEOUT_SECONDS` | 30 | train | Connect/read timeout for HTTP/HTTPS source fetch (clamped [1, 600]). |
 | `RECOTEM_HTTP_ALLOW_PRIVATE` | (unset) | train | Truthy (`1`/`true`/`yes`/`on`) allows HTTP fetches to private/loopback/link-local destinations. Leave unset in production to block SSRF against cloud-metadata services. |

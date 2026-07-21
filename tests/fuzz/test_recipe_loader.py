@@ -10,6 +10,7 @@ import string
 from pathlib import Path
 
 import pytest
+import yaml
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -29,6 +30,45 @@ schema:
   item_column: item_id
 training:
   algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: /tmp/out.recotem
+"""
+
+
+# A recipe that DOES carry a `features:` block, so mutations reach the nested
+# FeatureSide / FeatureColumn validation (and the nested `source` checks) that
+# MINIMAL_VALID_YAML never exercises. Exercises all three encodings, a
+# multi_label `delimiter`, and a `min_frequency`, on both the item and user
+# sides. `training.algorithms` must name a feature-capable algorithm (IALS) or
+# recipe load rejects the pairing before the nested feature validation runs.
+FEATURES_VALID_YAML = """\
+name: fuzz_features
+source:
+  type: csv
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+features:
+  item:
+    source:
+      type: csv
+      path: /tmp/items.csv
+    id_column: item_id
+    columns:
+      - {name: genres, encoding: multi_label, delimiter: "|", min_frequency: 2}
+      - {name: release_year, encoding: numerical}
+      - {name: country, encoding: categorical, min_frequency: 5}
+  user:
+    source:
+      type: csv
+      path: /tmp/users.csv
+    id_column: user_id
+    columns:
+      - {name: age_band, encoding: categorical}
+training:
+  algorithms: [IALS]
   n_trials: 1
 output:
   path: /tmp/out.recotem
@@ -135,6 +175,77 @@ output:
   path: /tmp/out.recotem
 """
     _try_load_yaml(content, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Hypothesis: mutation of the `features:` block (nested FeatureSide /
+# FeatureColumn validation, absent from MINIMAL_VALID_YAML)
+# ---------------------------------------------------------------------------
+
+
+@given(
+    encoding=st.text(alphabet=string.printable, min_size=0, max_size=20),
+    min_frequency=st.one_of(st.integers(), st.text(min_size=0, max_size=6)),
+    delimiter=st.one_of(st.none(), st.text(min_size=0, max_size=4)),
+)
+@settings(
+    max_examples=100,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+def test_loader_handles_mutated_features_column(
+    encoding: str, min_frequency: object, delimiter: str | None, tmp_path: Path
+) -> None:
+    """Mutating a FeatureColumn's encoding/min_frequency/delimiter must still
+    yield only a Recipe or a RecipeError -- never an unhandled exception from
+    the nested feature-column validation."""
+    doc = yaml.safe_load(FEATURES_VALID_YAML)
+    col = doc["features"]["item"]["columns"][0]
+    col["encoding"] = encoding
+    col["min_frequency"] = min_frequency
+    if delimiter is not None:
+        col["delimiter"] = delimiter
+    _try_load_yaml(yaml.safe_dump(doc), tmp_path)
+
+
+# Arbitrary JSON-ish values (scalars, lists, nested dicts) for injection AT a
+# recipe key. Keeps the leaves to YAML-dumpable scalar types so the resulting
+# document is always syntactically valid YAML -- the point is to fuzz the
+# pydantic *shape* at `features:`, not the YAML parser (that is what
+# test_loader_handles_arbitrary_text already covers).
+_JSON_ISH = st.recursive(
+    st.none()
+    | st.booleans()
+    | st.integers()
+    | st.text(alphabet=string.printable, min_size=0, max_size=20),
+    lambda children: (
+        st.lists(children, max_size=4)
+        | st.dictionaries(
+            st.text(alphabet=string.ascii_letters, min_size=0, max_size=8),
+            children,
+            max_size=4,
+        )
+    ),
+    max_leaves=15,
+)
+
+
+@given(features_value=_JSON_ISH)
+@settings(
+    max_examples=200,
+    derandomize=True,  # deterministic corpus across runs
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+def test_loader_handles_arbitrary_features_value(
+    features_value: object, tmp_path: Path
+) -> None:
+    """An arbitrary value injected AT the `features:` key -- a list, an int, or
+    nested garbage where a mapping is expected -- must resolve to a Recipe or a
+    RecipeError, never an unhandled exception. Builds on FEATURES_VALID_YAML so
+    the surrounding recipe (including the IALS algorithm the features block
+    requires) stays valid and the fuzzed value is the only variable."""
+    doc = yaml.safe_load(FEATURES_VALID_YAML)
+    doc["features"] = features_value
+    _try_load_yaml(yaml.safe_dump(doc), tmp_path)
 
 
 # ---------------------------------------------------------------------------

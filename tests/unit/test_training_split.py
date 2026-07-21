@@ -9,6 +9,7 @@ These tests cover:
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -69,7 +70,7 @@ def test_random_split_is_deterministic_for_same_seed() -> None:
         split_config=config,
     )
 
-    assert _matrix_fingerprint(a[1]) == _matrix_fingerprint(b[1])
+    assert _matrix_fingerprint(a.X_val_test) == _matrix_fingerprint(b.X_val_test)
 
 
 def test_random_split_differs_for_different_seeds() -> None:
@@ -89,7 +90,7 @@ def test_random_split_differs_for_different_seeds() -> None:
         split_config=SplitConfig(scheme="random", heldout_ratio=0.2, seed=999),
     )
 
-    assert _matrix_fingerprint(a[1]) != _matrix_fingerprint(b[1])
+    assert _matrix_fingerprint(a.X_val_test) != _matrix_fingerprint(b.X_val_test)
 
 
 def test_time_user_split_is_deterministic_for_same_seed() -> None:
@@ -110,7 +111,7 @@ def test_time_user_split_is_deterministic_for_same_seed() -> None:
         split_config=config,
     )
 
-    assert _matrix_fingerprint(a[1]) == _matrix_fingerprint(b[1])
+    assert _matrix_fingerprint(a.X_val_test) == _matrix_fingerprint(b.X_val_test)
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +125,7 @@ def test_time_global_held_out_interactions_are_after_global_cutoff() -> None:
     heldout_ratio = 0.2
     cutoff = df["ts"].quantile(1.0 - heldout_ratio)
 
-    _, X_val_test, _ = split_interactions(
+    res = split_interactions(
         df,
         user_column="user_id",
         item_column="item_id",
@@ -136,7 +137,7 @@ def test_time_global_held_out_interactions_are_after_global_cutoff() -> None:
         ),
     )
 
-    csr = X_val_test.tocsr()
+    csr = res.X_val_test.tocsr()
     item_ids = sorted(df["item_id"].unique())
     item_idx_to_name = dict(enumerate(item_ids))
     held_out_item_names = {item_idx_to_name[c] for c in csr.indices}
@@ -255,7 +256,7 @@ def test_time_global_and_time_user_produce_different_splits() -> None:
         time_column="ts",
     )
 
-    _, X_user, _ = split_interactions(
+    res_user = split_interactions(
         df,
         **user_args,
         split_config=SplitConfig(
@@ -264,7 +265,7 @@ def test_time_global_and_time_user_produce_different_splits() -> None:
             seed=42,
         ),
     )
-    _, X_global, _ = split_interactions(
+    res_global = split_interactions(
         df,
         **user_args,
         split_config=SplitConfig(
@@ -277,4 +278,111 @@ def test_time_global_and_time_user_produce_different_splits() -> None:
     # Held-out counts can match coincidentally, but the structural fingerprint
     # must differ because time_user holds each user's most recent k% while
     # time_global holds the global tail (some users contribute zero).
-    assert _matrix_fingerprint(X_user) != _matrix_fingerprint(X_global)
+    assert _matrix_fingerprint(res_user.X_val_test) != _matrix_fingerprint(
+        res_global.X_val_test
+    )
+
+
+# ---------------------------------------------------------------------------
+# SplitResult axis labels — item_ids / row_user_ids must align to the
+# returned matrices' columns/rows. Feature-aware training (Task 6) relies on
+# these labels to build a correctly ordered feature matrix; irspack accepts a
+# misordered feature matrix silently, so these axes must be verified rather
+# than assumed.
+# ---------------------------------------------------------------------------
+
+
+def _df() -> pd.DataFrame:
+    rng = np.random.default_rng(0)
+    rows = []
+    # STRING ids on purpose: integer ids would pass by accident because
+    # hash(int) == int makes list(set(...)) come out sorted.
+    for u in range(12):
+        for i in rng.choice(8, size=4, replace=False):
+            rows.append(
+                {
+                    "user_id": f"u{u:02d}",
+                    "item_id": f"i_{'abcdefgh'[i]}",
+                    "ts": 1000 + u * 10 + int(i),
+                }
+            )
+    df = pd.DataFrame(rows)
+    # Match _synth_df: force plain-object string dtype. Pandas' default
+    # (Arrow-backed) string dtype produces an ArrowStringArray, which
+    # irspack's `_split_list` cannot shuffle (not a Sequence subclass).
+    df["user_id"] = df["user_id"].astype(object)
+    df["item_id"] = df["item_id"].astype(object)
+    return df
+
+
+@pytest.mark.parametrize(
+    "scheme,time_col",
+    [("random", None), ("time_user", "ts"), ("time_global", "ts")],
+)
+def test_split_returns_axes(scheme: str, time_col: str | None) -> None:
+    # heldout_ratio=0.25: with 4 items/user (as in _synth_df's time_user
+    # test), the default 0.1 rounds down to 0 held-out interactions per user
+    # for the random/time_user schemes and raises SplitError.
+    # test_user_ratio=0.5: the repo default of 1.0 sends every user into the
+    # validation split, leaving train.n_users == 0. That degenerates
+    # row_user_ids (== train.user_ids + val.user_ids) into literally
+    # val.user_ids, so a swapped concatenation order would go undetected.
+    # 0.5 guarantees a genuine non-empty train block for every scheme.
+    res = split_interactions(
+        _df(),
+        user_column="user_id",
+        item_column="item_id",
+        time_column=time_col,
+        split_config=SplitConfig(
+            scheme=scheme, heldout_ratio=0.25, test_user_ratio=0.5
+        ),
+    )
+    assert len(res.item_ids) == res.X_train_full.shape[1]
+    assert len(res.row_user_ids) == res.X_train_full.shape[0]
+    assert all(isinstance(i, str) for i in res.item_ids)
+    assert all(isinstance(u, str) for u in res.row_user_ids)
+
+
+@pytest.mark.parametrize(
+    "scheme,time_col",
+    [("random", None), ("time_user", "ts"), ("time_global", "ts")],
+)
+def test_item_ids_label_the_columns(scheme: str, time_col: str | None) -> None:
+    """Reconstructing interactions from the returned axes must match the input."""
+    df = _df()
+    # test_user_ratio=0.5: see test_split_returns_axes for why the default
+    # 1.0 would make this test blind to a swapped row_user_ids concatenation
+    # order (train.n_users == 0 collapses train+val into just val).
+    res = split_interactions(
+        df,
+        user_column="user_id",
+        item_column="item_id",
+        time_column=time_col,
+        split_config=SplitConfig(
+            scheme=scheme, heldout_ratio=0.25, test_user_ratio=0.5
+        ),
+    )
+    X = res.X_train_full.tocoo()
+    recon = {
+        (res.row_user_ids[r], res.item_ids[c])
+        for r, c in zip(X.row, X.col, strict=True)
+    }
+    truth = set(zip(df["user_id"], df["item_id"], strict=True))
+    assert recon <= truth, "reconstructed pairs must all be real interactions"
+    assert recon, "reconstruction must not be empty"
+
+
+def test_val_offset_still_points_at_validation_users() -> None:
+    # test_user_ratio=0.5: see test_split_returns_axes for why the default
+    # 1.0 would make this test blind to a swapped row_user_ids concatenation
+    # order (train.n_users == 0 collapses train+val into just val).
+    res = split_interactions(
+        _df(),
+        user_column="user_id",
+        item_column="item_id",
+        time_column=None,
+        split_config=SplitConfig(
+            scheme="random", heldout_ratio=0.25, test_user_ratio=0.5
+        ),
+    )
+    assert res.X_val_test.shape[0] == res.X_train_full.shape[0] - res.val_offset

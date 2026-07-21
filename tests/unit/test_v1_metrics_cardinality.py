@@ -47,6 +47,8 @@ def _make_client_with_metrics(
     monkeypatch.setattr(_m, "_V1_BATCH_ELEMENT_ERRORS", None)
     monkeypatch.setattr(_m, "_V1_METADATA_DEGRADED_ITEMS", None)
     monkeypatch.setattr(_m, "_V1_VALIDATION_ERRORS_OUTSIDE_VERB", None)
+    monkeypatch.setattr(_m, "_V1_FEATURE_UNKNOWN_VALUE", None)
+    monkeypatch.setattr(_m, "_V1_COLD_START_REQUESTS", None)
 
     registry = ModelRegistry()
     return TestClient(build_v1_app(registry))

@@ -37,12 +37,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from recotem._features import check_artifact_feature_version
 from recotem._irspack_compat import check_artifact_irspack_version
 from recotem.artifact.format import ArtifactError, parse_header_from_bytes
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
-from recotem.config import ConfigError, ServeConfig
+from recotem.config import ConfigError, ServeConfig, get_max_body_bytes
 from recotem.recipe.loader import load_recipes_directory_lenient
 from recotem.serving import metrics as _metrics
 from recotem.serving._header_utils import extract_algorithms, normalize_config_digest
@@ -131,6 +132,116 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             return response
         finally:
             structlog.contextvars.unbind_contextvars("request_id")
+
+
+# ---------------------------------------------------------------------------
+# Request-body size cap middleware
+# ---------------------------------------------------------------------------
+
+
+async def _noop_receive() -> Message:  # pragma: no cover - Response never calls it
+    return {"type": "http.request", "body": b"", "more_body": False}
+
+
+class BodySizeLimitMiddleware:
+    """Pure ASGI middleware capping the REQUEST body at ``max_body_bytes``.
+
+    Starlette buffers and JSON-parses the whole request body before pydantic
+    validation runs, so without this an authenticated client can make the
+    process allocate a multi-GB body. Enforced at two points:
+
+    - A declared ``Content-Length`` above the cap is rejected outright, before
+      any body byte is read.
+    - Bodies with no ``Content-Length`` (chunked / streamed) are counted as
+      they arrive by wrapping ``receive``; the cap fires the moment the running
+      total crosses it, so omitting the header cannot bypass the limit.
+
+    Only REQUEST bodies are bounded: the ``send`` side is untouched on the
+    normal path, so streaming large RESPONSES is unaffected. Written as a pure
+    ASGI middleware (not ``BaseHTTPMiddleware``) because the running-count guard
+    needs to wrap ``receive`` itself.
+    """
+
+    def __init__(self, app: ASGIApp, max_body_bytes: int) -> None:
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        declared = _declared_content_length(scope)
+        if declared is not None and declared > self.max_body_bytes:
+            await self._send_too_large(scope, send)
+            return
+
+        received = 0
+        overflowed = False
+        response_started = False
+
+        async def rcv() -> Message:
+            nonlocal received, overflowed
+            if overflowed:
+                # Already over the cap: stop draining the oversized stream and
+                # tell the inner app the client is gone so it unwinds.
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_body_bytes:
+                    overflowed = True
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def snd(message: Message) -> None:
+            nonlocal response_started
+            if overflowed:
+                # We own the response once the cap is breached; swallow whatever
+                # the inner app emits and reply 413 exactly once.
+                if not response_started:
+                    response_started = True
+                    await self._send_too_large(scope, send)
+                return
+            await send(message)
+
+        try:
+            await self.app(scope, rcv, snd)
+        except Exception:
+            # The inner app may raise ClientDisconnect (or similar) because we
+            # injected http.disconnect after the cap was hit. That is a
+            # consequence of our own guard, not a real error, so absorb it and
+            # emit the 413. Anything raised without an overflow is a genuine
+            # error and must propagate.
+            if not overflowed:
+                raise
+        if overflowed and not response_started:
+            response_started = True
+            await self._send_too_large(scope, send)
+
+    async def _send_too_large(self, scope: Scope, send: Send) -> None:
+        response = JSONResponse(
+            status_code=413,
+            content={
+                "detail": (
+                    "Request body exceeds the "
+                    f"{self.max_body_bytes}-byte limit (RECOTEM_MAX_BODY_BYTES)"
+                ),
+                "code": "PAYLOAD_TOO_LARGE",
+            },
+        )
+        await response(scope, _noop_receive, send)
+
+
+def _declared_content_length(scope: Scope) -> int | None:
+    """Return the request's ``Content-Length`` as an int, or None if absent/bad."""
+    for name, value in scope.get("headers", []):
+        if name == b"content-length":
+            try:
+                return int(value)
+            except ValueError:
+                return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +680,14 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         allowed_hosts=serve_config.allowed_hosts,
     )
 
+    # Cap the request body before Starlette buffers/parses it. Added after
+    # TrustedHost/CORS (so it wraps them and runs before the body is read) but
+    # before RequestIDMiddleware, so a 413 still carries X-Request-ID.
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_body_bytes=get_max_body_bytes(),
+    )
+
     if serve_config.allowed_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -864,6 +983,21 @@ def _try_load_artifact(
             error=str(exc),
         )
         return _failed_entry(recipe, str(exc)), "version_skew"
+
+    # Preflight the feature-encoder state version for the same reason: an
+    # unknown shape would otherwise be silently mis-encoded rather than
+    # refused, and the failure would surface as wrong recommendations, not an
+    # exception.
+    try:
+        check_artifact_feature_version(header_dict, name=recipe.name)
+    except ArtifactError as exc:
+        logger.warning(
+            "initial_artifact_feature_version_refused",
+            name=recipe.name,
+            kid=hdr.kid,
+            error=str(exc),
+        )
+        return _failed_entry(recipe, str(exc)), "feature_version"
 
     try:
         recommender = unpickle_payload(payload_bytes)

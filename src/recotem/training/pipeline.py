@@ -28,17 +28,27 @@ from irspack import __version__ as irspack_version
 from irspack.utils import df_to_sparse
 
 from recotem._exit_codes import _map_exception_to_exit  # shared with cli.py
+from recotem._features import FEATURE_STATE_VERSION, state_descriptor
 from recotem.recipe.errors import RecipeError
 from recotem.recipe.models import Recipe
 from recotem.training._compat import IDMappedRecommender
-from recotem.training.algorithms import get_recommender_cls, resolve_algorithm_name
+from recotem.training.algorithms import (
+    get_recommender_cls,
+    is_feature_capable,
+    resolve_algorithm_name,
+)
 from recotem.training.errors import (
     MinDataViolation,
     TrainingError,
 )
 from recotem.training.evaluate import build_evaluator
+from recotem.training.features import (
+    FeatureTables,
+    encode_for_axis,
+    load_feature_tables,
+)
 from recotem.training.progress import ProgressReporter
-from recotem.training.search import SearchResult, run_search
+from recotem.training.search import SearchResult, _construct, run_search
 from recotem.training.split import split_interactions
 from recotem.version import __version__ as recotem_version
 
@@ -350,6 +360,19 @@ def _run_training_locked(
     bound_logger.info("data_fetched", n_rows=len(df))
 
     # ------------------------------------------------------------------
+    # 2.5. Fetch feature tables (feature-aware iALS), if configured.
+    #
+    #      The fetch + encoder-state build is phase-independent and happens
+    #      once here; ``feature_tables`` is then re-encoded onto each
+    #      phase's OWN axis labels (search vs. final refit) further down,
+    #      because those two phases use different, non-interchangeable
+    #      item/user orderings (see encode_for_axis's docstring).
+    # ------------------------------------------------------------------
+    feature_tables: FeatureTables = load_feature_tables(
+        recipe.features, recipe_name=recipe.name, run_id=run_id
+    )
+
+    # ------------------------------------------------------------------
     # 3. Cleanse.
     # ------------------------------------------------------------------
     df, drop_count = _cleanse(df, recipe)
@@ -385,14 +408,31 @@ def _run_training_locked(
     # 4. Split.
     # ------------------------------------------------------------------
     bound_logger.info("splitting_data")
-    X_train_full, X_val_test, val_offset = split_interactions(
+    split_result = split_interactions(
         df,
         user_column=user_col,
         item_column=item_col,
         time_column=time_col,
         split_config=recipe.training.split,
     )
+    X_train_full = split_result.X_train_full
+    X_val_test = split_result.X_val_test
+    val_offset = split_result.val_offset
     bound_logger.info("split_done", val_offset=val_offset)
+
+    # Encode features onto the SEARCH phase's own axis labels. This matrix
+    # must never be reused by the final refit: the final refit builds its
+    # matrix via df_to_sparse -> pd.Categorical (sorted), while this one is
+    # ordered by split_interactions's list(set(...)) (unsorted, and not even
+    # stable across processes for string ids) -- a different permutation of
+    # the same items/users. irspack accepts a misordered feature matrix
+    # SILENTLY (no shape or value error), so re-encoding per phase is not an
+    # optional optimization to skip.
+    search_feature_kwargs = encode_for_axis(
+        feature_tables,
+        item_order=split_result.item_ids,
+        user_order=split_result.row_user_ids,
+    )
 
     # ------------------------------------------------------------------
     # 5. Build evaluator.
@@ -439,6 +479,7 @@ def _run_training_locked(
             recipe_name=recipe.name,
             run_id=run_id,
             metric=recipe.training.metric,
+            feature_kwargs=search_feature_kwargs,
         )
 
     bound_logger.info(
@@ -458,6 +499,7 @@ def _run_training_locked(
         item_column=item_col,
         class_name=search_result.best_class_name,
         best_params=search_result.best_params,
+        feature_tables=feature_tables,
     )
     bound_logger.info("final_model_trained")
 
@@ -487,6 +529,18 @@ def _run_training_locked(
         },
         "data_stats": data_stats,
     }
+
+    # Omit the "features" key entirely when features are off, so a
+    # non-feature artifact's header stays byte-identical to today's.
+    if feature_tables.enabled:
+        features_header: dict[str, Any] = {"version": FEATURE_STATE_VERSION}
+        item_desc = state_descriptor(feature_tables.item_state)
+        if item_desc is not None:
+            features_header["item"] = item_desc
+        user_desc = state_descriptor(feature_tables.user_state)
+        if user_desc is not None:
+            features_header["user"] = user_desc
+        header_dict["features"] = features_header
 
     artifact_path: str = write_artifact_fn(
         trained_recommender,
@@ -754,6 +808,7 @@ def _train_final(
     item_column: str,
     class_name: str,
     best_params: dict[str, Any],
+    feature_tables: FeatureTables | None = None,
 ) -> IDMappedRecommender:
     """Train the final model on the full dataset using best hyperparameters.
 
@@ -764,12 +819,50 @@ def _train_final(
     gets written.  Filter to ``__init__``-accepted keys before constructing,
     and log any dropped names so operators can investigate plugin/version
     drift.
+
+    ``feature_tables``, when given and enabled, is re-encoded HERE against
+    THIS function's own ``iids_str`` / ``uids_str`` (derived from
+    ``df_to_sparse``'s sorted ``pd.Categorical`` ordering).  It must never
+    reuse a matrix built for the search phase's ``list(set(...))`` ordering
+    (see ``encode_for_axis``'s docstring) -- irspack accepts a misordered
+    feature matrix silently, so that would train a silently-wrong model
+    rather than raise.  Defaults to ``None`` so existing callers that never
+    touch features are unaffected.
+
+    The re-encoded kwargs are only built when ``class_name`` actually accepts
+    them (``is_feature_capable``), mirroring ``search.py``'s per-trial gate
+    (``trial_features``).  A recipe's ``features:`` block only requires that
+    *at least one* listed algorithm be feature-capable (see
+    ``Recipe._validate_features_algorithms``); a multi-algorithm search may
+    still pick a non-feature-capable winner (e.g. TopPop), and that is a
+    perfectly valid, non-feature artifact -- not an error.  Splatting
+    ``item_features``/``user_features`` into a constructor that does not
+    declare them (e.g. ``TopPopRecommender.__init__(self, X_train)``) raises
+    ``TypeError`` unconditionally, so this gate must run BEFORE construction.
     """
     import inspect as _inspect
 
     X_full, uids, iids = df_to_sparse(df, user_column, item_column)
     uids_str = [str(u) for u in uids]
     iids_str = [str(i) for i in iids]
+
+    # Re-encode against THIS phase's own axes -- see the docstring above.
+    # Gated on is_feature_capable(class_name): a features: recipe only
+    # requires ONE listed algorithm to be feature-capable, so the search
+    # winner may legitimately be a non-feature-capable class (e.g. TopPop).
+    # Splatting item_features/user_features into such a constructor raises
+    # TypeError unconditionally -- this mirrors search.py's per-trial gate.
+    final_feature_kwargs: dict[str, Any] = {}
+    if (
+        feature_tables is not None
+        and feature_tables.enabled
+        and is_feature_capable(class_name)
+    ):
+        final_feature_kwargs = encode_for_axis(
+            feature_tables,
+            item_order=iids_str,
+            user_order=uids_str,
+        )
 
     rec_cls = get_recommender_cls(class_name)
 
@@ -807,7 +900,9 @@ def _train_final(
             )
 
     try:
-        recommender = rec_cls(X_full, **filtered).learn()
+        recommender = _construct(
+            rec_cls, X_full, filtered, final_feature_kwargs
+        ).learn()
     except TypeError as exc:
         raise TrainingError(
             f"Final training of {class_name} failed with params {filtered}: {exc}",
@@ -821,5 +916,45 @@ def _train_final(
             f"Final training of {class_name} rejected params {filtered}: {exc}",
             code="final_training_error",
         ) from exc
+    except RuntimeError as exc:
+        # Rank-deficient features make the feature-ridge Cholesky solve
+        # fail. This CAN happen even when every search trial succeeded,
+        # because the final refit's matrix differs from every trial's
+        # matrix (full dataset vs. train+val split). Do not tell the user
+        # to drop a column: recotem's own always-on bias column is
+        # deliberately collinear with the categorical one-hots (see
+        # recotem._features's module docstring) and is the most likely
+        # structural cause, and it cannot be removed from the recipe.
+        if "Feature ridge Cholesky decomposition failed" in str(exc):
+            raise TrainingError(
+                "Feature ridge Cholesky decomposition failed during final "
+                "training. The feature matrix for the full dataset is rank "
+                "deficient at the selected lambda. This can happen even "
+                "when every search trial succeeded, because the final "
+                "matrix differs from every trial's matrix. Raising "
+                "min_frequency on high-cardinality feature columns usually "
+                "resolves it; see docs/operations.md.",
+                code="feature_cholesky_error",
+            ) from exc
+        raise
 
-    return IDMappedRecommender(recommender, uids_str, iids_str)
+    # Deliberately unconditional -- do NOT gate this on is_feature_capable
+    # the way final_feature_kwargs is gated above. The artifact header's
+    # "features" key is written whenever feature_tables.enabled (see the
+    # header-assembly block above, keyed off feature_tables.enabled, not
+    # is_feature_capable), regardless of which class the search actually
+    # picked. `recotem inspect` promises the header describes the payload
+    # without deserializing it, so item_feature_state/user_feature_state
+    # must be persisted here whenever the header says features are present
+    # -- even for a non-feature-capable winner (e.g. TopPop) that never
+    # reads them at serve time. Symmetrizing this return with the
+    # is_feature_capable gate above would make such an artifact's header
+    # claim features that the payload does not carry, silently breaking
+    # header/payload parity.
+    return IDMappedRecommender(
+        recommender,
+        uids_str,
+        iids_str,
+        item_feature_state=feature_tables.item_state if feature_tables else None,
+        user_feature_state=feature_tables.user_state if feature_tables else None,
+    )

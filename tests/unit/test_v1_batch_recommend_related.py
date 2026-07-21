@@ -186,6 +186,121 @@ def test_batch_related_aggregate_limit_cap_exceeded() -> None:
     assert results[-1]["error"]["code"] == "VALIDATION_ERROR"
 
 
+# ---------------------------------------------------------------------------
+# Cold-seed solve cap
+# ---------------------------------------------------------------------------
+#
+# Case C runs one irspack CG solve PER COLD SEED (``_idmap``'s
+# ``get_recommendation_for_cold_seeds`` loop), unlike every pre-existing path
+# where one solve served the whole element. The schema caps seed_items <= 100
+# and requests <= 256 independently, so their PRODUCT -- 25_600 solves, ~11s
+# of single-threaded CPU on a single-process uvicorn -- was reachable in one
+# HTTP request. BATCH_AGGREGATE_LIMIT cannot catch this: it caps sum(limit)
+# (response volume), a different dimension entirely.
+
+
+def _cold_element(n_seeds: int, limit: int = 1) -> dict:
+    """One batch element driving exactly *n_seeds* cold-seed solves."""
+    seeds = [f"c{i}" for i in range(n_seeds)]
+    return {
+        "seed_items": seeds,
+        "limit": limit,
+        "item_features": {s: {"genre": "action"} for s in seeds},
+    }
+
+
+def _cold_seed_client() -> TestClient:
+    rec = MagicMock()
+    # A real encoder state, not a bare MagicMock: the router counts undeclared
+    # columns via ``_features.state_descriptor``, which reads both keys.
+    rec.item_feature_state = {
+        "columns": [{"name": "genre"}],
+        "n_features": 1,
+    }
+    rec.get_recommendation_for_cold_seeds.return_value = ([("i1", 0.9)], [])
+    return _client(rec, known_items=["s1"])
+
+
+def test_batch_related_cold_seed_solve_cap_exceeded() -> None:
+    """6 elements x 100 cold seeds = 600 solves. The 6th element pushes the
+    running total to 600 > 512 and is rejected; the first five still serve."""
+    r = _cold_seed_client().post(
+        "/v1/recipes/demo:batch-recommend-related",
+        json={"requests": [_cold_element(100) for _ in range(6)]},
+    )
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    assert [e["status"] for e in results] == ["ok"] * 5 + ["error"]
+    assert results[-1]["error"]["code"] == "VALIDATION_ERROR"
+    assert "cold-seed" in results[-1]["error"]["message"]
+
+
+def test_batch_related_cold_seed_solve_cap_boundary() -> None:
+    """Exactly 512 solves is allowed; one more solve is not."""
+    at_cap = _cold_seed_client().post(
+        "/v1/recipes/demo:batch-recommend-related",
+        json={"requests": [_cold_element(100) for _ in range(5)] + [_cold_element(12)]},
+    )
+    assert at_cap.status_code == 200, at_cap.text
+    assert [e["status"] for e in at_cap.json()["results"]] == ["ok"] * 6
+
+    over_cap = _cold_seed_client().post(
+        "/v1/recipes/demo:batch-recommend-related",
+        json={"requests": [_cold_element(100) for _ in range(5)] + [_cold_element(13)]},
+    )
+    assert over_cap.status_code == 200, over_cap.text
+    assert [e["status"] for e in over_cap.json()["results"]] == ["ok"] * 5 + ["error"]
+
+
+def test_batch_related_cold_seed_cap_fires_where_aggregate_limit_cannot() -> None:
+    """The reported DoS shape: limit=1 x 256 elements keeps sum(limit) at 256,
+    far under BATCH_AGGREGATE_LIMIT (5000), while still demanding 25_600
+    solves. Proves the two caps guard genuinely different dimensions."""
+    r = _cold_seed_client().post(
+        "/v1/recipes/demo:batch-recommend-related",
+        json={"requests": [_cold_element(100, limit=1) for _ in range(256)]},
+    )
+    assert r.status_code == 200, r.text
+    statuses = [e["status"] for e in r.json()["results"]]
+    assert statuses[:5] == ["ok"] * 5
+    assert set(statuses[5:]) == {"error"}, (
+        "every element past the solve budget must be rejected"
+    )
+    assert sum(s == "ok" for s in statuses) == 5, (
+        "at most 512 solves may run; 5 x 100 is the most that fits"
+    )
+
+
+def test_batch_related_cold_seed_cap_counts_only_seeds_with_features() -> None:
+    """A seed with no item_features entry can never be solved from features,
+    so it must not consume solve budget. 256 elements x 100 featureless seeds
+    would otherwise trip the cap and reject a legitimate batch."""
+    rec = MagicMock()
+    rec.get_recommendation_for_new_user.return_value = [("i1", 0.9)]
+    r = _client(rec, known_items=["s1"]).post(
+        "/v1/recipes/demo:batch-recommend-related",
+        json={
+            "requests": [
+                {"seed_items": ["s1"] + [f"c{i}" for i in range(99)], "limit": 1}
+                for _ in range(256)
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert set(e["status"] for e in r.json()["results"]) == {"ok"}
+
+
+def test_single_related_maximal_cold_seeds_is_not_capped() -> None:
+    """The single verb is already bounded at 100 solves by seed_items'
+    max_length=100 -- well under the 512 batch budget -- so a maximal single
+    request must still serve. The cap is a batch-only concern by construction."""
+    r = _cold_seed_client().post(
+        "/v1/recipes/demo:recommend-related",
+        json=_cold_element(100, limit=10),
+    )
+    assert r.status_code == 200, r.text
+
+
 def test_batch_recommend_related_sets_model_version_response_header():
     rec = MagicMock()
     rec.get_recommendation_for_new_user.return_value = [("i9", 0.7)]

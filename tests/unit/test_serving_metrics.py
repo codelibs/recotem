@@ -186,6 +186,9 @@ def reset_metrics_registry(monkeypatch: pytest.MonkeyPatch):
             "recotem_v1_batch_element_errors",
             "recotem_v1_metadata_degraded_items",
             "recotem_v1_validation_errors_outside_verb",
+            "recotem_v1_feature_unknown_value",
+            "recotem_v1_feature_unknown_column",
+            "recotem_v1_cold_start_requests",
         }
         for collector in list(REGISTRY._names_to_collectors.values()):
             describe = getattr(collector, "describe", None)
@@ -209,6 +212,9 @@ def reset_metrics_registry(monkeypatch: pytest.MonkeyPatch):
             "_V1_BATCH_ELEMENT_ERRORS",
             "_V1_METADATA_DEGRADED_ITEMS",
             "_V1_VALIDATION_ERRORS_OUTSIDE_VERB",
+            "_V1_FEATURE_UNKNOWN_VALUE",
+            "_V1_FEATURE_UNKNOWN_COLUMN",
+            "_V1_COLD_START_REQUESTS",
         ):
             setattr(_m, attr, None)
 
@@ -261,3 +267,112 @@ def test_inc_metadata_degraded_items_coerces_unknown_kind(reset_metrics_registry
     assert "arbitrary_future_kind" not in text, (
         "raw unknown kind must not appear in Prometheus output"
     )
+
+
+# ---------------------------------------------------------------------------
+# Feature-aware iALS cold-start metrics: recotem_v1_feature_unknown_value_total,
+# recotem_v1_cold_start_requests_total
+# ---------------------------------------------------------------------------
+
+
+def test_inc_feature_unknown_value_emits_labels(reset_metrics_registry):
+    _m.inc_feature_unknown_value("r1", "user", "band")
+    _m.inc_feature_unknown_value("r1", "item", "genre", 3)
+
+    out, _ = _m.generate_latest()
+    text = out.decode()
+
+    assert "recotem_v1_feature_unknown_value_total" in text
+    assert 'side="user"' in text
+    assert 'column="band"' in text
+    assert 'side="item"' in text
+    assert 'column="genre"' in text
+
+
+def test_inc_feature_unknown_column_emits_labels(reset_metrics_registry):
+    _m.inc_feature_unknown_column("r1", "user")
+    _m.inc_feature_unknown_column("r1", "item")
+
+    out, _ = _m.generate_latest()
+    text = out.decode()
+
+    assert "recotem_v1_feature_unknown_column_total" in text
+    assert 'side="user"' in text
+    assert 'side="item"' in text
+
+
+def test_inc_feature_unknown_column_has_no_column_label(reset_metrics_registry):
+    """The column name is request input, not recipe content, so it must never
+    become a label: an unbounded label value is a metrics-cardinality DoS.
+    This is the deliberate asymmetry with ``inc_feature_unknown_value``,
+    whose ``column`` label is bounded by the operator's own recipe."""
+    _m.inc_feature_unknown_column("r1", "user")
+
+    out, _ = _m.generate_latest()
+    line = next(
+        ln
+        for ln in out.decode().splitlines()
+        if ln.startswith("recotem_v1_feature_unknown_column_total{")
+    )
+    assert "column=" not in line, f"unknown column name must not be a label: {line!r}"
+    assert _m.inc_feature_unknown_column.__code__.co_argcount == 2, (
+        "signature must stay (recipe, side) so a column name cannot be passed"
+    )
+
+
+def test_inc_feature_unknown_column_coerces_unknown_side(reset_metrics_registry):
+    _m.inc_feature_unknown_column("r1", "user")
+    _m.inc_feature_unknown_column("r1", "sideways")
+
+    out, _ = _m.generate_latest()
+    text = out.decode()
+
+    assert 'side="user"' in text
+    assert 'side="unexpected"' in text
+    assert 'side="sideways"' not in text
+
+
+def test_inc_feature_unknown_value_coerces_unknown_side(reset_metrics_registry):
+    """Unknown side values must be coerced to 'unexpected' to prevent label
+    cardinality explosion; 'item' and 'user' pass through."""
+    _m.inc_feature_unknown_value("r1", "user", "band")
+    _m.inc_feature_unknown_value("r1", "sideways", "band")
+
+    out, _ = _m.generate_latest()
+    text = out.decode()
+
+    assert 'side="user"' in text
+    assert 'side="unexpected"' in text
+    assert "sideways" not in text, "raw unknown side must not reach Prometheus"
+
+
+def test_inc_cold_start_request_coerces_unknown_case(reset_metrics_registry):
+    _m.inc_cold_start_request("r1", "features_only")
+    _m.inc_cold_start_request("r1", "cold_seeds")
+    _m.inc_cold_start_request("r1", "arbitrary_future_case")
+
+    out, _ = _m.generate_latest()
+    text = out.decode()
+
+    assert 'case="features_only"' in text
+    assert 'case="cold_seeds"' in text
+    assert 'case="unexpected"' in text
+    assert "arbitrary_future_case" not in text
+
+
+def test_feature_counters_are_noop_when_metrics_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With metrics off the helpers must be inert, not raise."""
+    from recotem.serving import metrics as m
+
+    monkeypatch.setattr(m, "metrics_enabled", lambda: False)
+    monkeypatch.setattr(m, "_V1_FEATURE_UNKNOWN_VALUE", None)
+    monkeypatch.setattr(m, "_V1_COLD_START_REQUESTS", None)
+    monkeypatch.setattr(m, "_V1_REQUEST_COUNTER", None)
+
+    m.inc_feature_unknown_value("r1", "user", "band")
+    m.inc_cold_start_request("r1", "features_only")
+
+    assert m._V1_FEATURE_UNKNOWN_VALUE is None
+    assert m._V1_COLD_START_REQUESTS is None

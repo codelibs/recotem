@@ -6,6 +6,9 @@ redaction runs before any other processor can serialize the event.
 Redacted key patterns (case-insensitive, matched against the **key name**):
   - x-api-key, authorization, cookie
   - recotem_signing_key, recotem_signing_keys, recotem_api_keys
+  - user_features, item_features (feature-aware iALS cold-start request
+    attributes -- PII by construction, e.g. age_band, country. Defense in
+    depth only: callers must never pass a feature dict to a logger.)
   - any key whose name contains: secret, password, passwd, token, key,
     auth, bearer, cred, private
   - any key whose lowercased name starts with: aws_, gcp_, google_, azure_
@@ -32,6 +35,13 @@ import structlog
 # ---------------------------------------------------------------------------
 
 # Exact key names (lowercased) to always redact.
+#
+# user_features / item_features: feature-aware iALS cold-start requests carry
+# raw request-supplied attributes (e.g. age_band, country) that are PII by
+# construction. This is defense in depth, NOT the primary control -- the
+# primary rule is that caller code must never pass a feature dict to a
+# logger in the first place (log column names and counts instead). This key
+# match is a mechanical backstop for if one does anyway.
 _EXACT_KEYS: frozenset[str] = frozenset(
     {
         "x-api-key",
@@ -40,6 +50,8 @@ _EXACT_KEYS: frozenset[str] = frozenset(
         "recotem_signing_key",
         "recotem_signing_keys",
         "recotem_api_keys",
+        "user_features",
+        "item_features",
     }
 )
 
@@ -229,7 +241,7 @@ def _redact_value(value: Any) -> Any:
         return [_redact_value(item) for item in value]
     if isinstance(value, tuple):
         return tuple(_redact_value(item) for item in value)
-    if isinstance(value, (set, frozenset)):
+    if isinstance(value, set | frozenset):
         # ``set`` cannot hold unhashable elements; ``_redact_value`` only ever
         # returns hashables when given hashables (str/bytes/numbers).  Return
         # the same container type so downstream rendering is unchanged.
@@ -237,7 +249,7 @@ def _redact_value(value: Any) -> Any:
         return frozenset(scrubbed) if isinstance(value, frozenset) else scrubbed
     if isinstance(value, str):
         return _scrub_string_value(value)
-    if isinstance(value, (bytes, bytearray)):
+    if isinstance(value, bytes | bytearray):
         return _redact_bytes_value(value)
     return value
 

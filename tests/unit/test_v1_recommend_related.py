@@ -89,6 +89,53 @@ def test_related_404_when_seeds_known_but_ranker_empty():
     assert body["code"] == "NO_CANDIDATES"
 
 
+def test_related_404_when_case_b_ranker_empty():
+    """Case B (known seed + user_features) with an empty ranker result must
+    return 404 NO_CANDIDATES -- the same contract the plain "all seeds known,
+    no user_features" path already enforces -- not 200 with an empty items
+    list. Regression guard for the L1 inconsistency fix.
+
+    ``get_recommendation_for_new_user`` here is the case-B overload that
+    returns the ``(raw_results, unknown_columns)`` tuple; stub it to
+    ``([], [])`` so the ranker yields no survivors.
+    """
+    rec = MagicMock()
+    rec.get_recommendation_for_new_user.return_value = ([], [])
+    rec.user_feature_state = {"n_features": 1, "columns": [{"name": "band"}]}
+    r = _client_with_recommender(rec, known_items=["i1"]).post(
+        "/v1/recipes/demo:recommend-related",
+        json={"seed_items": ["i1"], "limit": 5, "user_features": {"band": "young"}},
+    )
+    assert r.status_code == 404, r.text
+    body = r.json()
+    assert body["code"] == "NO_CANDIDATES"
+
+
+def test_related_404_when_case_c_cold_seed_ranker_empty():
+    """Case C (cold seed + item_features) with an empty ranker result must
+    return 404 NO_CANDIDATES -- matching the plain path -- not 200 with an
+    empty items list. Regression guard for the L1 inconsistency fix.
+
+    ``brand_new`` is absent from the id-map (cold) and carries item_features,
+    so the request takes the ``get_recommendation_for_cold_seeds`` branch;
+    stub it to ``([], [])`` so the ranker yields no survivors.
+    """
+    rec = MagicMock()
+    rec.get_recommendation_for_cold_seeds.return_value = ([], [])
+    rec.item_feature_state = {"n_features": 1, "columns": [{"name": "genre"}]}
+    r = _client_with_recommender(rec, known_items=[]).post(
+        "/v1/recipes/demo:recommend-related",
+        json={
+            "seed_items": ["brand_new"],
+            "limit": 5,
+            "item_features": {"brand_new": {"genre": "action"}},
+        },
+    )
+    assert r.status_code == 404, r.text
+    body = r.json()
+    assert body["code"] == "NO_CANDIDATES"
+
+
 def test_related_404_when_recipe_missing_from_registry():
     rec = MagicMock()
     r = _client_with_recommender(rec).post(
@@ -157,7 +204,7 @@ def test_recommend_related_rejects_oversized_seed_item() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Finding 10: _any_seed_known AttributeError → INTERNAL_ERROR
+# Finding 10: _resolve_recommend_related AttributeError → INTERNAL_ERROR
 # ---------------------------------------------------------------------------
 
 
@@ -222,8 +269,9 @@ def test_batch_recommend_related_attribute_error_only_affects_element() -> None:
     )  # spec=[] means NO attributes allowed → AttributeError
 
     # We need ONE entry with two different requests. The handler calls
-    # _any_seed_known per-element, which calls entry.recommender._mapper.item_id_to_index
-    # Since entry.recommender is fixed, we can't simulate mixed per-element mapper failure.
+    # _resolve_recommend_related per-element, which accesses
+    # entry.recommender._mapper.item_id_to_index. Since entry.recommender is
+    # fixed, we can't simulate mixed per-element mapper failure.
     # Instead, test that a wholly broken mapper yields all INTERNAL_ERROR in a batch.
     broken_entry = ModelEntry(
         name="broken",

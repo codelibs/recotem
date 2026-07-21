@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from recotem.training.algorithms import (
+    FEATURE_CAPABLE_CLASS_NAMES,
     SUPPORTED_CLASS_NAMES,
+    is_feature_capable,
     resolve_algorithm_name,
 )
 from recotem.training.errors import UnknownAlgorithmError
@@ -55,3 +57,24 @@ def test_unsupported_irspack_recommender_rejected(alias: str) -> None:
 def test_garbage_alias_rejected() -> None:
     with pytest.raises(UnknownAlgorithmError):
         resolve_algorithm_name("not-an-algorithm")
+
+
+# ---------------------------------------------------------------------------
+# Task 2: feature-capable algorithm registry
+# ---------------------------------------------------------------------------
+
+
+def test_only_ials_is_feature_capable() -> None:
+    assert frozenset({"IALSRecommender"}) == FEATURE_CAPABLE_CLASS_NAMES
+
+
+def test_is_feature_capable_accepts_alias() -> None:
+    assert is_feature_capable("IALS") is True
+    assert is_feature_capable("ials") is True
+    assert is_feature_capable("TopPop") is False
+
+
+def test_is_feature_capable_unknown_name_is_false_not_raise() -> None:
+    # Unknown names must NOT raise here: training.algorithms has no load-time
+    # validation and models.py:136-141 deliberately tolerates them.
+    assert is_feature_capable("NoSuchThing") is False

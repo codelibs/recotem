@@ -5,12 +5,37 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
 # Aggregate ``limit`` cap across all sub-requests in a single batch call.
 # Documented in docs/api-reference.md. Bounds total candidate work per HTTP
 # request so a 256-element batch cannot demand 256_000 items in one go.
 BATCH_AGGREGATE_LIMIT = 5000
+
+# Aggregate cold-seed cap across all sub-requests in a single
+# ``:batch-recommend-related`` call. Documented in docs/api-reference.md and
+# docs/operations.md.
+#
+# Why a SECOND cap rather than reusing BATCH_AGGREGATE_LIMIT: that one caps
+# ``sum(limit)`` -- response volume -- which is a different dimension. Case C
+# (a cold seed carrying ``item_features``) runs one irspack conjugate-gradient
+# solve PER COLD SEED, so ``limit: 1`` x 256 elements x 100 cold seeds keeps
+# the aggregate limit at 256 (2% of its cap) while demanding 25_600 solves.
+# Every other path costs one solve per element at most.
+#
+# Why 512: measured ~0.25-0.45 ms/solve, so 512 bounds the worst case at
+# ~230 ms of single-threaded CPU per HTTP request -- material on a
+# single-process uvicorn but not an outage. The measurement is near-flat in
+# ``n_components`` (0.27 ms at 8, 0.30 ms at 128, 0.45 ms at 256) and in the
+# encoded feature dimension: the solve is call-overhead-dominated, not
+# Cholesky-dominated, at every size a recipe can produce. So this bound does
+# NOT need to shrink for a production-sized model.
+#
+# 512 also leaves the whole existing request space intact: a single
+# ``:recommend-related`` tops out at 100 solves (``seed_items`` max_length),
+# so the cap only ever binds on batch fan-out, and even then admits five
+# maximal elements.
+BATCH_COLD_SEED_SOLVE_LIMIT = 512
 
 # Machine-readable error codes emitted by the v1 API. Kept as a Literal
 # union so OpenAPI / SDK generation produces an exhaustive enum and any
@@ -25,6 +50,9 @@ ErrorCode = Literal[
     "MISSING_API_KEY",
     "INVALID_API_KEY",
     "INTERNAL_ERROR",
+    "FEATURES_NOT_SUPPORTED",
+    "FEATURE_VALUE_UNUSABLE",
+    "PAYLOAD_TOO_LARGE",
 ]
 
 # ---------------------------------------------------------------------------
@@ -32,6 +60,78 @@ ErrorCode = Literal[
 # ---------------------------------------------------------------------------
 
 _ItemStr = Annotated[str, Field(min_length=1, max_length=256)]
+
+# Per-string-value length cap for cold-start feature values. `Field(max_length=64)`
+# on `_FeatureValues` caps only the KEY COUNT; without this a single string
+# VALUE was unbounded -- the one request field with no length cap (user_id /
+# _ItemStr are 256, seed_items 100, exclude_items 1000). `_tokens` does
+# `str(raw).split(delimiter)` unbounded, so a large `multi_label` value
+# amplifies (~8x) into a memory-DoS reachable with one API key and multiplied
+# by batch/related fan-out. 8192 is generous for a real multi_label token list
+# yet blocks MB-scale amplification, restoring parity with every other field.
+_MAX_FEATURE_VALUE_CHARS = 8192
+
+# Per-KEY length cap for cold-start feature mappings. `Field(max_length=64)` on
+# `_FeatureValues` caps the key COUNT; `_MAX_FEATURE_VALUE_CHARS` caps each
+# string VALUE; this caps each KEY's length. Without it the dict keys
+# (`user_features` column names and the nested `item_features` per-seed feature
+# keys) were unbounded even while every other identifier field is length-capped
+# (_ItemStr is 1..256). 256 keeps parity with `_ItemStr`. An over-length key
+# reports only its length, never its text, so a multi-MB key cannot amplify into
+# the 422 body / logs; the `item_features` OUTER keys (seed ids) are capped
+# separately by typing that dict's keys as `_ItemStr`.
+_MAX_FEATURE_KEY_CHARS = 256
+
+
+def _check_feature_value_lengths(
+    values: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Reject over-length feature-dict KEYS and string VALUES.
+
+    Shared by every place a cold-start feature mapping appears: ``user_features``
+    on both request models and each nested ``item_features`` mapping (this
+    validator runs per ``_FeatureValues``, so a nested dict of keys/values is
+    checked too). KEYS are bounded to ``1..._MAX_FEATURE_KEY_CHARS``; string
+    VALUES to ``_MAX_FEATURE_VALUE_CHARS``. The value check names the offending
+    column key but never echoes the value (treated as personal data); the key
+    check reports only the length, never the key text. Non-string scalar values
+    are unaffected by the value cap.
+    """
+    if values is None:
+        return values
+    for key, val in values.items():
+        if not 1 <= len(key) <= _MAX_FEATURE_KEY_CHARS:
+            raise ValueError(
+                f"feature key length {len(key)} is outside the permitted "
+                f"1..{_MAX_FEATURE_KEY_CHARS} characters"
+            )
+        if isinstance(val, str) and len(val) > _MAX_FEATURE_VALUE_CHARS:
+            raise ValueError(
+                f"feature value for column {key!r} exceeds the "
+                f"{_MAX_FEATURE_VALUE_CHARS}-character limit"
+            )
+    return values
+
+
+# Raw feature values for cold start, shared by the ``user_features`` field on
+# both single-request models and the ``item_features`` values on
+# ``RecommendRelatedRequest``.  Values are encoded server-side against the
+# model's training vocabulary (``recotem._features.encode_one``) and are
+# treated as personal data: never logged (see ``recotem.log_redaction`` for
+# the key-based backstop, which this relies on as defence in depth only).
+_FeatureValues = Annotated[
+    dict[str, Any],
+    Field(
+        max_length=64,
+        description=(
+            "Raw feature values for cold start, keyed by the recipe's feature "
+            "column names. Encoded server-side with the model's training "
+            "vocabulary. Values are treated as personal data and are never "
+            "logged."
+        ),
+    ),
+    AfterValidator(_check_feature_value_lengths),
+]
 
 
 class RecommendRequest(BaseModel):
@@ -47,6 +147,14 @@ class RecommendRequest(BaseModel):
         list[_ItemStr] | None,
         Field(max_length=1000, description="Item IDs to exclude from results"),
     ] = None
+    # Cold-start profile (case A -- unknown user, features only). Ignored,
+    # not rejected, for a KNOWN user_id: the learned embedding was fit to
+    # their real interactions and strictly dominates a profile prior, so a
+    # client that always sends the profile keeps working either way. See
+    # ``routes.py``'s ``recommend`` handler and
+    # ``docs/api-reference.md#feature-aware-cold-start`` ("A known `user_id`
+    # with `user_features` supplied is not an error.").
+    user_features: _FeatureValues | None = None
 
 
 class RecommendRelatedRequest(BaseModel):
@@ -66,6 +174,26 @@ class RecommendRelatedRequest(BaseModel):
     exclude_items: Annotated[
         list[_ItemStr] | None,
         Field(max_length=1000, description="Item IDs to exclude from results"),
+    ] = None
+    # Case B -- profile prior added to the ad-hoc seed-history solve.
+    user_features: _FeatureValues | None = None
+    # Case C -- feature values for seed items absent from training, keyed by
+    # seed item id. Takes precedence over ``user_features`` when a seed named
+    # here is also cold: a cold seed has no row in the seed interaction
+    # matrix, so the case-B solve would silently drop it.
+    # Outer keys are seed item ids, so they are typed ``_ItemStr`` (1..256) to
+    # bound key length exactly like ``seed_items`` -- ``Field(max_length=100)``
+    # caps only the key COUNT. The nested ``_FeatureValues`` validator bounds
+    # each cold-seed mapping's own keys and values.
+    item_features: Annotated[
+        dict[_ItemStr, _FeatureValues] | None,
+        Field(
+            max_length=100,
+            description=(
+                "Raw feature values for seed items absent from training, keyed "
+                "by seed item id."
+            ),
+        ),
     ] = None
 
 

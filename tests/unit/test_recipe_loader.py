@@ -583,6 +583,48 @@ output:
         load_recipe(p)
 
 
+def test_missing_and_other_schema_error_both_reported(tmp_path: Path) -> None:
+    """A recipe with no 'source:' key AND an unrelated schema error must
+    report BOTH problems in a single validation round, not just one.
+
+    Regression guard: pydantic v2's aggregatable field-required error for a
+    genuinely-absent key is what surfaces the "source" complaint here. If the
+    loader instead writes ``source: None`` into the expanded dict before
+    validation, the complaint moves to the ``_check_source_value``
+    model_validator(mode="after") in models.py, which pydantic v2 SKIPS
+    whenever another field already has a validation error -- silently
+    dropping the source complaint from this combined-error case.
+
+    Note: this asserts on the formatted "- source:" error line rather than a
+    bare substring match for "source", because pytest's ``tmp_path`` embeds
+    the test's own function name in the recipe's file path, and that name
+    itself contains "source" -- a bare match would pass even when the loader
+    drops the real complaint.
+    """
+    content = """\
+name: missing_and_bogus
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+  bogus_unknown_field: 123
+output:
+  path: /tmp/out.recotem
+"""
+    p = _write_recipe(tmp_path, content, filename="missing_and_bogus.yaml")
+    with pytest.raises(RecipeError) as exc_info:
+        load_recipe(p)
+    message = str(exc_info.value)
+    assert "- source:" in message, (
+        f"expected the missing 'source' field to be reported; got: {message}"
+    )
+    assert "bogus_unknown_field" in message, (
+        f"expected the OTHER schema error to be reported too; got: {message}"
+    )
+
+
 def test_recipe_name_revalidated_before_filesystem_use(tmp_path: Path) -> None:
     """validate_for_filesystem raises ValueError for names with slashes."""
     from recotem.recipe.models import validate_for_filesystem
@@ -2352,3 +2394,742 @@ def test_gs_project_at_bucket_accepted(tmp_path: Path) -> None:
             f"gs://project@bucket/key must not trigger credentials rejection; "
             f"got: {exc}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 3: features.<side>.source — typed resolution + security validation
+# ---------------------------------------------------------------------------
+#
+# ``features`` requires a feature-capable algorithm (IALS) per
+# ``Recipe._validate_features_algorithms``, so every recipe below lists IALS.
+
+_FEATURES_BASE_RECIPE = """\
+name: {name}
+source:
+  type: csv
+  path: ./interactions.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [IALS]
+  n_trials: 1
+output:
+  path: {output_path}
+"""
+
+
+def _write_features_recipe(tmp_path: Path, name: str, features_block: str) -> Path:
+    content = (
+        _FEATURES_BASE_RECIPE.format(
+            name=name,
+            output_path=str(tmp_path / f"{name}.recotem"),
+        )
+        + features_block
+    )
+    return _write_recipe(tmp_path, content, filename=f"{name}.yaml")
+
+
+def test_feature_source_is_typed_after_load(tmp_path: Path) -> None:
+    """After load_recipe, features.item.source must be a typed CSVConfig."""
+    from recotem.datasource.csv import CSVConfig
+
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_typed",
+        """\
+features:
+  item:
+    source:
+      type: csv
+      path: ./items.csv
+    id_column: item_id
+    columns:
+      - {name: genre, encoding: categorical}
+""",
+    )
+    recipe = load_recipe(p)
+    assert isinstance(recipe.features.item.source, CSVConfig), (
+        f"Expected CSVConfig, got {type(recipe.features.item.source)}"
+    )
+    assert recipe.features.item.source.path == "./items.csv"
+
+
+def test_feature_source_rejects_disallowed_scheme(tmp_path: Path) -> None:
+    """The source-path scheme allow-list must also cover features.item.source."""
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_bad_scheme",
+        """\
+features:
+  item:
+    source:
+      type: csv
+      path: ftp://evil.example/items.csv
+    id_column: item_id
+    columns:
+      - {name: genre, encoding: categorical}
+""",
+    )
+    with pytest.raises(RecipeError, match="scheme"):
+        load_recipe(p)
+
+
+def test_feature_source_rejects_chained_scheme(tmp_path: Path) -> None:
+    """The ``::``-chain rejection must also cover features.item.source.
+
+    Mirrors ``test_input_source_disallowed_scheme_rejected``'s
+    ``simplecache::https://...`` case for the top-level source: the same
+    shared path-scheme validator is reused for ``features.*.source.path``, so
+    a chained fsspec protocol string must be rejected there too.
+    """
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_chained_scheme",
+        """\
+features:
+  item:
+    source:
+      type: csv
+      path: simplecache::https://example.com/items.csv
+    id_column: item_id
+    columns:
+      - {name: genre, encoding: categorical}
+""",
+    )
+    with pytest.raises(RecipeError, match="chain"):
+        load_recipe(p)
+
+
+def test_feature_source_https_requires_sha256(tmp_path: Path) -> None:
+    """An unpinned https:// feature source must be rejected, same as source."""
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_https_no_sha",
+        """\
+features:
+  item:
+    source:
+      type: csv
+      path: https://example.com/items.csv
+    id_column: item_id
+    columns:
+      - {name: genre, encoding: categorical}
+""",
+    )
+    with pytest.raises(RecipeError, match="sha256"):
+        load_recipe(p)
+
+
+def test_feature_source_https_with_sha256_accepted(tmp_path: Path) -> None:
+    sha = "0" * 64
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_https_ok",
+        f"""\
+features:
+  item:
+    source:
+      type: csv
+      path: https://example.com/items.csv
+      sha256: "{sha}"
+    id_column: item_id
+    columns:
+      - {{name: genre, encoding: categorical}}
+""",
+    )
+    recipe = load_recipe(p)
+    assert recipe.features.item.source.sha256 == sha
+
+
+def test_feature_source_rejects_embedded_credentials(tmp_path: Path) -> None:
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_creds",
+        f"""\
+features:
+  item:
+    source:
+      type: csv
+      path: https://user:pw@example.com/items.csv
+      sha256: "{"0" * 64}"
+    id_column: item_id
+    columns:
+      - {{name: genre, encoding: categorical}}
+""",
+    )
+    with pytest.raises(RecipeError, match="credentials"):
+        load_recipe(p)
+
+
+def test_feature_source_unknown_type_rejected(tmp_path: Path) -> None:
+    """An unregistered features.item.source.type must be rejected at load time.
+
+    Complements (does not duplicate) the models-layer
+    ``Recipe._validate_features_sources`` fallback exercised in
+    test_recipe_models.py — this test exercises the real YAML → load_recipe
+    path, which must fail no later than that fallback would.
+    """
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_unknown_type",
+        """\
+features:
+  item:
+    source:
+      type: no_such_source
+      path: ./items.csv
+    id_column: item_id
+    columns:
+      - {name: genre, encoding: categorical}
+""",
+    )
+    with pytest.raises(RecipeError):
+        load_recipe(p)
+
+
+def test_feature_sql_source_dsn_env_not_expanded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A features.<side>.source plugin's no_expand_fields must reach feature
+    subtrees, proven with a real ``${...}`` reference (not a bare string).
+
+    Before this task, the no_expand_fields hook was gated on the ``source``
+    key appearing at the recipe's top level, so a feature source living at
+    features.item.source would silently lose that protection.
+
+    A bare string with no ``${...}`` marker (e.g. plain
+    ``RECOTEM_RECIPE_DB``) is never touched by ``expand_env_vars`` regardless
+    of whether no_expand_fields is honoured -- so asserting such a value
+    round-trips unchanged is vacuous; it would pass identically even if
+    feature sources got zero plugin-declared protection.  SQLConfig.dsn_env's
+    own pattern (``^RECOTEM_RECIPE_[A-Z0-9_]+$``) also rejects any string
+    containing ``${`` or ``}``, so the real SQLSource cannot be used to embed
+    a literal reference and still validate.
+
+    This mirrors
+    ``test_plugin_no_expand_fields_prevents_expansion_in_custom_field``'s
+    approach (mock ``get_source_class`` with a fake Config that has no
+    pattern constraint, embed a real ``${RECOTEM_RECIPE_X}`` reference,
+    assert the literal survives) but under ``features.item.source`` instead
+    of the top-level ``source``. It additionally mocks ``get_source_types``
+    so ``Recipe.model_validate``'s ``_check_source_value`` accepts the fake
+    Config and the recipe loads all the way through, letting this test
+    assert on the actual field value instead of merely tolerating a
+    ``RecipeError``.
+
+    Non-vacuity verified manually: monkeypatching
+    ``recotem.recipe.loader._resolve_extra_no_expand`` to return
+    ``frozenset()`` (simulating feature sources getting zero plugin-declared
+    protection -- the exact bug this task exists to prevent) makes this test
+    fail, because ``dsn_env`` is then expanded to the injected env value
+    instead of staying literal.
+    """
+    from unittest.mock import patch
+
+    from pydantic import BaseModel
+
+    from recotem.datasource.registry import get_source_class as real_get_source_class
+    from recotem.datasource.registry import get_source_types as real_get_source_types
+
+    dsn_ref = "${RECOTEM_RECIPE_X}"
+    monkeypatch.setenv("RECOTEM_RECIPE_X", "injected_value")
+
+    class _FeatureSqlConfig(BaseModel, extra="ignore"):
+        type: str = "test_feature_sql_source"
+        dsn_env: str = ""
+
+    class _FeatureSqlSource:
+        type_name: str = "test_feature_sql_source"
+        Config = _FeatureSqlConfig
+        extras_required: list = []
+        no_expand_fields: frozenset = frozenset({"dsn_env"})
+
+        def __init__(self, config: _FeatureSqlConfig) -> None:  # pragma: no cover
+            self.config = config
+
+        def fetch(self, ctx):  # pragma: no cover
+            raise NotImplementedError
+
+    # Merge the fake type into the *real* registry snapshot (rather than
+    # replacing it outright) so the top-level csv source in
+    # _FEATURES_BASE_RECIPE still resolves normally through
+    # _check_source_value.
+    real_types = dict(real_get_source_types())
+    merged_types = {**real_types, "test_feature_sql_source": _FeatureSqlSource}
+
+    def _fake_get_source_class(type_name: str):
+        if type_name == "test_feature_sql_source":
+            return _FeatureSqlSource
+        return real_get_source_class(type_name)
+
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_plugin_no_expand",
+        f"""\
+features:
+  item:
+    source:
+      type: test_feature_sql_source
+      dsn_env: "{dsn_ref}"
+    id_column: item_id
+    columns:
+      - {{name: genre, encoding: categorical}}
+""",
+    )
+
+    with (
+        patch(
+            "recotem.datasource.registry.get_source_class",
+            side_effect=_fake_get_source_class,
+        ),
+        patch(
+            "recotem.datasource.registry.get_source_types",
+            return_value=merged_types,
+        ),
+    ):
+        recipe = load_recipe(p)
+
+    # dsn_env must remain the literal ${...} reference; if no_expand_fields
+    # was not honoured for this feature subtree it would instead be expanded
+    # to the injected env value asserted against below.
+    assert recipe.features.item.source.dsn_env == dsn_ref, (
+        f"no_expand_fields guard must preserve literal {dsn_ref!r} in "
+        "features.item.source.dsn_env; got: "
+        f"{recipe.features.item.source.dsn_env!r}"
+    )
+    assert "injected_value" not in recipe.features.item.source.dsn_env, (
+        "features.item.source.dsn_env must not receive env expansion; "
+        f"found injected value in: {recipe.features.item.source.dsn_env!r}"
+    )
+
+
+def test_feature_user_side_sql_source_dsn_env_not_expanded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same as ``test_feature_sql_source_dsn_env_not_expanded`` above, but for
+    ``features.user.source`` instead of ``features.item.source``.
+
+    ``_SOURCE_NODE_PATHS`` lists ``("features", "item")`` and
+    ``("features", "user")`` as the two symmetric feature-side positions
+    where a ``source`` mapping is treated as a genuine DataSource subtree
+    (see ``_is_source_node``). No existing test proved the user-side entry
+    is load-bearing: ``test_feature_sql_source_dsn_env_not_expanded`` only
+    covers ``features.item.source``, and
+    ``test_feature_user_side_source_also_typed_and_validated`` only covers
+    ``_validate_path_fields``'s scheme check, a mechanism entirely
+    independent of ``_is_source_node`` / ``_SOURCE_NODE_PATHS``. This test
+    closes that gap by mirroring the item-side test under
+    ``features.user.source``.
+
+    Non-vacuity verified manually: removing ``("features", "user")`` from
+    ``_SOURCE_NODE_PATHS`` makes this test fail, because ``dsn_env`` is then
+    expanded to the injected env value instead of staying literal.
+    """
+    from unittest.mock import patch
+
+    from pydantic import BaseModel
+
+    from recotem.datasource.registry import get_source_class as real_get_source_class
+    from recotem.datasource.registry import get_source_types as real_get_source_types
+
+    dsn_ref = "${RECOTEM_RECIPE_X}"
+    monkeypatch.setenv("RECOTEM_RECIPE_X", "injected_value")
+
+    class _FeatureSqlConfig(BaseModel, extra="ignore"):
+        type: str = "test_feature_sql_source"
+        dsn_env: str = ""
+
+    class _FeatureSqlSource:
+        type_name: str = "test_feature_sql_source"
+        Config = _FeatureSqlConfig
+        extras_required: list = []
+        no_expand_fields: frozenset = frozenset({"dsn_env"})
+
+        def __init__(self, config: _FeatureSqlConfig) -> None:  # pragma: no cover
+            self.config = config
+
+        def fetch(self, ctx):  # pragma: no cover
+            raise NotImplementedError
+
+    # Merge the fake type into the *real* registry snapshot (rather than
+    # replacing it outright) so the top-level csv source in
+    # _FEATURES_BASE_RECIPE still resolves normally through
+    # _check_source_value.
+    real_types = dict(real_get_source_types())
+    merged_types = {**real_types, "test_feature_sql_source": _FeatureSqlSource}
+
+    def _fake_get_source_class(type_name: str):
+        if type_name == "test_feature_sql_source":
+            return _FeatureSqlSource
+        return real_get_source_class(type_name)
+
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_user_plugin_no_expand",
+        f"""\
+features:
+  user:
+    source:
+      type: test_feature_sql_source
+      dsn_env: "{dsn_ref}"
+    id_column: user_id
+    columns:
+      - {{name: segment, encoding: categorical}}
+""",
+    )
+
+    with (
+        patch(
+            "recotem.datasource.registry.get_source_class",
+            side_effect=_fake_get_source_class,
+        ),
+        patch(
+            "recotem.datasource.registry.get_source_types",
+            return_value=merged_types,
+        ),
+    ):
+        recipe = load_recipe(p)
+
+    # dsn_env must remain the literal ${...} reference; if no_expand_fields
+    # was not honoured for this feature subtree it would instead be expanded
+    # to the injected env value asserted against below.
+    assert recipe.features.user.source.dsn_env == dsn_ref, (
+        f"no_expand_fields guard must preserve literal {dsn_ref!r} in "
+        "features.user.source.dsn_env; got: "
+        f"{recipe.features.user.source.dsn_env!r}"
+    )
+    assert "injected_value" not in recipe.features.user.source.dsn_env, (
+        "features.user.source.dsn_env must not receive env expansion; "
+        f"found injected value in: {recipe.features.user.source.dsn_env!r}"
+    )
+
+
+def test_feature_sql_query_not_env_expanded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """features.item.source.query must not receive ${...} env expansion.
+
+    query is already covered by the global _NO_EXPAND_KEYS baseline (applies
+    at any nesting depth), independent of the plugin-declared no_expand_fields
+    generalisation exercised above.
+    """
+    monkeypatch.setenv("RECOTEM_RECIPE_TBL", "evil")
+    monkeypatch.setenv("RECOTEM_RECIPE_DB", "postgresql://h/db")
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_sql_query",
+        """\
+features:
+  item:
+    source:
+      type: sql
+      dsn_env: RECOTEM_RECIPE_DB
+      query: SELECT item_id FROM ${RECOTEM_RECIPE_TBL}
+    id_column: item_id
+    columns:
+      - {name: genre, encoding: categorical}
+""",
+    )
+    recipe = load_recipe(p)
+    assert "${RECOTEM_RECIPE_TBL}" in recipe.features.item.source.query
+
+
+def test_feature_user_side_source_also_typed_and_validated(tmp_path: Path) -> None:
+    """features.user.source must get the same typed-resolution treatment."""
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_user_side",
+        """\
+features:
+  user:
+    source:
+      type: csv
+      path: ftp://evil.example/users.csv
+    id_column: user_id
+    columns:
+      - {name: segment, encoding: categorical}
+""",
+    )
+    with pytest.raises(RecipeError, match="scheme"):
+        load_recipe(p)
+
+
+# ---------------------------------------------------------------------------
+# Task 3 review fix: _is_source_node must not false-positive on a freeform
+# field (e.g. BigQueryConfig.query_parameters) that happens to contain a key
+# literally named 'source'.
+# ---------------------------------------------------------------------------
+
+
+def test_query_parameters_named_source_not_misdetected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A query_parameters entry literally named 'source' is not a DataSource.
+
+    BigQueryConfig.query_parameters is genuinely freeform
+    (dict[str, Any] | None) -- a query may legitimately bind a parameter
+    named 'source' whose value is an unrelated nested mapping (e.g. a
+    struct-typed parameter).  Before the fix, ``_is_source_node`` matched on
+    the key name 'source' at *any* nesting depth, so this nested mapping
+    (whose own 'type' field happens to look like a DataSource discriminator)
+    was mistaken for a features.*.source subtree and triggered a spurious
+    plugin-type lookup, failing recipe load with a confusing "Unknown
+    DataSource type 'organic'" error even though no DataSource was ever
+    referenced.
+    """
+    monkeypatch.setenv("RECOTEM_RECIPE_CHANNEL", "leaked_value")
+    content = f"""\
+name: bq_query_param_source
+source:
+  type: bigquery
+  query: "SELECT * FROM t WHERE traffic_source = @source"
+  query_parameters:
+    source: {{type: organic, channel: "${{RECOTEM_RECIPE_CHANNEL}}"}}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {tmp_path / "bq_query_param_source.recotem"}
+"""
+    p = _write_recipe(tmp_path, content)
+
+    # Must not raise -- the nested 'source' mapping under query_parameters is
+    # not a DataSource subtree and must not trigger plugin-type discovery.
+    recipe = load_recipe(p)
+
+    # query_parameters is globally no-expand (_NO_EXPAND_KEYS), so the nested
+    # mapping -- including its 'channel' string -- must survive completely
+    # unexpanded and untouched, proving no accidental env-var substitution
+    # occurred while walking the (correctly non-)detected node.
+    assert recipe.source.query_parameters == {
+        "source": {"type": "organic", "channel": "${RECOTEM_RECIPE_CHANNEL}"}
+    }
+
+
+# Note: proof that _is_source_node's position-based narrowing does not
+# over-narrow away from the two legitimate features.<side>.source positions
+# lives in test_feature_sql_source_dsn_env_not_expanded above (Task 3
+# section) — it embeds a real ${...} reference in a plugin-declared
+# no_expand field under features.item.source and asserts the literal
+# survives.  That assertion is sensitive to exactly this: manually reverting
+# _SOURCE_NODE_PATHS to omit ("features", "item") makes it fail (dsn_env
+# gets expanded), confirming detection still fires at that position.  An
+# additional test asserting only that an unregistered type under
+# features.item.source raises a RecipeError would NOT be a useful over-
+# narrowing check here: _resolve_source_node's typed-resolution step (a
+# separate, unconditional lookup made regardless of _is_source_node) raises
+# an equivalent error on its own, so such a test would pass identically
+# whether or not _is_source_node detects the position.
+
+
+# ---------------------------------------------------------------------------
+# Source-resolution errors must name BOTH the recipe file and the subtree
+#
+# A recipe now has up to three source subtrees (top-level, features.item,
+# features.user), so an error must say which file AND which subtree.  The
+# file name matters most for load_recipes_directory (public API), which does
+# not re-add it: without it a failing 20-file directory names no file at all.
+# ---------------------------------------------------------------------------
+
+
+def _bad_field_source_recipe(tmp_path: Path, name: str) -> Path:
+    """Write a recipe whose *top-level* source carries an unknown field.
+
+    ``bogus_field`` trips CSVConfig's ``extra="forbid"``, driving
+    ``_resolve_source_node``'s pydantic-ValidationError branch.
+    """
+    content = f"""\
+name: {name}
+source:
+  type: csv
+  path: /tmp/data.csv
+  bogus_field: 1
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {tmp_path / f"{name}.recotem"}
+"""
+    return _write_recipe(tmp_path, content, filename=f"{name}.yaml")
+
+
+def test_source_validation_error_names_recipe_file(tmp_path: Path) -> None:
+    """A bad top-level source must name the recipe file and the subtree.
+
+    Restores the file path that ``Recipe '{p}' source failed validation:``
+    carried before the ``_resolve_source_node`` refactor, which reduced the
+    message to a bare ``source failed validation:``.
+    """
+    p = _bad_field_source_recipe(tmp_path, "prod_events")
+
+    with pytest.raises(RecipeError) as excinfo:
+        load_recipe(p)
+
+    msg = str(excinfo.value)
+    assert str(p) in msg, f"message must name the recipe file {str(p)!r}; got: {msg}"
+    assert "source failed validation" in msg, msg
+    # The underlying pydantic detail must survive the prefixing.
+    assert "bogus_field" in msg, msg
+
+
+def test_feature_source_validation_error_names_recipe_file_and_subtree(
+    tmp_path: Path,
+) -> None:
+    """A bad features.item.source names the file *and* the subtree.
+
+    The subtree location alone is not enough: load_recipes_directory raises
+    straight through, so an operator loading a directory needs the file too.
+    """
+    p = _write_features_recipe(
+        tmp_path,
+        "feat_bad_field",
+        """\
+features:
+  item:
+    source:
+      type: csv
+      path: ./items.csv
+      bogus_field: 1
+    id_column: item_id
+    columns:
+      - {name: genre, encoding: categorical}
+""",
+    )
+
+    with pytest.raises(RecipeError) as excinfo:
+        load_recipe(p)
+
+    msg = str(excinfo.value)
+    assert str(p) in msg, f"message must name the recipe file {str(p)!r}; got: {msg}"
+    assert "features.item.source failed validation" in msg, (
+        f"message must locate the failing subtree; got: {msg}"
+    )
+
+
+def test_source_missing_type_error_names_recipe_file(tmp_path: Path) -> None:
+    """The missing-'type'-discriminator message must name the recipe file.
+
+    Complements test_load_recipe_source_missing_type_raises_recipe_error,
+    which only asserts that *some* RecipeError is raised.
+    """
+    content = f"""\
+name: no_type_named
+source:
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {tmp_path / "no_type_named.recotem"}
+"""
+    p = _write_recipe(tmp_path, content, filename="no_type_named.yaml")
+
+    with pytest.raises(RecipeError) as excinfo:
+        load_recipe(p)
+
+    msg = str(excinfo.value)
+    assert str(p) in msg, f"message must name the recipe file {str(p)!r}; got: {msg}"
+    assert "missing the 'type' discriminator" in msg, msg
+
+
+def test_load_recipes_directory_source_error_names_offending_file(
+    tmp_path: Path,
+) -> None:
+    """load_recipes_directory is public API and does not re-add the filename.
+
+    With several recipes on disk, the raised error must still identify which
+    one failed -- the concrete reason the path belongs in the message rather
+    than being left to the CLI's single-file framing.
+    """
+    good = tmp_path / "good.yaml"
+    good.write_text(
+        MINIMAL_RECIPE_TEMPLATE.format(
+            name="good_recipe",
+            output_path=str(tmp_path / "good_recipe.recotem"),
+        )
+    )
+    bad = _bad_field_source_recipe(tmp_path, "bad_recipe")
+
+    with pytest.raises(RecipeError) as excinfo:
+        load_recipes_directory(tmp_path)
+
+    msg = str(excinfo.value)
+    assert str(bad) in msg, (
+        f"directory load must name the offending file {str(bad)!r}; got: {msg}"
+    )
+
+
+def test_plugin_discovery_error_distinguishes_which_source_is_broken(
+    tmp_path: Path,
+) -> None:
+    """An unknown 'type' must say WHICH of the three sources carries it.
+
+    ``_resolve_extra_no_expand`` reports the type name only, so two recipes
+    differing solely in which subtree holds the typo produced byte-identical
+    output.  The type name was self-identifying on main (one source per
+    recipe); with features there are three, so the subtree is required to
+    tell them apart.
+    """
+    top_level = _write_recipe(
+        tmp_path,
+        f"""\
+name: top_typo
+source:
+  type: no_such_source_type
+  path: /tmp/data.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [IALS]
+  n_trials: 1
+output:
+  path: {tmp_path / "top_typo.recotem"}
+""",
+        filename="top_typo.yaml",
+    )
+    feature_side = _write_features_recipe(
+        tmp_path,
+        "feat_typo",
+        """\
+features:
+  item:
+    source:
+      type: no_such_source_type
+      path: ./items.csv
+    id_column: item_id
+    columns:
+      - {name: genre, encoding: categorical}
+""",
+    )
+
+    with pytest.raises(RecipeError) as top_exc:
+        load_recipe(top_level)
+    with pytest.raises(RecipeError) as feat_exc:
+        load_recipe(feature_side)
+
+    top_msg = str(top_exc.value)
+    feat_msg = str(feat_exc.value)
+
+    assert str(top_level) in top_msg, top_msg
+    assert str(feature_side) in feat_msg, feat_msg
+    assert "features.item.source" in feat_msg, (
+        f"feature-side typo must name the subtree; got: {feat_msg}"
+    )
+    assert "features" not in top_msg, (
+        f"top-level typo must not be attributed to a feature subtree; got: {top_msg}"
+    )
+    assert top_msg != feat_msg, (
+        "the two recipes differ only in which source carries the typo, so "
+        f"their errors must not be identical; both were: {top_msg}"
+    )

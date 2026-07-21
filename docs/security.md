@@ -39,6 +39,7 @@ The internet-facing boundary is `recotem serve`. `recotem train` has no inbound 
 | Malicious artifact file (serialization RCE) | HMAC-SHA256 verify before any deserialization; signing key required; no legacy unsigned fallback |
 | HMAC bypass leading to arbitrary class construction | Hand-enumerated FQCN allow-list as backstop (see below) |
 | Artifact-size DoS | `RECOTEM_MAX_ARTIFACT_BYTES` cap (default 2 GiB); header length cap (64 KiB); both enforced before deserialization |
+| Request-body DoS (multi-GB body buffered before validation) | `RECOTEM_MAX_BODY_BYTES` cap (default 128 MiB) enforced by `BodySizeLimitMiddleware` before Starlette buffers/parses the body — on both `Content-Length` and chunked bodies; over-cap → `413 PAYLOAD_TOO_LARGE`. All request fields (ids, `exclude_items`, `seed_items`, batch size, and feature-dict key/value lengths + key count) are individually bounded. See [Rate limiting and DoS](#rate-limiting-and-dos) |
 | Stat-then-read TOCTOU on artifact | Read-once protocol: bytes read into memory once, sha256 computed, then HMAC-verified from the same buffer |
 | Key material in logs | structlog redaction processor runs first in chain; unit test asserts no key material at any log level |
 | API key brute-force / timing attack | `hmac.compare_digest` constant-time compare; no logging of plaintext or hash |
@@ -163,6 +164,169 @@ Specific operator responsibilities:
   literal are refused regardless of stdlib semantics.
 - **Compute and pin sha256 once, then alert on changes.** A mismatch is
   the signal. Don't bypass it by silently regenerating during CI.
+
+## Feature-aware iALS
+
+### Feature-source path and integrity rules
+
+A recipe's `features.item.source` / `features.user.source` are full
+DataSource configs — same registry as the top-level `source` — and are
+**not** a lower-trust surface just because they feed side features instead
+of interactions. The recipe loader applies the identical rules to
+`features.item.source.path` / `features.user.source.path` that it applies
+to `source.path`:
+
+- The same [path-scheme allow-list](recipe-reference.md#path-rules) (bare
+  local path, `file://`, `s3://`, `gs://`, `az://`, `abfs(s)://`, `http://`,
+  `https://`; chained fsspec protocols rejected).
+- The same mandatory `sha256` integrity pin whenever the scheme is `http://`
+  or `https://`.
+- Embedded URI credentials are rejected on feature-source paths exactly as
+  on `source.path` / `item_metadata.path`.
+
+`recotem validate` probes feature-source connectivity the same way it
+probes `source` (see [recipe-reference.md](recipe-reference.md#features)),
+so a missing extra or an unreachable feature source is caught before
+`recotem train` does real work.
+
+### Feature-encoder version gate
+
+Every artifact trained with a `features:` block carries a small
+`features.version` field in its (unencrypted, HMAC-covered) header. Before
+serve deserializes the payload, it checks that field against this build's
+known encoder-state version:
+
+- **`features` key absent** → load proceeds (fail **open**). This is a
+  pre-feature artifact or a model trained without `features:`; there is no
+  encoder state to misinterpret.
+- **`features` present but `version` missing, non-integer, or not the exact
+  version this build knows** → refuse to load (fail **closed**), reason
+  `feature_version`.
+
+The asymmetry is deliberate, and mirrors the posture of the pre-existing
+irspack version-skew guard (see
+[operations.md — irspack version skew](operations.md#irspack-version-skew)):
+an old serve with no feature code never reads the encoder state and keeps
+serving known-user recommendations correctly — safe by ignorance. A serve
+that *does* have feature code but does not recognize the state's shape is
+the one that must be stopped, because silently proceeding would encode a
+request's `user_features` / `item_features` into the wrong vector space and
+return **incorrect recommendations that look like correct ones** — the one
+failure mode a request-count or error-rate metric cannot catch. See
+[operations.md — Feature-aware iALS sizing](operations.md#feature-aware-ials-sizing)
+for the operational detail (event name, metric label).
+
+### Request-side PII: `user_features` / `item_features`
+
+`user_features` (on `:recommend` and `:recommend-related`) and per-seed
+`item_features` (on `:recommend-related`) are attacker- or client-supplied
+request fields that carry personal data **by construction** — an age band,
+a country, a device category. This is a request-side PII vector distinct
+from anything else in the v1 API surface, and recotem's posture is:
+
+1. **Raw feature values are never logged.** The code paths that touch
+   feature values (encoding, the unknown-category counter) log column names
+   and counts only — never the value itself.
+2. `log_redaction.py`'s key-based redaction also strips `user_features` /
+   `item_features` wholesale, as defense in depth in case a future code path
+   ever logs a raw request body.
+3. Feature values are never echoed back in a response body, so no
+   response-side deny-list is needed for them. `RECOTEM_METADATA_FIELD_DENY`
+   (see [recipe-reference.md](recipe-reference.md#item_metadata)) is the
+   existing **response-side** counterpart for a different field: it strips
+   configured item-metadata columns from `:recommend` /
+   `:recommend-related` responses. The two controls address opposite
+   directions of PII flow — one on the way in, one on the way out — and
+   neither substitutes for the other.
+
+### Extreme numerical feature values map to a 400, not a 500
+
+A client-supplied `numerical` feature value that is extreme but still a
+finite float (e.g. `1e22`) is not rejected by schema validation — it is a
+legal float. Standardized against the training column's mean/std
+(`recotem._features._row_values`), such a value can produce a magnitude
+large enough to make irspack's per-request conjugate-gradient cold-start
+solve numerically ill-conditioned. irspack's native core raises a bare
+`RuntimeError` ("Conjugate-gradient solver encountered a singular system.")
+in that case, with no awareness that the offending value came from an
+untrusted client rather than a bug.
+
+`recotem._idmap` catches that `RuntimeError` at each of the three cold-start
+call sites that feed a features-derived matrix into irspack's solver
+(`get_score_cold_user_from_features`, `get_score_cold_user`,
+`compute_item_embedding_from_features`) and re-raises
+`ColdStartNumericalError`, which `serving/routes.py` maps to `400
+FEATURE_VALUE_UNUSABLE` (see [api-reference.md](api-reference.md#feature-aware-cold-start))
+rather than letting it surface as an unhandled `500`.
+
+**What this does and does not guarantee.** The catch is **signature-gated**:
+`_is_numerical_cold_start_failure` re-raises only when the `RuntimeError`'s
+message matches one of the irspack numerical-failure signatures verified
+present in the installed binary and enumerated in
+`_NUMERICAL_FAILURE_SIGNATURES` (`recotem/_idmap`). That narrowness is
+deliberate — a bare `except RuntimeError` would silently reattribute an
+unrelated irspack bug to client input — but it means the mapping is only as
+complete as that list. An irspack release that rewords one of those messages
+would re-raise past the gate and surface as a `500`. Equally out of scope is
+any path where a client value fails as something other than a `RuntimeError`
+from the solver — and this PR fixed a live instance of exactly that shape: a
+`numerical` value supplied as a JSON integer literal of 309 or more digits
+raised `OverflowError` (an `ArithmeticError`, not a `ValueError`) out of
+`float()`, escaped the `except (TypeError, ValueError)` around the parse, and
+reached the generic 500 handler with nothing but a valid API key
+(`_features._parse_number`). The honest claim is therefore narrower than
+"cannot crash the request": the **known** ill-conditioning paths are mapped
+to a 400, and both the signature list and the parse-path exception handling
+are the places to extend when a new one is found.
+
+The fix is otherwise conservative: it does not change what value a
+`numerical` column standardizes to, at either train or serve time — the same
+extreme value flowing through training-time `encode()` is untouched, and a
+resulting final-refit Cholesky failure on an ill-conditioned *training*
+matrix already surfaces as `TrainingError` (exit 4) through an unrelated code
+path. Only the three serve-time cold-start solves are wrapped.
+
+### Why hand-rolled encoding, not scikit-learn preprocessing
+
+Feature encoding (`recotem._features`) deliberately reimplements one-hot,
+standardization, and multi-hot encoding rather than persisting a fitted
+`sklearn.preprocessing.OneHotEncoder` / `StandardScaler` inside the artifact.
+[operations.md](operations.md#upgrades) already documents scikit-learn as a
+**further, unguarded** compatibility axis: `TruncatedSVDRecommender` pickles
+an sklearn estimator into the payload, and sklearn's own
+`InconsistentVersionWarning` says unpickling across its own minor versions
+"might lead to breaking code or invalid results" — recotem range-pins
+`scikit-learn` to narrow this window but cannot close it. Pickling
+`OneHotEncoder` / `StandardScaler` into the feature-encoder state would
+**voluntarily widen** that same unguarded axis, and would do so via private
+sklearn module paths (e.g. `sklearn.preprocessing._data`) that have no entry
+in the FQCN allow-list's narrow prefix list to absorb a future rename.
+
+The encoder state is instead plain Python data — nested `dict` / `list`,
+`str` vocabularies, and `int` / `float` scalars, with no numpy or pandas
+object anywhere in it (`build_encoder_state` constructs every scalar through
+`str()` / `float()` / `int()`; the numpy arrays in `_features.py` are built
+inside `encode()` at call time and are not part of the persisted state).
+Verified to round-trip through the existing `SafeUnpickler` with **no
+allow-list change**.
+
+The allow-list is only a **partial** backstop for that invariant, and the
+limit is worth stating precisely, because it is what makes those coercions
+load-bearing. A stray `pandas.Index` really would be refused at load time
+(`pandas.core.indexes.base._new_Index` is not allow-listed — verified). A
+`numpy.str_` would **not**: it pickles via `numpy._core.multiarray.scalar`
+plus `numpy.dtype`, both allow-listed (the former via the `numpy._core.*`
+module-prefix list, the latter via its explicit FQCN entry), so it loads and
+keeps its type (verified). Nothing
+downstream catches it either — `numpy.str_` subclasses `str` and hashes and
+compares equal to it, so every vocabulary lookup keeps working and the leak
+stays invisible at runtime. The `str()` coercions in `build_encoder_state`
+are therefore the only thing keeping numpy's scalar types out of the state,
+not a belt-and-braces gesture on top of a gate that would fail closed anyway.
+See the module docstring in `recotem/_features.py` for the reasoning, and
+`tests/unit/test_features.py::test_vocabulary_keys_are_exactly_str_not_numpy_str`
+for the enforcement — it asserts the exact key type, because an `isinstance`
+check cannot distinguish the two.
 
 ## Artifact payload and the FQCN allow-list
 
@@ -520,6 +684,56 @@ The v1 inference verbs (`:recommend`, `:recommend-related`,
 recommendation inference; sustained request rates above the recommender's
 inference throughput will queue under uvicorn and cause request latency to
 climb. Measure and cap at the proxy.
+
+**Cold-start solves are bounded per request.** Case C of the feature-aware
+cold start (a `:recommend-related` seed carrying `item_features`, see
+[api-reference.md](api-reference.md#feature-aware-cold-start)) runs one
+irspack conjugate-gradient solve **per cold seed** — measured ~0.25–0.45 ms
+each. That per-solve cost is effectively **flat in model size**: 0.27 ms at
+`n_components=8`, 0.30 ms at 128, 0.45 ms at 256, and flat across encoded
+feature dimensions from 3 to 501. The solve is call-overhead-dominated rather
+than Cholesky-dominated at every size a recipe can produce, so a
+production-sized model does not make this bound materially worse. The
+aggregate is capped at 512 solves per request by `BATCH_COLD_SEED_SOLVE_LIMIT`
+(`serving/schemas.py`) on `:batch-recommend-related` — roughly 230 ms of
+single-threaded CPU in the worst case. An element that would exceed the cap
+receives a per-element `VALIDATION_ERROR` inside a 200, matching
+`BATCH_AGGREGATE_LIMIT`'s existing posture, rather than failing the whole
+request with a 422. The single verbs need no cap of their own: they are
+structurally bounded at 100 solves by `seed_items`' `max_length`. As with
+everything else in this section, that bounds the work a **single request** can
+demand and says nothing about the rate; sustained rates remain the proxy's
+job.
+
+**Request body is size-capped before it is parsed.** A `BodySizeLimitMiddleware`
+(`serving/app.py`) rejects any request body larger than `RECOTEM_MAX_BODY_BYTES`
+(default 128 MiB, clamped [1 MiB, 2 GiB]) with a `413 PAYLOAD_TOO_LARGE`
+**before** Starlette buffers and JSON-parses it. Without this an authenticated
+client could send a multi-GB body and force the process to allocate and parse it
+in full ahead of any pydantic validation. The middleware enforces the cap at two
+points so the header cannot be omitted to bypass it: a declared `Content-Length`
+over the cap is refused outright, and a chunked/streamed body with no
+`Content-Length` is counted as it arrives and cut off the moment the running
+total crosses the cap. The default preserves the entire legitimate request space
+— the largest well-formed body the API accepts is ~72 MiB (a 256-element batch,
+each sub-request carrying 1000 `exclude_items` of up to 256 chars) — while
+blocking GB-scale bodies. This bounds a **single request**; sustained rates are
+still the proxy's job.
+
+**Per-request input fields are all length- and count-bounded.** Every
+client-controlled request field has an explicit cap so a well-formed but huge
+body cannot amplify inside validation or the recommender: `user_id` / item ids
+are 1–256 chars (`_ItemStr`), `exclude_items` ≤ 1000, `seed_items` ≤ 100, batch
+`requests` ≤ 256. The cold-start feature mappings are bounded on all three axes:
+`Field(max_length=64)` caps the number of keys, each string **value** is capped
+at 8192 chars (`_MAX_FEATURE_VALUE_CHARS`), and each **key** is capped at 1–256
+chars (`_MAX_FEATURE_KEY_CHARS`) — covering `user_features` column names, the
+`item_features` outer seed-id keys (typed `_ItemStr`), and the nested per-seed
+feature keys. Before the key cap the dict keys were the one length-unbounded
+field left: `max_length` bounded only the key *count*, and only *values* were
+length-checked, so an attacker could send megabyte-scale keys. An over-length
+key now yields a `422` reporting only its length, never its text, so it cannot
+amplify into the error body or logs.
 
 **Recommended nginx configuration:**
 

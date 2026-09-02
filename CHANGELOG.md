@@ -75,6 +75,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside the image**; rebuild to change dependencies, or run
   `python -m ensurepip` if pip is genuinely needed.
 
+- **A scheduled `train` could exit 0 having trained nothing.** `lock.py` treated
+  `EACCES`/`EPERM` on the lock path as "lock not acquireable -- same semantics
+  as contention", so an unwritable lock directory made the command skip
+  silently and report success. Contention is transient and skipping is right;
+  a permission error is a deployment mistake no retry will fix. Permission
+  failures now raise `LockPermissionError` (a `ConfigError`, so exit **8** --
+  not 6, which schedulers read as "retry later"), regardless of
+  `--fail-on-busy`, and name the path, the uid/gid and `RECOTEM_LOCK_DIR` in
+  the message. On Windows only `EPERM` converts, because `EACCES` there also
+  covers a genuine sharing violation; that case stays contention but now logs
+  a warning instead of being silent.
+- **`serve` returned exit 3 instead of 8 when it could not bind.** uvicorn
+  catches the bind `OSError` itself and raises
+  `SystemExit(uvicorn.config.STARTUP_FAILURE)` (== 3), which bypasses
+  `except OSError` because `SystemExit` is a `BaseException`. Exit 3 is
+  `_EXIT_DATASOURCE`, so a port clash was indistinguishable from a data-source
+  failure to supervisor and CronJob retry logic. Bind and other uvicorn startup
+  failures now map to `_EXIT_CONFIG` (8) as documented. The unit test that
+  covered this mocked an `OSError` real uvicorn never raises; it is replaced,
+  and integration tests now exercise real bind collisions in a subprocess.
+
 ### Changed
 
 - **irspack upgraded from 0.4.2 to 0.5.2.** irspack 0.5.0 adds feature-aware

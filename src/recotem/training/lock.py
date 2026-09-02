@@ -8,6 +8,11 @@ Implements the spec's lock semantics (Section 6 step 2):
 - If lock is contended (non-blocking acquire fails): yield False so the
   caller can exit 0 gracefully (default), or raise ``LockContestedError``
   when ``fail_on_busy=True``.
+- If the lock path is not writable (EACCES/EPERM): raise
+  ``LockPermissionError`` — always, and regardless of ``fail_on_busy``.
+  Contention is transient and skipping is the right answer; a permission
+  failure is a deployment mistake that no retry fixes, and skipping it would
+  exit 0 without training. See ``LockPermissionError``.
 - ``--no-lock`` is expressed by callers simply not calling this module.
 
 Uses ``fcntl.flock`` on POSIX and falls back to a best-effort open-based
@@ -46,7 +51,7 @@ from urllib.parse import urlparse
 
 import structlog
 
-from recotem.config import get_lock_dir
+from recotem.config import ConfigError, get_lock_dir
 
 logger = structlog.get_logger(__name__)
 
@@ -61,6 +66,29 @@ class LockContestedError(Exception):
     ``fail_on_busy=True`` was requested."""
 
     code = "lock_contested"
+
+
+class LockPermissionError(ConfigError):
+    """Raised when the recipe lock cannot be created or opened for lack of
+    filesystem permission.
+
+    Deliberately **not** a ``LockContestedError``.  Contention means "another
+    process holds the lock right now" — a transient condition whose correct
+    response is to skip this run and let the next scheduled one succeed.  A
+    permission failure is a deployment mistake (wrong volume ownership, a
+    read-only mount, a mistyped ``RECOTEM_LOCK_DIR``): it will not clear on
+    retry, and skipping makes ``recotem train`` exit 0 without training, so a
+    cron/CronJob reports success while the model silently goes stale.  That is
+    the hardest possible failure to notice, which is exactly why it must not
+    share a code path — or an exit code — with contention.
+
+    Subclassing ``ConfigError`` maps this to exit 8 (configuration error) via
+    the existing ``_map_exception_to_exit`` branch, keeping exit 6
+    (``_EXIT_LOCK_CONTESTED``) meaning "retry later" for schedulers that
+    branch on it.
+    """
+
+    code = "lock_permission_denied"
 
 
 class LockTimeoutError(LockContestedError):
@@ -82,6 +110,40 @@ class LockTimeoutError(LockContestedError):
     def __init__(self, message: str, *, waited_seconds: float) -> None:
         super().__init__(message)
         self.waited_seconds = waited_seconds
+
+
+def _lock_permission_error(lock_path: Path, exc: OSError) -> LockPermissionError:
+    """Log and build the ``LockPermissionError`` for an unwritable lock path.
+
+    Centralised so every call site emits the same structured event and the
+    same operator advice.  The message names the exact path that could not be
+    written and what to change, because the operator reading it is looking at
+    a scheduler log, not a shell.
+    """
+    identity = ""
+    if hasattr(os, "getuid"):  # POSIX only; keeps the helper importable anywhere
+        identity = f" (running as uid={os.getuid()}, gid={os.getgid()})"
+
+    logger.error(
+        "recipe_lock_permission_denied",
+        lock_path=str(lock_path),
+        errno=exc.errno,
+        error=str(exc),
+        advice=(
+            "Lock path is not writable. This is a configuration error, not "
+            "lock contention — training was NOT skipped, it failed. Make the "
+            "directory writable by the user running recotem, or point "
+            "RECOTEM_LOCK_DIR at a writable directory."
+        ),
+    )
+    return LockPermissionError(
+        f"Cannot create or open the recipe lock at {lock_path}: "
+        f"{exc.strerror or exc}{identity}. This is a permissions problem, not "
+        "lock contention, so retrying will not help and the run was failed "
+        "rather than skipped. Make the containing directory writable by the "
+        "user running recotem, or set RECOTEM_LOCK_DIR to a writable "
+        "directory."
+    )
 
 
 _LOCAL_SCHEMES = {"", "file"}
@@ -142,6 +204,10 @@ def recipe_lock(
         Subclass of ``LockContestedError``.  Raised when *timeout* > 0 and
         the deadline expires before the lock is acquired.  Carries
         ``waited_seconds`` for operational log correlation.
+    LockPermissionError
+        The lock directory or sentinel is not writable.  Raised regardless of
+        *fail_on_busy* — this is a configuration error, not contention, so it
+        never yields ``False``.
     """
     # Defence-in-depth: the CLI validates lock_timeout before calling this
     # function, but library callers may pass an arbitrary float.  Values < 0
@@ -181,7 +247,15 @@ def recipe_lock(
             logger.debug("recipe_lock_local_only", **_log_kwargs)
     else:
         lock_path = Path(output_str + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError as _mkdir_exc:
+        # Same misconfiguration as the EACCES/EPERM open below, one step
+        # earlier: a mistyped RECOTEM_LOCK_DIR or a read-only mount can make
+        # the lock *directory* uncreatable. Route it through the same error so
+        # the operator gets the path and the remedy instead of a bare
+        # PermissionError traceback mapped to _EXIT_UNKNOWN.
+        raise _lock_permission_error(lock_path, _mkdir_exc) from _mkdir_exc
 
     if sys.platform == "win32":
         win_result = _try_acquire_windows(lock_path)
@@ -241,15 +315,17 @@ def recipe_lock(
                 ),
             )
             raise
-        # EACCES / EPERM: lock directory or sentinel has wrong permissions.
-        # Treat as "lock not acquireable" — same semantics as contention.
+        # EACCES / EPERM: the lock directory or sentinel has wrong
+        # permissions.  This is NOT contention: flock() is advisory, so a lock
+        # already held by another process never makes os.open() fail — the
+        # contended case is detected below, at the flock() call.  Reaching
+        # here means the process genuinely cannot write the sentinel, which no
+        # amount of retrying fixes.  Raise regardless of `fail_on_busy`:
+        # yielding False here used to make `recotem train` exit 0 without
+        # training, so a scheduled run reported success while the model went
+        # stale.  See LockPermissionError for the full rationale.
         if _open_exc.errno in (errno.EACCES, errno.EPERM):
-            if fail_on_busy:
-                raise LockContestedError(
-                    f"Recipe lock at {lock_path} is not accessible: {_open_exc}"
-                ) from _open_exc
-            yield False
-            return
+            raise _lock_permission_error(lock_path, _open_exc) from _open_exc
         # Any other OSError (ENOSPC, ENAMETOOLONG, EIO, …) is a genuine system
         # problem — propagate so the caller can map to _EXIT_UNKNOWN.
         raise
@@ -341,11 +417,31 @@ def _try_acquire_windows(lock_path: Path) -> int | None:
             0o600,  # noqa: S103 – mode is 0o600 (owner-only); CodeQL false positive (py/world-readable-file)
         )
     except OSError as _open_exc:
-        # EACCES / EAGAIN: the lock directory or file is temporarily inaccessible —
-        # treat as "lock contested" and return None so the caller can handle it.
+        # EPERM is never a sharing violation, so it means the same thing here
+        # as on POSIX: the sentinel is not writable. Fail loudly.
+        if _open_exc.errno == errno.EPERM:
+            raise _lock_permission_error(lock_path, _open_exc) from _open_exc
+        # EACCES / EAGAIN: on Windows EACCES is ambiguous — it is both
+        # "permission denied" and the sharing-violation errno — so unlike the
+        # POSIX branch this cannot be classified from the errno alone, and is
+        # still treated as "lock contested" (return None) to avoid failing
+        # genuine contention on a platform this project does not test on. It
+        # is logged at WARNING so the case is at least visible in the operator
+        # log rather than an unexplained exit 0.
         # All other errno values indicate a genuine system problem (ENOENT, EROFS,
         # ENOSPC, …) that must propagate so the operator sees the real root cause.
         if _open_exc.errno in (errno.EACCES, errno.EAGAIN):
+            logger.warning(
+                "recipe_lock_windows_open_denied",
+                lock_path=str(lock_path),
+                errno=_open_exc.errno,
+                error=str(_open_exc),
+                advice=(
+                    "Treating as lock contention, but on Windows this errno "
+                    "is also 'permission denied'. If no other recotem process "
+                    "is running, check the permissions on this path."
+                ),
+            )
             return None
         logger.warning(
             "recipe_lock_windows_open_failed",

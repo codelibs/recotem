@@ -181,7 +181,20 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
 | 5 | `_EXIT_ARTIFACT` | `ArtifactError` (magic / version / HMAC verify) |
 | 6 | `_EXIT_LOCK_CONTESTED` | per-recipe training lock held by another process |
 | 7 | `_EXIT_HTTP_FETCH` | `HttpFetchError` (SSRF guard / sha256 mismatch / scheme-changing redirect / byte cap) |
-| 8 | `_EXIT_CONFIG` | configuration error (e.g. signing keys missing without `--dev-allow-unsigned`) |
+| 8 | `_EXIT_CONFIG` | configuration error (e.g. signing keys missing without `--dev-allow-unsigned`; `serve` failing to bind) |
+
+`serve` bind failures (EADDRINUSE / EACCES / EADDRNOTAVAIL) exit **8**, not 3.
+uvicorn catches the bind `OSError` internally and raises
+`SystemExit(uvicorn.config.STARTUP_FAILURE)` (== 3), which bypasses
+`except OSError` because `SystemExit` is a `BaseException`. `cli.py` translates
+that sentinel to `_EXIT_CONFIG` so a bind failure is never mistaken for a
+`DataSourceError` by supervisor / CronJob retry logic. The same mapping covers
+uvicorn's other startup failures (ASGI app import, unix-socket chmod, lifespan
+refusing to start), which are configuration errors too. `STARTUP_FAILURE` is a
+uvicorn internal — `tests/unit/test_cli.py` pins its value and
+`tests/integration/test_serve_bind_failure.py` exercises real bind collisions in
+a subprocess, so a uvicorn change fails the suite instead of silently
+reintroducing exit 3.
 
 ## Test commands
 
@@ -214,7 +227,7 @@ uv run ruff format --check src tests
 | `RECOTEM_ARTIFACT_ROOT` | (empty) | If set, local `output.path` must lie under it. |
 | `RECOTEM_RECIPE_*` | — | Allow-listed for `${...}` recipe expansion. |
 | `RECOTEM_METADATA_FIELD_DENY` | (empty) | Comma-separated columns stripped from `/v1/recipes/{name}:recommend` and `:recommend-related` responses. |
-| `RECOTEM_METRICS_ENABLED` | (empty) | Opt-in Prometheus `/metrics` endpoint. Truthy values: `1`, `true`, `yes`, `on`. Requires `recotem[metrics]` extra. |
+| `RECOTEM_METRICS_ENABLED` | (empty) | Opt-in Prometheus endpoint. Truthy values: `1`, `true`, `yes`, `on`. Requires `recotem[metrics]` extra. **Path is `/v1/metrics`, not `/metrics`** — the route is mounted under the `/v1` router prefix, and bare `/metrics` returns 404. **Authentication is required**: the endpoint takes `Depends(_require_auth)` like every other `/v1` route, so a scrape without a valid `X-API-Key` gets 401. Prometheus must be configured with the API key (e.g. `authorization` / a `X-API-Key` header via `http_headers` in the scrape config), or the server must be running in an unauthenticated posture (no `RECOTEM_API_KEYS`, which forces the loopback-only bind). |
 | `RECOTEM_LOCK_DIR` | (empty) | Override directory for per-recipe training lock files. Local outputs always lock at `<output_path>.lock`; remote outputs (`s3://`, `gs://`, ...) need a host-local path and fall back to `<tempdir>/recotem-locks/`. `flock` is host-local — across hosts use scheduler-level mutex (`concurrencyPolicy: Forbid`). |
 | `RECOTEM_BQ_REQUIRE_STORAGE_API` | (empty) | When truthy (`1`/`true`/`yes`/`on`), the BigQuery source raises `DataSourceError` instead of falling back to the REST path when the Storage Read API fails. Requires the service account to hold `bigquery.readSessions.create`. |
 | `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW` | (empty) | Truthy downgrades the serve-side irspack version-skew check from `ArtifactError` to a warning. The default rule is an **allow-list** (`_irspack_compat.py`): same **major.minor** always loads (patch drift tolerated); a differing major.minor loads only when `(best_class, header_mm, running_mm)` is in the verified table — CosineKNN / TopPop / RP3beta / DenseSLIM / TruncatedSVD across (0,4)↔(0,5), both directions. IALS (known break: `IALSModelConfig.__setstate__` arity 7→10 at 0.5.0) and BPRFM (unverifiable: gated behind the separately installed `lightfm` package, which has no py3.12 release, so irspack never exports it) are refused, as is a missing/non-str `best_class` on a real skew (fail-closed) and every not-yet-verified future transition. Missing/unparseable version fails **open**. The remedy is to retrain; this flag is for operators who know their artifact is unaffected. |

@@ -539,28 +539,51 @@ def test_train_systemexit_with_zero_exits_zero(tmp_path: Path, monkeypatch) -> N
 # ---------------------------------------------------------------------------
 
 
-def test_serve_oserror_returns_dedicated_exit_code(tmp_path: Path, monkeypatch) -> None:
-    """serve must catch bind-related OSError from uvicorn.run and exit 8 (config).
+def test_uvicorn_startup_failure_constant_is_still_3() -> None:
+    """Pin the uvicorn internal the serve exit-code mapping depends on.
 
-    A bind failure (EADDRINUSE — port in use) is a configuration error.
-    After the I-7 fix, bind-related errnos (EADDRINUSE, EACCES, EADDRNOTAVAIL)
-    map to exit 8 while other errnos (resource exhaustion, etc.) map via
-    _map_exception_to_exit to their own codes.
-
-    This test uses EADDRINUSE explicitly to verify the bind-error path.
+    ``recotem.cli.serve`` translates ``SystemExit(uvicorn.config.STARTUP_FAILURE)``
+    into exit 8.  ``STARTUP_FAILURE`` is not part of uvicorn's public API, so if a
+    future release inside the supported range (``uvicorn[standard]>=0.30,<0.52``)
+    changes or moves it, this test fails loudly instead of the mapping silently
+    reverting to uvicorn's raw code.
     """
-    import errno as _errno
+    from uvicorn.config import STARTUP_FAILURE
+
+    assert STARTUP_FAILURE == 3, (
+        f"uvicorn.config.STARTUP_FAILURE changed to {STARTUP_FAILURE!r}. "
+        "Re-check the SystemExit mapping in recotem.cli.serve."
+    )
+
+
+def test_serve_uvicorn_startup_failure_systemexit_exits_8(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """serve must map uvicorn's SystemExit(STARTUP_FAILURE) to exit 8 (config).
+
+    This is what a real bind failure looks like.  ``uvicorn.Server.startup``
+    catches the bind ``OSError`` itself, logs it, and calls
+    ``sys.exit(STARTUP_FAILURE)``.  ``SystemExit`` derives from
+    ``BaseException``, so it bypasses ``except OSError`` / ``except Exception``
+    entirely — before the fix the process exited with uvicorn's own code 3,
+    which collides with ``_EXIT_DATASOURCE``.
+
+    An earlier version of this test patched ``uvicorn.run`` with
+    ``side_effect=OSError(EADDRINUSE)``, a behaviour real uvicorn never exhibits,
+    so it stayed green while the documented contract was broken.  See
+    ``tests/integration/test_serve_bind_failure.py`` for the end-to-end check
+    against a real uvicorn process.
+    """
     from unittest.mock import patch
+
+    from uvicorn.config import STARTUP_FAILURE
 
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
     monkeypatch.setenv("RECOTEM_ENV", "test")
 
-    exc = OSError(_errno.EADDRINUSE, "address already in use")
-    exc.errno = _errno.EADDRINUSE
-
-    with patch("uvicorn.run", side_effect=exc):
+    with patch("uvicorn.run", side_effect=SystemExit(STARTUP_FAILURE)):
         result = runner.invoke(
             app,
             [
@@ -572,8 +595,60 @@ def test_serve_oserror_returns_dedicated_exit_code(tmp_path: Path, monkeypatch) 
         )
 
     assert result.exit_code == 8, (
-        f"EADDRINUSE OSError from uvicorn.run must map to exit 8 (config), got {result.exit_code}. "
+        f"SystemExit(STARTUP_FAILURE) from uvicorn.run must map to exit 8 "
+        f"(config), got {result.exit_code}. Output: {result.stdout}"
+    )
+
+
+@pytest.mark.parametrize("exit_arg", [None, 0])
+def test_serve_clean_systemexit_exits_0(exit_arg, tmp_path: Path, monkeypatch) -> None:
+    """A zero/None SystemExit escaping uvicorn.run is a clean shutdown → exit 0."""
+    from unittest.mock import patch
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_ENV", "test")
+
+    with patch("uvicorn.run", side_effect=SystemExit(exit_arg)):
+        result = runner.invoke(
+            app,
+            ["serve", "--recipes", str(recipes_dir), "--insecure-no-auth"],
+        )
+
+    assert result.exit_code == 0, (
+        f"SystemExit({exit_arg!r}) must exit 0; got {result.exit_code}. "
         f"Output: {result.stdout}"
+    )
+
+
+@pytest.mark.parametrize("exit_arg", [7, 42, "boom"])
+def test_serve_foreign_systemexit_normalised_to_unknown(
+    exit_arg, tmp_path: Path, monkeypatch
+) -> None:
+    """A SystemExit code we do not recognise must not leak to the shell.
+
+    Only ``STARTUP_FAILURE`` carries meaning for us.  Any other non-zero code
+    originates below recotem and is normalised to ``_EXIT_UNKNOWN`` (1) rather
+    than being passed through, where it could masquerade as a documented
+    recotem exit code (e.g. 7 = HttpFetchError).
+    """
+    from unittest.mock import patch
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_ENV", "test")
+
+    with patch("uvicorn.run", side_effect=SystemExit(exit_arg)):
+        result = runner.invoke(
+            app,
+            ["serve", "--recipes", str(recipes_dir), "--insecure-no-auth"],
+        )
+
+    assert result.exit_code == 1, (
+        f"SystemExit({exit_arg!r}) must normalise to exit 1; "
+        f"got {result.exit_code}. Output: {result.stdout}"
     )
 
 
@@ -2205,6 +2280,14 @@ def test_serve_eaddrinuse_oserror_exits_8(tmp_path: Path, monkeypatch) -> None:
     EADDRINUSE, EACCES, and EADDRNOTAVAIL are bind-related errors that indicate
     a configuration problem (wrong port, wrong address, missing privileges).
     These map to _EXIT_CONFIG (8).
+
+    NOTE: uvicorn 0.30–0.51 never actually propagates a bind ``OSError`` out of
+    ``uvicorn.run`` — it exits with ``SystemExit(STARTUP_FAILURE)`` instead (see
+    ``test_serve_uvicorn_startup_failure_systemexit_exits_8``).  This test
+    therefore covers the ``except OSError`` branch as *defence in depth*: the
+    supported uvicorn range is wide and a future release could go back to
+    letting the OSError through.  It is not evidence that the real bind path
+    works — ``tests/integration/test_serve_bind_failure.py`` is.
     """
     import errno as _errno
     from unittest.mock import patch

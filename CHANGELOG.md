@@ -26,6 +26,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warning, for operators who know their artifact's algorithm is unaffected.
 - `recotem_artifact_load_failures_total` gained a `version_skew` reason label.
 
+### Fixed
+
+- **Cleared the seven HIGH CVEs the container image was carrying.** The trivy
+  gate had been failing since 2026-08-01 on every branch that triggers it.
+  Three findings were real dependencies pulled in by the bigquery/gcs/s3
+  extras and are fixed by relocking -- `aiohttp` 3.13.5 to 3.14.3
+  (CVE-2026-69244), `cryptography` 49.0.0 to 50.0.1 (CVE-2026-69247), and
+  `pyasn1` 0.6.3 to 0.6.4 (CVE-2026-59884/59885/59886). The other two were
+  inside pip's vendor tree (`pip/_vendor/msgpack` 1.1.2 and
+  `pip/_vendor/pkg_resources` from setuptools 70.3.0), which no pip release
+  fixes -- 26.2.1 is the latest and still vendors both.
+- **pip is no longer shipped in the Docker image.** uv performs every install,
+  pip was never invoked, and it had become a standing source of HIGH findings
+  that upgrading could no longer clear. **`python -m pip` no longer works
+  inside the image**; rebuild to change dependencies, or run
+  `python -m ensurepip` if pip is genuinely needed.
+
 ### Changed
 
 - **irspack upgraded from 0.4.2 to 0.5.0.** irspack 0.5.0 adds feature-aware

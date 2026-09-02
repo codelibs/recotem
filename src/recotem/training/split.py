@@ -1,7 +1,10 @@
 """Train/test split wrapper around irspack.
 
 Implements the three recipe split schemes:
-- ``random``      → ``irspack.split_dataframe_partial_user_holdout`` (no time_column).
+- ``random``      → ``irspack.split_dataframe_partial_user_holdout`` with
+                    ``time_column`` forced to ``None``, so the holdout is
+                    uniform at random per user even when the recipe declares a
+                    time column.
 - ``time_user``   → same helper, with ``time_column`` set so each user's most
                     recent interactions are held out.
 - ``time_global`` → global timestamp quantile cutoff via
@@ -34,6 +37,10 @@ def split_interactions(
 ) -> tuple[sps.spmatrix, sps.spmatrix, int]:
     """Split *df* into train and validation sparse matrices.
 
+    *time_column* is honoured only by the two time-based schemes. Under
+    ``random`` it is ignored outright, so callers may pass
+    ``schema.time_column`` unconditionally without changing the split.
+
     Returns
     -------
     X_train_full:
@@ -58,6 +65,18 @@ def split_interactions(
             "configured in schema.time_column."
         )
 
+    # `random` means "hold out uniformly at random per user"; the time column
+    # is no part of that definition.  Normalise it away HERE rather than at the
+    # call site, because irspack's splitter switches to a per-user *recency*
+    # holdout the moment it is handed a ``time_column`` — so any caller that
+    # forwards ``schema.time_column`` unconditionally would silently get a
+    # ``time_user`` split while asking for ``random``.  The training pipeline
+    # does exactly that, and legitimately so: the column is still parsed and
+    # validated regardless of scheme.  Normalising on this side keeps the
+    # scheme the single source of truth for every present and future caller.
+    if scheme == "random":
+        time_column = None
+
     try:
         if scheme == "time_global":
             assert time_column is not None  # narrowed by the check above
@@ -69,8 +88,8 @@ def split_interactions(
                 split_config=split_config,
             )
         else:
-            # `random` (time_column is None) and `time_user` (time_column set)
-            # both use partial_user_holdout.
+            # `random` (time_column normalised to None above) and `time_user`
+            # (time_column set) both use partial_user_holdout.
             dataset, _ = split_dataframe_partial_user_holdout(
                 df,
                 user_column=user_column,

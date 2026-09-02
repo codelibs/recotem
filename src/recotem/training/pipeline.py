@@ -385,6 +385,9 @@ def _run_training_locked(
     # 4. Split.
     # ------------------------------------------------------------------
     bound_logger.info("splitting_data")
+    # `time_col` is forwarded regardless of split scheme: the column is parsed
+    # and validated for every recipe that declares one. `split_interactions`
+    # ignores it under `scheme: random` so that stays a uniform-random holdout.
     X_train_full, X_val_test, val_offset = split_interactions(
         df,
         user_column=user_col,

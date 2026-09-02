@@ -28,6 +28,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The published Docker image could not start.** `docker run ghcr.io/codelibs/recotem:2.0.0 --help`
+  failed with `exec /opt/venv/bin/recotem: no such file or directory`, on every
+  tag and both architectures. Two defects compounded: `uv sync` ran before
+  `COPY src/` and left an *editable* stub in the venv (dist-info pointing at
+  `/build`, no package directory), while the `uv pip install --no-deps .` that
+  was meant to install the real package was redirected to the builder stage's
+  `/usr/local` by `UV_SYSTEM_PYTHON=1` and never reached the runtime stage; and
+  the venv was built at `/build/.venv` then copied to `/opt/venv`, leaving
+  console-script shebangs pointing at a path that does not exist at runtime.
+  The venv is now built directly at `/opt/venv` and every install names its
+  interpreter explicitly.
+- **`docker.yml` now runs the image it builds.** A `smoke` job starts the built
+  image before anything is pushed (`build` gains `needs: smoke`) and asserts
+  that `--help` exits 0, that `recotem` and `irspack` import, that `/v1/health`
+  returns 200, that bare `/health` returns 404, and that the image's own
+  HEALTHCHECK reaches `healthy`. The previous workflow only built, pushed and
+  scanned — it never executed the artifact, which is how the broken image above
+  shipped with a green build.
+- **Health probes pointed at `/health`, which is a 404.** The API router is
+  mounted under `/v1`, so the correct path is `/v1/health`. The Dockerfile
+  HEALTHCHECK, the Compose healthcheck, all three Helm probes (startup,
+  readiness, liveness), the `examples/k8s` probes, and the deployment docs all
+  used the bare path. The Helm chart in particular could never pass its
+  startupProbe and would enter CrashLoopBackOff.
+- **Compose training silently did nothing.** `compose.yaml` mounts the
+  artifacts volume at `/workspace/artifacts`, a path the image did not
+  pre-create, so Docker created it as `root:root` and `appuser` could not write
+  there. The image now creates and owns it.
+- `docs/deployment/docker.md` showed a health response in the
+  `/v1/health/details` shape rather than the `{status,total,loaded}` that
+  `/v1/health` actually returns, and described the metrics endpoint as
+  `/metrics` without noting that it is `/v1/metrics` and requires an API key.
 - **Cleared the seven HIGH CVEs the container image was carrying.** The trivy
   gate had been failing since 2026-08-01 on every branch that triggers it.
   Three findings were real dependencies pulled in by the bigquery/gcs/s3

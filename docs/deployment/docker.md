@@ -70,7 +70,7 @@ services:
     healthcheck:
       test:
         - "CMD-SHELL"
-        - "python -c \"import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).status == 200 else 1)\""
+        - "python -c \"import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/v1/health', timeout=5).status == 200 else 1)\""
       interval: 30s
       timeout: 10s
       retries: 3
@@ -107,7 +107,7 @@ mkdir -p ./artifacts && chown 1000:1000 ./artifacts
 
 Named Docker volumes (as in `compose.yaml`) are pre-created with the right ownership and need no chown. The container also has `readOnlyRootFilesystem` semantics in mind — `/tmp` is the only writable location outside mounted volumes.
 
-**Image-level HEALTHCHECK.** The Dockerfile declares its own `HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3` that probes the public `/health` endpoint with `urllib.request.urlopen(f'http://127.0.0.1:{RECOTEM_PORT}/health', timeout=3)` (so it picks up an overridden `RECOTEM_PORT`). For one-shot `train` containers this fires after the process has already exited and causes no spurious failures. The Compose-level healthcheck shown in the annotated example also targets `/health` (with a slightly looser `timeout=5` inside the Python probe) and overrides the image default for the `serve` service — orchestrators should rely on the HTTP 200 response from `/health`.
+**Image-level HEALTHCHECK.** The Dockerfile declares its own `HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3` that probes the public `/v1/health` endpoint with `urllib.request.urlopen(f'http://127.0.0.1:{RECOTEM_PORT}/v1/health', timeout=3)` (so it picks up an overridden `RECOTEM_PORT`). For one-shot `train` containers this fires after the process has already exited and causes no spurious failures. The Compose-level healthcheck shown in the annotated example also targets `/v1/health` (with a slightly looser `timeout=5` inside the Python probe) and overrides the image default for the `serve` service — orchestrators should rely on the HTTP 200 response from `/v1/health`. Note the `/v1` prefix: the API router is mounted there, so a probe pointed at bare `/health` gets a 404 and the container never reports healthy.
 
 **Bind port only on localhost on the host if you put a reverse proxy in front:**
 
@@ -159,15 +159,38 @@ docker run --rm \
 | `RECOTEM_ARTIFACT_ROOT` | no | `""` | If set, local `output.path` must resolve under this directory (symlink-escape guard) |
 | `RECOTEM_LOCK_DIR` | no | `""` | Override directory for per-recipe training lock files. Needed when `output.path` is a remote URI (lock files must be host-local). Falls back to a temp dir under the system temp directory. |
 | `RECOTEM_METADATA_FIELD_DENY` | no | `""` | Comma-separated column names stripped from `/v1/recipes/{name}:recommend` and `:recommend-related` responses after the metadata join |
-| `RECOTEM_METRICS_ENABLED` | no | `""` | Set to `1`/`true`/`yes`/`on` to enable the Prometheus `/metrics` endpoint. Requires `recotem[metrics]` extra. |
+| `RECOTEM_METRICS_ENABLED` | no | `""` | Set to `1`/`true`/`yes`/`on` to enable the Prometheus endpoint at `/v1/metrics` (mounted under the `/v1` router prefix; bare `/metrics` is a 404, and the route requires an API key). Requires `recotem[metrics]` extra. |
 | `RECOTEM_STARTUP_PARALLELISM` | no | `""` (auto) | Number of parallel threads used to load artifacts at startup. Default is `min(len(recipes), 8)`. Clamped 1–32. Set to `1` for sequential loading (useful for memory-constrained environments or debugging). |
 
 *`auto` switches to `console` for an interactive TTY and `json` otherwise.
 
 ## Health check
 
+`/v1/health` is the unauthenticated probe endpoint. It returns aggregate counts
+only — no per-recipe detail:
+
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:8080/v1/health
+```
+
+```json
+{
+  "status": "ok",
+  "total": 1,
+  "loaded": 1
+}
+```
+
+`status` is `degraded` — and the response code is **503** — whenever any recipe
+failed to load (`loaded < total`); otherwise it is `ok` with **200**. A serve
+process with no recipes at all reports `ok`. A Kubernetes readiness probe should
+check HTTP 200 from `/v1/health`.
+
+For per-recipe diagnostics use `/v1/health/details`, which requires an API key
+and likewise answers 503 when degraded:
+
+```bash
+curl -H "X-API-Key: <plaintext>" http://localhost:8080/v1/health/details
 ```
 
 ```json
@@ -183,5 +206,3 @@ curl http://localhost:8080/health
   }
 }
 ```
-
-`status` is `degraded` if any recipe failed to load. A Kubernetes readiness probe should check HTTP 200 from `/health`.

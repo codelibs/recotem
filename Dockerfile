@@ -63,6 +63,19 @@ FROM base AS builder
 
 WORKDIR /build
 
+# Build the project venv directly at its final runtime path.
+#
+# Two reasons this must not be the default `/build/.venv`:
+#   1. Console scripts get an absolute shebang (`#!<venv>/bin/python`).  A venv
+#      built at /build/.venv and copied to /opt/venv leaves `bin/recotem`
+#      pointing at a path that does not exist in the runtime stage, so the
+#      entrypoint fails with "exec /opt/venv/bin/recotem: no such file or
+#      directory".  Building at /opt/venv makes the shebang correct as-is.
+#   2. `UV_SYSTEM_PYTHON=1` (set in the base stage) makes a bare `uv pip
+#      install` target /usr/local rather than the venv.  Every install below
+#      therefore names its interpreter explicitly.
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+
 # Copy dependency manifests + LICENSE first for layer caching.
 # LICENSE is required because pyproject.toml declares `license = { file = "LICENSE" }`
 # and hatchling reads it during the build performed by `uv sync` / `uv pip install`.
@@ -84,32 +97,45 @@ COPY src/ ./src/
 # Build and install the recotem wheel into the virtual env.
 # Dependencies (including extras) are already resolved by `uv sync` above,
 # so --no-deps is sufficient — extras only add deps, not new package code.
-RUN uv pip install --no-deps .
+#
+# --python is mandatory: `UV_SYSTEM_PYTHON=1` would otherwise send this into
+# /usr/local, which the runtime stage never copies, leaving only the editable
+# stub `uv sync` wrote before `COPY src/` and an unimportable `recotem`.
+RUN uv pip install --python /opt/venv/bin/python --no-deps .
 
 # ── stage: runtime ────────────────────────────────────────────────────────────
 FROM base AS runtime
 
-# Copy the populated virtual env from builder.
-COPY --from=builder /build/.venv /opt/venv
+# Copy the populated virtual env from builder.  Source and destination paths
+# must match so the console-script shebangs stay valid (see builder stage).
+COPY --from=builder /opt/venv /opt/venv
 
 ENV PATH="/opt/venv/bin:$PATH" \
     VIRTUAL_ENV="/opt/venv"
 
 # Default data directories.  Operators bind-mount recipes and artifacts.
-RUN mkdir -p /recipes /artifacts \
- && chown -R appuser:appuser /recipes /artifacts
+#
+# /workspace/artifacts is pre-created (not just /artifacts) because compose.yaml
+# mounts the artifacts volume there, under the WORKDIR.  Docker creates a
+# missing mountpoint as root:root, which appuser cannot write; training would
+# then fail to take its `<output>.lock` and — since lock.py maps EACCES to
+# "contended" — skip silently with exit 0.  Owning the directory in the image
+# makes Docker propagate appuser ownership onto a fresh named volume.
+RUN mkdir -p /recipes /artifacts /workspace/artifacts \
+ && chown -R appuser:appuser /recipes /artifacts /workspace
 
 USER appuser
 
 WORKDIR /workspace
 
-# Default HEALTHCHECK probes the /health endpoint of the serve process.
+# Default HEALTHCHECK probes the /v1/health endpoint of the serve process.
+# The API router is mounted under the /v1 prefix, so bare /health is a 404.
 # This makes sense for the primary serve mode. For one-shot train jobs the
 # container exits before any healthcheck fires, so the probe does not cause
 # spurious failures. Operators can override with --no-healthcheck or a custom
 # HEALTHCHECK in their compose service / k8s liveness probe.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD ["python", "-c", "import os,sys,urllib.request; port=os.environ.get('RECOTEM_PORT','8080'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/health',timeout=3).status==200 else 1)"]
+    CMD ["python", "-c", "import os,sys,urllib.request; port=os.environ.get('RECOTEM_PORT','8080'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/v1/health',timeout=3).status==200 else 1)"]
 
 ENTRYPOINT ["recotem"]
 CMD ["--help"]

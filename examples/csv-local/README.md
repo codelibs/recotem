@@ -7,7 +7,7 @@ shipped alongside the recipe. No network access required.
 
 - `recipe.yaml` — uses local path `examples/csv-local/interactions.csv.gz`
 - `interactions.csv.gz` — small synthetic dataset (`user_id`, `item_id`,
-  `timestamp`)
+  `timestamp`): 221 rows, 20 distinct users, 15 distinct items
 
 ## Run
 
@@ -25,7 +25,11 @@ The artifact is written to `./artifacts/csv_local_example.<sha>.recotem`
 
 - A `csv` data source with explicit `dtype` overrides for ID columns.
 - `time_user` train/test split (requires `time_column` on the schema).
-- IALS, CosineKNN, and TopPop algorithms compared via Optuna ndcg@20.
+- IALS, CosineKNN, and TopPop algorithms compared via Optuna ndcg@10.
+
+`training.cutoff` is 10 because the evaluation cutoff must not exceed the
+number of distinct items (15 here) — irspack raises `cutoff must not exeeed
+the number of items.` otherwise. Raise it only alongside a larger dataset.
 
 ## When to prefer this over `tutorial-purchase-log`
 

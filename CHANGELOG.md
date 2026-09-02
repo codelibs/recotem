@@ -96,6 +96,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   covered this mocked an `OSError` real uvicorn never raises; it is replaced,
   and integration tests now exercise real bind collisions in a subprocess.
 
+- **`examples/csv-local` failed when followed as written.** The recipe asked
+  for `cutoff: 20` against bundled data holding only 15 distinct items, so
+  irspack raised `ValueError: cutoff must not exeeed the number of items.` and
+  training exited 1. The cutoff is now 10, and both the recipe and the README
+  state the constraint. (Not a regression: the same reproduction fails on
+  irspack 0.4.2, 0.5.0 and 0.5.2 alike.)
+- **`examples/plugins/echo-source` could not be used from a recipe.** Its
+  `Config` declared no `type` field, so `train` exited 2 with "Recipe source
+  has no discriminator 'type' field". `docs/plugin-authoring.md` was the root
+  cause: it offered "let `extra="ignore"` discard it" as an option, which
+  cannot work, because pydantic refuses to discriminate on anything but a
+  `Literal`. The guide now states the requirement,
+  `validate_plugin_contract()` enforces it, and an integration test drives the
+  full recipe-YAML-to-train path that the previous class-only unit tests never
+  exercised.
+
 ### Changed
 
 - **irspack upgraded from 0.4.2 to 0.5.2.** irspack 0.5.0 adds feature-aware

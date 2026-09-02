@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    Protocol,
+    get_args,
+    get_origin,
+    runtime_checkable,
+)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -112,6 +121,56 @@ class DataSource(Protocol):
     def fetch(self, ctx: FetchContext) -> pd.DataFrame: ...
 
 
+def _validate_config_discriminator(cls: type) -> None:
+    """Assert that ``cls.Config`` carries the ``type`` discriminator field.
+
+    ``recotem.datasource.registry.build_source_config_union`` assembles every
+    registered ``Config`` into a pydantic discriminated union keyed on ``type``,
+    and ``recotem.training.pipeline`` reads that field back to resolve the source
+    class.  A ``Config`` without it still *loads* (pydantic's default
+    ``extra="ignore"`` silently drops the YAML ``type:`` key) but fails at train
+    time with "Recipe source has no discriminator 'type' field.", so the check
+    belongs at plugin-discovery time where the message can name the culprit.
+    """
+    type_name = cls.type_name  # type: ignore[attr-defined]
+    declaration = f'type: Literal["{type_name}"] = "{type_name}"'
+    hint = (
+        f"Declare '{declaration}' on the Config. "
+        "See docs/plugin-authoring.md for the plugin contract."
+    )
+
+    model_fields = getattr(cls.Config, "model_fields", None)  # type: ignore[attr-defined]
+    if not isinstance(model_fields, dict):
+        raise DataSourceError(
+            f"DataSource plugin '{cls.__qualname__}' has a 'Config' that is not a "
+            f"pydantic BaseModel subclass. {hint}"
+        )
+
+    field_info = model_fields.get("type")
+    if field_info is None:
+        raise DataSourceError(
+            f"DataSource plugin '{cls.__qualname__}' has a Config without the "
+            f"required 'type' discriminator field. {hint}"
+        )
+
+    annotation = field_info.annotation
+    if get_origin(annotation) is not Literal:
+        raise DataSourceError(
+            f"DataSource plugin '{cls.__qualname__}' declares Config.type as "
+            f"{annotation!r}, which pydantic cannot discriminate on. "
+            f"It must be a typing.Literal. {hint}"
+        )
+
+    literal_values = get_args(annotation)
+    if literal_values != (type_name,):
+        raise DataSourceError(
+            f"DataSource plugin '{cls.__qualname__}' declares Config.type as "
+            f"Literal{list(literal_values)!r}, which does not match its "
+            f"type_name {type_name!r}. The registry resolves sources by "
+            f"type_name, so the two must agree exactly. {hint}"
+        )
+
+
 def validate_plugin_contract(cls: type) -> None:
     """Assert that *cls* satisfies the DataSource plugin contract.
 
@@ -134,6 +193,8 @@ def validate_plugin_contract(cls: type) -> None:
             f"DataSource plugin '{cls.__qualname__}' has an invalid 'type_name': "
             "must be a non-empty string."
         )
+
+    _validate_config_discriminator(cls)
 
     if not isinstance(cls.extras_required, list):  # type: ignore[union-attr]
         raise DataSourceError(

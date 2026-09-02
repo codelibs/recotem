@@ -25,7 +25,7 @@ Allowed dependency direction (from spec Section 4):
 from __future__ import annotations
 
 import random
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -72,6 +72,12 @@ class EchoSource:
         All fields have defaults so the source can be used with minimal YAML.
         """
 
+        # REQUIRED on every plugin Config.  Recotem assembles all registered
+        # Config classes into a pydantic discriminated union keyed on ``type``,
+        # so the field must exist and must be a ``Literal`` matching type_name.
+        # Without it the recipe loads but ``source.type`` is dropped, and
+        # training fails with "Recipe source has no discriminator 'type' field."
+        type: Literal["echo"] = "echo"
         n_users: int = Field(default=10, ge=1, description="Number of distinct users.")
         n_items: int = Field(default=20, ge=1, description="Number of distinct items.")
         n_rows: int = Field(

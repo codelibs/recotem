@@ -48,7 +48,7 @@ from recotem._irspack_compat import check_artifact_irspack_version
 from recotem.artifact.format import ArtifactError, parse_header_from_bytes
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
 from recotem.config import ConfigError, ServeConfig, get_max_body_bytes
-from recotem.recipe.errors import describe_recipe_load_failure
+from recotem.recipe.errors import format_recipe_load_failure
 from recotem.recipe.loader import load_recipes_directory_lenient
 from recotem.serving import metrics as _metrics
 from recotem.serving._header_utils import extract_algorithms, normalize_config_digest
@@ -370,7 +370,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
                     header={},
                     kid="",
                     metadata_df=None,
-                    last_load_error=f"{describe_recipe_load_failure(exc)}: {exc}",
+                    last_load_error=format_recipe_load_failure(exc, path=yaml_path),
                     artifact_path="",
                     loaded=False,
                     skipped=True,

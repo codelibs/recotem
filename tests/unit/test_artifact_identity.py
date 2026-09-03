@@ -85,16 +85,16 @@ def test_non_string_name_refuses_and_is_reported_by_type() -> None:
 def test_refusal_survives_health_error_truncation() -> None:
     """Both names must fit the 200-char ``last_load_error`` budget.
 
-    ``_sanitize_error`` truncates to 200 chars, which is what
+    ``sanitize_load_error`` truncates to 200 chars, which is what
     ``/v1/health/details`` exposes.  A message that buries the two names past
     that point is useless exactly where an operator reads it.
     """
-    from recotem.serving.app import _sanitize_error
+    from recotem.serving.registry import sanitize_load_error
 
     long_a, long_b = "a" * 64, "b" * 64
     with pytest.raises(ArtifactError) as excinfo:
         check_artifact_recipe_name({"recipe_name": long_b}, name=long_a)
-    surfaced = _sanitize_error(str(excinfo.value))
+    surfaced = sanitize_load_error(str(excinfo.value))
     assert long_a in surfaced, "loading recipe's name truncated away"
     assert long_b in surfaced, "artifact's recipe name truncated away"
 

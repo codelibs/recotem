@@ -35,6 +35,25 @@ from tests.conftest import ACTIVE_KEY_HEX
 _SECRET_SEGMENT = "customer-catalog"
 _METADATA_URL = f"https://127.0.0.1:9/private/{_SECRET_SEGMENT}/items.csv"
 
+_RECIPE_NAME = "news"
+
+
+def _news_artifact(make_artifact) -> bytes:
+    """A signed artifact whose header names the recipe it is served under.
+
+    ``conftest``'s default header says ``recipe_name: "test"``, which
+    ``check_artifact_recipe_name`` refuses for a recipe named "news" —
+    before the metadata failure these tests are about is ever reached.
+    The header has to agree with the recipe for the load to get that far.
+    """
+    return make_artifact(
+        header_dict={
+            "recipe_name": _RECIPE_NAME,
+            "trained_at": "2026-01-01T00:00:00Z",
+            "best_class": "TopPopRecommender",
+        }
+    )
+
 
 @pytest.fixture(autouse=True)
 def _enforce_ssrf_guard(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,7 +69,7 @@ def _enforce_ssrf_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 def _recipe_with_remote_metadata(artifact_path: Path) -> Any:
     """A recipe whose item_metadata load fails with a URI-carrying message."""
     return types.SimpleNamespace(
-        name="news",
+        name=_RECIPE_NAME,
         output=types.SimpleNamespace(path=str(artifact_path)),
         item_metadata=types.SimpleNamespace(
             type="csv",
@@ -87,7 +106,7 @@ def test_startup_path_sanitizes_load_error(
     tmp_path: Path, make_artifact, single_key_ring
 ) -> None:
     artifact_path = tmp_path / "model.recotem"
-    artifact_path.write_bytes(make_artifact())
+    artifact_path.write_bytes(_news_artifact(make_artifact))
 
     entry, reason = _try_load_artifact(
         _recipe_with_remote_metadata(artifact_path), single_key_ring, _serve_config()
@@ -107,7 +126,7 @@ def test_watcher_path_sanitizes_load_error(
     report success no matter what.
     """
     artifact_path = tmp_path / "model.recotem"
-    artifact_path.write_bytes(make_artifact())
+    artifact_path.write_bytes(_news_artifact(make_artifact))
 
     recipe = _recipe_with_remote_metadata(artifact_path)
     state = _RecipeWatchState(recipe=recipe, artifact_path=str(artifact_path))

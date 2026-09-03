@@ -54,7 +54,7 @@ from recotem._irspack_compat import (
 from recotem._log_safe import format_kid_for_log as _format_kid_for_log
 from recotem._metrics_watcher import inc_recipes_dir_scan_failure as _inc_scan_failure
 from recotem.artifact.format import ArtifactError
-from recotem.recipe.errors import describe_recipe_load_failure
+from recotem.recipe.errors import format_recipe_load_failure
 from recotem.serving import metrics as _metrics
 from recotem.serving._header_utils import extract_algorithms, normalize_config_digest
 from recotem.serving._naming import dedup_stub_name
@@ -481,9 +481,7 @@ class ArtifactWatcher(threading.Thread):
             lambda n: n in self._states or self._registry.get(n) is not None,
         )
 
-        error_msg = (
-            f"{describe_recipe_load_failure(error)} in '{yaml_file.name}': {error}"
-        )
+        error_msg = format_recipe_load_failure(error, path=yaml_file)
         stub = ModelEntry(
             name=stub_name,
             recommender=None,
@@ -610,8 +608,9 @@ class ArtifactWatcher(threading.Thread):
                     # back to the actual cause.
                     self._registry.set_load_error(
                         existing_name,
-                        f"{describe_recipe_load_failure(exc)} on rescan "
-                        f"in '{yaml_file.name}': {exc}",
+                        format_recipe_load_failure(
+                            exc, path=yaml_file, context="on rescan"
+                        ),
                     )
                     # Remember that *we* own the outstanding error so a later
                     # successful reparse can clear it without also clearing an

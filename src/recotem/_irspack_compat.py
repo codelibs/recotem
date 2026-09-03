@@ -236,8 +236,10 @@ def check_artifact_irspack_version(
     # Front-loaded on purpose: serve truncates last_load_error to 200 chars for
     # /health/details, so the remedy, the recipe name, best_class and BOTH
     # versions must land inside that budget even at a 64-char recipe name.
-    # tests/unit/test_irspack_compat.py measures this against _sanitize_error
-    # rather than trusting it to eye. The rest still reaches the logs above.
+    # tests/unit/test_irspack_compat.py measures this against the sanitizer
+    # serve actually applies (registry.sanitize_load_error, enforced on every
+    # write to the field) rather than trusting it to eye. The rest still
+    # reaches the logs above.
     raise ArtifactError(
         f"{SKEW_MSG_PREFIX} retrain recipe '{name}' with irspack {running} "
         f"— {label} {header_version}→{running} is not verified compatible. "

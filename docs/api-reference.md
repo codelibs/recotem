@@ -21,7 +21,7 @@ recipe-name constraint enforced by the recipe loader).
 |---|---|---|---|---|
 | `user_id` | string | yes | – | 1-256 chars |
 | `limit` | int | no | 10 | 1..1000 |
-| `exclude_items` | string[] \| null | no | null | ≤1000 items |
+| `exclude_items` | string[] \| null | no | null | ≤1000 items. Post-filtered off the ranked list, so the response can be **shorter than `limit`**. See [Item exclusion](#item-exclusion). |
 | `user_features` | object \| null | no | null | Raw feature values, keyed by the recipe's `features.user` column names. See [Feature-aware cold start](#feature-aware-cold-start) below. ≤64 keys. |
 
 **Response body:** see `RecommendResponse` in `src/recotem/serving/schemas.py`.
@@ -37,7 +37,7 @@ Seed-item → items.
 |---|---|---|---|---|
 | `seed_items` | string[] | yes | – | 1-100 items |
 | `limit` | int | no | 10 | 1..1000 |
-| `exclude_items` | string[] \| null | no | null |  |
+| `exclude_items` | string[] \| null | no | null | ≤1000 items. Post-filtered off the ranked list, so the response can be **shorter than `limit`**. See [Item exclusion](#item-exclusion). |
 | `user_features` | object \| null | no | null | Raw feature values, keyed by the recipe's `features.user` column names. Adds a profile prior to the seed-history solve. See [Feature-aware cold start](#feature-aware-cold-start). ≤64 keys. |
 | `item_features` | object[string, object] \| null | no | null | Raw feature values for seed items absent from training, keyed by seed item id. ≤100 keys; each value ≤64 keys. See [Feature-aware cold start](#feature-aware-cold-start). |
 
@@ -145,6 +145,46 @@ Prometheus exposition.  Excluded from OpenAPI.  Requires
 
 **Requires `X-API-Key`** — configure your Prometheus scraper with an
 `authorization` block or `http_headers` accordingly.
+
+## Item exclusion
+
+`exclude_items` is a **post-filter, not a constraint on the ranker.** The
+model is asked for exactly `limit` items, and any of those that appear in
+`exclude_items` are then dropped. Excluded items are not backfilled, so a
+response can be **shorter than `limit`** — by however many of the excluded ids
+happened to rank inside the top `limit`:
+
+```
+limit=5, no exclude          -> 5 items  ['40', '3', 'beta', 'mmm', 'aaa']
+limit=5, excluding the top 2 -> 3 items  ['beta', 'mmm', 'aaa']
+```
+
+This is the behaviour on all four inference verbs, including each element of
+the two batch verbs. Ids in `exclude_items` that the model never ranked are
+simply no-ops.
+
+**Plan for it client-side.** The common case — "don't recommend what this user
+already bought" — is exactly the case where exclusions are *likely* to rank
+highly, so the shortfall is not a rare edge. If you need a full page of `n`
+items, request `limit = n + len(exclude_items)` and trim the response yourself.
+There is no server-side option to backfill.
+
+**Why it is not a ranker constraint.** Pushing `exclude_items` down into the
+ranker (as `forbidden_item_ids`) would make it backfill to a full `limit`.
+That option is deliberately not taken, because it is only available on some
+code paths: the feature-aware cold-start paths could honour it, while the
+pre-existing paths post-filter. The same request would then return a different
+number of items depending on whether feature values were supplied — one
+parameter quietly meaning two different things. Uniformly post-filtering
+everywhere is the trade the implementation makes; see the reasoning in
+`src/recotem/_idmap.py`.
+
+Note the contrast with `:recommend-related`'s own seed handling: the seed
+items *are* removed via `forbidden_item_ids`, so the ranker **does** backfill
+around them and you still get `limit` items. A client that asked "what goes
+with `i0`" should not spend a slot on `i0` itself. Seed removal is the
+server's own business and is invisible in the count; client-requested
+`exclude_items` is not.
 
 ## Feature-aware cold start
 

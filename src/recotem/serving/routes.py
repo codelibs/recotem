@@ -573,11 +573,21 @@ def make_router(
         # lock acquisition so the two numbers are consistent with each other.
         # /health/details performs a per-recipe error scan for richer operator
         # diagnostics; see health_details below.
-        loaded_count, total = registry.health_counts()
+        loaded_count, total, skipped_count = registry.health_counts()
         overall = "ok" if total == 0 or loaded_count == total else "degraded"
         if overall == "degraded":
             response.status_code = 503
-        return {"status": overall, "total": total, "loaded": loaded_count}
+        body: dict[str, Any] = {
+            "status": overall,
+            "total": total,
+            "loaded": loaded_count,
+        }
+        # Unparseable recipe files are excluded from `total` so one typo does
+        # not fail readiness for every other recipe, but they are still
+        # counted here so an operator (and their alerting) can see them.
+        if skipped_count:
+            body["skipped"] = skipped_count
+        return body
 
     @router.get(
         "/health/details",
@@ -596,6 +606,11 @@ def make_router(
             snapshot = registry.health_snapshot()
             overall = "ok"
             for entry_health in snapshot.values():
+                # A skipped file is reported (with its parse error) but does
+                # not degrade status — it declares no recipe, so there is
+                # nothing that stopped serving.  Mirrors /health's `total`.
+                if entry_health.get("skipped"):
+                    continue
                 if not entry_health.get("loaded", True) or entry_health.get("error"):
                     overall = "degraded"
                     break

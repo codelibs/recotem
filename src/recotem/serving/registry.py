@@ -71,6 +71,17 @@ class ModelEntry:
         which recipes are not serving, and the v1 inference endpoints
         (``:recommend``, ``:recommend-related``, ``:batch-recommend``,
         ``:batch-recommend-related``) should reject them with 503.
+    skipped:
+        ``True`` for a recipe *file* that could not be parsed at all (YAML
+        syntax error, schema violation).  Such a file declares no recipe —
+        it has no name, no artifact, and nothing to serve — so it is
+        deliberately excluded from the readiness counts returned by
+        :meth:`ModelRegistry.health_counts`.  ``docs/operations.md``
+        (``recipe_load_error_skipped``) documents this as "the recipe is
+        skipped": a typo in one file must not take the whole server out of
+        rotation.  The entry is still registered (keyed by file stem) so it
+        stays visible in ``/v1/health/details``, and the inference endpoints
+        still reject it with 503 because ``loaded`` is ``False``.
     """
 
     name: str
@@ -82,6 +93,7 @@ class ModelEntry:
     last_load_error: str | None = None
     artifact_path: str = ""
     loaded: bool = True
+    skipped: bool = False
     # Internal watcher state: (mtime_or_etag, sha256_hex)
     _loaded_marker: tuple[Any, str] = field(default_factory=lambda: (None, ""))
     # v1 additions. The watcher sets loaded_at_unix on every successful
@@ -152,6 +164,8 @@ class ModelEntry:
     def health_dict(self) -> dict[str, Any]:
         """Summarise entry state for the ``/health`` endpoint."""
         d: dict[str, Any] = {"loaded": self.loaded}
+        if self.skipped:
+            d["skipped"] = True
         if self.trained_at:
             d["trained_at"] = self.trained_at
         if self.best_class:
@@ -210,6 +224,9 @@ class ModelRegistry:
         # Maintained atomically inside the lock on every mutation that changes
         # entry.loaded; enables O(1) loaded_count() without an O(N) walk.
         self._loaded_count: int = 0
+        # Same discipline for entry.skipped, so health_counts() can subtract
+        # unparseable recipe files from the readiness total in O(1).
+        self._skipped_count: int = 0
 
     # ------------------------------------------------------------------
     # Core CRUD
@@ -241,6 +258,9 @@ class ModelRegistry:
                 self._loaded_count += 1
             elif not entry.loaded and old_loaded:
                 self._loaded_count -= 1
+            self._skipped_count += int(entry.skipped) - int(
+                old.skipped if old is not None else False
+            )
 
     def replace_with_marker(
         self, name: str, entry: ModelEntry, marker: tuple[Any, str]
@@ -262,6 +282,9 @@ class ModelRegistry:
                 self._loaded_count += 1
             elif not entry.loaded and old_loaded:
                 self._loaded_count -= 1
+            self._skipped_count += int(entry.skipped) - int(
+                old.skipped if old is not None else False
+            )
 
     def remove(self, name: str) -> None:
         """Remove the entry for *name*.  No-op if not present.
@@ -272,6 +295,8 @@ class ModelRegistry:
             old = self._entries.pop(name, None)
             if old is not None and old.loaded:
                 self._loaded_count -= 1
+            if old is not None and old.skipped:
+                self._skipped_count -= 1
 
     def set_load_error(self, name: str, error: str | None) -> bool:
         """Record the latest artifact-load failure (if any) on the entry.
@@ -320,16 +345,27 @@ class ModelRegistry:
         with self._lock:
             return self._loaded_count
 
-    def health_counts(self) -> tuple[int, int]:
-        """Return ``(loaded, total)`` under a single lock acquisition.
+    def health_counts(self) -> tuple[int, int, int]:
+        """Return ``(loaded, total, skipped)`` under a single lock acquisition.
 
         Avoids the TOCTOU window between a separate ``loaded_count()`` and
-        ``health_snapshot()`` call in the ``/v1/health`` handler: both
-        numbers are read atomically so they are guaranteed to be consistent
-        with each other even if a hot-swap occurs between calls.
+        ``health_snapshot()`` call in the ``/v1/health`` handler: the numbers
+        are read atomically so they are guaranteed to be consistent with each
+        other even if a hot-swap occurs between calls.
+
+        ``total`` counts only *loadable* recipes — entries flagged
+        ``skipped`` (a file that could not be parsed as a recipe at all) are
+        excluded and reported separately.  Otherwise a single YAML syntax
+        error would hold ``loaded < total`` forever and keep the readiness
+        probe failing permanently; see the ``skipped`` attribute on
+        :class:`ModelEntry`.
         """
         with self._lock:
-            return self._loaded_count, len(self._entries)
+            return (
+                self._loaded_count,
+                len(self._entries) - self._skipped_count,
+                self._skipped_count,
+            )
 
     def health_snapshot(self) -> dict[str, dict[str, Any]]:
         """Return per-recipe health info (safe copy, no model objects).

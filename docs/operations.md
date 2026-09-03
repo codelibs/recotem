@@ -46,7 +46,7 @@ This multi-kid pattern enables zero-downtime rotation:
 
    Restart `recotem serve`. Any artifact still signed with the old kid will fail to load and will show up as `loaded: false` in `/v1/health/details`. Retrain those recipes.
 
-   Confirm all recipes loaded successfully. Per-recipe state lives behind the authenticated `/v1/health/details` endpoint — the public `/v1/health` returns only `{status, total, loaded}` aggregates, not the `recipes` map:
+   Confirm all recipes loaded successfully. Per-recipe state lives behind the authenticated `/v1/health/details` endpoint — the public `/v1/health` returns only `{status, total, loaded}` aggregates (plus `skipped` when any recipe file is unparseable — see [Unparseable recipe files](#unparseable-recipe-files)), not the `recipes` map:
 
    ```bash
    # -f / --fail returns exit 22 on 4xx/5xx, which would mask a 503.
@@ -272,7 +272,7 @@ Additional events emitted by the watcher, recipe loader, and size-cap helper tha
 | Event | Level | Emitted by | Significance |
 |-------|-------|-----------|--------------|
 | `recipe_security_violation_skipped` | ERROR | `recipe/loader.py` lenient loader | A recipe file contains a security-category error (path traversal, disallowed scheme, embedded credentials). The recipe is skipped but the server keeps running. **Alertable** — indicates a misconfigured or potentially hostile recipe file. |
-| `recipe_load_error_skipped` | WARN | `recipe/loader.py` lenient loader | A recipe file failed to load for non-security reasons (schema error, YAML parse error). The recipe is skipped. |
+| `recipe_load_error_skipped` | WARN | `recipe/loader.py` lenient loader | A recipe file failed to load for non-security reasons (schema error, YAML parse error). The recipe is skipped — see [Unparseable recipe files](#unparseable-recipe-files). Logged once on transition, not on every watcher tick. |
 | `size_cap_probe_failed` | WARN | `_size_cap.py` | An fsspec `info()` call on an object-store path failed unexpectedly (not `FileNotFoundError` / `PermissionError`). The size cap check was skipped; the subsequent read proceeds but is unbounded by the pre-read cap. Indicates degraded-but-bounded behavior. |
 | `auth_anonymous_bypass` | DEBUG | `serving/auth.py` | Every request that passes without an API key (when `RECOTEM_API_KEYS` is empty). Emitted on every request for access-log correlation. The `mode` field distinguishes `"insecure_no_auth"` (explicit flag) from `"loopback_no_keys"` (no keys configured). |
 | `auth_anonymous_bypass_first_seen` | INFO | `serving/auth.py` | First anonymous request from a given `client_host` (per process). The LRU cache tracking first-seen IPs is bounded to 1024 entries to prevent unbounded memory growth. |
@@ -637,6 +637,42 @@ a stub (`loaded=false`, `error=<reason>`). The server starts, `/v1/health`
 reports `degraded`, and `/v1/recipes/{name}:recommend` (and sibling verbs)
 return 503 (`RECIPE_UNAVAILABLE`). This is intentional: a partial outage
 is recoverable by retraining without restarting the process.
+
+### Unparseable recipe files
+
+A file that cannot be parsed *at all* — YAML syntax error, schema violation —
+is treated differently from a recipe whose artifact failed to load. It
+declares no recipe: it has no name, no artifact, and nothing to serve. Such a
+file is **skipped**:
+
+- It is **excluded from the `total` and `loaded` counts** in `/v1/health`, and
+  reported under a separate `skipped` count instead. `/v1/health` returns `ok`
+  (HTTP 200) when every *loadable* recipe is loaded, so a typo in one file
+  cannot fail a Kubernetes readiness probe for every other recipe in the pod.
+- It **remains visible in `/v1/health/details`**, keyed by its file stem, with
+  `"skipped": true` and an `error` string naming the offending **filename** and
+  the parse error. The file stem is a fabrication — the recipe name is
+  unreadable — so the filename is the identifier that leads back to the cause.
+- `skipped` entries do **not** set `/v1/health/details` to `degraded`; nothing
+  stopped serving.
+
+```json
+{"status": "ok", "total": 3, "loaded": 3, "skipped": 1}
+```
+
+> **Alerting.** Do not page on the `skipped` count — it is a config-quality
+> signal, not an availability one. Alert on it as a warning
+> (`skipped > 0` for more than one deploy cycle) so a broken file is noticed
+> and fixed, while readiness stays keyed to `status`.
+
+The failure is logged once when it first appears and once more on the first
+rescan, then demoted to DEBUG while the file is unchanged: an unfixed file
+would otherwise emit roughly 17k lines a day at the default 5-second watch
+interval, and the condition is already visible in `/v1/health/details`. A
+*different* failure on the same file logs immediately at its normal level.
+
+Fixing or deleting the file clears the entry on the next watcher tick — no
+restart needed.
 
 The startup-only event variants are:
 

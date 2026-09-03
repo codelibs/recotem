@@ -193,6 +193,11 @@ class _RecipeWatchState:
     #: succeeded.  Used by OBS-1 to demote repeated identical errors from
     #: WARNING to DEBUG so log aggregation is not flooded during an outage.
     _last_stat_error_class: str | None = None
+    #: Signature of the most recent load/parse failure, or ``None`` when the
+    #: last attempt succeeded.  Same purpose as ``_last_stat_error_class`` but
+    #: for the read / build / rescan-parse paths, which retry every tick
+    #: because a failed load never advances ``last_marker``.
+    _last_failure_signature: str | None = None
     #: Set to True after the first TypeError from artifact_path + ".sha256"
     #: so subsequent polls skip the sidecar check rather than flooding logs
     #: with the same warning on every poll cycle (M7).
@@ -287,6 +292,16 @@ class ArtifactWatcher(threading.Thread):
            set_load_error on the stub entry rather than silently discarding the
            failure.
 
+        A matching ``_RecipeWatchState`` is registered too.  ``_scan_recipes_dir``
+        derives ``current_names`` from ``_states``, not from the registry, so a
+        name that exists only in ``_yaml_path_to_name`` fails the
+        ``existing_name in current_names`` test on the very first rescan: the
+        file is then treated as brand-new and ``_register_yaml_failure_stub``
+        mints a *second*, de-duplicated entry (``broken`` → ``broken_1``) for the
+        same file.  Seeding ``_states`` here keeps one file to one entry, and
+        also puts the name inside the ``gone`` eviction set so the stub is
+        dropped once the file is fixed or deleted.
+
         Parameters
         ----------
         yaml_path:
@@ -295,6 +310,11 @@ class ArtifactWatcher(threading.Thread):
             The stub name chosen by app.py (usually yaml_path.stem, de-duped).
         """
         self._yaml_path_to_name[yaml_path] = stub_name
+        # recipe=None / artifact_path="": the YAML never parsed, so no output
+        # path is known.  _poll_artifacts skips states with no artifact path.
+        self._states.setdefault(
+            stub_name, _RecipeWatchState(recipe=None, artifact_path="")
+        )
 
     def stop(self) -> None:
         """Signal the watcher thread to exit and cancel any pending futures.
@@ -446,7 +466,7 @@ class ArtifactWatcher(threading.Thread):
             lambda n: n in self._states or self._registry.get(n) is not None,
         )
 
-        error_msg = f"YAML parse failed: {error}"
+        error_msg = f"YAML parse failed in '{yaml_file.name}': {error}"
         stub = ModelEntry(
             name=stub_name,
             recommender=None,
@@ -456,15 +476,20 @@ class ArtifactWatcher(threading.Thread):
             last_load_error=error_msg,
             artifact_path="",
             loaded=False,
+            skipped=True,
         )
         self._registry.replace(stub_name, stub)
         _metrics.inc_artifact_load_failure(stub_name, reason="yaml")
         _metrics.set_model_loaded(stub_name, False)
 
         # Create a minimal _RecipeWatchState using a sentinel recipe object.
-        # We use an empty artifact_path; _poll_artifacts will stat it and get
-        # FileNotFoundError, which keeps last_load_error set via set_load_error.
+        # artifact_path stays empty because the YAML never parsed, so no
+        # output path is known; _poll_artifacts skips such states entirely.
         stub_state = _RecipeWatchState(recipe=None, artifact_path="")
+        # Record the failure signature now: the warning below already reports
+        # this parse error, and from the next tick onwards the same file takes
+        # the "existing recipe" branch, which would otherwise repeat it.
+        stub_state._last_failure_signature = f"rescan:{type(error).__name__}:{error}"
         self._states[stub_name] = stub_state
         self._yaml_path_to_name[yaml_file] = stub_name
 
@@ -558,17 +583,31 @@ class ArtifactWatcher(threading.Thread):
                 if existing_name is not None and existing_name in current_names:
                     # Keep the entry in found_names → it won't be deleted.
                     found_names.add(existing_name)
+                    # Name the file in the health error too: for a parse
+                    # failure the entry key is a fabricated file stem, so the
+                    # filename is the only identifier that leads an operator
+                    # back to the actual cause.
                     self._registry.set_load_error(
                         existing_name,
-                        f"recipe YAML parse error on rescan: {exc}",
+                        f"recipe YAML parse error on rescan "
+                        f"in '{yaml_file.name}': {exc}",
                     )
                     _metrics.inc_recipe_rescan_error(existing_name)
-                    logger.warning(
-                        "recipe_rescan_load_error",
-                        file=yaml_file.name,
-                        recipe=existing_name,
-                        error=str(exc),
-                    )
+                    # An unfixed file fails identically on every tick and is
+                    # already visible in /v1/health/details; log the transition
+                    # only.  ``file=`` names the offending file so the operator
+                    # has the actionable identifier, not just the stub name.
+                    _fields = {
+                        "file": yaml_file.name,
+                        "recipe": existing_name,
+                        "error": str(exc),
+                    }
+                    if self._failure_is_new(
+                        existing_name, f"rescan:{error_class}:{exc}"
+                    ):
+                        logger.warning("recipe_rescan_load_error", **_fields)
+                    else:
+                        logger.debug("recipe_rescan_load_error_repeated", **_fields)
                 else:
                     # Brand-new YAML that has never been parsed.  Register a
                     # stub entry so /health surfaces the broken YAML immediately,
@@ -690,7 +729,15 @@ class ArtifactWatcher(threading.Thread):
         """Check all known recipes for artifact changes (bounded at 16 concurrent)."""
         import concurrent.futures
 
-        names = list(self._states.keys())
+        # Skip YAML-parse-failure stubs: their YAML never parsed, so no
+        # output path is known.  An empty path is NOT a missing file —
+        # ``fsspec.core.url_to_fs("")`` resolves to the process working
+        # directory, whose ``info()`` succeeds, so the marker never settles
+        # and every tick re-read it only to fail with ``IsADirectoryError``
+        # (POSIX raises EISDIR, not ENOENT, for an empty path).  That named
+        # an unrelated directory in the log and buried the real cause — the
+        # parse error already recorded on the stub entry.
+        names = [n for n, s in self._states.items() if s.artifact_path]
         if not names:
             return
 
@@ -879,23 +926,11 @@ class ArtifactWatcher(threading.Thread):
         try:
             data = _read_artifact_bytes(artifact_path, max_bytes)
         except ArtifactError as exc:
-            logger.error(
-                "artifact_read_failed",
-                name=name,
-                path=str(artifact_path),
-                error=str(exc),
-                exc_type=type(exc).__name__,
-            )
+            self._log_read_failure(name, artifact_path, exc)
             self._record_load_failure(name, f"read failed: {exc}", reason="read")
             return
         except Exception as exc:
-            logger.error(
-                "artifact_read_failed",
-                name=name,
-                path=str(artifact_path),
-                error=str(exc),
-                exc_type=type(exc).__name__,
-            )
+            self._log_read_failure(name, artifact_path, exc)
             self._record_load_failure(
                 name, f"unexpected read error: {exc}", reason="unexpected"
             )
@@ -942,13 +977,16 @@ class ArtifactWatcher(threading.Thread):
                 # Non-deserialization ArtifactError — reset streak (different
                 # failure class; the deserialization path is not involved).
                 self._post_hmac_failure_streak.pop(name, None)
-            logger.error(
-                "artifact_load_failed",
-                name=name,
-                kid=kid_log,
-                error=_err_str,
-                reason=reason,
-            )
+            _fields = {
+                "name": name,
+                "kid": kid_log,
+                "error": _err_str,
+                "reason": reason,
+            }
+            if self._failure_is_new(name, f"load:{reason}:{_err_str}"):
+                logger.error("artifact_load_failed", **_fields)
+            else:
+                logger.debug("artifact_load_failed_repeated", **_fields)
             self._record_load_failure(name, _err_str, reason=reason)
             return
         except (MemoryError, RecursionError):
@@ -988,6 +1026,9 @@ class ArtifactWatcher(threading.Thread):
         state.last_marker = new_marker
         # Reset post-HMAC deserialization failure streak on successful load.
         self._post_hmac_failure_streak.pop(name, None)
+        # Clear the repeat-suppression signature so the next failure — even an
+        # identical one — is logged at ERROR again rather than swallowed.
+        state._last_failure_signature = None
         _metrics.set_model_loaded(name, True)
         _metrics.record_swap(name, ok=True)
         _metrics.set_active_recipes(self._registry.loaded_count())
@@ -1092,6 +1133,38 @@ class ArtifactWatcher(threading.Thread):
             or "",
             algorithms=extract_algorithms(header_dict),
         )
+
+    def _log_read_failure(self, name: str, artifact_path: str, exc: Exception) -> None:
+        """Emit ``artifact_read_failed``; demote an unchanged repeat to DEBUG."""
+        _fields = {
+            "name": name,
+            "path": str(artifact_path),
+            "error": str(exc),
+            "exc_type": type(exc).__name__,
+        }
+        if self._failure_is_new(name, f"read:{type(exc).__name__}:{exc}"):
+            logger.error("artifact_read_failed", **_fields)
+        else:
+            logger.debug("artifact_read_failed_repeated", **_fields)
+
+    def _failure_is_new(self, name: str, signature: str) -> bool:
+        """Return True when *signature* differs from the last failure for *name*.
+
+        A failure that persists is retried on every tick — a failed load never
+        advances ``last_marker`` — so the same line would otherwise be emitted
+        at ERROR roughly 17k times a day at the default 5s interval.  The
+        condition is already visible in ``/v1/health/details``, so log it once
+        on transition and stay quiet until something changes.  A genuinely
+        different failure has a different signature and logs immediately.
+        Same treatment OBS-1 gives repeated ``artifact_stat_failed``.
+        """
+        state = self._states.get(name)
+        if state is None:
+            return True
+        if state._last_failure_signature == signature:
+            return False
+        state._last_failure_signature = signature
+        return True
 
     def _mark_error(self, name: str, error: str) -> None:
         """Mark last_load_error on the existing registry entry (if any).

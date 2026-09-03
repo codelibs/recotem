@@ -3326,6 +3326,121 @@ def test_validate_matches_train_on_a_missing_schema_column(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
+# validate must reject algorithm names train rejects, before fetching data
+# ---------------------------------------------------------------------------
+
+
+def _recipe_with_algorithms(tmp_path: Path, algorithms: str) -> Path:
+    """Write a recipe whose only questionable field is ``training.algorithms``.
+
+    The dataset is deliberately deep enough (4 users x 12 items) to survive the
+    split: the parity test needs ``train`` to reach alias resolution, which
+    happens only after fetch, cleanse and split have all succeeded.
+    """
+    csv_file = tmp_path / "data.csv"
+    rows = "".join(f"u{user},i{item}\n" for user in range(4) for item in range(12))
+    csv_file.write_text(f"user_id,item_id\n{rows}")
+    yaml_path = tmp_path / "recipe.yaml"
+    yaml_path.write_text(
+        f"""\
+name: algo_parity
+source:
+  type: csv
+  path: {csv_file}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: {algorithms}
+  cutoff: 5
+  n_trials: 1
+output:
+  path: {tmp_path / "out.recotem"}
+"""
+    )
+    return yaml_path
+
+
+def test_validate_exits_4_on_an_unknown_algorithm(tmp_path: Path) -> None:
+    """A typo in ``algorithms`` must fail the pre-flight gate, not the run.
+
+    ``train`` only reaches alias resolution after fetching, cleansing and
+    splitting the whole dataset, so before this check a scheduled job burned
+    its data pull to discover a mistake that was visible in the YAML.
+    """
+    yaml_path = _recipe_with_algorithms(tmp_path, "[NotARealAlgo]")
+    result = runner.invoke(app, ["validate", str(yaml_path)])
+    out = result.stdout + result.stderr
+
+    assert result.exit_code == 4, f"expected exit 4, got {result.exit_code}: {out}"
+    assert "Unknown or unsupported algorithm 'NotARealAlgo'" in out, out
+    assert "Validation passed." not in out, out
+
+
+def test_validate_matches_train_on_an_unknown_algorithm(tmp_path: Path) -> None:
+    """Same recipe, same verdict *and* same message from both verbs.
+
+    The message is asserted, not just the exit code: the two paths must share
+    one definition of it rather than carry copies that can drift.
+    """
+    yaml_path = _recipe_with_algorithms(tmp_path, "[NotARealAlgo]")
+    validate_result = runner.invoke(app, ["validate", str(yaml_path)])
+    train_result = runner.invoke(
+        app,
+        ["train", str(yaml_path)],
+        env={"RECOTEM_SIGNING_KEYS": f"dev:{ACTIVE_KEY_HEX}"},
+    )
+    assert validate_result.exit_code == train_result.exit_code == 4, (
+        f"validate exited {validate_result.exit_code}, "
+        f"train exited {train_result.exit_code}"
+    )
+
+    from recotem.training.algorithms import resolve_algorithm_name
+    from recotem.training.errors import UnknownAlgorithmError
+
+    with pytest.raises(UnknownAlgorithmError) as excinfo:
+        resolve_algorithm_name("NotARealAlgo")
+    message = str(excinfo.value)
+
+    for result in (validate_result, train_result):
+        assert message in (result.stdout + result.stderr), result.stdout + result.stderr
+
+
+def test_validate_exits_4_on_an_algorithm_irspack_does_not_export(
+    tmp_path: Path,
+) -> None:
+    """``BPRFM`` resolves but cannot be constructed, and train says so at 4.
+
+    irspack gates ``BPRFMRecommender`` behind ``lightfm``, which has no Python
+    3.12 release, so the class is never exported.  Resolution alone would let
+    such a recipe through validate and fail it mid-train.
+    """
+    yaml_path = _recipe_with_algorithms(tmp_path, "[BPRFM]")
+    result = runner.invoke(app, ["validate", str(yaml_path)])
+    out = result.stdout + result.stderr
+
+    assert result.exit_code == 4, f"expected exit 4, got {result.exit_code}: {out}"
+    assert "irspack does not know recommender class 'BPRFMRecommender'" in out, out
+
+
+@pytest.mark.parametrize(
+    "algorithms",
+    ["[toppop]", "[TopPOP]", "[ials]", "[CosinekNN]", "[TopPopRecommender]"],
+)
+def test_validate_accepts_case_insensitive_aliases(
+    tmp_path: Path, algorithms: str
+) -> None:
+    """Resolution is case-insensitive; the new check must not narrow it."""
+    yaml_path = _recipe_with_algorithms(tmp_path, algorithms)
+    result = runner.invoke(app, ["validate", str(yaml_path)])
+    out = result.stdout + result.stderr
+
+    assert result.exit_code == 0, out
+    assert "Algorithms: OK" in out, out
+    assert "Validation passed." in out, out
+
+
+# ---------------------------------------------------------------------------
 # recotem schema: the emitted document must agree with the loader
 # ---------------------------------------------------------------------------
 

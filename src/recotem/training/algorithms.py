@@ -7,6 +7,8 @@ all supported class names for this release.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from irspack.recommenders.base import get_recommender_class
 
 # _compat must be imported first: it applies the IPython stub that allows
@@ -111,10 +113,17 @@ def resolve_algorithm_name(alias: str) -> str:
     if candidate_folded in _CLASS_NAME_CASEFOLD:
         return _CLASS_NAME_CASEFOLD[candidate_folded]
 
+    # Suggest only what this interpreter can actually train.  Listing every
+    # name in SUPPORTED_CLASS_NAMES handed the user a first suggestion
+    # ("BPRFM", alphabetically first) that fails with a *different* error, so
+    # correcting a typo by following the advice led straight to a second
+    # failure.
+    constructible = constructible_class_names()
     raise UnknownAlgorithmError(
         f"Unknown or unsupported algorithm {alias!r}. "
-        f"Supported aliases: {sorted(_ALIAS_MAP_RAW)} "
-        f"or full class names: {sorted(SUPPORTED_CLASS_NAMES)}."
+        f"Supported aliases: "
+        f"{sorted(a for a, c in _ALIAS_MAP_RAW.items() if c in constructible)} "
+        f"or full class names: {sorted(constructible)}."
     )
 
 
@@ -132,3 +141,28 @@ def get_recommender_cls(class_name: str):  # type: ignore[return]
         raise UnknownAlgorithmError(
             f"irspack does not know recommender class {class_name!r}."
         ) from exc
+
+
+@lru_cache(maxsize=1)
+def constructible_class_names() -> frozenset[str]:
+    """Return the ``SUPPORTED_CLASS_NAMES`` irspack exports on this host.
+
+    ``SUPPORTED_CLASS_NAMES`` is recotem's frozen contract, but irspack gates
+    some recommenders behind optional dependencies and simply does not export
+    the class when they are absent -- ``BPRFMRecommender`` needs ``lightfm``,
+    which has no Python 3.12 release.  Availability is therefore established by
+    asking irspack rather than by hard-coding the gated names here: which
+    recommenders are gated is irspack's decision to change, not ours, and a
+    hard-coded copy would go stale silently.
+
+    Cached because the answer cannot change within a process: the result
+    depends only on which modules irspack could import at its own import time.
+    """
+    available: set[str] = set()
+    for class_name in SUPPORTED_CLASS_NAMES:
+        try:
+            get_recommender_cls(class_name)
+        except UnknownAlgorithmError:
+            continue
+        available.add(class_name)
+    return frozenset(available)

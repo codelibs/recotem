@@ -574,3 +574,173 @@ def test_parquet_no_sha256_over_byte_cap_rejected(tmp_path: Path, monkeypatch) -
     source = ParquetSource(cfg)
     with pytest.raises(DataSourceError, match="RECOTEM_MAX_DOWNLOAD_BYTES"):
         source.fetch(_ctx())
+
+
+# ---------------------------------------------------------------------------
+# probe_columns: the validate-time schema-column check
+#
+# ``recotem validate`` is documented as the pre-flight gate for ``train``, but
+# ``probe()`` only checks that the path exists.  A recipe naming a column the
+# file does not have therefore passed validate with exit 0 and then failed
+# train with exit 3.  ``probe_columns`` closes that gap for the two sources
+# that can answer from a header / footer read.
+# ---------------------------------------------------------------------------
+
+
+def _schema_ctx(
+    user_column: str = "user_id",
+    item_column: str = "item_id",
+    time_column: str | None = None,
+) -> FetchContext:
+    """A FetchContext carrying schema columns, as pipeline._fetch_data builds."""
+    return FetchContext(
+        recipe_name="probe_cols",
+        run_id="run-pc",
+        extra={
+            "user_column": user_column,
+            "item_column": item_column,
+            "time_column": time_column,
+        },
+    )
+
+
+def test_csv_probe_columns_accepts_present_columns(tmp_path: Path) -> None:
+    csv_file = tmp_path / "ok.csv"
+    csv_file.write_text("user_id,item_id,ts\nu1,i1,1\n")
+
+    source = CSVSource(CSVConfig(type="csv", path=str(csv_file)))
+    assert source.probe_columns(_schema_ctx(time_column="ts")) is True
+
+
+def test_csv_probe_columns_rejects_absent_column(tmp_path: Path) -> None:
+    """The message must match what ``train`` prints for the same recipe."""
+    csv_file = tmp_path / "wrong_cols.csv"
+    csv_file.write_text("other_user,item_id\nu1,i1\n")
+
+    source = CSVSource(CSVConfig(type="csv", path=str(csv_file)))
+    with pytest.raises(DataSourceError) as exc_info:
+        source.probe_columns(_schema_ctx())
+
+    msg = str(exc_info.value)
+    assert "'user_id' not found" in msg, msg
+    assert "['item_id', 'other_user']" in msg, msg
+
+
+def test_csv_probe_columns_rejects_absent_time_column(tmp_path: Path) -> None:
+    """``time_column`` is optional in the recipe but checked when declared."""
+    csv_file = tmp_path / "no_ts.csv"
+    csv_file.write_text("user_id,item_id\nu1,i1\n")
+
+    source = CSVSource(CSVConfig(type="csv", path=str(csv_file)))
+    with pytest.raises(DataSourceError, match="'ts' not found"):
+        source.probe_columns(_schema_ctx(time_column="ts"))
+
+
+def test_csv_probe_columns_reads_only_the_header(tmp_path: Path, monkeypatch) -> None:
+    """The check must not become a second full read of the source.
+
+    The point of doing this at validate time is that it is cheap; a header
+    read that quietly degraded into a scan would make validate as expensive as
+    train on a multi-GB CSV.
+    """
+    import pandas as pd_mod
+
+    csv_file = tmp_path / "big.csv"
+    csv_file.write_text("user_id,item_id\n" + "u1,i1\n" * 1000)
+
+    seen: dict[str, object] = {}
+    real_read_csv = pd_mod.read_csv
+
+    def _spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real_read_csv(*args, **kwargs)
+
+    monkeypatch.setattr(pd_mod, "read_csv", _spy)
+
+    source = CSVSource(CSVConfig(type="csv", path=str(csv_file)))
+    assert source.probe_columns(_schema_ctx()) is True
+    assert seen.get("nrows") == 0, (
+        f"probe_columns must stop after the header row; got nrows={seen.get('nrows')!r}"
+    )
+
+
+def test_csv_probe_columns_honours_delimiter(tmp_path: Path) -> None:
+    """A non-default delimiter must be used, or every column looks missing."""
+    csv_file = tmp_path / "semi.csv"
+    csv_file.write_text("user_id;item_id\nu1;i1\n")
+
+    source = CSVSource(CSVConfig(type="csv", path=str(csv_file), delimiter=";"))
+    assert source.probe_columns(_schema_ctx()) is True
+
+
+def test_csv_probe_columns_skipped_for_http_path() -> None:
+    """HTTP paths report "not checked" instead of running a second fetch.
+
+    Reading the header over HTTP means downloading the body, which is where
+    the sha256 pin, the byte cap, and the redirect-scheme policy live — all
+    fetch-time controls that a probe must not bypass.
+    """
+    cfg = CSVConfig(
+        type="csv",
+        path="https://example.invalid/data.csv",
+        sha256="0" * 64,
+    )
+    assert CSVSource(cfg).probe_columns(_schema_ctx()) is False
+
+
+def test_csv_probe_columns_without_schema_context_is_a_noop(tmp_path: Path) -> None:
+    """No schema columns in ctx.extra (e.g. a plugin test) skips the check."""
+    csv_file = tmp_path / "any.csv"
+    csv_file.write_text("a,b\n1,2\n")
+
+    source = CSVSource(CSVConfig(type="csv", path=str(csv_file)))
+    assert source.probe_columns(_ctx()) is True
+
+
+def test_csv_probe_columns_wraps_read_failure(tmp_path: Path) -> None:
+    """An unreadable header is a DataSourceError, not a bare pandas exception."""
+    csv_file = tmp_path / "empty.csv"
+    csv_file.write_text("")
+
+    source = CSVSource(CSVConfig(type="csv", path=str(csv_file)))
+    with pytest.raises(DataSourceError, match="Failed to read the CSV header"):
+        source.probe_columns(_schema_ctx())
+
+
+def test_parquet_probe_columns_accepts_present_columns(tmp_path: Path) -> None:
+    parquet_file = tmp_path / "ok.parquet"
+    pd.DataFrame({"user_id": ["u1"], "item_id": ["i1"]}).to_parquet(
+        parquet_file, index=False
+    )
+
+    source = ParquetSource(ParquetConfig(type="parquet", path=str(parquet_file)))
+    assert source.probe_columns(_schema_ctx()) is True
+
+
+def test_parquet_probe_columns_rejects_absent_column(tmp_path: Path) -> None:
+    parquet_file = tmp_path / "wrong.parquet"
+    pd.DataFrame({"other_user": ["u1"], "item_id": ["i1"]}).to_parquet(
+        parquet_file, index=False
+    )
+
+    source = ParquetSource(ParquetConfig(type="parquet", path=str(parquet_file)))
+    with pytest.raises(DataSourceError, match="'user_id' not found"):
+        source.probe_columns(_schema_ctx())
+
+
+def test_parquet_probe_columns_skipped_for_http_path() -> None:
+    cfg = ParquetConfig(
+        type="parquet",
+        path="https://example.invalid/data.parquet",
+        sha256="0" * 64,
+    )
+    assert ParquetSource(cfg).probe_columns(_schema_ctx()) is False
+
+
+def test_parquet_probe_columns_wraps_read_failure(tmp_path: Path) -> None:
+    corrupt = tmp_path / "corrupt.parquet"
+    corrupt.write_bytes(b"not a parquet file")
+
+    source = ParquetSource(ParquetConfig(type="parquet", path=str(corrupt)))
+    with pytest.raises(DataSourceError, match="Failed to read the Parquet schema"):
+        source.probe_columns(_schema_ctx())

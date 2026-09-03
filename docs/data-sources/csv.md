@@ -141,6 +141,14 @@ When `source.path` (or `item_metadata.path`) uses `http://` or `https://`:
   against an unreachable or private hostname fails at DNS, not at HTTP.
   No actual HTTP request is issued during validate; the sha256 integrity
   check happens at fetch time, not validate time.
+- `recotem validate` also checks that the columns named in `schema:`
+  (`user_column`, `item_column`, and `time_column` when set) actually exist,
+  reading only the CSV header row / the Parquet footer schema. A missing
+  column exits **3** with the same message `recotem train` prints, instead of
+  passing validate and failing mid-train. HTTP(S) sources are the exception —
+  reading their header means downloading the body, which is where the sha256
+  pin and the byte cap live, so validate reports `Schema columns: not
+  checked` for them rather than issuing a second, unguarded fetch.
 - On sha256 mismatch the error message shows only the first 8 hex characters
   of each digest (`got 1a2b3c4d…, expected 5e6f7a8b…`) to avoid leaking the
   expected ground truth into shared logs.

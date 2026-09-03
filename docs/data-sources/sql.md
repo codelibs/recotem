@@ -160,6 +160,9 @@ names), not a recipe-schema problem. The full error type is included in the stde
 
 - `recotem validate recipes/my_recipe.yaml` probes the database by issuing `SELECT 1`
   before training starts. This validates the DSN, driver installation, and host connectivity.
+  It does **not** check that the columns named in `schema:` are in the result set — that
+  would mean running the query, so validate reports `Schema columns: not checked (sql ...)`
+  and the columns are verified at train time (exit 3 on a mismatch).
 - Query results are read in chunks to bound memory usage during streaming. The chunk size is
   `min(100_000, RECOTEM_MAX_SQL_ROWS)` so the row cap is enforced before the first chunk is
   fully loaded.

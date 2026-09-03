@@ -849,3 +849,112 @@ def test_feature_capable_class_names_stay_in_sync_with_training() -> None:
     from recotem.training.algorithms import FEATURE_CAPABLE_CLASS_NAMES
 
     assert _FEATURE_CAPABLE_CLASS_NAMES == FEATURE_CAPABLE_CLASS_NAMES
+
+
+# ---------------------------------------------------------------------------
+# The capability-gate 400 body is user-facing prose.
+#
+# ``_require_capability`` splices *missing* into "it has no {missing}", which
+# already supplies the determiner -- a call site that passed a leading article
+# produced "it has no the item-embedding API" / "it has no a `user_features`-
+# aware `get_score_cold_user`".
+# ---------------------------------------------------------------------------
+
+
+def test_capability_messages_have_no_doubled_article() -> None:
+    """Every capability refusal must read as English, from all three verbs."""
+    import re
+
+    import pandas as pd
+    from irspack import TopPopRecommender
+
+    from recotem._features import build_encoder_state
+    from recotem._idmap import IDMappedRecommender
+    from recotem.recipe.models import FeatureColumn
+
+    n_users, n_items = 5, 4
+    X = sps.csr_matrix(np.ones((n_users, n_items)))
+    rec = TopPopRecommender(X).learn()
+
+    item_df = pd.DataFrame(
+        {
+            "item_id": [f"i{i}" for i in range(n_items)],
+            "genre": ["a", "b", "a", "b"],
+        }
+    ).set_index("item_id")
+    user_df = pd.DataFrame(
+        {
+            "user_id": [f"u{u}" for u in range(n_users)],
+            "band": ["x"] * n_users,
+        }
+    ).set_index("user_id")
+
+    idm = IDMappedRecommender(
+        rec,
+        [f"u{u}" for u in range(n_users)],
+        [f"i{i}" for i in range(n_items)],
+        item_feature_state=build_encoder_state(
+            item_df, [FeatureColumn(name="genre", encoding="categorical")]
+        ),
+        user_feature_state=build_encoder_state(
+            user_df, [FeatureColumn(name="band", encoding="categorical")]
+        ),
+    )
+
+    calls = [
+        lambda: idm.get_recommendation_for_new_user(
+            ["i0"], cutoff=2, user_features={"band": "x"}
+        ),
+        lambda: idm.get_recommendation_for_cold_user({"band": "x"}, cutoff=2),
+        lambda: idm.get_recommendation_for_cold_seeds(
+            ["i0", "brand_new"], {"brand_new": {"genre": "a"}}, cutoff=2
+        ),
+    ]
+    doubled = re.compile(r"\bno (the|a|an)\b")
+    for call in calls:
+        with pytest.raises(ValueError) as exc_info:
+            call()
+        message = str(exc_info.value)
+        assert "it has no " in message, message
+        assert not doubled.search(message), (
+            f"capability message has a doubled article: {message!r}"
+        )
+
+
+def test_item_embedding_capability_message_names_the_missing_methods() -> None:
+    """Fixing the article must not lose the method names operators need."""
+    import pandas as pd
+    from irspack import TopPopRecommender
+
+    from recotem._features import build_encoder_state
+    from recotem._idmap import IDMappedRecommender
+    from recotem.recipe.models import FeatureColumn
+
+    n_users, n_items = 5, 4
+    X = sps.csr_matrix(np.ones((n_users, n_items)))
+    rec = TopPopRecommender(X).learn()
+    item_df = pd.DataFrame(
+        {
+            "item_id": [f"i{i}" for i in range(n_items)],
+            "genre": ["a", "b", "a", "b"],
+        }
+    ).set_index("item_id")
+
+    idm = IDMappedRecommender(
+        rec,
+        [f"u{u}" for u in range(n_users)],
+        [f"i{i}" for i in range(n_items)],
+        item_feature_state=build_encoder_state(
+            item_df, [FeatureColumn(name="genre", encoding="categorical")]
+        ),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        idm.get_recommendation_for_cold_seeds(
+            ["i0", "brand_new"], {"brand_new": {"genre": "a"}}, cutoff=2
+        )
+    message = str(exc_info.value)
+    assert "it has no item-embedding API" in message, message
+    assert "`get_item_embedding`" in message, message
+    assert "`compute_item_embedding_from_features`" in message, message
+    assert "`get_score_from_user_embedding`" in message, message

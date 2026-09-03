@@ -355,6 +355,40 @@ failure is reported the same way: `DataSource probe failed [<where>]:
 <error>`. The builtin `CSVSource` / `ParquetSource` use `fsspec` `exists()`,
 and `BigQuerySource` uses a dry-run query job.
 
+### `probe_columns()` — the schema-column check
+
+`recotem train` rejects a recipe naming a column the data does not have with
+a `DataSourceError` (exit 3). `recotem validate` asks the same question for
+the **top-level `source` only**, via a second optional hook:
+
+```python
+def probe_columns(self, ctx: FetchContext) -> bool:
+    """Optional. Called by recotem validate with the recipe's schema columns.
+
+    ctx.extra carries user_column / item_column / time_column, exactly as
+    fetch() receives them.  Implement this only when the column list is
+    cheap to obtain — a CSV header row, a Parquet footer schema — never by
+    running the query or downloading the body.
+
+    Return True when the check ran, False when this configuration cannot
+    answer cheaply.  Raise DataSourceError when a required column is absent.
+    """
+    ...
+```
+
+`recotem validate` reports `Schema columns: OK (<type_name>) [<where>]` on
+`True`, `Schema columns: not checked (<type_name> cannot list columns without
+a full fetch) [<where>]` on `False`, and `Schema columns: not checked
+(<type_name> has no header-only column probe; verified at train time)
+[<where>]` when the hook is absent — so the line never claims a check that
+did not run. A raised `DataSourceError` is reported as `Schema column check
+failed [<where>]: <error>` and exits 3, matching `train`.
+
+Feature sources (`features.item.source` / `features.user.source`) are **not**
+column-checked: a feature table legitimately does not carry the interaction
+columns. `BigQuerySource` and `SQLSource` do not implement the hook, because
+their column set is only known once the query runs.
+
 ## Testing
 
 Test `fetch()` directly without the CLI:

@@ -3136,3 +3136,319 @@ def test_tampered_artifact_hmac_still_exits_artifact(
         f"HMAC verification failure is an ArtifactError (exit 5); "
         f"got {result.exit_code}"
     )
+
+
+# ---------------------------------------------------------------------------
+# validate / train parity: schema columns
+#
+# ``validate`` is documented as the pre-flight gate, but ``probe()`` only
+# checks that the source exists.  A recipe naming a column the data does not
+# have passed validate with exit 0 and then failed ``train`` with exit 3 on
+# identical config.
+# ---------------------------------------------------------------------------
+
+
+def _recipe_with_schema_columns(
+    tmp_path: Path,
+    *,
+    csv_header: str,
+    user_column: str = "user_id",
+    item_column: str = "item_id",
+    time_column: str | None = None,
+) -> Path:
+    csv_file = tmp_path / "data.csv"
+    csv_file.write_text(f"{csv_header}\n")
+    time_line = f"  time_column: {time_column}\n" if time_column else ""
+    yaml_path = tmp_path / "recipe.yaml"
+    yaml_path.write_text(
+        f"""\
+name: parity
+source:
+  type: csv
+  path: {csv_file}
+schema:
+  user_column: {user_column}
+  item_column: {item_column}
+{time_line}training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {tmp_path / "out.recotem"}
+"""
+    )
+    return yaml_path
+
+
+def test_validate_exits_3_when_schema_column_is_absent(tmp_path: Path) -> None:
+    """A recipe naming a column the CSV lacks must fail validate, not train."""
+    yaml_path = _recipe_with_schema_columns(
+        tmp_path, csv_header="other_user,item_id\nu1,i1"
+    )
+    result = runner.invoke(app, ["validate", str(yaml_path)])
+    out = result.stdout + result.stderr
+
+    assert result.exit_code == 3, f"expected exit 3, got {result.exit_code}: {out}"
+    assert "Schema column check failed [source]" in out, out
+    assert "'user_id' not found" in out, out
+    assert "Validation passed." not in out, out
+
+
+def test_validate_exits_3_when_time_column_is_absent(tmp_path: Path) -> None:
+    """``time_column`` is optional in the recipe but checked once declared."""
+    yaml_path = _recipe_with_schema_columns(
+        tmp_path, csv_header="user_id,item_id\nu1,i1", time_column="ts"
+    )
+    result = runner.invoke(app, ["validate", str(yaml_path)])
+    out = result.stdout + result.stderr
+
+    assert result.exit_code == 3, out
+    assert "'ts' not found" in out, out
+
+
+def test_validate_reports_schema_columns_ok_for_reachable_csv(tmp_path: Path) -> None:
+    yaml_path = _recipe_with_schema_columns(
+        tmp_path, csv_header="user_id,item_id,ts\nu1,i1,1", time_column="ts"
+    )
+    result = runner.invoke(app, ["validate", str(yaml_path)])
+    assert result.exit_code == 0, result.stdout
+    assert "Schema columns: OK (csv) [source]" in result.stdout
+    assert "Validation passed." in result.stdout
+
+
+def test_validate_checks_schema_columns_for_parquet(tmp_path: Path) -> None:
+    import pandas as pd
+
+    parquet_file = tmp_path / "data.parquet"
+    pd.DataFrame({"other_user": ["u1"], "item_id": ["i1"]}).to_parquet(
+        parquet_file, index=False
+    )
+    yaml_path = tmp_path / "recipe.yaml"
+    yaml_path.write_text(
+        f"""\
+name: parquet_parity
+source:
+  type: parquet
+  path: {parquet_file}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+output:
+  path: {tmp_path / "out.recotem"}
+"""
+    )
+    result = runner.invoke(app, ["validate", str(yaml_path)])
+    out = result.stdout + result.stderr
+
+    assert result.exit_code == 3, out
+    assert "'user_id' not found" in out, out
+
+
+def test_validate_says_not_checked_when_source_cannot_answer_cheaply(
+    tmp_path: Path,
+) -> None:
+    """A source with no ``probe_columns`` must not imply the check passed.
+
+    A SQL source's columns come from running the query, which validate must
+    not do, so validate reports the check as skipped rather than printing an
+    OK line it did not earn.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "events.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE events (user_id TEXT, item_id TEXT)")
+    conn.commit()
+    conn.close()
+
+    yaml_path = tmp_path / "recipe.yaml"
+    yaml_path.write_text(
+        f"""\
+name: sql_parity
+source:
+  type: sql
+  dsn_env: RECOTEM_RECIPE_TEST_DSN
+  query: SELECT user_id, item_id FROM events
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+output:
+  path: {tmp_path / "out.recotem"}
+"""
+    )
+    result = runner.invoke(
+        app,
+        ["validate", str(yaml_path)],
+        env={"RECOTEM_RECIPE_TEST_DSN": f"sqlite:///{db_path}"},
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "Schema columns: not checked (sql" in result.stdout, result.stdout
+    assert "Schema columns: OK" not in result.stdout, result.stdout
+
+
+def test_validate_does_not_column_check_feature_sources(tmp_path: Path) -> None:
+    """Feature tables legitimately lack the interaction columns.
+
+    ``training/features.py`` passes an empty ``ctx.extra`` for exactly this
+    reason; applying the interaction schema to ``features.item.source`` would
+    reject every valid feature-aware recipe.
+    """
+    items = tmp_path / "items.csv"
+    items.write_text("item_id,genre\ni1,action\n")
+    recipe = _feature_recipe_yaml(tmp_path, items)
+    result = runner.invoke(app, ["validate", str(recipe)])
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "Schema columns: OK (csv) [source]" in result.stdout
+    assert "[features.item.source]" not in result.stdout.replace(
+        "probe OK (csv) [features.item.source]", ""
+    ), "the column check must not run against a feature source"
+
+
+def test_validate_matches_train_on_a_missing_schema_column(tmp_path: Path) -> None:
+    """The whole point of the fix: same recipe, same verdict from both verbs."""
+    yaml_path = _recipe_with_schema_columns(
+        tmp_path, csv_header="other_user,item_id\nu1,i1"
+    )
+    validate_result = runner.invoke(app, ["validate", str(yaml_path)])
+    train_result = runner.invoke(
+        app,
+        ["train", str(yaml_path)],
+        env={"RECOTEM_SIGNING_KEYS": f"dev:{ACTIVE_KEY_HEX}"},
+    )
+    assert validate_result.exit_code == train_result.exit_code == 3, (
+        f"validate exited {validate_result.exit_code}, "
+        f"train exited {train_result.exit_code}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# recotem schema: the emitted document must agree with the loader
+# ---------------------------------------------------------------------------
+
+
+def test_schema_declares_training_required() -> None:
+    """``training`` has no usable default, so the schema must require it.
+
+    ``TrainingConfig.algorithms`` is ``Field(min_length=1)`` with no default,
+    so ``TrainingConfig()`` always raises and a ``default_factory`` could never
+    have produced one — yet the field was declared optional, which dropped
+    ``training`` from the emitted ``required`` list.
+    """
+    result = runner.invoke(app, ["schema"])
+    assert result.exit_code == 0, result.stdout
+    schema_dict = json.loads(result.stdout)
+    assert schema_dict["required"] == ["name", "source", "schema", "training", "output"]
+
+
+def test_schema_declares_its_dialect() -> None:
+    """Editors cannot pick a draft's keyword semantics without ``$schema``."""
+    from pydantic.json_schema import GenerateJsonSchema
+
+    result = runner.invoke(app, ["schema"])
+    assert result.exit_code == 0, result.stdout
+    schema_dict = json.loads(result.stdout)
+    assert schema_dict["$schema"] == GenerateJsonSchema.schema_dialect
+    assert schema_dict["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+
+
+def test_emitted_schema_and_loader_agree_on_a_training_less_recipe(
+    tmp_path: Path,
+) -> None:
+    """Round-trip: a recipe the loader rejects must fail the shipped schema too.
+
+    This is the contract ``recotem schema`` exists to provide — an editor
+    validating against it must not green-light a file the product rejects.
+    """
+    import jsonschema
+
+    result = runner.invoke(app, ["schema"])
+    assert result.exit_code == 0, result.stdout
+    schema_dict = json.loads(result.stdout)
+
+    validator_cls = jsonschema.validators.validator_for(schema_dict)
+    validator_cls.check_schema(schema_dict)
+    validator = validator_cls(schema_dict)
+
+    csv_file = tmp_path / "data.csv"
+    csv_file.write_text("user_id,item_id\nu1,i1\n")
+    recipe_doc = {
+        "name": "no_training",
+        "source": {"type": "csv", "path": str(csv_file)},
+        "schema": {"user_column": "user_id", "item_column": "item_id"},
+        "output": {"path": str(tmp_path / "out.recotem")},
+    }
+
+    errors = [e.message for e in validator.iter_errors(recipe_doc)]
+    assert errors, "the shipped schema must reject a recipe with no training block"
+    assert any("training" in e for e in errors), errors
+
+    yaml_path = tmp_path / "recipe.yaml"
+    yaml_path.write_text(json.dumps(recipe_doc))
+    cli_result = runner.invoke(app, ["validate", str(yaml_path)])
+    assert cli_result.exit_code == 2, cli_result.stdout + cli_result.stderr
+
+    # And the converse: adding the block satisfies both.
+    recipe_doc["training"] = {"algorithms": ["TopPop"], "n_trials": 1}
+    assert not list(validator.iter_errors(recipe_doc))
+    yaml_path.write_text(json.dumps(recipe_doc))
+    assert runner.invoke(app, ["validate", str(yaml_path)]).exit_code == 0
+
+
+def test_missing_schema_and_training_are_both_reported(tmp_path: Path) -> None:
+    """Both absent blocks must be named, with a ``training.``-prefixed loc.
+
+    While ``training`` carried ``default_factory=TrainingConfig``, the
+    factory's own ValidationError escaped before Recipe's errors were
+    collected: the report said only "algorithms: Field required" and never
+    mentioned the missing ``schema:`` block at all.
+    """
+    csv_file = tmp_path / "data.csv"
+    csv_file.write_text("user_id,item_id\nu1,i1\n")
+    yaml_path = tmp_path / "recipe.yaml"
+    yaml_path.write_text(
+        f"""\
+name: neither
+source:
+  type: csv
+  path: {csv_file}
+output:
+  path: {tmp_path / "out.recotem"}
+"""
+    )
+    result = runner.invoke(app, ["validate", str(yaml_path)])
+    out = result.stdout + result.stderr
+
+    assert result.exit_code == 2, out
+    assert "schema: Field required" in out, out
+    assert "training: Field required" in out, out
+
+
+def test_missing_algorithms_loc_is_prefixed_with_training(tmp_path: Path) -> None:
+    """A present-but-incomplete ``training:`` block reports a qualified loc."""
+    csv_file = tmp_path / "data.csv"
+    csv_file.write_text("user_id,item_id\nu1,i1\n")
+    yaml_path = tmp_path / "recipe.yaml"
+    yaml_path.write_text(
+        f"""\
+name: no_algos
+source:
+  type: csv
+  path: {csv_file}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  n_trials: 3
+output:
+  path: {tmp_path / "out.recotem"}
+"""
+    )
+    result = runner.invoke(app, ["validate", str(yaml_path)])
+    out = result.stdout + result.stderr
+
+    assert result.exit_code == 2, out
+    assert "training.algorithms: Field required" in out, out

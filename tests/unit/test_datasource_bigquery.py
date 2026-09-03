@@ -1597,3 +1597,141 @@ def test_storage_api_available_false_when_dependency_blocked() -> None:
         from recotem.datasource.bigquery import _storage_api_available
 
         assert _storage_api_available() is False
+
+
+# ---------------------------------------------------------------------------
+# RECOTEM_BQ_REQUIRE_STORAGE_API is enforced by probe(), not only by fetch()
+#
+# The check is a pure import probe -- no query, no credentials, no round trip
+# -- so ``recotem validate`` can answer it for free.  While it lived only in
+# ``fetch()``, an operator got a green validate and a failing train on
+# identical config and environment.
+# ---------------------------------------------------------------------------
+
+
+def test_probe_require_storage_api_missing_extra_raises_datasource_error(
+    monkeypatch,
+) -> None:
+    """probe() must refuse strict mode with the storage extra absent."""
+    monkeypatch.setenv("RECOTEM_BQ_REQUIRE_STORAGE_API", "1")
+
+    mock_bq, mock_exceptions, mock_api_core, mock_client, _ = _make_probe_bq_modules()
+    mock_client.query.return_value = MagicMock()
+
+    with patch.dict(
+        sys.modules,
+        _patched_modules(
+            mock_bq, mock_exceptions, mock_api_core, storage_installed=False
+        ),
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError) as exc_info:
+            source.probe()
+
+    err_msg = str(exc_info.value)
+    assert "RECOTEM_BQ_REQUIRE_STORAGE_API" in err_msg, err_msg
+    assert "google-cloud-bigquery-storage" in err_msg, err_msg
+    assert "recotem[bigquery]" in err_msg, err_msg
+    mock_bq.Client.assert_not_called()
+    mock_client.query.assert_not_called()
+
+
+def test_probe_require_storage_api_message_matches_fetch(monkeypatch) -> None:
+    """probe() and fetch() must refuse with the identical message.
+
+    The two paths share ``_assert_storage_api_capability`` precisely so the
+    validate-time and train-time answers cannot drift apart.
+    """
+    monkeypatch.setenv("RECOTEM_BQ_REQUIRE_STORAGE_API", "1")
+
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        _mock_client,
+        mock_query_job,
+        _err_cls,
+    ) = _make_mock_bq_modules()
+    mock_query_job.download = lambda **_kwargs: _default_df()
+
+    with patch.dict(
+        sys.modules,
+        _patched_modules(
+            mock_bq, mock_exceptions, mock_api_core, storage_installed=False
+        ),
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError) as probe_exc:
+            source.probe()
+        with pytest.raises(DataSourceError) as fetch_exc:
+            source.fetch(_ctx())
+
+    assert str(probe_exc.value) == str(fetch_exc.value)
+
+
+def test_probe_unaffected_when_strict_mode_is_off(monkeypatch) -> None:
+    """Without the env var, a missing storage extra must not fail probe()."""
+    monkeypatch.delenv("RECOTEM_BQ_REQUIRE_STORAGE_API", raising=False)
+
+    mock_bq, mock_exceptions, mock_api_core, mock_client, _ = _make_probe_bq_modules()
+    mock_client.query.return_value = MagicMock()
+
+    with patch.dict(
+        sys.modules,
+        _patched_modules(
+            mock_bq, mock_exceptions, mock_api_core, storage_installed=False
+        ),
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        assert source.probe() is None
+    mock_client.query.assert_called_once()
+
+
+def test_probe_strict_mode_passes_when_extra_is_installed(monkeypatch) -> None:
+    """Strict mode with the extra present must not disturb the dry run."""
+    monkeypatch.setenv("RECOTEM_BQ_REQUIRE_STORAGE_API", "1")
+
+    mock_bq, mock_exceptions, mock_api_core, mock_client, _ = _make_probe_bq_modules()
+    mock_client.query.return_value = MagicMock()
+
+    with patch.dict(
+        sys.modules,
+        _patched_modules(
+            mock_bq, mock_exceptions, mock_api_core, storage_installed=True
+        ),
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        assert source.probe() is None
+    mock_client.query.assert_called_once()

@@ -111,6 +111,17 @@ class DataSource(Protocol):
         ``LIMIT 1`` / dry-run / ``fs.exists`` style checks.  Must raise
         :class:`DataSourceError` on failure.  Sources without ``probe`` are
         still validated for extras and config schema only.
+    ``probe_columns(self, ctx: FetchContext) -> bool``  (optional)
+        Schema-column check invoked by ``recotem validate`` for the
+        interaction source only, with the same ``ctx.extra`` column names
+        ``fetch`` receives.  Implement it only when the column list can be
+        obtained cheaply (a CSV header row, a Parquet footer schema) — never
+        by running the query or downloading the body.  Return ``True`` when
+        the check ran and ``False`` when this configuration cannot answer
+        cheaply, so ``recotem validate`` reports the check as skipped rather
+        than implying it passed.  Raise :class:`DataSourceError` when a
+        required column is absent.  Sources without ``probe_columns`` have
+        their columns verified at train time instead.
     """
 
     type_name: ClassVar[str]

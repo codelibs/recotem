@@ -745,3 +745,56 @@ def test_recipes_list_response_loaded_at_iso8601() -> None:
     # Normalise to UTC and verify the offset is zero
     dt_utc = dt.astimezone(UTC)
     assert dt_utc.utcoffset().total_seconds() == 0
+
+
+# ---------------------------------------------------------------------------
+# Cold-start feature values must be scalars.
+#
+# The value cap is `isinstance(val, str)`-gated, and `Field(max_length=64)`
+# counts KEYS, so a JSON array or object was bounded by neither -- yet
+# `_features._tokens` reduces every value with `str(raw)`. One key holding a
+# large array therefore materialised a repr as large as RECOTEM_MAX_BODY_BYTES
+# allows, while encoding to nothing (a Python repr never matches a training
+# vocabulary entry).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [["a", "b"], {"nested": "x"}])
+def test_non_scalar_feature_value_is_rejected(bad: object) -> None:
+    """An array or object feature value must 422, not encode to its repr."""
+    with pytest.raises(ValidationError) as exc_info:
+        RecommendRequest(user_id="u1", user_features={"tags": bad})
+    message = str(exc_info.value)
+    assert "must be a scalar" in message
+    assert "tags" in message
+
+
+def test_non_scalar_feature_value_is_rejected_inside_item_features() -> None:
+    """The nested ``item_features`` mapping is validated the same way.
+
+    ``item_features`` is ``dict[_ItemStr, _FeatureValues]``, so the outer
+    values are legitimately dicts; only the INNER per-column values must be
+    scalars. A guard written against the outer level would either miss this or
+    reject every well-formed request.
+    """
+    with pytest.raises(ValidationError, match="must be a scalar"):
+        RecommendRelatedRequest(
+            seed_items=["i1"],
+            item_features={"i1": {"tags": ["a", "b"]}},
+        )
+
+
+def test_well_formed_item_features_still_validates() -> None:
+    """Guard against the above rejecting the outer dict-of-dicts shape."""
+    req = RecommendRelatedRequest(
+        seed_items=["i1"],
+        item_features={"i1": {"category": "drama", "year": 2016}},
+    )
+    assert req.item_features == {"i1": {"category": "drama", "year": 2016}}
+
+
+@pytest.mark.parametrize("good", ["drama", 2016, 3.5, True, None])
+def test_scalar_feature_values_are_accepted(good: object) -> None:
+    """Every JSON scalar stays acceptable -- the fix must not narrow these."""
+    req = RecommendRequest(user_id="u1", user_features={"col": good})
+    assert req.user_features == {"col": good}

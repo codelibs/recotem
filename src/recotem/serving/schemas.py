@@ -94,8 +94,18 @@ def _check_feature_value_lengths(
     checked too). KEYS are bounded to ``1..._MAX_FEATURE_KEY_CHARS``; string
     VALUES to ``_MAX_FEATURE_VALUE_CHARS``. The value check names the offending
     column key but never echoes the value (treated as personal data); the key
-    check reports only the length, never the key text. Non-string scalar values
-    are unaffected by the value cap.
+    check reports only the length, never the key text.
+
+    Non-string SCALARS (number / boolean / null) are unaffected by the value
+    cap -- their encoded form is bounded by their own type. Non-scalar JSON
+    values (arrays and objects) are REJECTED outright rather than capped:
+    ``_features._tokens`` reduces every value with ``str(raw)``, so an array
+    would be encoded as its Python repr, which never matches a training
+    vocabulary entry. Such a value is therefore already meaningless -- but
+    being neither a ``str`` nor key-counted, it slipped past both caps and let
+    one request materialise a repr as large as the body limit allows.
+    Rejecting is the safe direction to move in now: a client cannot come to
+    depend on a value that never encoded to anything.
     """
     if values is None:
         return values
@@ -104,6 +114,15 @@ def _check_feature_value_lengths(
             raise ValueError(
                 f"feature key length {len(key)} is outside the permitted "
                 f"1..{_MAX_FEATURE_KEY_CHARS} characters"
+            )
+        if isinstance(val, list | dict | tuple | set):
+            # Checked BEFORE the length cap below, which is `str`-only and so
+            # would not see this at all. `len()` on a container counts
+            # elements, not characters, so it is not a usable substitute.
+            raise ValueError(
+                f"feature value for column {key!r} must be a scalar "
+                f"(string, number, boolean, or null), not "
+                f"{type(val).__name__}"
             )
         if isinstance(val, str) and len(val) > _MAX_FEATURE_VALUE_CHARS:
             raise ValueError(

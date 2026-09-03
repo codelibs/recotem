@@ -283,6 +283,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A cold-start feature value must now be a JSON scalar.** The per-value
+  length cap was `isinstance(val, str)`-gated and `_FeatureValues`'
+  `max_length` counts KEYS, so a JSON array or object was bounded by neither —
+  while `_features._tokens` reduces every value with `str(raw)`. One key
+  holding a large array therefore materialised a repr as large as
+  `RECOTEM_MAX_BODY_BYTES` allows. Such a value never encoded to anything
+  regardless (a Python repr does not match a training vocabulary entry), so
+  arrays and objects are now rejected with `422` instead of capped. Numbers,
+  booleans and `null` are unaffected.
+- **The request-body cap no longer swallows `MemoryError` / `RecursionError`.**
+  `BodySizeLimitMiddleware` deliberately absorbs whatever the inner app raises
+  once the cap is breached, because injecting `http.disconnect` is what made it
+  raise — but both of those are `Exception` subclasses, so an out-of-memory
+  unwind during an oversized request was reported to the client as a tidy
+  `413` instead of surfacing. They are now re-raised ahead of the broad clause,
+  matching how every other broad handler in the package treats them.
+- **A pruned trial no longer logs a spurious `trial_learn_failed` WARNING
+  under `per_trial_timeout_seconds`.** `optuna.TrialPruned` subclasses
+  `Exception`, so the generic handler in the threaded learn path caught every
+  by-design prune on its way out and logged it exactly like a genuine
+  failure — while the non-threaded path, which has no such handler, stayed
+  silent for the identical prune. **This is not features-only:** irspack
+  raises `TrialPruned` from `recommenders/base_earlystop.py` whenever
+  Optuna's pruner fires, so any existing recipe that sets
+  `per_trial_timeout_seconds` on an early-stopping algorithm (IALS included)
+  was emitting these. Optuna still records the trial as `PRUNED` and the
+  search outcome is unchanged; only the log stream is quieter. Alerting built
+  on the *count* of `trial_learn_failed` events will see it drop.
 - **Feature-aware iALS: every feature-ridge failure is now recognised, not
   just the Cholesky one.** irspack raises this family from three sites in
   `cpp_source/als/IALSTrainer.hpp` and types them inconsistently. On 0.5.0

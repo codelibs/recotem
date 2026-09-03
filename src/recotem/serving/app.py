@@ -207,6 +207,13 @@ class BodySizeLimitMiddleware:
 
         try:
             await self.app(scope, rcv, snd)
+        except (MemoryError, RecursionError):
+            # Never absorbed, even on the overflow path. These say the process
+            # is in a bad state, not that our injected disconnect unwound the
+            # inner app, and turning one into a tidy 413 would hide a fault the
+            # operator must see. Re-raising them ahead of the broad clause below
+            # is what every other broad handler in this package does.
+            raise
         except Exception:
             # The inner app may raise ClientDisconnect (or similar) because we
             # injected http.disconnect after the cap was hit. That is a

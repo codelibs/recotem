@@ -98,3 +98,46 @@ def test_413_carries_request_id_header(
     )
     assert resp.status_code == 413
     assert resp.headers.get("x-request-id")
+
+
+def test_overflow_path_does_not_swallow_memory_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A MemoryError raised while the cap is being enforced must propagate.
+
+    The overflow path deliberately absorbs whatever the inner app raises,
+    because injecting ``http.disconnect`` is what made it raise. ``MemoryError``
+    and ``RecursionError`` are ``Exception`` subclasses and so were absorbed
+    too -- turning "this process is out of memory" into a tidy 413 and hiding a
+    fault the operator must see. Every other broad handler in this package
+    re-raises them first; this pins that the middleware does as well.
+    """
+    from recotem.serving.app import BodySizeLimitMiddleware
+
+    async def _exploding_app(scope, receive, send):
+        # Drain past the cap so `overflowed` is set, then fail the way an
+        # out-of-memory unwind would.
+        await receive()
+        raise MemoryError("simulated OOM while unwinding")
+
+    middleware = BodySizeLimitMiddleware(_exploding_app, max_body_bytes=8)
+
+    async def _receive():
+        return {"type": "http.request", "body": b"x" * 64, "more_body": False}
+
+    sent: list = []
+
+    async def _send(message):
+        sent.append(message)
+
+    import asyncio
+
+    with pytest.raises(MemoryError):
+        asyncio.run(
+            middleware(
+                {"type": "http", "headers": [], "method": "POST", "path": "/"},
+                _receive,
+                _send,
+            )
+        )
+    assert not sent, "no 413 may be emitted in place of the fault"

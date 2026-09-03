@@ -337,14 +337,20 @@ is bounded on three axes, each rejected before the model is consulted:
   `item_features` outer seed id, or a nested per-seed feature key) must be
   **1..256 characters**. Over the cap is `422`; the error reports only the
   offending length, never the key text.
+- **Value type** — each feature value must be a JSON **scalar** (string,
+  number, boolean, or `null`). An array or object is rejected with `422`.
+  This is not merely a size guard: values are encoded via `str(value)`, so an
+  array would be matched against the training vocabulary as its Python repr
+  and could never match anything — it was already a no-op, just an expensive
+  one.
 - **Value length** — each *string* feature value must be **≤ 8192 characters**
   (this bounds `multi_label` tokenization work). Over the cap is `422`; the
   error names the offending column but never echoes the value. Non-string
-  scalar values are unaffected.
+  scalars are unaffected — their encoded form is bounded by their own type.
 
-On the batch verbs a key- or value-length violation surfaces as a per-element
-`VALIDATION_ERROR` inside the `200` batch response rather than failing the
-whole batch.
+On the batch verbs a key-length, value-type, or value-length violation
+surfaces as a per-element `VALIDATION_ERROR` inside the `200` batch response
+rather than failing the whole batch.
 
 Independently of these per-field caps, the **entire request body** is bounded
 by `RECOTEM_MAX_BODY_BYTES` (default **128 MiB**, clamped to

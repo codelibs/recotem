@@ -1286,15 +1286,20 @@ output:
     )
 
 
-def _make_valid_artifact_bytes() -> bytes:
-    """Return valid signed artifact bytes via the shared conftest builder."""
+def _make_valid_artifact_bytes(recipe_name: str = "test") -> bytes:
+    """Return valid signed artifact bytes via the shared conftest builder.
+
+    *recipe_name* must match the recipe that will load these bytes: serving
+    refuses an artifact whose header names a different recipe (see
+    ``recotem._artifact_identity``).
+    """
     from tests.conftest import ACTIVE_KEY_HEX, build_raw_artifact
 
     return build_raw_artifact(
         kid="active",
         key_hex=ACTIVE_KEY_HEX,
         header_dict={
-            "recipe_name": "test",
+            "recipe_name": recipe_name,
             "trained_at": "2026-01-01T00:00:00Z",
             "best_class": "TopPopRecommender",
         },
@@ -1316,12 +1321,10 @@ def test_startup_loads_artifacts_in_parallel_with_default_concurrency(
 
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
-    artifact_data = _make_valid_artifact_bytes()
-
     n_recipes = 4
     for i in range(n_recipes):
         artifact_path = tmp_path / f"model_{i}.recotem"
-        artifact_path.write_bytes(artifact_data)
+        artifact_path.write_bytes(_make_valid_artifact_bytes(f"recipe_{i}"))
         _write_recipe_for_parallel_test(recipes_dir, f"recipe_{i}", artifact_path)
 
     thread_ids: list[int] = []
@@ -1391,10 +1394,8 @@ def test_startup_one_failed_load_does_not_block_others(
 
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
-    artifact_data = _make_valid_artifact_bytes()
-
     ok_artifact = tmp_path / "model_ok.recotem"
-    ok_artifact.write_bytes(artifact_data)
+    ok_artifact.write_bytes(_make_valid_artifact_bytes("recipe_ok"))
     _write_recipe_for_parallel_test(recipes_dir, "recipe_ok", ok_artifact)
 
     missing_artifact = tmp_path / "does_not_exist.recotem"
@@ -1448,10 +1449,8 @@ def test_startup_emits_load_complete_event_with_counts(
 
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
-    artifact_data = _make_valid_artifact_bytes()
-
     ok_artifact = tmp_path / "model_ok.recotem"
-    ok_artifact.write_bytes(artifact_data)
+    ok_artifact.write_bytes(_make_valid_artifact_bytes("recipe_ok"))
     _write_recipe_for_parallel_test(recipes_dir, "recipe_ok", ok_artifact)
 
     missing_artifact = tmp_path / "no_such_file.recotem"
@@ -1741,12 +1740,10 @@ def test_startup_parallel_loading_uses_multiple_threads(
 
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
-    artifact_data = _make_valid_artifact_bytes()
-
     n_recipes = 8
     for i in range(n_recipes):
         artifact_path = tmp_path / f"model_{i}.recotem"
-        artifact_path.write_bytes(artifact_data)
+        artifact_path.write_bytes(_make_valid_artifact_bytes(f"recipe_p_{i}"))
         _write_recipe_for_parallel_test(recipes_dir, f"recipe_p_{i}", artifact_path)
 
     thread_ids: list[int] = []
@@ -1903,12 +1900,10 @@ def test_startup_parallelism_one_uses_single_thread(
 
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
-    artifact_data = _make_valid_artifact_bytes()
-
     n_recipes = 4
     for i in range(n_recipes):
         artifact_path = tmp_path / f"model_seq_{i}.recotem"
-        artifact_path.write_bytes(artifact_data)
+        artifact_path.write_bytes(_make_valid_artifact_bytes(f"recipe_seq_{i}"))
         _write_recipe_for_parallel_test(recipes_dir, f"recipe_seq_{i}", artifact_path)
 
     thread_ids: list[int] = []

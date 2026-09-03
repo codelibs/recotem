@@ -37,6 +37,10 @@ from typing import TYPE_CHECKING, Any
 import fsspec
 import structlog
 
+from recotem._artifact_identity import (
+    RECIPE_NAME_MSG_PREFIX,
+    check_artifact_recipe_name,
+)
 from recotem._features import (
     FEATURE_STATE_MSG_PREFIX,
     FEATURE_VERSION_MSG_PREFIX,
@@ -50,6 +54,7 @@ from recotem._irspack_compat import (
 from recotem._log_safe import format_kid_for_log as _format_kid_for_log
 from recotem._metrics_watcher import inc_recipes_dir_scan_failure as _inc_scan_failure
 from recotem.artifact.format import ArtifactError
+from recotem.recipe.errors import describe_recipe_load_failure
 from recotem.serving import metrics as _metrics
 from recotem.serving._header_utils import extract_algorithms, normalize_config_digest
 from recotem.serving._naming import dedup_stub_name
@@ -476,7 +481,9 @@ class ArtifactWatcher(threading.Thread):
             lambda n: n in self._states or self._registry.get(n) is not None,
         )
 
-        error_msg = f"YAML parse failed in '{yaml_file.name}': {error}"
+        error_msg = (
+            f"{describe_recipe_load_failure(error)} in '{yaml_file.name}': {error}"
+        )
         stub = ModelEntry(
             name=stub_name,
             recommender=None,
@@ -503,10 +510,14 @@ class ArtifactWatcher(threading.Thread):
         self._states[stub_name] = stub_state
         self._yaml_path_to_name[yaml_file] = stub_name
 
+        # ``category`` distinguishes a syntax error from a schema violation in
+        # the structured log; the event name is left alone because operators
+        # alert on it.
         logger.warning(
             "recipe_yaml_parse_failed_on_rescan_new_file",
             file=yaml_file.name,
             name=stub_name,
+            category=getattr(error, "category", "unknown"),
             error=str(error),
         )
 
@@ -599,7 +610,7 @@ class ArtifactWatcher(threading.Thread):
                     # back to the actual cause.
                     self._registry.set_load_error(
                         existing_name,
-                        f"recipe YAML parse error on rescan "
+                        f"{describe_recipe_load_failure(exc)} on rescan "
                         f"in '{yaml_file.name}': {exc}",
                     )
                     # Remember that *we* own the outstanding error so a later
@@ -1123,6 +1134,12 @@ class ArtifactWatcher(threading.Thread):
         except (ValueError, UnicodeDecodeError) as exc:
             raise ArtifactError(f"header JSON decode failed: {exc}") from exc
 
+        # Bind the artifact to the recipe it is being loaded for before any
+        # other gate: an artifact trained for a different recipe is wrong no
+        # matter what the rest of the header says, and the check needs only
+        # the dict already in hand — no payload, no version lookup.
+        check_artifact_recipe_name(header_dict, name=name)
+
         # Preflight the irspack version before deserializing: a skewed artifact
         # fails inside the C++ __setstate__ with an error that names neither
         # the recipe nor the remedy.
@@ -1272,6 +1289,11 @@ def _classify_artifact_error(err_msg: str) -> str:
     ``artifact/signing.py``.
     """
     lower = err_msg.lower()
+    # First because it is the cheapest gate and the most specific condition:
+    # the artifact says outright which recipe it belongs to, so no other
+    # branch can legitimately claim this message.
+    if lower.startswith(RECIPE_NAME_MSG_PREFIX.lower()):
+        return "recipe_name"
     # Must precede the "parse" branch below: the skew message contains the
     # word "version", which that branch's catch-all would otherwise claim.
     # `.lower()` on the prefix so a future capitalisation of SKEW_MSG_PREFIX

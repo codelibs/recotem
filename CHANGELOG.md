@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.1.0] - Unreleased
 
+### Upgrading from 2.0.0
+
+**2.1.0 moves irspack from 0.4.2 to 0.5.2.** irspack 0.5.0 changed
+`IALSModelConfig`'s pickled state from a 7-tuple to a 10-tuple, so **IALS
+artifacts trained on 2.0.0 cannot be loaded by 2.1.0.** Every other algorithm
+carries over unchanged: of the six algorithms trained under 2.0.0 and loaded
+under 2.1.0, five (`CosineKNN`, `TopPop`, `RP3beta`, `DenseSLIM`,
+`TruncatedSVD`) load and serve bit-identical scores; only IALS is refused. The
+refusal is correct rather than over-cautious — bypassing the guard and
+deserializing anyway reproduces the real `TypeError: __setstate__():
+incompatible function arguments`. The mechanism and the full verified-pair table
+are under **Migrating to irspack 0.5.0** below.
+
+This affects more deployments than it might appear to. The shipped tutorial
+recipe searches `algorithms: [IALS, TopPop]` and normally settles on IALS, so a
+deployment that started from the tutorial holds an IALS artifact without anyone
+having chosen IALS explicitly. The winning algorithm is a search outcome, not a
+recipe setting — check each artifact with `recotem inspect` rather than reading
+it off the recipe.
+
+**What you will see.** `serve` starts normally — it does not crash. The IALS
+recipe is registered with `"loaded": false` and an error naming the recipe, both
+irspack versions, and the remedy. Requests to that recipe return `503`
+(`RECIPE_UNAVAILABLE`); every other recipe keeps serving.
+`recotem_artifact_load_failures_total{reason="version_skew"}` increments, and
+`/v1/health/details` reports `"status": "degraded"`.
+
+**On Kubernetes the blast radius is the whole pod, not one recipe.**
+`/v1/health` is count-based: it returns `degraded` with HTTP **503** whenever
+`loaded < total` — that is, whenever *any* recipe failed to load. The shipped
+Helm chart points all three probes (startup, readiness, liveness) at
+`/v1/health`, and `examples/k8s/` points readiness and liveness there too. So a
+single refused IALS artifact fails the startupProbe, the pod never becomes
+ready, it is kept out of the Service and restarted — and the recipes that would
+have served fine never receive traffic. "Other recipes keep serving" is true of
+the process, not of the deployment. Retrain before rolling serve.
+
+**Upgrade procedure.**
+
+1. `recotem inspect` every artifact and note which report
+   `"best_class": "IALSRecommender"` — only those need work.
+2. Upgrade the **train** side first and retrain every IALS recipe on 2.1.0.
+3. Wait for the new artifacts to land in the artifact store.
+4. Upgrade the **serve** side.
+5. Confirm `/v1/health/details` reports `"status": "ok"`.
+
+The full runbook, including the zero-downtime caveat that this upgrade breaks,
+is [docs/operations.md](docs/operations.md#irspack-version-skew).
+
+If you upgrade serve first — the default rolling-deploy order — the old IALS
+artifact is still on disk, so that recipe comes up `loaded: false` and returns
+503 until a 2.1.0-trained artifact replaces it. Non-IALS recipes are unaffected
+in themselves. This is a clean, visible outage rather than corruption, but it is
+what a rolling deploy does by default, so plan around it.
+
+**Do not reach for `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW=1` here.** It only
+downgrades the refusal to a warning and lets the payload reach the
+deserializer; the load then fails anyway with the bare `TypeError` the guard
+exists to replace. It converts an actionable error into an unattributable one
+and buys nothing. The flag is for algorithms that are merely *unverified*, not
+for the known IALS break.
+
+**Rollback.** Roll serve and artifacts back together. Once a recipe has been
+retrained on 2.1.0, a 2.0.0 serve cannot load its IALS artifact either — the
+break is bidirectional. Keep the pre-upgrade artifacts until the upgrade is
+confirmed; the default `versioning: append_sha` plus its pointer file makes this
+natural — repoint, do not delete. **A recipe using the new `features:` block
+cannot be rolled back at all** and must be retrained without the block to run on
+2.0.0.
+
+**Unchanged by this upgrade:** signing keys and the key-rotation procedure; the
+artifact container itself (magic bytes, `FORMAT_VERSION` 1, and the header
+layout — `src/recotem/artifact/` is byte-identical between the two releases);
+and every existing recipe, which stays valid as written. Every recipe's
+`recipe_hash` does change, but nothing gates on it — see **Changed** below.
+
 ### Added
 
 - **irspack version-skew guard.** `serve` now checks an artifact header's
@@ -122,6 +198,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unbounded. Over-length or empty keys now get a `422`; an over-length key
   reports only its length, never its (possibly huge) text.
 
+### Changed
+
+- **A numerical `features:` column with a tiny-but-nonzero training std is
+  now treated as zero-variance, like an exactly-constant column.** Previously
+  only an exact `std == 0.0` was floored; a column whose values differ only
+  by floating-point rounding noise (e.g. `std ≈ 1e-15`) passed that check but
+  still divided serve-time standardization by a near-zero denominator,
+  turning an ordinary request value into an astronomically large
+  standardized one and a false `400 FEATURE_VALUE_UNUSABLE`.
+  `build_encoder_state` now floors any std no larger than `1e-8 ×
+  max(abs(mean), 1.0)` (relative to the column's own scale) to zero. A
+  column caught by this floor degrades exactly like a missing value
+  (`feature_zero_variance_column` warning, unchanged) instead of ever
+  reaching the standardization divide. This changes training-time encoding
+  for any feature table containing such a column; retrain to pick it up. See
+  `docs/api-reference.md#feature-aware-cold-start`.
+- **Every recipe's `recipe_hash` changes on upgrade, features or not.** The
+  hash is computed by JSON-dumping the whole recipe with no `exclude_none`,
+  so adding the new optional `features` field emits `{"features": null}` for
+  every existing recipe and changes its hash — the same effect
+  `item_metadata` already has when absent. Nothing in Recotem compares or
+  gates on `recipe_hash` today; it is carried through to the artifact header
+  (`recotem inspect`) and the `GET /v1/recipes/{name}` response purely for
+  operators' own SIEM/audit rules. It is **not** readable from the
+  `train_done` log event: `log_redaction` rewrites every 64-hex string to
+  `[REDACTED-HEX64]`, so that field logs a constant regardless of the
+  recipe. The inference verbs do not echo it: `:recommend` returns
+  `request_id` / `recipe` / `model_version` / `items` only. If you pin or
+  diff `recipe_hash` in external tooling, expect every recipe to show a
+  changed hash on this upgrade even though nothing about the recipe's
+  behavior changed.
+
+- **irspack upgraded from 0.4.2 to 0.5.2.** irspack 0.5.0 adds feature-aware
+  iALS, cache/Eigen performance work, and a reworked tuning API. Recotem drives
+  Optuna itself and does not call `BaseRecommender.tune`, so none of irspack's
+  documented breaking changes (`tune_with_study` removal, `fixed_params` →
+  keyword arguments, `random_seed` → `tuning_random_seed`) affect Recotem.
+  **IALS and BPRFM models trained on 0.4.x must be retrained** — see below.
+  The subsequent 0.5.1 (parallelised feature-aware iALS) and 0.5.2
+  (`FeatureRidgeCholeskyError`, a dedicated exception for a feature-ridge
+  Cholesky failure) both land in the feature-aware path, which the new
+  `features:` block *does* reach — recotem's search prunes the Optuna trial
+  on that failure rather than aborting the run. They were verified not to
+  change the serialised model: for all six algorithms Recotem can build, an
+  identically-trained recommender pickles to a byte-identical payload under
+  0.5.0 and 0.5.2 (SHA-256 compared), `IALSModelConfig.__setstate__` keeps its
+  10-element arity, and artifacts interchange in both directions with
+  bit-exact recommendation scores. That comparison was run on
+  non-feature-carrying payloads only, so it does not by itself certify a
+  0.5.0-trained *feature-aware* artifact on 0.5.2; train and serve on the same
+  irspack minor, as the skew guard already requires. **No retrain is needed
+  for a 0.5.x → 0.5.2 upgrade.**
+- **scikit-learn is now a direct, range-pinned dependency** (`>=1.8,<1.10`).
+  It was already reachable transitively via irspack, which asks only for
+  `>=0.21.0`. `TruncatedSVDRecommender` pickles an sklearn estimator into the
+  artifact payload, and sklearn does not guarantee correctness when unpickling
+  across its own minors (`InconsistentVersionWarning`: "might lead to breaking
+  code or invalid results"). The range keeps train and serve inside a tested
+  window and forces a deliberate bump plus retest at the next sklearn minor.
+  **A range narrows this axis but does not close it:** two installs inside the
+  range can still differ, and the irspack version-skew guard does not check the
+  sklearn axis at all. If you need TruncatedSVD artifacts to be reproducible
+  bit-exact, pin sklearn exactly or build train and serve from the same lock
+  file.
+- **`recotem validate` labels each probed data source.** Because a recipe may
+  now declare feature-side sources (`features.item.source` /
+  `features.user.source`) alongside the top-level `source:`, the probe output
+  tags which one it is (`DataSource: probe OK (csv) [source]`, `DataSource probe
+  failed [features.item.source]: ...`) and the missing-discriminator message
+  reads `source is missing the 'type' discriminator.` rather than `Recipe
+  source is missing the 'type' discriminator.`. Exit codes are unchanged;
+  tooling that greps the exact `validate` output lines should update.
+
 ### Fixed
 
 - **The published Docker image could not start.** `docker run ghcr.io/codelibs/recotem:2.0.0 --help`
@@ -220,81 +369,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Behaviour change:** such a recipe will split differently on its next train
   and its reported metric may move; existing artifacts are unaffected until
   retrained, and `scheme: time_user` restores the old behaviour explicitly.
-
-### Changed
-
-- **A numerical `features:` column with a tiny-but-nonzero training std is
-  now treated as zero-variance, like an exactly-constant column.** Previously
-  only an exact `std == 0.0` was floored; a column whose values differ only
-  by floating-point rounding noise (e.g. `std ≈ 1e-15`) passed that check but
-  still divided serve-time standardization by a near-zero denominator,
-  turning an ordinary request value into an astronomically large
-  standardized one and a false `400 FEATURE_VALUE_UNUSABLE`.
-  `build_encoder_state` now floors any std no larger than `1e-8 ×
-  max(abs(mean), 1.0)` (relative to the column's own scale) to zero. A
-  column caught by this floor degrades exactly like a missing value
-  (`feature_zero_variance_column` warning, unchanged) instead of ever
-  reaching the standardization divide. This changes training-time encoding
-  for any feature table containing such a column; retrain to pick it up. See
-  `docs/api-reference.md#feature-aware-cold-start`.
-- **Every recipe's `recipe_hash` changes on upgrade, features or not.** The
-  hash is computed by JSON-dumping the whole recipe with no `exclude_none`,
-  so adding the new optional `features` field emits `{"features": null}` for
-  every existing recipe and changes its hash — the same effect
-  `item_metadata` already has when absent. Nothing in Recotem compares or
-  gates on `recipe_hash` today; it is carried through to the artifact header
-  (`recotem inspect`) and the `GET /v1/recipes/{name}` response purely for
-  operators' own SIEM/audit rules. It is **not** readable from the
-  `train_done` log event: `log_redaction` rewrites every 64-hex string to
-  `[REDACTED-HEX64]`, so that field logs a constant regardless of the
-  recipe. The inference verbs do not echo it: `:recommend` returns
-  `request_id` / `recipe` / `model_version` / `items` only. If you pin or
-  diff `recipe_hash` in external tooling, expect every recipe to show a
-  changed hash on this upgrade even though nothing about the recipe's
-  behavior changed.
-
-- **irspack upgraded from 0.4.2 to 0.5.2.** irspack 0.5.0 adds feature-aware
-  iALS, cache/Eigen performance work, and a reworked tuning API. Recotem drives
-  Optuna itself and does not call `BaseRecommender.tune`, so none of irspack's
-  documented breaking changes (`tune_with_study` removal, `fixed_params` →
-  keyword arguments, `random_seed` → `tuning_random_seed`) affect Recotem.
-  **IALS and BPRFM models trained on 0.4.x must be retrained** — see below.
-  The subsequent 0.5.1 (parallelised feature-aware iALS) and 0.5.2
-  (`FeatureRidgeCholeskyError`, a dedicated exception for a feature-ridge
-  Cholesky failure) both land in the feature-aware path, which the new
-  `features:` block *does* reach — recotem's search prunes the Optuna trial
-  on that failure rather than aborting the run. They were verified not to
-  change the serialised model: for all six algorithms Recotem can build, an
-  identically-trained recommender pickles to a byte-identical payload under
-  0.5.0 and 0.5.2 (SHA-256 compared), `IALSModelConfig.__setstate__` keeps its
-  10-element arity, and artifacts interchange in both directions with
-  bit-exact recommendation scores. That comparison was run on
-  non-feature-carrying payloads only, so it does not by itself certify a
-  0.5.0-trained *feature-aware* artifact on 0.5.2; train and serve on the same
-  irspack minor, as the skew guard already requires. **No retrain is needed
-  for a 0.5.x → 0.5.2 upgrade.**
-- **scikit-learn is now a direct, range-pinned dependency** (`>=1.8,<1.10`).
-  It was already reachable transitively via irspack, which asks only for
-  `>=0.21.0`. `TruncatedSVDRecommender` pickles an sklearn estimator into the
-  artifact payload, and sklearn does not guarantee correctness when unpickling
-  across its own minors (`InconsistentVersionWarning`: "might lead to breaking
-  code or invalid results"). The range keeps train and serve inside a tested
-  window and forces a deliberate bump plus retest at the next sklearn minor.
-  **A range narrows this axis but does not close it:** two installs inside the
-  range can still differ, and the irspack version-skew guard does not check the
-  sklearn axis at all. If you need TruncatedSVD artifacts to be reproducible
-  bit-exact, pin sklearn exactly or build train and serve from the same lock
-  file.
-- **`recotem validate` labels each probed data source.** Because a recipe may
-  now declare feature-side sources (`features.item.source` /
-  `features.user.source`) alongside the top-level `source:`, the probe output
-  tags which one it is (`DataSource: probe OK (csv) [source]`, `DataSource probe
-  failed [features.item.source]: ...`) and the missing-discriminator message
-  reads `source is missing the 'type' discriminator.` rather than `Recipe
-  source is missing the 'type' discriminator.`. Exit codes are unchanged;
-  tooling that greps the exact `validate` output lines should update.
-
-### Fixed
 
 - **A cold-start feature value must now be a JSON scalar.** The per-value
   length cap was `isinstance(val, str)`-gated and `_FeatureValues`'
@@ -395,6 +469,125 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   training) returned `200` with an empty `items` list for the identical
   condition. Both branches now raise the same `NO_CANDIDATES`, so every path of
   the verb — single and batch — reports an empty result the same way.
+- **The artifact header's `features` descriptor was never reconciled with the
+  model the artifact actually contains.** The header block was written whenever
+  the recipe declared a `features:` block, and cross-checked against neither the
+  winning recommender's capability nor whether that model was trained with
+  features at all. A `features:` recipe only requires *one* of its algorithms to
+  be feature-aware, so a search over `[IALS, TopPop]` that TopPop wins produces a
+  model trained with no features whatsoever — while the header still advertises
+  `features` with the full column list. `recotem inspect`, whose whole contract
+  is that the header describes the payload, then reports a feature-aware model
+  that is really plain TopPop. Request handling was not affected (serve reads the
+  encoder state off the payload, not the header, and the only existing consumer
+  of the header block checks its `version` integer), so this was a truthfulness
+  defect in the artifact's own self-description rather than a serving fault — but
+  the header is precisely what operators, audits and `inspect` reason about, and
+  it is not independently checkable without deserializing the payload the header
+  exists to describe. The `features` block is now reconciled with the winning
+  `best_class` and the state actually attached to the payload before signing.
+- **Four CLI failures reported the wrong exit code, three of them as an
+  unmapped `1`.** Exit codes are the contract supervisors and CronJob retry
+  logic read, and `1` (`_EXIT_UNKNOWN`) says nothing about whether to retry, fix
+  the recipe, or fix the data. Worse, an unmapped exception is classified
+  `internal_error`, so it is the case that logs a full traceback — a recipe or
+  data mistake was presented as a Recotem bug. A `schema` column absent from the
+  source data escaped as a bare pandas `KeyError` (exit 1) rather than a
+  `DataSourceError` (exit **3**); a `training.cutoff` larger than the item
+  count surfaced irspack's `ValueError: cutoff must not exeeed the number of
+  items.` unmapped (exit 1) rather than a `TrainingError` (exit **4**);
+  `recotem inspect` exited 1 with a traceback on a configuration error that
+  `serve` already mapped to **8**, because `inspect` called the same
+  `ServeConfig.from_env()` outside the `try` that `serve` wraps around it. The
+  missing-column case is worth calling out: the CSV source *has* a
+  required-column check for exactly this, but it was dead code — it reads the
+  column names out of the fetch context's `extra` mapping, which neither
+  production call site populates, so it always took its "no schema context —
+  skip" early return and the column was first touched much later, by the
+  cleansing step's `dropna`. The fourth was the most misleading: a malformed
+  `RECOTEM_SIGNING_KEYS` exited **5** (`_EXIT_ARTIFACT`), which reads as "the
+  artifact is corrupt" and sends an operator to the artifact store when the
+  fault is an environment variable — on `train`, `serve` and `inspect` alike.
+  It now exits **8** (`_EXIT_CONFIG`), like every other configuration error.
+- **One malformed recipe file made the entire serve deployment permanently
+  unready.** A single YAML syntax error produced an orphaned registry entry:
+  startup registers a failure stub for the unparseable file, but the watcher
+  builds its state map from successfully *parsed* recipes only, so that stub was
+  never in the watcher's view. It could therefore never be evicted — not even
+  after the operator fixed the YAML — and on the first rescan the watcher, not
+  recognising the name, registered a *second* stub under a deduplicated name
+  with an empty artifact path. Since `/v1/health` is count-based (`loaded <
+  total` → `degraded`, HTTP 503), `total` stayed permanently above `loaded` for
+  the life of the process. The valid recipes did load and would answer their
+  verbs directly, but `/v1/health` is exactly what the Helm chart's and
+  `examples/k8s/`'s readiness probes poll, so the pod never became Ready and was
+  kept out of the Service — the healthy recipes stopped receiving traffic
+  through it, and no restart cleared the condition. The watcher additionally
+  re-parsed and re-failed the broken file on every tick, because its mtime cache
+  memoises only successful parses, logging a warning each time at the default
+  5-second interval. A malformed recipe file no longer creates a duplicate or
+  unevictable entry, and fixing the YAML now restores health without a restart.
+- **Log redaction blanked non-secret fields and whole event names.** Two
+  over-broad rules fired on things that carry no secret. The key-name substring
+  patterns `auth` and `key(?!s\b)` matched `auth_enabled` and
+  `signing_key_status` on the `security.posture` event — the two fields that
+  event exists to report — so the startup security posture was unreadable in the
+  very log line that records it. Separately, the high-entropy value scrubber's
+  base64url alphabet (`[A-Za-z0-9_-]`, 43+ chars — 43 being `ceil(256/6)`)
+  includes the underscore, so an ordinary `snake_case` structlog **event name**
+  of 43 characters or more matched end to end and was replaced wholesale with
+  `[REDACTED-B64URL43]`. Three real event names are that long and were being
+  erased: `sql_statement_timeout_unsupported_on_sqlite`,
+  `recipe_yaml_parse_failed_on_rescan_new_file`, and
+  `source_registry_unavailable_during_validation`. The first is the one
+  `docs/data-sources/sql.md` promises operators can alert on to learn that the
+  documented statement-timeout safety control is not in effect on SQLite — an
+  alert that could never match, on a control the docs tell you to verify.
+  Redaction is now scoped to the fields and value shapes that actually carry
+  secrets, and leaves event names and non-secret posture fields intact. **Any
+  alerting keyed on the redacted forms needs updating** — these events now log
+  their real names and values.
+- **The shipped deployment assets did not work as published.** Both
+  `examples/k8s/` workloads set `serviceAccountName: recotem`, which no manifest
+  in the directory declares and the README does not list as a prerequisite, so
+  applying the directory as documented produced a workload whose pods are never
+  created. The Helm CronJob pins its shell to `/bin/sh` and then, on the legacy
+  `recipeFiles` string form, emitted bash-only syntax into it — a `<<<`
+  here-string, `read -a`, array expansion and pattern substitution — none of
+  which dash supports, so a chart using that form failed at run time rather than
+  at `helm install`. The annotated Compose example in
+  `docs/deployment/docker.md` (and its `docker run` counterpart) doubled the
+  entrypoint: Compose's `command:` replaces `CMD`, not `ENTRYPOINT`, so
+  `command: recotem train …` against `ENTRYPOINT ["recotem"]` runs
+  `recotem recotem train …`. The repository's own `compose.yaml` gets this
+  right, so the annotated example contradicted the file it claimed to annotate.
+  `docs/deployment/k8s.md` described the default NetworkPolicy as the canonical
+  deny-all-inbound pattern; in fact the default enables `allowKubeletProbes`,
+  which renders an ingress rule with no `from:` selector and therefore admits
+  **any** source on the service port. That is the most consequential of these,
+  because a reader takes a protection they do not have for granted. And
+  first-time install had no documented bootstrap ordering — generate keys, train,
+  then serve — which is now stated, along with the fact that `/v1/health` reports
+  503 until the first artifact exists.
+- **The release pipeline had no gate on the steps most likely to break a
+  release.** The publish workflow triggers on the tag glob `v*`, which matches
+  `vfoo`, and compared the tag against neither `pyproject.toml` nor
+  `version.py`, nor rejected a `.devN`/pre-release version — on a registry where
+  a version is burned permanently the moment it is uploaded. The container
+  vulnerability scan ran *after* the multi-arch push, so a failing scan could
+  only report a vulnerability in an image that was already public. Nothing
+  validated the Helm chart, the `examples/k8s/` manifests, or `compose.yaml`,
+  which is how the deployment defects above shipped under a green build. And the
+  e2e script reported failures misleadingly: every request uses `curl -sf`, which
+  exits 22 on any 4xx/5xx, so under `set -euo pipefail` a server that started but
+  came up `degraded` (503 on `/v1/health`) was diagnosed as "server did not start
+  within 30s", and the script's own status-reporting branch — written for exactly
+  that case — was unreachable, because `set -e` killed the script one line
+  earlier. The run ended on the cleanup banner with no failure message, which
+  reads like an orderly finish. The script also served with `--insecure-no-auth`
+  and never set `RECOTEM_API_KEYS`, sent an `X-API-Key`, or asserted a `401`, so
+  the authenticated path every production deployment uses went untested by the
+  suite whose job is to prove the release works. All of these are now gated.
 
 ### Migrating to irspack 0.5.0
 

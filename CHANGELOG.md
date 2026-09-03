@@ -20,6 +20,16 @@ deserializing anyway reproduces the real `TypeError: __setstate__():
 incompatible function arguments`. The mechanism and the full verified-pair table
 are under **Migrating to irspack 0.5.0** below.
 
+**"Bit-identical" is a claim about loading an existing artifact, not about
+retraining.** Those five algorithms load a 2.0.0-trained artifact under 2.1.0
+and serve the same scores. Retraining the same recipe on 2.1.0 and diffing
+against the 2.0.0 model — the obvious way to convince yourself the upgrade is
+safe — is a different comparison, and it will show small differences: measured
+at roughly 8.5e-09 on `DenseSLIM` and 3e-15 on `TruncatedSVD`, with the item
+ordering unchanged. That is float drift from a dependency range that admits more
+than one build, not a break. Validate the upgrade by loading and serving the
+artifacts you already have.
+
 This affects more deployments than it might appear to. The shipped tutorial
 recipe searches `algorithms: [IALS, TopPop]` and normally settles on IALS, so a
 deployment that started from the tutorial holds an IALS artifact without anyone
@@ -43,6 +53,20 @@ single refused IALS artifact fails the startupProbe, the pod never becomes
 ready, it is kept out of the Service and restarted — and the recipes that would
 have served fine never receive traffic. "Other recipes keep serving" is true of
 the process, not of the deployment. Retrain before rolling serve.
+
+**That is the picture at startup only. A hot-swap fails silently instead.** When
+a skewed artifact lands in an *already-running* server, the previously loaded
+model stays in memory — the watcher annotates the load error onto the registry
+entry without clearing its `loaded` flag — so the count-based `/v1/health` stays
+**200** and no probe fails. Nothing restarts the pod. Only
+`/v1/health/details`, which reads the error strings rather than the count,
+reports `degraded`, and
+`recotem_artifact_load_failures_total{reason="version_skew"}` increments. The
+fleet quietly keeps serving the *old* model until the next involuntary restart —
+a node drain, an eviction, a scale-up — turns it into the startup case above,
+potentially long after the deploy that caused it. Alert on that counter and
+scrape `/v1/health/details`; a green `/v1/health` is not evidence the swap
+worked. `docs/operations.md` calls this "degraded now, down later".
 
 **Upgrade procedure.**
 
@@ -79,9 +103,19 @@ cannot be rolled back at all** and must be retrained without the block to run on
 
 **Unchanged by this upgrade:** signing keys and the key-rotation procedure; the
 artifact container itself (magic bytes, `FORMAT_VERSION` 1, and the header
-layout — `src/recotem/artifact/` is byte-identical between the two releases);
+layout — `artifact/__init__.py`, `format.py` and `io.py` are byte-identical
+between the two releases);
 and every existing recipe, which stays valid as written. Every recipe's
 `recipe_hash` does change, but nothing gates on it — see **Changed** below.
+
+**One thing in that area did change.** `src/recotem/artifact/signing.py` is not
+byte-identical: a malformed `RECOTEM_SIGNING_KEYS` now exits **8**
+(`_EXIT_CONFIG`) where 2.0.0 exited **5** (`_EXIT_ARTIFACT`), on `train`,
+`serve` and `inspect` alike (see **Fixed** below). The container format is
+untouched and no artifact needs anything done to it — but supervisor, CronJob
+or alerting logic that branches on exit 5 to mean "the artifact is corrupt,
+retrain it" will stop firing for an environment-variable typo and must learn
+exit 8.
 
 ### Added
 
@@ -262,14 +296,50 @@ and every existing recipe, which stays valid as written. Every recipe's
   sklearn axis at all. If you need TruncatedSVD artifacts to be reproducible
   bit-exact, pin sklearn exactly or build train and serve from the same lock
   file.
+- **`recotem validate` now rejects a recipe whose `schema:` names a column the
+  source does not have.** It used to exit **0** and leave the failure to
+  `train`: `probe()` only confirmed the source was reachable, so the documented
+  pre-flight gate green-lit recipes `train` then refused with exit 3. Validate
+  now reads the column names where that is cheap — a CSV header row
+  (`nrows=0`), a Parquet footer schema — and applies the same rule the train
+  path does, so both verbs print the same message. Where the answer is not
+  cheap it says so rather than implying a check it did not run: `http(s)://`
+  paths are skipped (their `sha256` pin and byte cap are fetch-time controls a
+  probe must not spend twice), and `bigquery`, `sql` and plugin sources are
+  reported as "not checked". Feature sources are exempt — a feature table
+  legitimately lacks the interaction columns.
+
+  **This changes `validate`'s exit code, and two upgrade scenarios break on
+  it**, both because validate now performs I/O it did not perform before:
+
+  - *A validate-only CI gate run against data the scheduled `train` will not
+    see.* If the column lands in the real table later, the PR is now red while
+    the scheduled train stays green — the reverse of the previous behaviour.
+    Point the gate at data carrying the declared columns, or move the gate to
+    where the train-time data is visible.
+  - *A source the process cannot read.* A CSV at `chmod 000` previously printed
+    `DataSource: probe OK (csv) [source]` followed by `Validation passed.` and
+    exited 0. It now prints the same `probe OK` line and then
+    `Schema column check failed [source]: ... Permission denied`, exit **3**.
+    Reading `probe OK` as the verdict was always wrong; nothing before this
+    release made that visible.
+
+  `recotem schema` changes alongside it. `training` now appears in the emitted
+  schema's `required` list — it was always required by the loader, and the
+  `default_factory` that made it look optional could never succeed — and the
+  document now declares its `$schema` dialect so editors need not guess the
+  draft. An editor validating against the 2.0.0 schema accepted recipes the
+  product rejects.
 - **`recotem validate` labels each probed data source.** Because a recipe may
   now declare feature-side sources (`features.item.source` /
   `features.user.source`) alongside the top-level `source:`, the probe output
   tags which one it is (`DataSource: probe OK (csv) [source]`, `DataSource probe
   failed [features.item.source]: ...`) and the missing-discriminator message
   reads `source is missing the 'type' discriminator.` rather than `Recipe
-  source is missing the 'type' discriminator.`. Exit codes are unchanged;
-  tooling that greps the exact `validate` output lines should update.
+  source is missing the 'type' discriminator.`. Tooling that greps the exact
+  `validate` output lines should update. This labelling change does not itself
+  move an exit code, but `validate`'s exit codes **do** change in 2.1.0 — see
+  the schema-column entry above.
 
 ### Fixed
 

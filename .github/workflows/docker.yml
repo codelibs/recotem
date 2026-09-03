@@ -63,7 +63,7 @@ jobs:
 
       # Also runnable locally before tagging:
       #   bash .github/scripts/check-release-tag.sh v2.1.0
-      - name: Tag is a final release and matches pyproject.toml + version.py
+      - name: Tag is a final release and matches pyproject.toml + version.py + Chart.yaml
         if: startsWith(github.ref, 'refs/tags/')
         run: bash .github/scripts/check-release-tag.sh
 

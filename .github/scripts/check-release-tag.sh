@@ -10,9 +10,10 @@
 # It enforces two things:
 #   1. The tag is a clean PEP 440 *final release* — vMAJOR.MINOR.PATCH with no
 #      .dev / a / b / rc / .post / +local suffix.
-#   2. The tag agrees with BOTH in-tree version declarations:
+#   2. The tag agrees with EVERY in-tree version declaration:
 #        - pyproject.toml            [project] version
 #        - src/recotem/version.py    __version__
+#        - helm/recotem/Chart.yaml   version: and appVersion:
 #
 # Usage (CI):    bash .github/scripts/check-release-tag.sh          # reads GITHUB_REF
 # Usage (local): bash .github/scripts/check-release-tag.sh v2.1.0   # before tagging
@@ -22,6 +23,7 @@ set -euo pipefail
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYPROJECT="${REPO_ROOT}/pyproject.toml"
 VERSION_PY="${REPO_ROOT}/src/recotem/version.py"
+CHART="${REPO_ROOT}/helm/recotem/Chart.yaml"
 
 fail() {
     echo "::error::$1"
@@ -80,7 +82,7 @@ fi
 EXPECTED="${TAG#v}"
 
 # ---------------------------------------------------------------------------
-# 3. Both in-tree version declarations must equal the tag
+# 3. Every in-tree version declaration must equal the tag
 # ---------------------------------------------------------------------------
 PYPROJECT_VERSION="$(
     python3 - "${PYPROJECT}" <<'PYEOF'
@@ -111,27 +113,76 @@ else:
 PYEOF
 )"
 
+# The Helm chart's two version keys are deployment pins rather than package
+# metadata, but they must track the release for the same reason the wheel must:
+# the chart published for X.Y.Z deploys `ghcr.io/codelibs/recotem:X.Y.Z`, and
+# the release procedure lists both keys among the things a release bumps.
+# Checking them here is what makes that fail closed.  Left behind, the chart
+# ships a release whose manifests pull the *previous* image; bumped early during
+# a dev cycle, it pins a tag that was never built — and neither is visible from
+# the package version alone.
+#
+# Read with awk rather than a YAML parser for the same reason version.py is read
+# with `ast`: the guard jobs run this script straight after `actions/checkout`
+# with nothing installed, so no YAML library is on the runner.  Both keys are
+# top-level scalars whose spelling the release procedure already fixes.
+[ -f "${CHART}" ] || fail "Cannot read helm/recotem/Chart.yaml." \
+     "The Helm chart is part of the release and its version must match the tag."
+
+chart_key() {
+    awk -v key="$1:" '$1 == key { value = $2; gsub(/"/, "", value); print value; exit }' \
+        "${CHART}"
+}
+CHART_VERSION="$(chart_key version)"
+CHART_APP_VERSION="$(chart_key appVersion)"
+
+[ -n "${CHART_VERSION}" ] || \
+    fail "helm/recotem/Chart.yaml has no top-level 'version:' key." \
+         "The chart version must equal the release tag; a chart that does not declare" \
+         "one cannot be checked, so this is refused rather than skipped."
+[ -n "${CHART_APP_VERSION}" ] || \
+    fail "helm/recotem/Chart.yaml has no top-level 'appVersion:' key." \
+         "appVersion is the image tag the chart deploys by default and must equal the" \
+         "release tag; a chart that does not declare one cannot be checked."
+
 echo "pyproject.toml       version = ${PYPROJECT_VERSION}"
 echo "src/recotem/version.py       = ${VERSION_PY_VERSION}"
+echo "helm Chart.yaml version      = ${CHART_VERSION}"
+echo "helm Chart.yaml appVersion   = ${CHART_APP_VERSION}"
 echo "expected (from tag)          = ${EXPECTED}"
 
+# Every declaration is compared before reporting, so one run names every file
+# that did not move.  Reporting the first mismatch alone would send an operator
+# round the fix/re-run loop once per stale file.
 MISMATCH=""
-[ "${PYPROJECT_VERSION}" = "${EXPECTED}" ] || MISMATCH="pyproject.toml (${PYPROJECT_VERSION})"
-if [ "${VERSION_PY_VERSION}" != "${EXPECTED}" ]; then
-    [ -n "${MISMATCH}" ] && MISMATCH="${MISMATCH} and "
-    MISMATCH="${MISMATCH}src/recotem/version.py (${VERSION_PY_VERSION})"
-fi
+add_mismatch() {
+    [ -z "${MISMATCH}" ] || MISMATCH="${MISMATCH} and "
+    MISMATCH="${MISMATCH}$1"
+}
+
+[ "${PYPROJECT_VERSION}" = "${EXPECTED}" ] || \
+    add_mismatch "pyproject.toml (${PYPROJECT_VERSION})"
+[ "${VERSION_PY_VERSION}" = "${EXPECTED}" ] || \
+    add_mismatch "src/recotem/version.py (${VERSION_PY_VERSION})"
+[ "${CHART_VERSION}" = "${EXPECTED}" ] || \
+    add_mismatch "helm/recotem/Chart.yaml version: (${CHART_VERSION})"
+[ "${CHART_APP_VERSION}" = "${EXPECTED}" ] || \
+    add_mismatch "helm/recotem/Chart.yaml appVersion: (${CHART_APP_VERSION})"
 
 if [ -n "${MISMATCH}" ]; then
     fail "Tag '${TAG}' does not match the project version: ${MISMATCH}." \
-         "The tag, pyproject.toml and src/recotem/version.py must all agree, or the" \
-         "wheel uploaded to PyPI would carry a version nobody tagged." \
+         "The tag, pyproject.toml, src/recotem/version.py and helm/recotem/Chart.yaml" \
+         "must all agree.  A mismatch in the first two uploads a wheel carrying a" \
+         "version nobody tagged; a mismatch in the chart ships a release whose" \
+         "manifests deploy some other image tag." \
          "" \
          "To fix:" \
          "  1. delete the bad tag:  git tag -d ${TAG} && git push origin :refs/tags/${TAG}" \
-         "  2. set version = \"${EXPECTED}\" in pyproject.toml and" \
-         "     __version__ = \"${EXPECTED}\" in src/recotem/version.py (or pick another number)" \
+         "  2. set version = \"${EXPECTED}\" in pyproject.toml," \
+         "     __version__ = \"${EXPECTED}\" in src/recotem/version.py, and" \
+         "     version: ${EXPECTED} / appVersion: \"${EXPECTED}\" in" \
+         "     helm/recotem/Chart.yaml (or pick another number)" \
          "  3. commit, merge, and re-tag the merge commit"
 fi
 
-echo "OK: ${TAG} is a final release and matches both version declarations."
+echo "OK: ${TAG} is a final release and matches every version declaration."

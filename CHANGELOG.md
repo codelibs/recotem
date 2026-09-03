@@ -45,12 +45,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **irspack upgraded from 0.4.2 to 0.5.0.** irspack 0.5.0 adds feature-aware
+- **irspack upgraded from 0.4.2 to 0.5.2.** irspack 0.5.0 adds feature-aware
   iALS, cache/Eigen performance work, and a reworked tuning API. Recotem drives
   Optuna itself and does not call `BaseRecommender.tune`, so none of irspack's
   documented breaking changes (`tune_with_study` removal, `fixed_params` →
   keyword arguments, `random_seed` → `tuning_random_seed`) affect Recotem.
   **IALS and BPRFM models trained on 0.4.x must be retrained** — see below.
+  The subsequent 0.5.1 (parallelised feature-aware iALS) and 0.5.2 (graceful
+  handling of a feature-ridge Cholesky failure during tuning) releases touch
+  code paths Recotem does not reach, and were verified not to change the
+  serialised model at all: for all six algorithms Recotem can build, an
+  identically-trained recommender pickles to a byte-identical payload under
+  0.5.0 and 0.5.2 (SHA-256 compared), `IALSModelConfig.__setstate__` keeps its
+  10-element arity, and artifacts interchange in both directions with
+  bit-exact recommendation scores. **No retrain is needed for a 0.5.x → 0.5.2
+  upgrade.**
 - **scikit-learn is now a direct, range-pinned dependency** (`>=1.8,<1.10`).
   It was already reachable transitively via irspack, which asks only for
   `>=0.21.0`. `TruncatedSVDRecommender` pickles an sklearn estimator into the

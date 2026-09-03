@@ -149,10 +149,12 @@ source:
 | Absolute-path host refused | 3 | `DataSourceError: DSN host is an absolute path (libpq Unix-socket form); this bypasses the network SSRF guard. Set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
 | Network DSN with no host refused | 3 | `DataSourceError: DSN for dialect 'postgresql' does not specify a host; the driver would default to the local socket / 127.0.0.1 which is rejected by the SSRF guard. Specify a host explicitly or set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
 | sqlalchemy not installed | 3 | `DataSourceError: sqlalchemy is required for SQLSource. Install one of: recotem[postgres], recotem[mysql], recotem[sqlite].` |
-| Column missing after query | 2 | `RecipeError: column 'item_id' not found in query result` |
+| Query returned no rows | 3 | `DataSourceError: source 'sql' returned no rows for recipe '<name>'; the query or file matched no data. ...` |
+| Column missing after query | 3 | `DataSourceError: schema column(s) ['ts'] not found in the fetched data for recipe '<name>'; available columns: [...]` |
 
-All SQL exceptions are wrapped in `DataSourceError` and produce exit 3. The full error type is
-included in the stderr JSON line.
+All SQL failures are wrapped in `DataSourceError` and produce exit 3 — including a missing
+`schema:` column, which is a data-source problem (the query did not produce what the recipe
+names), not a recipe-schema problem. The full error type is included in the stderr JSON line.
 
 ## Notes
 

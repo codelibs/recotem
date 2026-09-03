@@ -8,10 +8,14 @@ The ``/metrics`` endpoint itself is opt-in via the
 ``yes``, ``on``).  When the variable is unset or any other value, the
 endpoint returns 404 even if recorders are populating the registry.
 
-All metrics share the default ``prometheus_client`` registry, which means
-``generate_latest()`` exposes both the serving-layer metrics defined here
-and the datasource-layer metrics defined in ``recotem._metrics_bigquery``
-(e.g. ``recotem_bigquery_storage_fallback_total``).
+All metrics share the default ``prometheus_client`` registry, so
+``generate_latest()`` would expose any other counter registered in the same
+process.  In practice that is only the serving-layer metrics defined here:
+``recotem._metrics_bigquery`` is written exclusively by ``recotem train``,
+which serves no ``/v1/metrics`` endpoint, so
+``recotem_bigquery_storage_fallback_total`` is never populated in a
+scrapeable process and is deliberately absent from the inventory below.
+Its operable signal is the ``bigquery_storage_fallback`` log event.
 
 Metric inventory (matches docs/operations.md):
 
@@ -35,7 +39,6 @@ Metric inventory (matches docs/operations.md):
 | ``recotem_metadata_index_build_errors_total``      | Counter    | recipe                  |
 | ``recotem_metadata_serialization_errors_total``    | Counter    | recipe, verb            |
 | ``recotem_recipe_rescan_errors_total``             | Counter    | recipe                  |
-| ``recotem_bigquery_storage_fallback_total``        | Counter    | reason                  |
 | ``recotem_recipes_dir_scan_failures_total``        | Counter    | error_class             |
 | ``recotem_recommender_layout_unexpected_total``    | Counter    | recipe                  |
 | ``recotem_watcher_state_divergence_total``         | Counter    | —                       |

@@ -140,6 +140,8 @@ cleansing:
 
 Violation of any `min_*` threshold exits with code 4 and `"code": "min_data_violation"` in the JSON error line.
 
+A **completely empty** fetch is handled earlier and separately: a source that returns zero rows exits **3** (`DataSourceError`) with `source '<type>' returned no rows for recipe '<name>'`, regardless of whether `min_rows` is set. The `min_*` checks exist for "not enough data to train well"; a zero-row result is a data-source outcome, not a threshold violation.
+
 `dedup` values:
 
 | Value | Behaviour |

@@ -684,6 +684,47 @@ def validate(
         code = _map_exception_to_exit(exc)
         _exit(code, f"Recipe validation failed: {exc}")
 
+    def _check_algorithms() -> list[str]:
+        """Resolve ``training.algorithms`` exactly the way ``train`` does.
+
+        ``train`` asks two questions of every entry -- can the alias be
+        resolved to a canonical class name, and does irspack export that class
+        -- but only after the dataset has been fetched, cleansed and split, so
+        a typo in the YAML costs a full data pull before it surfaces.
+        ``validate`` is the documented pre-flight gate, so it asks the same two
+        questions here, before any source is touched, and it does so by calling
+        the same two functions rather than restating the rules: the exit code
+        and the message then cannot drift from what ``train`` produces.
+
+        The check lives here and not in ``TrainingConfig``'s model validator
+        (where the neighbouring ``per_algorithm_trials`` key check does live)
+        because a model validator runs on *every* recipe load, including the
+        loads ``recotem serve`` performs -- which would make ``serving/``
+        import ``training/`` transitively, the one dependency edge the layering
+        forbids.  ``per_algorithm_trials`` escapes that because it returns
+        before the import whenever the optional field is unset; an unconditional
+        ``algorithms`` check has no such escape.  ``cli.py`` is the module
+        allowed to reach into both sub-packages, via a deferred import.
+        """
+        from recotem.training.algorithms import (
+            get_recommender_cls,
+            resolve_algorithm_name,
+        )
+
+        resolved: list[str] = []
+        for alias in loaded_recipe.training.algorithms:
+            class_name = resolve_algorithm_name(alias)
+            get_recommender_cls(class_name)
+            resolved.append(class_name)
+        return resolved
+
+    try:
+        resolved_algorithms = _check_algorithms()
+    except Exception as exc:
+        code = _map_exception_to_exit(exc)
+        _exit(code, f"Algorithm check failed: {exc}")
+    typer.echo(f"Algorithms: OK ({', '.join(resolved_algorithms)})")
+
     def _probe_source(source_cfg: Any, where: str) -> tuple[Any, str]:
         from recotem.datasource.registry import get_source_class
 

@@ -334,8 +334,35 @@ def run_search(
             )
             parallelism = 1
 
-    # Resolve all aliases up front so we can report canonical names.
-    class_names: list[str] = [resolve_algorithm_name(a) for a in algorithms]
+    # Resolve all aliases up front so we can report canonical names, then
+    # collapse duplicates preserving first-seen order.  Alias resolution is
+    # case-insensitive, so ``[IALS, ials]`` -- or a copy/paste from the
+    # unknown-algorithm error, whose suggestion list prints both ``CosineKNN``
+    # and ``CosinekNN`` -- yields the same class twice.  A repeated name is
+    # silently destructive downstream: ``_compute_budgets`` divides by
+    # ``len(class_names)`` while writing into a dict keyed by class name, so
+    # the budgets sum to less than ``n_trials``; the over-budget slots are
+    # then pruned inside the objective but still consume Optuna's global
+    # ``n_trials``, i.e. asking for 10 trials of ``[toppop, TopPOP]`` runs 5.
+    # Dedup here rather than only inside ``_compute_budgets`` so the enqueue
+    # loop, the per-algorithm counters and ``SearchResult.tried_algorithms``
+    # all see the same collapsed list.
+    resolved_names: list[str] = [resolve_algorithm_name(a) for a in algorithms]
+    class_names: list[str] = list(dict.fromkeys(resolved_names))
+    if len(class_names) != len(resolved_names):
+        logger.warning(
+            "duplicate_algorithms_collapsed",
+            original=resolved_names,
+            collapsed=class_names,
+            reason=(
+                "training.algorithms lists the same algorithm more than once "
+                "(alias resolution is case-insensitive); duplicates were "
+                "removed so the trial budget is split over distinct "
+                "algorithms only."
+            ),
+            recipe=recipe_name,
+            run_id=run_id,
+        )
 
     # Compute per-algorithm trial budgets.
     budgets: dict[str, int] = _compute_budgets(
@@ -787,6 +814,13 @@ def _compute_budgets(
     The returned mapping always sums to ``n_trials`` unless every entry is 0
     (which only happens when the caller asked for no trials).
     """
+    # Duplicates would break the sum contract stated above: every branch below
+    # writes into a dict keyed by class name (last write wins) while the even
+    # split divides by -- and ``explicit_sum`` adds up -- the *positional*
+    # length.  ``run_search`` already collapses them, but this helper is also
+    # called directly, so it upholds its own invariant.
+    class_names = list(dict.fromkeys(class_names))
+
     if not per_algorithm_trials:
         base = n_trials // len(class_names)
         remainder = n_trials % len(class_names)
@@ -836,13 +870,23 @@ def _compute_budgets(
                 budgets[c] = 1 if idx < n_trials else 0
             return budgets
 
+        # Address the remainder-absorbing class by its *position* in the loop,
+        # not by value: a value comparison also matches an earlier entry that
+        # happens to carry the same class name, handing the whole remaining
+        # budget to the first occurrence.  The dedup at the top of this
+        # function makes that unreachable today, but an index is correct
+        # rather than merely currently-safe.
+        last_nonzero_idx = max(
+            idx for idx, c in enumerate(explicit_classes) if resolved[c] > 0
+        )
+
         scale = n_trials / explicit_sum
         allocated = 0
-        for c in explicit_classes:
+        for idx, c in enumerate(explicit_classes):
             v = resolved[c]
             if v == 0:
                 budgets[c] = 0
-            elif c == nonzero_explicit[-1]:
+            elif idx == last_nonzero_idx:
                 budgets[c] = max(1, n_trials - allocated)
             else:
                 b = max(1, round(v * scale))

@@ -1972,3 +1972,203 @@ def test_feature_ridge_lambda_range_matches_upstream_floor() -> None:
             "bias column already consumes."
         )
         assert high == 1e6, f"{name}'s ceiling is {high}, not 1e6"
+
+
+# ---------------------------------------------------------------------------
+# Duplicate algorithms in training.algorithms.
+#
+# Alias resolution is case-insensitive, so ``[toppop, TopPOP]`` is a writable
+# recipe that resolves to the same class twice.  Every branch of
+# _compute_budgets writes into a dict keyed by class name while the even split
+# divides by -- and explicit_sum adds up -- the positional length, so a
+# duplicate used to make the returned mapping sum to less than n_trials,
+# breaking the invariant its own docstring states.  The lost slots are not
+# saved compute: they are consumed as pruned trials against Optuna's global
+# n_trials budget.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("class_names", "n_trials"),
+    [
+        (["TopPopRecommender", "TopPopRecommender"], 10),
+        (["TopPopRecommender"] * 3, 9),
+        (["A", "B", "A"], 7),
+        (["A", "A", "B", "B", "C"], 8),
+        (["A", "A"], 1),
+    ],
+)
+def test_compute_budgets_duplicates_still_sum_to_n_trials(
+    class_names: list[str], n_trials: int
+) -> None:
+    """The docstring's contract -- sum(budgets) == n_trials -- must hold when
+    class_names repeats a name."""
+    budgets = _compute_budgets(
+        class_names=class_names,
+        n_trials=n_trials,
+        per_algorithm_trials=None,
+    )
+    total = sum(budgets.values())
+    assert total == n_trials, (
+        f"budgets for {class_names} at n_trials={n_trials} sum to {total}, "
+        f"not {n_trials}; the lost slots are still spent as pruned trials"
+    )
+    assert list(budgets) == list(dict.fromkeys(class_names)), (
+        "duplicates must collapse preserving first-seen order"
+    )
+
+
+def test_compute_budgets_duplicates_do_not_double_count_explicit_budget() -> None:
+    """A duplicate must not be counted twice in ``explicit_sum``.
+
+    ``per_algorithm_trials={"TopPop": 6, "IALS": 4}`` fits n_trials=10 exactly,
+    but with ``[toppop, TopPOP, IALS]`` the 6 was added twice (16 > 10), which
+    took the proportional scale-down branch and produced 4 + 2 = 6 trials.
+    """
+    budgets = _compute_budgets(
+        class_names=[
+            "TopPopRecommender",
+            "TopPopRecommender",
+            "IALSRecommender",
+        ],
+        n_trials=10,
+        per_algorithm_trials={"TopPop": 6, "IALS": 4},
+    )
+    assert budgets == {"TopPopRecommender": 6, "IALSRecommender": 4}, (
+        f"explicit budgets that fit n_trials must be respected literally, got {budgets}"
+    )
+
+
+class _InstantRecommender:
+    """Recommender stub that completes a trial with no work."""
+
+    learnt_config: dict = {}
+
+    def __init__(self, X, **kwargs):
+        pass
+
+    @staticmethod
+    def default_suggest_parameter(trial, space):
+        return {}
+
+    def learn_with_optimizer(self, evaluator, trial):
+        pass
+
+    def learn(self):
+        return self
+
+
+def _run_search_counting_trials(
+    algorithms: list[str],
+    n_trials: int,
+    per_algorithm_trials: dict[str, int] | None,
+    events: list | None = None,
+):
+    """Run a real in-process study over ``algorithms`` with a no-op recommender.
+
+    Only ``get_recommender_cls`` is patched, so real alias resolution (and
+    therefore the real duplicate-collapsing behaviour) is exercised.
+    """
+    import structlog
+
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    counter = [0]
+
+    def _mock_get_score(evaluator, recommender):
+        counter[0] += 1
+        return 0.1 + counter[0] * 0.01
+
+    with (
+        patch(
+            "recotem.training.search.get_recommender_cls",
+            return_value=_InstantRecommender,
+        ),
+        patch("recotem.training.search.get_score", side_effect=_mock_get_score),
+    ):
+        X = sps.csr_matrix(np.ones((5, 3)))
+        with ProgressReporter(
+            n_trials=n_trials, recipe_name="dupe", run_id="d1", quiet=True
+        ) as rep:
+            with structlog.testing.capture_logs() as cap:
+                result = run_search(
+                    algorithms=algorithms,
+                    X_tv_train=X,
+                    evaluator=MagicMock(),
+                    n_trials=n_trials,
+                    per_algorithm_trials=per_algorithm_trials,
+                    per_trial_timeout_seconds=None,
+                    timeout_seconds=None,
+                    parallelism=1,
+                    storage_path="",
+                    random_seed=0,
+                    reporter=rep,
+                    recipe_name="dupe",
+                    run_id="d1",
+                )
+    if events is not None:
+        events.extend(cap)
+    return result
+
+
+def test_run_search_duplicate_aliases_spend_the_whole_trial_budget() -> None:
+    """``[toppop, TopPOP]`` at n_trials=10 must run 10 trials, not 5."""
+    events: list = []
+    result = _run_search_counting_trials(
+        algorithms=["toppop", "TopPOP"],
+        n_trials=10,
+        per_algorithm_trials=None,
+        events=events,
+    )
+    assert result.n_completed == 10, (
+        f"n_trials=10 over a duplicated algorithm completed "
+        f"{result.n_completed} trials; the remainder was pruned against the "
+        "global budget rather than searched"
+    )
+    assert result.tried_algorithms == ["TopPopRecommender"], (
+        f"tried_algorithms must carry each class once, got {result.tried_algorithms}"
+    )
+    collapsed = [
+        e for e in events if e.get("event") == "duplicate_algorithms_collapsed"
+    ]
+    assert len(collapsed) == 1, (
+        "collapsing a duplicate must be reported once, not applied silently; "
+        f"got {collapsed}"
+    )
+    assert collapsed[0]["collapsed"] == ["TopPopRecommender"]
+
+
+def test_run_search_duplicate_aliases_honour_per_algorithm_trials() -> None:
+    """``per_algorithm_trials`` that fits n_trials must not be double-counted.
+
+    The recipe validator resolves ``algorithms`` into a set, so
+    ``{TopPop: 6, IALS: 4}`` against ``[toppop, TopPOP, IALS]`` loads cleanly.
+    """
+    result = _run_search_counting_trials(
+        algorithms=["toppop", "TopPOP", "IALS"],
+        n_trials=10,
+        per_algorithm_trials={"TopPop": 6, "IALS": 4},
+        events=None,
+    )
+    assert result.n_completed == 10, (
+        f"6 + 4 explicit trials fit n_trials=10 exactly, but only "
+        f"{result.n_completed} trials completed"
+    )
+    assert result.tried_algorithms == ["TopPopRecommender", "IALSRecommender"]
+
+
+def test_run_search_distinct_algorithms_unchanged() -> None:
+    """Control: two genuinely distinct algorithms behave exactly as before."""
+    events: list = []
+    result = _run_search_counting_trials(
+        algorithms=["toppop", "IALS"],
+        n_trials=10,
+        per_algorithm_trials=None,
+        events=events,
+    )
+    assert result.n_completed == 10
+    assert result.tried_algorithms == ["TopPopRecommender", "IALSRecommender"]
+    assert not [
+        e for e in events if e.get("event") == "duplicate_algorithms_collapsed"
+    ], "no duplicate was written, so nothing may be reported as collapsed"

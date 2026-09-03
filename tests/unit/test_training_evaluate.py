@@ -135,3 +135,59 @@ def test_build_evaluator_with_offset_uses_correct_split() -> None:
     assert ev_with_offset.target_metric.name == "ndcg"
     # They should be distinct objects.
     assert ev_no_offset is not ev_with_offset
+
+
+# ---------------------------------------------------------------------------
+# cutoff greater than the item count is a TrainingError (exit 4), not the
+# unmapped irspack ValueError that used to escape run_search as exit 1.
+# ---------------------------------------------------------------------------
+
+
+def test_build_evaluator_cutoff_exceeding_item_count_raises_TrainingError() -> None:
+    """cutoff > n_items must be refused up-front with both numbers named.
+
+    irspack's evaluator core raises a bare ``ValueError`` for this, but only
+    once the first Optuna trial calls ``get_score`` -- from inside the
+    objective, where it escaped ``run_search`` unmapped and exited 1.
+    """
+    from recotem._exit_codes import _map_exception_to_exit
+
+    X = _tiny_matrix(5)  # 5 items
+    with pytest.raises(TrainingError) as exc_info:
+        build_evaluator(X, offset=0, metric="ndcg", cutoff=20)
+
+    assert exc_info.value.code == "cutoff_exceeds_item_count", (
+        f"Expected code='cutoff_exceeds_item_count', got {exc_info.value.code!r}"
+    )
+    msg = str(exc_info.value)
+    assert "20" in msg, f"message must name the configured cutoff; got {msg!r}"
+    assert "5" in msg, f"message must name the item count; got {msg!r}"
+    assert "exeeed" not in msg, "do not reproduce upstream's typo"
+    assert _map_exception_to_exit(exc_info.value) == 4, (
+        "cutoff over the item count is a training-domain error (exit 4)"
+    )
+
+
+def test_build_evaluator_default_cutoff_on_tiny_catalog_raises() -> None:
+    """The recipe default cutoff (20) on a <20-item toy dataset is refused cleanly.
+
+    This is the newcomer's very first `recotem train`, so it must not be a
+    traceback wall at exit 1.
+    """
+    from recotem.recipe.models import TrainingConfig
+
+    default_cutoff = TrainingConfig.model_fields["cutoff"].default
+    assert default_cutoff == 20
+
+    with pytest.raises(TrainingError) as exc_info:
+        build_evaluator(
+            _tiny_matrix(15), offset=0, metric="ndcg", cutoff=default_cutoff
+        )
+    assert exc_info.value.code == "cutoff_exceeds_item_count"
+
+
+@pytest.mark.parametrize("cutoff", [1, 4, 5])
+def test_build_evaluator_cutoff_up_to_item_count_is_accepted(cutoff: int) -> None:
+    """cutoff == n_items is the boundary irspack accepts; do not over-reject."""
+    evaluator = build_evaluator(_tiny_matrix(5), offset=0, metric="ndcg", cutoff=cutoff)
+    assert evaluator is not None

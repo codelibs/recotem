@@ -862,3 +862,64 @@ def test_zero_row_feature_table_refused_as_bias_only(
     msg = str(exc_info.value)
     assert "item" in msg
     assert "bias" in msg
+
+
+# ---------------------------------------------------------------------------
+# Feature tables are fetched WITHOUT the interaction schema columns.
+#
+# ``training.pipeline._fetch_data`` puts ``schema.user_column`` /
+# ``item_column`` / ``time_column`` into ``ctx.extra`` so the CSV and Parquet
+# sources reject a recipe naming a column the data lacks (exit 3 instead of a
+# bare pandas KeyError at exit 1).  Feature tables legitimately do NOT carry
+# the interaction columns, so ``_fetch_side`` must keep passing an empty
+# ``extra`` -- populating it here would break every feature-aware recipe.
+# ---------------------------------------------------------------------------
+
+
+def test_feature_side_fetch_receives_no_schema_column_context(items_csv: str) -> None:
+    """``_fetch_side`` must fetch feature tables with an empty ``ctx.extra``."""
+    from unittest.mock import patch
+
+    from recotem.datasource.csv import CSVSource
+
+    seen: list[dict] = []
+    real_fetch = CSVSource.fetch
+
+    def _spy(self, ctx):
+        seen.append(dict(ctx.extra))
+        return real_fetch(self, ctx)
+
+    with patch.object(CSVSource, "fetch", _spy):
+        tables = load_feature_tables(
+            _features(items_csv), recipe_name="r", run_id="run"
+        )
+
+    assert tables.enabled is True
+    assert seen == [{}], (
+        "feature-table fetch must pass an empty ctx.extra -- a feature table "
+        f"has no interaction columns to validate; got {seen!r}"
+    )
+
+
+def test_feature_table_without_interaction_columns_loads(tmp_path: Path) -> None:
+    """A feature table that shares no column names with the interaction schema loads.
+
+    ``items_csv`` has ``item_id`` / ``genre`` / ``year`` and no ``user_id`` or
+    ``timestamp``: exactly the shape that would fail if the interaction
+    schema's required-column check were applied to feature tables too.
+    """
+    p = tmp_path / "items_no_interaction_cols.csv"
+    pd.DataFrame(
+        {"sku": ["i_a", "i_b"], "genre": ["action", "drama"]},
+    ).to_csv(p, index=False)
+
+    cfg = FeaturesConfig(
+        item=FeatureSideConfig(
+            source={"type": "csv", "path": str(p)},
+            id_column="sku",
+            columns=[FeatureColumn(name="genre", encoding="categorical")],
+        )
+    )
+
+    tables = load_feature_tables(cfg, recipe_name="r", run_id="run")
+    assert tables.enabled is True

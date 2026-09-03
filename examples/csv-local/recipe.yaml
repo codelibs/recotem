@@ -44,8 +44,9 @@ training:
   # Choices: ndcg, map, recall, hit.
   metric: ndcg
   # cutoff must not exceed the number of distinct items in the data, otherwise
-  # irspack's evaluator raises "cutoff must not exeeed the number of items."
-  # interactions.csv.gz has 15 distinct item_id values, so keep this <= 15.
+  # training exits 4 (TrainingError, code cutoff_exceeds_item_count) before the
+  # first trial.  interactions.csv.gz has 15 distinct item_id values, so keep
+  # this <= 15.  Note the default cutoff is 20.
   cutoff: 10
   n_trials: 30
   timeout_seconds: 600

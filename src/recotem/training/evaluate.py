@@ -47,13 +47,30 @@ def build_evaluator(
     Raises
     ------
     TrainingError
-        If *metric* is not in the recognised set.
+        If *metric* is not in the recognised set, or if *cutoff* exceeds the
+        number of distinct items in the data.
     """
     irspack_metric = _METRIC_MAP.get(metric.lower())
     if irspack_metric is None:
         raise TrainingError(
             f"Unsupported metric {metric!r}. Must be one of: {sorted(_METRIC_MAP)}.",
             code="invalid_metric",
+        )
+    # irspack's evaluator core refuses a cutoff larger than the item dimension
+    # of the ground-truth matrix, but only once the first trial calls
+    # ``get_score`` -- from inside the Optuna objective, as a bare ValueError
+    # that escapes ``run_search`` unmapped (exit 1).  ``X_test`` has exactly
+    # the item dimension the core checks against, so classify it here instead:
+    # a training-domain error (exit 4) naming both numbers.  The default
+    # cutoff is 20, so every dataset with fewer than 20 distinct items -- the
+    # toy dataset a newcomer starts with -- hits this.
+    n_items = X_test.shape[1]
+    if cutoff > n_items:
+        raise TrainingError(
+            f"training.cutoff ({cutoff}) exceeds the number of distinct items "
+            f"in the data ({n_items}).  Lower training.cutoff to at most "
+            f"{n_items}, or train on a dataset with more items.",
+            code="cutoff_exceeds_item_count",
         )
     return Evaluator(
         X_test,

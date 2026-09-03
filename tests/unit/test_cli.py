@@ -2185,7 +2185,9 @@ def test_inspect_malformed_signing_keys_exits_nonzero(
 
     With M-3, the except block inside inspect uses _map_exception_to_exit so
     that different exception types produce distinct, documented exit codes.
-    A malformed KeyRing raises ArtifactError which maps to exit 5.
+    A malformed KeyRing raises KeyRingConfigError, which maps to exit 8
+    (configuration) — the value is a typo in the environment, not a corrupt
+    artifact, and exit 5 would tell a CronJob to retrain.
     """
     from tests.conftest import build_raw_artifact
 
@@ -2205,9 +2207,9 @@ def test_inspect_malformed_signing_keys_exits_nonzero(
     assert result.exit_code != 0, (
         "inspect must exit non-zero for malformed RECOTEM_SIGNING_KEYS"
     )
-    # ArtifactError from KeyRing → exit 5 via _map_exception_to_exit.
-    assert result.exit_code == 5, (
-        f"Malformed RECOTEM_SIGNING_KEYS causes ArtifactError → exit 5 via "
+    # KeyRingConfigError from KeyRing → exit 8 via _map_exception_to_exit.
+    assert result.exit_code == 8, (
+        f"Malformed RECOTEM_SIGNING_KEYS is a configuration error → exit 8 via "
         f"_map_exception_to_exit; got {result.exit_code}"
     )
     combined = result.stdout + (result.stderr or "")
@@ -2965,3 +2967,172 @@ def test_train_lock_timeout_default_is_zero(tmp_path: Path, monkeypatch) -> None
 
     assert "lock_timeout" in captured_kwargs
     assert captured_kwargs["lock_timeout"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# inspect: a ConfigError from ServeConfig.from_env() is exit 8 with a one-line
+# message, not exit 1 with a Rich traceback.
+# ---------------------------------------------------------------------------
+
+
+def _write_valid_artifact(tmp_path: Path, name: str = "model.recotem") -> Path:
+    from tests.conftest import build_raw_artifact
+
+    path = tmp_path / name
+    path.write_bytes(
+        build_raw_artifact(
+            kid="active",
+            key_hex=ACTIVE_KEY_HEX,
+            header_dict={"recipe_name": "cfg_test", "best_score": 0.5},
+            payload_bytes=b"payload",
+        )
+    )
+    return path
+
+
+def test_inspect_config_error_exits_config_without_traceback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Lowering only RECOTEM_MAX_ARTIFACT_BYTES must exit 8, not 1.
+
+    ``ServeConfig.from_env()`` enforces max_payload_bytes <= max_artifact_bytes.
+    Lowering the artifact cap below the 512 MiB payload default is an ordinary
+    hardening step, and it used to blow up ``inspect`` with an unguarded
+    ConfigError (exit 1 plus a traceback wall).  ``serve`` already handled the
+    identical error at exit 8.
+    """
+    artifact_path = _write_valid_artifact(tmp_path)
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    monkeypatch.setenv("RECOTEM_MAX_ARTIFACT_BYTES", str(256 * 1024 * 1024))
+
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+
+    assert result.exit_code == 8, (
+        f"ConfigError from ServeConfig.from_env() must exit 8; got {result.exit_code}"
+    )
+    combined = result.stdout + (result.stderr or "")
+    assert "Configuration error" in combined, (
+        f"inspect must print a one-line configuration error; got {combined!r}"
+    )
+    assert "Traceback" not in combined, (
+        f"inspect must not print a traceback for a config error; got {combined!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Malformed RECOTEM_SIGNING_KEYS is a configuration error (exit 8) on every
+# subcommand — exit 5 would tell a CronJob the artifact is corrupt.
+# ---------------------------------------------------------------------------
+
+
+_MALFORMED_SIGNING_KEYS = [
+    pytest.param("k1:nothex", id="non-hex"),
+    pytest.param("k1:aa", id="wrong-length"),
+    pytest.param("no-separator", id="no-separator"),
+    pytest.param(f":{ACTIVE_KEY_HEX}", id="empty-kid"),
+    pytest.param("k1:", id="empty-key"),
+]
+
+
+@pytest.mark.parametrize("signing_keys", _MALFORMED_SIGNING_KEYS)
+def test_train_malformed_signing_keys_exits_config(
+    tmp_path: Path, monkeypatch, signing_keys: str
+) -> None:
+    """`train` with a malformed RECOTEM_SIGNING_KEYS exits 8, not 5."""
+    yaml_path = _minimal_recipe_yaml(tmp_path, "bad_signing_keys")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", signing_keys)
+
+    result = runner.invoke(app, ["train", str(yaml_path)])
+
+    assert result.exit_code == 8, (
+        f"malformed RECOTEM_SIGNING_KEYS={signing_keys!r} is a configuration "
+        f"error (exit 8), not a corrupt artifact (exit 5); got {result.exit_code}"
+    )
+
+
+@pytest.mark.parametrize("signing_keys", _MALFORMED_SIGNING_KEYS)
+def test_inspect_malformed_signing_keys_exits_config(
+    tmp_path: Path, monkeypatch, signing_keys: str
+) -> None:
+    """`inspect` with a malformed RECOTEM_SIGNING_KEYS exits 8, not 5."""
+    artifact_path = _write_valid_artifact(tmp_path, "inspect_bad_keys.recotem")
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", signing_keys)
+
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+
+    assert result.exit_code == 8, (
+        f"malformed RECOTEM_SIGNING_KEYS={signing_keys!r} must exit 8; "
+        f"got {result.exit_code}"
+    )
+
+
+def test_serve_malformed_signing_keys_exits_config(tmp_path: Path, monkeypatch) -> None:
+    """`serve` with a malformed RECOTEM_SIGNING_KEYS exits 8, not 5.
+
+    ``create_app`` builds the KeyRing before uvicorn is ever reached, so this
+    never binds a port.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", "k1:nothex")
+
+    result = runner.invoke(app, ["serve", "--recipes", str(recipes_dir)])
+
+    assert result.exit_code == 8, (
+        f"malformed RECOTEM_SIGNING_KEYS must exit 8 on serve; got {result.exit_code}"
+    )
+
+
+def test_malformed_signing_keys_maps_to_config_not_artifact() -> None:
+    """KeyRingConfigError maps to _EXIT_CONFIG while staying an ArtifactError.
+
+    Dual inheritance keeps existing `except ArtifactError` handlers on the
+    signing path working; the ConfigError branch of _map_exception_to_exit is
+    checked first, so the exit code is 8.
+    """
+    from recotem._exit_codes import _map_exception_to_exit
+    from recotem.artifact.format import ArtifactError
+    from recotem.artifact.signing import KeyRing, KeyRingConfigError
+    from recotem.config import ConfigError
+
+    with pytest.raises(KeyRingConfigError) as exc_info:
+        KeyRing("k1:nothex")
+
+    exc = exc_info.value
+    assert isinstance(exc, ArtifactError)
+    assert isinstance(exc, ConfigError)
+    assert _map_exception_to_exit(exc) == 8
+
+
+def test_corrupt_artifact_still_exits_artifact(tmp_path: Path, monkeypatch) -> None:
+    """A genuinely corrupt artifact must keep exiting 5, not 8."""
+    artifact_path = tmp_path / "corrupt.recotem"
+    artifact_path.write_bytes(
+        _write_valid_artifact(tmp_path, "src.recotem").read_bytes()[:64]
+    )
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+
+    assert result.exit_code == 5, (
+        f"a truncated artifact is an ArtifactError (exit 5); got {result.exit_code}"
+    )
+
+
+def test_tampered_artifact_hmac_still_exits_artifact(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A payload-tampered artifact fails HMAC verify and must still exit 5."""
+    artifact_path = _write_valid_artifact(tmp_path, "tampered.recotem")
+    data = bytearray(artifact_path.read_bytes())
+    data[-1] ^= 0xFF  # flip a payload bit
+    artifact_path.write_bytes(bytes(data))
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", f"active:{ACTIVE_KEY_HEX}")
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+
+    assert result.exit_code == 5, (
+        f"HMAC verification failure is an ArtifactError (exit 5); "
+        f"got {result.exit_code}"
+    )

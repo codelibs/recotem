@@ -498,8 +498,9 @@ def inspect(
 
     Requires RECOTEM_SIGNING_KEYS to be set (or --dev-allow-unsigned with
     RECOTEM_ENV=development) so that a scripted pipeline can distinguish
-    verified output from unverified output.  Exits non-zero (exit 5) when
-    signing keys are absent and --dev-allow-unsigned is not passed.
+    verified output from unverified output.  Exits 8 (configuration error)
+    when signing keys are absent and --dev-allow-unsigned is not passed, or
+    when they are present but malformed.
     """
     _configure_logging_from_env()
 
@@ -518,14 +519,20 @@ def inspect(
         parse_header_from_bytes,
     )
     from recotem.artifact.io import resolve_artifact_pointer
-    from recotem.config import ServeConfig
+    from recotem.config import ConfigError, ServeConfig
 
     # Use max_artifact_bytes as the file read cap (matches the serving-watcher
     # protocol) and max_payload_bytes as the payload-parse cap (matches the
     # serve-side deserialization bound).  Previously both used max_payload_bytes,
     # which could reject valid artifacts larger than 512 MiB at read time even
     # though the artifact container itself is bounded by max_artifact_bytes.
-    cfg = ServeConfig.from_env()
+    try:
+        cfg = ServeConfig.from_env()
+    except ConfigError as exc:
+        # Same handling as `serve`: an env-var misconfiguration (e.g. lowering
+        # RECOTEM_MAX_ARTIFACT_BYTES below the RECOTEM_MAX_PAYLOAD_BYTES
+        # default) is exit 8 with a one-line message, not a Rich traceback.
+        _exit(_EXIT_CONFIG, f"Configuration error: {exc}")
     read_cap = cfg.max_artifact_bytes
     parse_cap = cfg.max_payload_bytes
     artifact_uri = _repair_uri(artifact)

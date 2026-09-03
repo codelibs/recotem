@@ -62,10 +62,10 @@ Exit code mapping for `restartPolicy: OnFailure`:
 | 2 | RecipeError | No retry (config bug; fix the ConfigMap) |
 | 3 | DataSourceError | No retry typically (CSV/Parquet format error, missing required column, local-FS path not found — persistent) |
 | 4 | TrainingError | Retry up to `backoffLimit` |
-| 5 | ArtifactError | No retry (signing key config issue; fix Secret) |
+| 5 | ArtifactError | No retry (artifact corrupt / unverifiable; retrain). A malformed signing key exits 8, not 5 |
 | 6 | LockContestedError (`--fail-on-busy` set) | Retry or let orchestrator route |
 | 7 | HttpFetchError | Retry (transient HTTP/SSRF/timeout/sha256 mismatch/body cap on network fetch) |
-| 8 | Configuration error | No retry (missing signing keys, bad env) |
+| 8 | Configuration error | No retry (missing or malformed signing keys, bad env; fix the Secret / ConfigMap) |
 | 1 | Unexpected error | Retry |
 
 Set `backoffLimit: 2` for production CronJobs to avoid runaway retry loops on persistent data issues — the bundled Helm CronJob template does *not* set `backoffLimit`, so add it via your values overlay (or on plain manifests). The bundled Helm CronJob does set `activeDeadlineSeconds: 3600` (1 h hard kill); raise it for slow Optuna budgets or data sources.

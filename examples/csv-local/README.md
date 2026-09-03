@@ -28,8 +28,9 @@ The artifact is written to `./artifacts/csv_local_example.<sha>.recotem`
 - IALS, CosineKNN, and TopPop algorithms compared via Optuna ndcg@10.
 
 `training.cutoff` is 10 because the evaluation cutoff must not exceed the
-number of distinct items (15 here) — irspack raises `cutoff must not exeeed
-the number of items.` otherwise. Raise it only alongside a larger dataset.
+number of distinct items (15 here). Otherwise training stops before the first
+trial with exit 4 (`TrainingError`, code `cutoff_exceeds_item_count`) naming
+both numbers. Raise it only alongside a larger dataset.
 
 ## When to prefer this over `tutorial-purchase-log`
 

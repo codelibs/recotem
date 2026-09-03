@@ -405,7 +405,7 @@ class ParquetSource:
         Raises
         ------
         DataSourceError
-            On any I/O or parse error.
+            On any I/O, parse, or schema error.
         """
         import fsspec
         import pandas as pd
@@ -442,6 +442,7 @@ class ParquetSource:
                 raise DataSourceError(
                     f"Failed to parse Parquet from '{safe_path}': {exc}"
                 ) from exc
+            _validate_required_columns(df, ctx, safe_path)
             logger.info(
                 "parquet_source_fetch_done",
                 recipe=ctx.recipe_name,
@@ -523,6 +524,7 @@ class ParquetSource:
                 ) from exc
             bytes_count = len(raw_bytes)
 
+        _validate_required_columns(df, ctx, safe_path)
         logger.info(
             "parquet_source_fetch_done",
             recipe=ctx.recipe_name,

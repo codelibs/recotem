@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from recotem._exit_codes import _map_exception_to_exit
 from recotem.training.errors import (
     MinDataViolation,
     SearchError,
@@ -2759,4 +2760,117 @@ def test_search_phase_feature_alignment_holds_across_hash_seeds() -> None:
     assert not failures, (
         "alignment test failed under one or more fixed hash seeds:\n\n"
         + "\n\n".join(failures)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Exit-code classification: a schema column absent from the source data is a
+# DataSourceError (exit 3), not an unmapped pandas KeyError (exit 1).
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_data_passes_schema_columns_to_source_via_ctx_extra(
+    tmp_path: Path,
+) -> None:
+    """_fetch_data must hand the source the recipe's schema column names.
+
+    Without them ``CSVSource._validate_required_columns`` silently no-ops (its
+    getters return None), so a typo in ``schema.item_column`` surfaces as a raw
+    pandas KeyError from ``_cleanse`` and exits 1 instead of 3.
+    """
+    from recotem.datasource.base import FetchContext
+    from recotem.training.pipeline import _fetch_data
+
+    recipe = _make_recipe(tmp_path)
+
+    seen: list[FetchContext] = []
+
+    def _capture(ctx):
+        seen.append(ctx)
+        return pd.DataFrame({"user_id": ["u1", "u2"], "item_id": ["i1", "i2"]})
+
+    mock_source = MagicMock()
+    mock_source.fetch.side_effect = _capture
+    mock_source_cls = MagicMock(return_value=mock_source)
+
+    with patch(
+        "recotem.datasource.registry.get_source_class",
+        return_value=mock_source_cls,
+    ):
+        _fetch_data(recipe, run_id="test-extra")
+
+    assert len(seen) == 1
+    assert seen[0].extra == {
+        "user_column": "user_id",
+        "item_column": "item_id",
+        "time_column": None,
+    }, f"interaction fetch must carry the schema columns; got {seen[0].extra!r}"
+
+
+def test_fetch_data_missing_schema_column_raises_DataSourceError(
+    tmp_path: Path,
+) -> None:
+    """A source returning a frame without a schema column exits 3, not 1.
+
+    Query-shaped sources (bigquery / sql) and third-party plugins build their
+    own column set and cannot honour ``ctx.extra``, so ``_fetch_data`` repeats
+    the check itself.
+    """
+    from recotem.datasource.base import DataSourceError
+    from recotem.training.pipeline import _fetch_data
+
+    recipe = _make_recipe(tmp_path)
+
+    mock_source = MagicMock()
+    # The declared item_column ("item_id") is absent from the fetched frame.
+    mock_source.fetch.return_value = pd.DataFrame(
+        {"user_id": ["u1", "u2"], "sku": ["i1", "i2"]}
+    )
+    mock_source_cls = MagicMock(return_value=mock_source)
+
+    with (
+        patch(
+            "recotem.datasource.registry.get_source_class",
+            return_value=mock_source_cls,
+        ),
+        pytest.raises(DataSourceError) as exc_info,
+    ):
+        _fetch_data(recipe, run_id="test-missing-col")
+
+    msg = str(exc_info.value)
+    assert "item_id" in msg, f"error must name the missing column; got {msg!r}"
+    assert "sku" in msg, f"error must list available columns; got {msg!r}"
+    assert _map_exception_to_exit(exc_info.value) == 3
+
+
+@pytest.mark.parametrize("drop_null_ids", [True, False])
+def test_run_training_missing_item_column_maps_to_exit_3(
+    tmp_path: Path, drop_null_ids: bool
+) -> None:
+    """End-to-end: a typo in schema.item_column exits 3 for both cleansing paths.
+
+    With ``drop_null_ids: true`` the raw failure was ``df.dropna(subset=[...])``
+    (KeyError ``['not_a_column']``); with ``drop_null_ids: false`` it relocated
+    to the ``df[item_col].astype(str)`` id coercion (KeyError
+    ``'not_a_column'``).  Both mapped to exit 1.
+    """
+    from recotem.datasource.base import DataSourceError
+    from recotem.training.pipeline import run_training
+
+    recipe = _make_recipe(tmp_path, drop_null_ids=drop_null_ids)
+    recipe.schema_.item_column = "not_a_column"
+
+    with pytest.raises(DataSourceError) as exc_info:
+        run_training(
+            recipe,
+            key_ring=_make_key_ring(),
+            signing_key="active",
+            no_lock=True,
+            write_artifact_fn=MagicMock(),
+        )
+
+    assert "not_a_column" in str(exc_info.value)
+    assert _map_exception_to_exit(exc_info.value) == 3, (
+        "missing schema column must exit 3 (DataSourceError); got "
+        f"{_map_exception_to_exit(exc_info.value)}"
     )

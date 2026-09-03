@@ -41,8 +41,28 @@ import structlog
 
 from recotem._log_safe import format_kid_for_log
 from recotem.artifact.format import ArtifactError
+from recotem.config import ConfigError
 
 logger = structlog.get_logger(__name__)
+
+
+class KeyRingConfigError(ArtifactError, ConfigError):
+    """Raised for a malformed ``RECOTEM_SIGNING_KEYS`` value.
+
+    A bad key entry is an operator typo in the environment, not a corrupt
+    artifact: exit 8 (configuration), never exit 5 (retrain).  ``RECOTEM_API_KEYS``
+    already behaves this way; this type removes the asymmetry on the signing side.
+
+    Inherits from both so that existing callers catching :class:`ArtifactError`
+    on the signing path keep working, while ``_map_exception_to_exit`` — which
+    checks ``ConfigError`` before ``ArtifactError`` — routes it to
+    ``_EXIT_CONFIG``.  ``code`` is picked up by ``training.pipeline``'s
+    ``train_error`` event so a config typo is not logged as ``internal_error``
+    with a stack trace.
+    """
+
+    code = "signing_keys_invalid"
+
 
 # ---------------------------------------------------------------------------
 # FQCN allow-list (hand-enumerated; see docs/security.md)
@@ -258,7 +278,7 @@ class KeyRing:
 
     def __init__(self, *entries: str) -> None:
         if not entries:
-            raise ArtifactError("KeyRing requires at least one key entry")
+            raise KeyRingConfigError("KeyRing requires at least one key entry")
 
         # Accept a single comma-separated string as a convenience
         flat: list[str] = []
@@ -266,30 +286,30 @@ class KeyRing:
             flat.extend(e.strip() for e in entry.split(",") if e.strip())
 
         if not flat:
-            raise ArtifactError("KeyRing requires at least one key entry")
+            raise KeyRingConfigError("KeyRing requires at least one key entry")
 
         self._keys: dict[str, bytes] = {}
         self._order: list[str] = []
 
         for entry in flat:
             if ":" not in entry:
-                raise ArtifactError(
+                raise KeyRingConfigError(
                     f"malformed KeyRing entry {entry!r}: expected '<kid>:<hex64>'"
                 )
             kid, _, hex_key = entry.partition(":")
             if not kid:
-                raise ArtifactError(
+                raise KeyRingConfigError(
                     f"malformed KeyRing entry {entry!r}: kid must not be empty"
                 )
             try:
                 key_bytes = bytes.fromhex(hex_key)
             except ValueError as exc:
-                raise ArtifactError(
+                raise KeyRingConfigError(
                     f"malformed KeyRing entry for kid {kid!r}: "
                     f"key is not valid hex: {exc}"
                 ) from exc
             if len(key_bytes) != 32:
-                raise ArtifactError(
+                raise KeyRingConfigError(
                     f"KeyRing entry for kid {kid!r}: key must decode to exactly "
                     f"32 bytes, got {len(key_bytes)}"
                 )
@@ -299,7 +319,7 @@ class KeyRing:
                     reason="duplicate_kid",
                     kid=format_kid_for_log(kid),
                 )
-                raise ArtifactError(f"duplicate kid {kid!r} in KeyRing entries")
+                raise KeyRingConfigError(f"duplicate kid {kid!r} in KeyRing entries")
             # Foot-gun guard: kids are expected to be short human labels
             # (e.g. ``prod-2026``, ``dev``).  A kid that looks like raw
             # key material — 32 or more hex chars — strongly suggests the
@@ -314,7 +334,7 @@ class KeyRing:
                     reason="kid_looks_like_hex_key_material",
                     kid=kid[:8] + "...",
                 )
-                raise ArtifactError(
+                raise KeyRingConfigError(
                     f"KeyRing entry has a kid {kid[:8]}... that looks like "
                     "raw hex key material (>=32 hex chars).  Use a short "
                     "human label (e.g. 'prod-2026') for the kid; the "

@@ -241,6 +241,7 @@ schema:
   user_column: user_id
   item_column: item_id
   time_column: timestamp   # EchoSource emits integer epoch-second timestamps
+  time_unit: s             # required: a numeric time_column has no implied unit
 
 training:
   algorithms: [TopPop]
@@ -257,6 +258,14 @@ Train:
 ```bash
 recotem train recipe.yaml
 ```
+
+> `time_unit` is mandatory whenever the column named by `schema.time_column`
+> holds numbers rather than strings or datetimes — omitting it exits 4 with
+> `code: time_unit_required`. `recotem validate` does **not** catch this: it
+> checks the recipe schema and probes the source, but the unit is only needed
+> once rows are parsed, so a recipe missing `time_unit` validates clean and
+> then fails at `recotem train`. If your source emits epoch integers, say so
+> in the plugin's README so recipe authors set the unit up front.
 
 ## FetchContext
 

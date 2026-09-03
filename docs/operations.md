@@ -222,7 +222,7 @@ logic instead of grepping stderr.
 | 1 | Unknown error | Bug, environment issue, schema generation failure |
 | 2 | RecipeError | YAML syntax, schema violation, invalid `--env-var`, `--dev-allow-unsigned` without companion confirmation flag, `--dev-allow-unsigned` outside `RECOTEM_ENV=development` |
 | 3 | DataSourceError | Source-layer failure NOT during HTTP fetch — CSV/Parquet format error, required column missing, local-FS path not found, BigQuery schema mismatch |
-| 4 | TrainingError | Includes subcodes `signing_key_missing`, `min_data_violation`, `time_column_parse_error`, `cutoff_exceeds_item_count`, `final_training_error`, `no_completed_trials`, `zero_score`, `excessive_per_trial_timeouts`, `feature_table_error`, `feature_axis_error`, `feature_cholesky_error` |
+| 4 | TrainingError | Includes subcodes `signing_key_missing`, `min_data_violation`, `time_unit_required`, `time_column_parse_error`, `cutoff_exceeds_item_count`, `split_error`, `search_error`, `unknown_algorithm`, `final_training_error`, `no_completed_trials`, `zero_score`, `excessive_per_trial_timeouts`, `feature_table_error`, `feature_axis_error`, `feature_cholesky_error`. A `TrainingError` carrying no more specific code reports the generic `training_error` |
 | 5 | ArtifactError | Magic mismatch, kid unknown, HMAC mismatch, payload over cap, disallowed FQCN, header JSON over cap. A **malformed** `RECOTEM_SIGNING_KEYS` value is exit 8, not 5 — the artifact is fine, the environment is not |
 | 6 | LockContestedError | Recipe lock held by another process when `--fail-on-busy` is set |
 | 7 | HttpFetchError | Any failure during HTTP/HTTPS source fetch — SSRF guard refused the destination, connect/read timeout, HTTP 4xx/5xx, body cap exceeded, redirect cap, scheme-changing redirect, sha256 mismatch on a network-fetched source |
@@ -925,6 +925,27 @@ The recipe is unhealthy (`loaded: false`) — response body carries
 `{"detail": "...", "code": "RECIPE_UNAVAILABLE"}`. See
 `/v1/health/details` for the underlying error. Usually a signing
 mismatch or corrupt artifact.
+
+### Recipe file present but the endpoint 404s and `/v1/health` does not count it
+
+Check the file extension. `--recipes <dir>` enumerates only direct `*.yaml`
+children of the directory; a `*.yml` file is not a recipe file as far as
+Recotem is concerned. It is not loaded, it is **not** reported under `skipped`
+(that count is for `*.yaml` files that failed to parse), and nothing is logged
+about it — the loader simply never sees it. A directory holding only `.yml`
+files therefore looks like an empty directory:
+
+```json
+{"status": "ok", "total": 0, "loaded": 0}
+```
+
+and every verb on the recipe returns `404` with
+`{"detail": "...", "code": "RECIPE_NOT_FOUND"}`. Rename the file to `.yaml`.
+
+The same applies to recipes in subdirectories (enumeration is non-recursive)
+and to symlinks that resolve outside `<dir>` — except that a rejected symlink
+*is* reported. See
+[recipe-reference.md — Loading a directory of recipes](recipe-reference.md#loading-a-directory-of-recipes).
 
 ### 404 on `/v1/recipes/{name}:recommend`
 

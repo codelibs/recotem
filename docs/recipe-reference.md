@@ -7,7 +7,7 @@ A recipe is a YAML file that defines what data to fetch, how to train, and where
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | yes | Endpoint name. Pattern: `^[A-Za-z0-9_-]{1,64}$`. Becomes `/v1/recipes/{name}:*`. |
-| `source` | object | yes | Data source config. `type` field is the discriminator (`csv`, `parquet`, `bigquery`, `sql`, or any plugin). Validated in two stages: the rest of the recipe is parsed first, then the source dict is dispatched to the plugin's `Config` class. As a result, errors in `source.*` surface *after* errors elsewhere in the recipe; an unknown `source.type` raises a `DataSourceError` listing all registered type names. |
+| `source` | object | yes | Data source config. `type` field is the discriminator (`csv`, `parquet`, `bigquery`, `sql`, or any plugin). Validated in two stages: the source dict is dispatched to the plugin's `Config` class first, then the rest of the recipe is parsed. As a result, errors in `source.*` surface *before* errors elsewhere in the recipe, and they surface alone — a recipe with a bad `source.type` and a bad `training.metric` reports only the source problem. An unknown `source.type` raises a `RecipeError` (exit **2**, not 3) listing all registered type names. |
 | `schema` | object | yes | Column mapping. |
 | `cleansing` | object | no | Data quality gates. |
 | `item_metadata` | object | no | Metadata joined into predict responses. |
@@ -64,7 +64,7 @@ source:
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `query` | string | required | SQL. Trusted code — not env-expanded. Use `@param` for dynamic values. |
-| `query_parameters` | map | `{}` | BigQuery named parameters bound to `@name` placeholders. |
+| `query_parameters` | map | `null` | BigQuery named parameters bound to `@name` placeholders. Omitted and `{}` behave identically (no parameters are bound). |
 | `project` | string | `null` | GCP project ID. Falls back to ADC ambient project. |
 
 Install the extra: `pip install "recotem[bigquery]"`.
@@ -134,13 +134,15 @@ cleansing:
 |-------|------|---------|-------|
 | `drop_null_ids` | bool | `true` | Drop rows where `user_id` or `item_id` is null. |
 | `dedup` | string | `keep_last` | How to handle duplicate (user, item) pairs. |
-| `min_rows` | int | `null` (no check) | Minimum row count after cleansing. |
-| `min_users` | int | `null` (no check) | Minimum distinct user count. |
-| `min_items` | int | `null` (no check) | Minimum distinct item count. |
+| `min_rows` | int | `null` (no check) | Minimum row count after cleansing. Must be `>= 0`; a negative value is a schema error (exit 2). |
+| `min_users` | int | `null` (no check) | Minimum distinct user count. Must be `>= 0`; a negative value is a schema error (exit 2). |
+| `min_items` | int | `null` (no check) | Minimum distinct item count. Must be `>= 0`; a negative value is a schema error (exit 2). |
 
 Violation of any `min_*` threshold exits with code 4 and `"code": "min_data_violation"` in the JSON error line.
 
-A **completely empty** fetch is handled earlier and separately: a source that returns zero rows exits **3** (`DataSourceError`) with `source '<type>' returned no rows for recipe '<name>'`, regardless of whether `min_rows` is set. The `min_*` checks exist for "not enough data to train well"; a zero-row result is a data-source outcome, not a threshold violation.
+A **completely empty** fetch is handled earlier and separately: a source that returns zero rows exits **3** (`DataSourceError`), regardless of whether `min_rows` is set. The `min_*` checks exist for "not enough data to train well"; a zero-row result is a data-source outcome, not a threshold violation.
+
+The message depends on which layer noticed. Sources that do not check for themselves (`parquet`, `bigquery`, `sql`, plugins) are caught by the pipeline's shared guard and report `source '<type>' returned no rows for recipe '<name>'; the query or file matched no data. ...`. The `csv` source checks first and reports its own `CSV file '<path>' is empty (no data rows after header).`. Both are `DataSourceError` and both exit 3, so branch on the exit code rather than on the message text.
 
 `dedup` values:
 
@@ -504,8 +506,8 @@ training:
 | `cutoff` | int | `20` | Recommendation list length for evaluation (must be ≥ 1, and must not exceed the number of distinct items in the data — a larger value exits 4 with code `cutoff_exceeds_item_count` before the first trial). |
 | `n_trials` | int | `40` | Total Optuna trial budget (must be ≥ 1). |
 | `per_algorithm_trials` | map | `null` | Per-algorithm trial overrides. **Explicit `0` disables that algorithm** (it is dropped from the search entirely). Algorithms in `algorithms` that are *unspecified* in this map split whatever budget remains after honouring the explicit values. If the explicit values sum to more than `n_trials`, positive values are scaled down proportionally (each remains ≥ 1 *when at least n_trials slots exist*; otherwise the first `n_trials` non-zero classes get one trial each and the remainder are skipped — the total budget never exceeds `n_trials`). **Unknown algorithm keys are rejected at recipe-load time with a ValidationError** — each key must be a valid alias or class name present in `algorithms`. When `parallelism > 1`, the actual per-algorithm trial count may exceed the configured budget by up to `parallelism - 1` trials due to in-flight concurrent trials; a warning is logged on each run where this condition applies. |
-| `per_trial_timeout_seconds` | int | `null` | Soft per-trial wall-clock cap. Implemented by running the trial in a worker thread; if it overshoots, Optuna prunes the trial but the underlying thread is daemonised and may continue until it finishes naturally (CPU/memory still spent). The count of threads still running at the time the study finishes is reported as `n_orphaned` in the `train_done` structured log event. Operators can monitor this field to detect trials that consistently exceed the timeout and adjust `per_trial_timeout_seconds` or `timeout_seconds` accordingly. |
-| `timeout_seconds` | int | `null` | Overall tuning wall-clock cap. |
+| `per_trial_timeout_seconds` | int | `null` | Soft per-trial wall-clock cap. Implemented by running the trial in a worker thread; if it overshoots, Optuna prunes the trial but the underlying thread is daemonised and may continue until it finishes naturally (CPU/memory still spent). The count of threads still running at the time the study finishes is reported as `n_orphaned` in the `train_done` structured log event. Operators can monitor this field to detect trials that consistently exceed the timeout and adjust `per_trial_timeout_seconds` or `timeout_seconds` accordingly. Must be `>= 1` when set; `0` and negatives are a schema error (exit 2) — omit the field to disable the cap. |
+| `timeout_seconds` | int | `null` | Overall tuning wall-clock cap. Must be `>= 1` when set; `0` and negatives are a schema error (exit 2) — omit the field to disable the cap. |
 | `parallelism` | int | `1` | Optuna `n_jobs` (Python threads, not processes). Algorithms whose hot loop is GIL-bound see little speed-up; native-code learners (IALS, RP3beta) benefit most. |
 | `storage_path` | string | `""` | Empty = in-memory (no resume). A bare path becomes a SQLite URL (`sqlite:///<path>`); explicit `sqlite://`, `postgresql://`, `postgres://`, and `mysql://` URLs are also accepted. Study name is `recotem_<recipe_name>_<run_id>` and `load_if_exists=True`, so a fresh `run_id` per train invocation always starts a new study (resume requires reusing the same `run_id` — pass `recotem train --run-id <stable>`). **SQLite over NFS corrupts** — keep SQLite databases on a local filesystem. **URLs must not embed credentials** (`postgresql://user:pass@host/db` is rejected with `SearchError` so userinfo cannot leak through SQLAlchemy tracebacks). Provide credentials via `PGPASSFILE` / `~/.pgpass` / SQLAlchemy env vars instead. |
 | `split.scheme` | string | `random` | `random`, `time_global`, or `time_user`. See semantics below. |

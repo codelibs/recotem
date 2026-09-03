@@ -187,7 +187,7 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
 | 3 | `_EXIT_DATASOURCE` | `DataSourceError` (CSV parse, missing column, BQ access) |
 | 4 | `_EXIT_TRAINING` | `TrainingError` (all trials failed, min-data violation) |
 | 5 | `_EXIT_ARTIFACT` | `ArtifactError` (magic / version / HMAC verify). A **malformed** `RECOTEM_SIGNING_KEYS` value is exit 8, not 5 — see `KeyRingConfigError` |
-| 6 | `_EXIT_LOCK_CONTESTED` | per-recipe training lock held by another process |
+| 6 | `_EXIT_LOCK_CONTESTED` | per-recipe training lock held by another process **and `--fail-on-busy` was passed**. Without the flag (the default) contention exits 0 after logging `recipe_lock_contended_skipping` |
 | 7 | `_EXIT_HTTP_FETCH` | `HttpFetchError` (SSRF guard / sha256 mismatch / scheme-changing redirect / byte cap) |
 | 8 | `_EXIT_CONFIG` | configuration error (e.g. signing keys missing without `--dev-allow-unsigned`; malformed `RECOTEM_SIGNING_KEYS` on `train` / `serve` / `inspect`; `ConfigError` from `ServeConfig.from_env()`; `serve` failing to bind) |
 

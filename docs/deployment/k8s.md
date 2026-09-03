@@ -443,12 +443,45 @@ networkPolicy:
   kubeletCIDRs: []
   #   - "10.0.0.0/8"
 
+  # extraEgress appends rules to the policy.  The built-in egress rules cover
+  # 53, 443 and 8080 only, and the policy selects the train CronJob's pods as
+  # well — add the ports your data sources use.  See the warning below.
+  extraEgress: []
+
 hpa:
   enabled: false
   minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
 ```
+
+When `hpa.enabled: true` the chart omits `spec.replicas` from the Deployment
+and `replicaCount` is ignored. That is deliberate: with the field rendered,
+every `helm upgrade` re-applies `replicaCount` and snaps a fleet the HPA had
+scaled out back down until the HPA reacts — an availability dip on each
+release. Set the floor with `hpa.minReplicas` instead.
+
+### PodDisruptionBudget covers serve only
+
+The serve pods carry `app.kubernetes.io/component: serve`, and the PDB
+selects on it. That matters because a PDB's allowed-disruption count is
+`currentHealthy - minAvailable` computed over **the pods its selector
+matches** — so an unscoped selector lets a train CronJob pod count as
+healthy:
+
+| Serve replicas | Training running? | currentHealthy | `minAvailable: 1` allows |
+|---|---|---|---|
+| 1 | no  | 1 | 0 disruptions — serve is protected |
+| 1 | yes | 2 | 1 disruption — a drain may evict the only serve pod |
+
+The protection would otherwise lapse exactly while a training job happened to
+be running, which is schedule-dependent and easy to miss.
+
+The Service selector is deliberately **not** scoped the same way. Train pods
+stay out of its Endpoints because `targetPort` is the *name* `http`, which
+the train container does not declare — narrowing the selector instead would
+empty the Endpoints for the length of the rollout that adds the matching pod
+label. If you add a port named `http` to the train container, revisit this.
 
 ### NetworkPolicy: the defaults are not deny-all inbound
 
@@ -496,6 +529,54 @@ deny-all.
 Note that `policyTypes` always includes `Egress`, and the egress rules are
 port-based only (53, 443, 8080) with no destination restriction. Add your own
 policy if you need to constrain which hosts the pod may reach.
+
+### NetworkPolicy: egress also gates the train CronJob
+
+> ⚠️ **The policy selects the train pods too, and its egress rules do not
+> cover SQL or plain HTTP.** `podSelector` matches on
+> `app.kubernetes.io/name` + `app.kubernetes.io/instance`, which the train
+> CronJob's pods carry as well as the serve pods. The built-in egress rules
+> are serve-shaped — DNS plus HTTPS for object storage — so with chart
+> defaults a training run whose recipe uses `source.type: sql`, or a
+> plain-`http://` `source.path`, is dropped by this policy. There is no
+> NetworkPolicy-shaped error: the job just times out connecting, which sends
+> you looking at the database instead of at the policy.
+
+Ports the built-in rules **do not** open, and that you must add for the
+matching data source:
+
+| Port | Protocol | Needed by |
+|------|----------|-----------|
+| 5432 | TCP | `source.type: sql` against PostgreSQL |
+| 3306 | TCP | `source.type: sql` against MySQL / MariaDB |
+| 1433 | TCP | `source.type: sql` against SQL Server |
+| 80   | TCP | `source.path` on plain `http://` |
+
+BigQuery, and object-store paths (`s3://`, `gs://`, `az://`) and `https://`
+URLs, already work: they go over 443.
+
+Use `networkPolicy.extraEgress` to append rules; entries are the Kubernetes
+`NetworkPolicyEgressRule` schema and are emitted verbatim:
+
+```yaml
+networkPolicy:
+  enabled: true
+  extraEgress:
+    - to:
+        - ipBlock:
+            cidr: "10.0.0.0/8"     # the subnet your database lives on
+      ports:
+        - port: 5432
+          protocol: TCP
+```
+
+Because serve and train share the one policy, anything opened here is
+reachable from the serve pods as well — scope each rule with `to:` when that
+matters. Confirm what you got:
+
+```console
+$ kubectl get networkpolicy recotem -o jsonpath='{.spec.egress}'
+```
 
 Create the auth Secret before installing the chart, e.g.:
 

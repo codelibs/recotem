@@ -13,6 +13,8 @@ image:
 imagePullSecrets: []
 
 # ── serve deployment ──────────────────────────────────────────────────────────
+# replicaCount is ignored when hpa.enabled=true: the chart then omits
+# spec.replicas so a `helm upgrade` cannot undo the autoscaler's decisions.
 replicaCount: 2
 
 # preStopSleepSeconds: seconds the preStop hook sleeps before SIGTERM is sent,
@@ -264,6 +266,11 @@ serviceAccount:
 # pdb.enabled: true to prevent all replicas being evicted simultaneously
 # during node drain or rolling upgrades.  The default is false only for
 # compatibility with single-replica development installs.
+#
+# The budget covers the serve pods only.  A PDB's allowed-disruption count is
+# computed over the pods its selector matches, so counting the train CronJob's
+# pods would let a training run inflate the budget and lend serve a disruption
+# it cannot afford.
 pdb:
   enabled: false
   minAvailable: 1
@@ -308,3 +315,31 @@ networkPolicy:
   #     - "172.16.0.0/12"
   #     - "192.168.0.0/16"
   kubeletCIDRs: []
+
+  # extraEgress: additional egress rules, appended verbatim to the policy.
+  # Entries use the Kubernetes NetworkPolicyEgressRule schema (`to:`/`ports:`).
+  #
+  # The built-in egress rules are serve-shaped: DNS (53) plus HTTPS (443) for
+  # object storage, and 8080.  But this policy's podSelector matches on
+  # name+instance only, so it selects the train CronJob's pods too — and a
+  # training run reaches whatever the recipe's `source` points at.  With chart
+  # defaults a recipe using `source.type: sql`, or a plain-`http://`
+  # `source.path`, is dropped by this policy with no NetworkPolicy-shaped
+  # error: the job just times out connecting.  Add the ports your data sources
+  # actually use:
+  #
+  #   PostgreSQL 5432 | MySQL / MariaDB 3306 | SQL Server 1433 | HTTP 80
+  #
+  # Rules are appended to the one shared policy, so anything opened here is
+  # also reachable from the serve pods; narrow each rule with `to:` when that
+  # matters.
+  extraEgress: []
+  #   - to:
+  #       - ipBlock:
+  #           cidr: "10.0.0.0/8"
+  #     ports:
+  #       - port: 5432
+  #         protocol: TCP
+  #   - ports:
+  #       - port: 80
+  #         protocol: TCP

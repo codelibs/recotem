@@ -49,6 +49,26 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Selector labels narrowed to the serve pods.
+
+recotem.selectorLabels carries no component dimension, so it matches the train
+CronJob's pods as well as the serve Deployment's.  For a PodDisruptionBudget
+that is not merely untidy: a PDB's allowed-disruption count is computed over
+the pods it selects, so a running training pod counts as healthy and inflates
+the budget — with minAvailable=1 and one serve replica, a concurrent training
+run raises allowed disruptions from 0 to 1 and a node drain may evict the only
+serve pod.  Selecting on the component keeps the budget about serve alone.
+
+NOT for a Deployment's spec.selector: that field is immutable, so adding a
+label to it would make `helm upgrade` fail on every already-installed release.
+Pod-template labels, PDB selectors and Service selectors are all mutable.
+*/}}
+{{- define "recotem.serveSelectorLabels" -}}
+{{ include "recotem.selectorLabels" . }}
+app.kubernetes.io/component: serve
+{{- end }}
+
+{{/*
 ServiceAccount name.
 */}}
 {{- define "recotem.serviceAccountName" -}}

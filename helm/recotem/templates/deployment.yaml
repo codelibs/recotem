@@ -6,7 +6,15 @@ metadata:
   labels:
     {{- include "recotem.labels" . | nindent 4 }}
 spec:
+  {{- /* Omit spec.replicas entirely when an HPA owns this Deployment.
+         Rendering it makes every `helm upgrade` re-apply replicaCount, which
+         snaps a fleet the HPA had scaled out back down until the HPA reacts —
+         an availability dip on every release.  With the field absent the API
+         server leaves the running replica count untouched on update, and the
+         HPA raises a freshly created Deployment to minReplicas. */}}
+  {{- if not .Values.hpa.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "recotem.selectorLabels" . | nindent 6 }}
@@ -21,7 +29,10 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
-        {{- include "recotem.selectorLabels" . | nindent 8 }}
+        {{- /* The component label is what lets the PodDisruptionBudget select
+               serve without also selecting the train CronJob's pods.  It goes
+               on the pod template only — spec.selector above is immutable. */}}
+        {{- include "recotem.serveSelectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

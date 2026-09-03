@@ -8,6 +8,7 @@ Tests:
 
 from __future__ import annotations
 
+from typing import Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -22,10 +23,10 @@ from recotem.datasource.base import DataSourceError
 def test_two_plugins_register_same_name_rejected_at_discovery() -> None:
     """Two plugins with the same type_name raise DataSourceError at discovery."""
     # We test the logic in get_source_types by patching entry_points
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel
 
     class DupeConfig(BaseModel):
-        type: str = Field(default="csv", pattern="^csv$")
+        type: Literal["csv"] = "csv"
         path: str = ""
 
     class DupeSource1:
@@ -95,10 +96,10 @@ def test_build_source_config_union_returns_annotated_type() -> None:
 
 def test_dynamic_discriminated_union_includes_third_party_type() -> None:
     """A third-party plugin type_name appears in get_source_types() after discovery."""
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel
 
     class ThirdPartyConfig(BaseModel):
-        type: str = Field(default="echo", pattern="^echo$")
+        type: Literal["echo"] = "echo"
 
     class EchoSource:
         type_name = "echo"
@@ -363,12 +364,12 @@ def test_clear_registry_cache_invalidates_cached_result() -> None:
     4. Call clear_registry_cache() then get_source_types() again — now returns
        the patched result, proving the cache was cleared.
     """
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel
 
     from recotem.datasource import registry
 
     class SentinelConfig(BaseModel):
-        type: str = Field(default="sentinel", pattern="^sentinel$")
+        type: Literal["sentinel"] = "sentinel"
 
     class SentinelSource:
         type_name = "sentinel"
@@ -495,10 +496,10 @@ def test_builtin_ep_skipped_other_eps_still_registered() -> None:
     Note: get_source_types is lru_cache'd; cache_clear() is called before and
     after to prevent state leakage between test runs.
     """
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel
 
     class GoodConfig(BaseModel):
-        type: str = Field(default="good", pattern="^good$")
+        type: Literal["good"] = "good"
 
     class GoodSource:
         type_name = "good"

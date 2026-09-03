@@ -11,6 +11,8 @@ Tests:
 
 from __future__ import annotations
 
+from typing import Literal
+
 import pytest
 
 from recotem.datasource.base import DataSourceError, validate_plugin_contract
@@ -29,7 +31,9 @@ def _make_valid_cls(**overrides):
     from pydantic import BaseModel
 
     class _Config(BaseModel):
-        type: str = "test"
+        # Must be a Literal matching type_name: pydantic can only discriminate
+        # a union on a Literal field, and validate_plugin_contract enforces it.
+        type: Literal["test"] = "test"
 
     attrs = {
         "type_name": "test",
@@ -232,3 +236,89 @@ def test_validate_plugin_contract_passes_for_bigquery_source() -> None:
     from recotem.datasource.bigquery import BigQuerySource
 
     validate_plugin_contract(BigQuerySource)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Config.type discriminator contract
+#
+# pydantic can only build a discriminated union when every member declares the
+# discriminator as a Literal (it raises PydanticUserError otherwise).  Recotem
+# additionally resolves the source class by ``type_name``, so the Literal value
+# and ``type_name`` must agree.  These checks run at plugin-discovery time so a
+# broken plugin is named at startup instead of failing mid-training.
+# ---------------------------------------------------------------------------
+
+
+def test_config_without_type_field_raises_datasource_error() -> None:
+    """A Config with no 'type' field is rejected, naming the required field."""
+    from pydantic import BaseModel
+
+    class _NoType(BaseModel):
+        n_rows: int = 1
+
+    cls = _make_valid_cls(Config=_NoType)
+    with pytest.raises(DataSourceError, match="required 'type' discriminator"):
+        validate_plugin_contract(cls)
+
+
+def test_config_without_type_field_error_suggests_literal_declaration() -> None:
+    """The error must spell out the exact declaration to add."""
+    from pydantic import BaseModel
+
+    class _NoType(BaseModel):
+        n_rows: int = 1
+
+    cls = _make_valid_cls(Config=_NoType)
+    with pytest.raises(DataSourceError) as exc_info:
+        validate_plugin_contract(cls)
+    assert 'type: Literal["test"] = "test"' in exc_info.value.message
+    assert "docs/plugin-authoring.md" in exc_info.value.message
+
+
+def test_config_with_plain_str_type_raises_datasource_error() -> None:
+    """``type: str`` cannot be discriminated on, even with a pattern constraint."""
+    from pydantic import BaseModel, Field
+
+    class _StrType(BaseModel):
+        type: str = Field(default="test", pattern="^test$")
+
+    cls = _make_valid_cls(Config=_StrType)
+    with pytest.raises(DataSourceError, match="must be a typing.Literal"):
+        validate_plugin_contract(cls)
+
+
+def test_config_type_literal_mismatching_type_name_raises() -> None:
+    """A Literal that disagrees with type_name is rejected."""
+    from pydantic import BaseModel
+
+    class _Mismatch(BaseModel):
+        type: Literal["other"] = "other"
+
+    cls = _make_valid_cls(Config=_Mismatch)
+    with pytest.raises(DataSourceError, match="does not match its type_name"):
+        validate_plugin_contract(cls)
+
+
+def test_config_that_is_not_a_pydantic_model_raises() -> None:
+    """A non-BaseModel Config cannot participate in the union."""
+
+    class _NotAModel:
+        type = "test"
+
+    cls = _make_valid_cls(Config=_NotAModel)
+    with pytest.raises(DataSourceError, match="not a pydantic BaseModel"):
+        validate_plugin_contract(cls)
+
+
+def test_validate_plugin_contract_passes_for_sql_source() -> None:
+    """validate_plugin_contract must not raise for the builtin SQLSource."""
+    from recotem.datasource.sql import SQLSource
+
+    validate_plugin_contract(SQLSource)  # must not raise
+
+
+def test_validate_plugin_contract_passes_for_echo_example_plugin() -> None:
+    """The shipped example plugin must satisfy the contract it documents."""
+    from recotem_echo.source import EchoSource
+
+    validate_plugin_contract(EchoSource)  # must not raise

@@ -372,6 +372,22 @@ exit 8.
   and lets the rest of the message name the field, the security check, or the
   OS error. The `skipped` accounting is unchanged — a rejected file is still
   excluded from the readiness `total`.
+- **Training progress bars owned stdout, so a redirected train log captured
+  nothing else.** `recotem train recipe.yaml > train.log` wrote 4.8 KB of carriage returns and
+  block-drawing characters into the file and not one of the run's 47 structured
+  log events, which went to stderr. The shipped examples in
+  `docs/deployment/cron.md` all redirect with `2>&1`, so they did capture the
+  log — but every cron run interleaved those 4.8 KB of terminal control codes
+  into it, which is what a log aggregator then ingests. The
+  bars come from `fastprogress`, pulled in transitively by irspack, and were
+  drawn for a redirected stdout because fastprogress's own gate, `printing()`,
+  evaluates `getattr(stdout, 'isatty', False)` — which yields the bound method
+  rather than calling it, so the check is truthy for pipes and files alike.
+  `--quiet` and `RECOTEM_LOG_FORMAT=json` were both ignored by it as well.
+  `run_training` now silences fastprogress unless stdout is a real terminal and
+  neither `--quiet` nor an explicit `RECOTEM_LOG_FORMAT=json` is in force, so a
+  redirected run captures the structured log alone. An interactive `recotem
+  train` renders exactly as before.
 - **Python warnings bypassed structured logging entirely.** Nothing in the
   source tree called `logging.captureWarnings`, so `warnings.warn` output went
   through the default `warnings.showwarning` straight to `sys.stderr`. Under
@@ -385,8 +401,9 @@ exit 8.
   to WARNING, so warnings are emitted as ordinary structured records through
   the same `foreign_pre_chain` — redaction first. This does not change how
   warnings are *filtered*; only where they are written. (Progress-bar output
-  written directly to stderr by irspack's `fastprogress` dependency is
-  unaffected and still interleaves with a JSON train log.)
+  from irspack's `fastprogress` dependency goes to stdout, not stderr, so it
+  never shared a stream with the JSON log; it is addressed by the preceding
+  entry.)
 - **`recipe_hash` was unreadable in `train_done`.** The value-side hex64 rule,
   which exists to catch a raw signing key, also matched the recipe hash and
   logged `[REDACTED-HEX64]` for every recipe. The hash is SHA-256 of the

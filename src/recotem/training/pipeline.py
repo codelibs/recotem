@@ -31,7 +31,7 @@ from recotem._exit_codes import _map_exception_to_exit  # shared with cli.py
 from recotem._features import FEATURE_STATE_VERSION, state_descriptor
 from recotem.recipe.errors import RecipeError
 from recotem.recipe.models import Recipe
-from recotem.training._compat import IDMappedRecommender
+from recotem.training._compat import IDMappedRecommender, suppress_progress_bars
 from recotem.training.algorithms import (
     get_recommender_cls,
     is_feature_capable,
@@ -183,6 +183,13 @@ def run_training(
     """
     if run_id is None:
         run_id = uuid.uuid4().hex[:12]
+
+    # irspack's early-stopping recommenders draw a fastprogress bar straight
+    # onto stdout, and fastprogress's own TTY guard is broken (see
+    # ``suppress_progress_bars``), so a redirected run captures nothing but
+    # bar frames.  Applied at the single public entry point rather than in
+    # the CLI so library callers of run_training() get the same behaviour.
+    suppress_progress_bars(quiet=quiet)
 
     # Hoist resolved kid into outer scope so the except block can include it
     # in the train_error event even when the failure happens inside the lock.

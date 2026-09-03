@@ -229,14 +229,137 @@ anything.
 
 `recotem-docs` (https://github.com/codelibs/recotem-docs, expected at
 `../recotem-docs`) is a separate VitePress repo serving recotem.org with EN + JA
-and a `1.0/` archive. It carries its own copies of the deployment docs, whose
-version pins go stale after a release. If it is not checked out locally, clone
-it; if you lack push access, hand the change list to the user.
+and per-version archives. If it is not checked out locally, clone it; if you
+lack push access, hand the change list to the user.
 
-- Branch there and bump the pins to `X.Y.Z` in the EN and JA
-  `docs/deployment/{docker,kubernetes}.md`. See `references/version-locations.md`.
-- **Leave the `1.0/` archive untouched** — it documents the legacy 1.x app.
-- Verify no stale pin remains outside `1.0/`, then open a PR there too.
+Two different jobs live in this phase, and **the order between them matters**:
+
+1. **4A — Freeze & promote** (minor/major releases only). The unversioned root
+   tree is "current stable". Shipping a new minor means the root must stop
+   serving the old version's docs.
+2. **4B — Bump version pins** in whatever is now the live tree.
+
+Do **4A before 4B**. Freezing after bumping copies the *new* version's pins into
+the archive that is supposed to document the *old* one.
+
+### Phase 4A — Freeze the old stable, promote the new one
+
+Skip this for a patch release (`X.Y.Z` where `Z > 0`) — a patch does not create
+a new documentation line. Run it for every minor or major.
+
+The site model (`specs/2026-07-20-docs-versioning-design.md` §2–§3): the
+unversioned root (`/docs/ /guide/ /learn/` + `/ja/…`) is the current stable and
+the only indexed tree; every `X.Y/` directory is a noindexed, self-canonical
+archive or preview. At release, the outgoing stable is frozen into its own
+`X.Y/` directory and the incoming preview is promoted to the root, so **every
+canonical URL keeps working and starts serving the new version**.
+
+Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
+
+1. **Freeze the outgoing stable into `$OLD/`.** Copy the root tree, EN and JA,
+   into a new `$OLD/` directory laid out like the existing `1.0/`: version
+   directories are self-contained under the root locale, so JA goes to
+   `$OLD/ja/…`, not into a locale-routed path.
+
+   ```bash
+   mkdir -p 2.0/ja
+   cp -R docs guide learn index.md 2.0/
+   cp -R ja/docs ja/guide ja/learn ja/index.md 2.0/ja/
+   ```
+
+   Copy **every** root content directory, not just the ones the preview
+   happens to contain. `learn/` in particular exists at the root but **not**
+   under `2.1/`; if the freeze skips it, the archive has a hole and the
+   promote in step 2 must not touch it either.
+
+2. **Promote the preview to the root.** Replace only the directories the
+   preview actually carries, and delete the old ones first so a file removed
+   during 2.1 development does not survive the copy:
+
+   ```bash
+   rm -rf docs guide ja/docs ja/guide
+   cp -R 2.1/docs 2.1/guide ./
+   cp -R 2.1/ja/docs 2.1/ja/guide ja/
+   ```
+
+   **Do NOT copy `2.1/index.md` over the root `index.md`.** The root landing
+   page is a VitePress `layout: home` hero (`hero:` / `features:`
+   frontmatter); `2.1/index.md` is a plain preview landing page carrying an
+   "in-development preview" warning banner and links into `/2.1/…`. Overwriting
+   the hero replaces the site's front page with a preview notice. Same for
+   `ja/index.md` and `2.1/ja/index.md`. Leave `learn/` and `ja/learn/` in
+   place for the same reason the freeze had to copy them: the preview has no
+   `learn/`.
+
+3. **Rewrite the promoted tree's absolute version links.** The preview's pages
+   link with absolute `/2.1/…` URLs (~40 of them across the EN and JA guide,
+   `docs/data-sources/plugins.md`, and both index pages). Once promoted these
+   must point at the unversioned root, or the new stable docs link back into a
+   preview directory that is about to be deleted:
+
+   ```bash
+   grep -rl '/2\.1/' --include='*.md' docs guide ja/docs ja/guide \
+     | xargs perl -pi -e 's{/2\.1/ja/}{/ja/}g; s{/2\.1/}{/}g;'
+   grep -rn '/2\.1/' --include='*.md' docs guide ja/docs ja/guide   # MUST be empty
+   ```
+
+   Order matters in that substitution: rewrite `/2.1/ja/` before the bare
+   `/2.1/`, or the JA links lose their locale prefix.
+
+4. **Retire the preview directory.** `rm -rf 2.1`. Note the deploy is `scp`
+   without `--delete`, so the removed files linger server-side; that is
+   expected and harmless (they are noindexed), but do not treat a still-live
+   `/2.1/` URL as a failed release.
+
+5. **Update the VitePress wiring** (`.vitepress/config.ts`):
+
+   - **Sidebars.** The EN locale registers `/2.1/guide/`, `/2.1/docs/`,
+     `/2.1/ja/guide/`, `/2.1/ja/docs/`, and the JA locale registers the two
+     `/2.1/ja/…` keys again. Delete all six and add the frozen archive's:
+     `'/2.0/guide/': v2GuideSidebar('en', '/2.0')`, `'/2.0/docs/':
+     v2DocsSidebar('en', '/2.0')`, and the `/2.0/ja/…` pair in both locales —
+     mirroring exactly how the `/2.1/` keys were registered. The root
+     `'/guide/'` / `'/docs/'` / `'/learn/'` registrations already point at the
+     unversioned tree and need no change.
+   - **No noindex work is required.** `transformPageData` and
+     `sitemap.transformItems` already match every version directory generically
+     (`/^\d+\.\d+\//`), so the new `2.0/` tree is noindexed and out of the
+     sitemap the moment it exists.
+
+6. **Update the version switcher**
+   (`.vitepress/theme/VersionSwitcher.vue`). It hardcodes the version set. For
+   a 2.1 release: the `isV21` check becomes an `isV20` check on `2.0/`,
+   `currentVersion` returns `'2.1'` for the unversioned tree, `v21Link` becomes
+   `v20Link` (`/2.0/` and `/2.0/ja/`), and the three menu entries become
+   **2.1** (unversioned root, marked latest), **2.0** (`/2.0/…`), **1.0**
+   (`/1.0/…`). Check the `:class="{ active: … }"` bindings too — they key off
+   the same booleans and will silently highlight the wrong entry.
+
+7. **Verify before opening the PR.**
+
+   ```bash
+   yarn docs:build
+   ```
+
+   The build's dead-link check is the gate that catches a missed link rewrite.
+   Then confirm in the built output that `/2.0/**` and `/1.0/**` carry
+   `noindex`, that the unversioned `/docs/**` does **not**, that the sitemap
+   excludes every `X.Y/` directory, and that the root front page still renders
+   the hero rather than a preview banner.
+
+### Phase 4B — Bump the version pins
+
+The docs repo carries its own copies of the deployment docs, whose version pins
+go stale after a release.
+
+- Branch there and bump the pins to `X.Y.Z`. `references/version-locations.md`
+  has the exact edit and the verification; it discovers the files to edit
+  rather than hardcoding them, because the set changes as version directories
+  come and go.
+- **Leave every archived `X.Y/` directory untouched** — `1.0/` documents the
+  legacy 1.x app, and a freshly frozen `2.0/` must keep documenting 2.0.
+- Verify no stale pin remains in any live (non-archive) tree, then open a PR
+  there too. If 4A ran, both jobs belong in the same PR.
 
 ## Phase 5 — Open the next dev cycle
 
@@ -254,6 +377,14 @@ post-release:
   strings. A `.dev0` version in `pyproject.toml` is inert on its own, but
   pushing a `v2.1.0.dev0` tag *would* fire `publish.yml` (whose filter is `v*`)
   and burn that version on PyPI permanently.
+- **If Phase 4A ran, seed the next docs preview.** The promote consumed the
+  `X.Y/` preview directory, so the next cycle has nowhere to author. In
+  `recotem-docs`, create `X.(Y+1)/` as a copy of the newly promoted root tree
+  (`docs/`, `guide/`, and their `ja/` counterparts — the preview carries no
+  `learn/`), give it an in-development landing page like the one Phase 4A
+  retired, register its sidebars in `.vitepress/config.ts`, and add it to the
+  version switcher. It is noindexed automatically by the generic `/^\d+\.\d+\//`
+  rules. See `specs/2026-07-20-docs-versioning-design.md` §3–§4 in that repo.
 - Branch + PR as usual.
 
 ## Common mistakes

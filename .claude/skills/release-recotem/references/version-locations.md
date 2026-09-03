@@ -161,9 +161,33 @@ In the separate `recotem-docs` repo the same pins live in EN + JA:
 - `docs/deployment/kubernetes.md`, `ja/docs/deployment/kubernetes.md` — image
   tags and the `values.yaml` excerpt
 
+**These four are only the root tree.** The same four files are duplicated in
+every version directory — the in-development preview (`2.1/docs/deployment/…`,
+`2.1/ja/docs/deployment/…`) carries its own copies, and so will any future
+preview. A hardcoded four-file list silently leaves the preview tree pinned to
+the previous release, and the preview is exactly what Phase 4A promotes to the
+root at the next minor — so a pin missed here becomes the root's pin one
+release later.
+
+Do not hand-maintain the file list. Derive it, and derive it from the same
+pattern the verification uses, so the two cannot disagree:
+
 ```bash
-DOCS=(docs/deployment/kubernetes.md ja/docs/deployment/kubernetes.md \
-      docs/deployment/docker.md ja/docs/deployment/docker.md)
+# Every frozen/archived version directory. These keep the version they
+# document and must NOT be rewritten. Add the newly frozen directory here as
+# part of Phase 4A (releasing 2.1 freezes 2.0, so 2.0 joins this list).
+ARCHIVE_RE='(^|/)(1\.0|2\.0)/'
+
+PAT='recotem:[0-9][^ "]*|tag: "[0-9][^"]*"|already pin `[0-9][^`]*`|すでに `[0-9][^`]*` にピン留め'
+
+# Discover every live (non-archive) file carrying a pin. (while-read, not
+# `mapfile`: macOS ships bash 3.2 as /bin/bash and has no `mapfile`.)
+DOCS=()
+while IFS= read -r f; do DOCS+=("$f"); done < <(
+  grep -rlE "$PAT" --include='*.md' . \
+    | grep -v node_modules | grep -vE "$ARCHIVE_RE" | sort)
+(( ${#DOCS[@]} )) || { echo "FAIL: no pinned docs found — discovery is broken"; exit 1; }
+printf 'will bump: %s\n' "${DOCS[@]}"
 
 perl -pi -e "s/\Qrecotem:$PREV\E/recotem:$NEW/g; \
              s/\Qtag: \"$PREV\"\E/tag: \"$NEW\"/g; \
@@ -174,23 +198,40 @@ perl -pi -e "s/\Qrecotem:$PREV\E/recotem:$NEW/g; \
 git diff --stat "${DOCS[@]}"    # MUST be non-empty
 ```
 
+Print the discovered list and read it. At a 2.1.0 release run *before* Phase 4A
+it should name eight files (root four + `2.1/` four); run *after* Phase 4A, when
+`2.1/` has been promoted and removed, it should name four. If it names four when
+you expected eight, a tree is being skipped.
+
 The `docker.md` files share the "already pin" / "すでに...ピン留め" sentence with
 an illustrative "e.g. `2.0.0`" / "例: `2.0.0`" on the same line — the targeted
 `perl` above moves only the assertion, not the example. Do not use a blanket
 `s/$PREV/$NEW/g` here.
 
-Then confirm nothing stale remains outside the archive. The check must cover
+Then confirm nothing stale remains in any live tree. The check must cover
 **all four** pin forms the bump touches, not just `recotem:` — a grep that
 verifies fewer forms than the replacement edits is how a stale pin slips through
-while the check prints `OK`:
+while the check prints `OK` — and it must exclude archives **by the same
+`ARCHIVE_RE` the bump used**, not by a hardcoded `/1.0/`. An exclusion that
+knows about only one archive either fires on a correctly-frozen `2.0/` (and
+trains you to add ad-hoc `grep -v` clauses, which is how a live tree gets
+excluded next cycle) or, once it is loosened, stops covering the tree it should:
 
 ```bash
-PAT='recotem:[0-9][^ "]*|tag: "[0-9][^"]*"|already pin `[0-9][^`]*`|すでに `[0-9][^`]*` にピン留め'
-ALL=$(grep -rnoE "$PAT" --include='*.md' . | grep -v node_modules | grep -v '/1.0/')
+ALL=$(grep -rnoE "$PAT" --include='*.md' . | grep -v node_modules | grep -vE "$ARCHIVE_RE")
 [ -n "$ALL" ] || { echo "FAIL: no pins matched — the check itself is broken"; exit 1; }
-echo "$ALL" | grep -v "$NEW" && { echo "FAIL: stale pins above"; exit 1; } \
-                            || echo "OK: all $(echo "$ALL" | wc -l | tr -d ' ') doc pins = $NEW"
+STALE=$(echo "$ALL" | grep -v "$NEW")
+[ -z "$STALE" ] || { echo "FAIL: stale pins:"; echo "$STALE"; exit 1; }
+echo "OK: all $(echo "$ALL" | wc -l | tr -d ' ') live doc pins = $NEW"
+
+# The bump must not have reached into an archive.
+git diff --name-only | grep -E "$ARCHIVE_RE" \
+  && { echo "FAIL: an archived version directory was rewritten"; exit 1; } \
+  || echo "OK: archives untouched"
 ```
 
 An empty match list is a failure, not a pass — same rule as the main
-verification block.
+verification block. Note the verification is written with an explicit `STALE`
+variable rather than `grep … && { … } || echo OK`: in the `&&`/`||` form the
+`OK` branch also runs when the `FAIL` branch's `exit` is skipped for any
+reason, which makes a broken check read as a passing one.

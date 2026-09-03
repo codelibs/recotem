@@ -58,8 +58,8 @@ Parquet sources accept only `path` and the optional `sha256` integrity pin. `del
 
 ## Path schemes
 
-Path schemes for `source.path` and `item_metadata.path` are restricted to an
-explicit allow-list: bare local path, `file://`, `s3://`, `gs://`, `az://`,
+Path schemes for `source.path`, `item_metadata.path` and a feature table's
+`features.<side>.source.path` are restricted to an explicit allow-list: bare local path, `file://`, `s3://`, `gs://`, `az://`,
 `abfs(s)://`, `http://`, `https://`. Chained fsspec protocols (containing
 `::`) are rejected. Novel or vendor-specific schemes not in this list are
 rejected by default rather than admitted by oversight.

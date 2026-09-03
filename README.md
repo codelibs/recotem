@@ -46,6 +46,8 @@ moving parts to a recipe file and a binary artifact:
 
 - Recipe-driven: 1 YAML = 1 model = 1 `/v1/recipes/{name}:recommend` endpoint (with related/batch verbs)
 - Hyperparameter search across irspack algorithms via Optuna
+- Feature-aware iALS: attach item/user side features (categorical / numerical / multi_label) via a `features:` recipe block
+- Cold-start serving: recommend for unknown users and unseen seed items from their attributes alone via `user_features` / `item_features`
 - Pluggable data sources (built-in: CSV / Parquet / BigQuery / SQL; extend via Python entry points)
 - HMAC-signed artifacts with multi-key rotation and a deterministic
   FQCN allow-list at deserialization time

@@ -38,10 +38,12 @@ src/recotem/
 ├── recipe/             pydantic v2 Recipe + YAML loader + env expansion
 ├── datasource/         DataSource Protocol + entry_points discovery (csv / parquet / bigquery / sql)
 ├── training/           Optuna search + irspack train; per-recipe file lock
+│   └── features.py     fetch feature tables, build encoder state, encode per phase (search vs. final refit)
 ├── artifact/           HMAC-signed binary container with FQCN allow-list
 ├── metadata/           item metadata loader (CSV/Parquet via fsspec)
 ├── serving/            FastAPI app, ModelRegistry, ArtifactWatcher
 ├── _idmap.py           Neutral home for IDMappedRecommender (canonical FQCN)
+├── _features.py        Neutral home for side-feature encoder state + pure encode logic (shared by training/ and serving/)
 ├── _irspack_compat.py  Verified-compatible allow-list guarding irspack pickle skew
 ├── _http_fetch.py      SSRF-guarded HTTP/HTTPS fetcher with sha256 verify
 ├── _size_cap.py        Shared download-size cap helper (used by csv source + metadata loader)
@@ -67,7 +69,7 @@ docs/
 └── plugin-authoring.md DataSource plugin contract walkthrough
 
 helm/recotem/           serve-only chart with optional CronJob train
-examples/               quickstart/, csv-local/, sql-sqlite/, ga4-bigquery/, k8s/, plugins/echo-source/, tutorial-purchase-log/
+examples/               quickstart/, csv-local/, sql-sqlite/, ga4-bigquery/, feature-aware/, k8s/, plugins/echo-source/, tutorial-purchase-log/
 Dockerfile              multi-stage python:3.12-slim, appuser:1000
 compose.yaml            train one-shot + serve long-running (tutorial)
 ```
@@ -120,6 +122,12 @@ See `docs/recipe-reference.md` for the full schema. Highlights:
 - Cleansing block: `drop_null_ids`, `dedup` policy, `min_rows / min_users /
   min_items` data preconditions.
 - Multi-algorithm Optuna search with optional per-algorithm trial budgets.
+- Optional `features:` block (sibling to `source:` / `item_metadata:`) turns
+  on feature-aware iALS — no separate flag. `features.item` / `features.user`
+  each declare a `source` (same datasource registry as the top-level
+  `source`), an `id_column`, and a `columns` list of `{name, encoding,
+  delimiter?, min_frequency?}` (`categorical` | `numerical` | `multi_label`).
+  See `docs/recipe-reference.md#features`.
 
 ## Artifact format
 
@@ -224,6 +232,7 @@ uv run ruff format --check src tests
 | `RECOTEM_DRAIN_SECONDS` | 30 | SIGTERM grace window. Clamped [1, 300]. |
 | `RECOTEM_LOG_FORMAT` | auto | `auto` / `json` / `console`. |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | 512 MiB | Per-payload cap (post-HMAC-verify) for serve-side deserialization. Clamped [1 MiB, 16 GiB]. Smaller than `RECOTEM_MAX_ARTIFACT_BYTES` to bound deserialization memory expansion. |
+| `RECOTEM_MAX_BODY_BYTES` | 128 MiB | Max serve-side HTTP **request** body size. Clamped [1 MiB, 2 GiB]. A `BodySizeLimitMiddleware` returns `413 PAYLOAD_TOO_LARGE` when the declared `Content-Length` exceeds the cap, and enforces a running byte count on chunked/streamed bodies with no `Content-Length` so the header cannot be omitted to bypass it. The default clears the largest schema-valid single-verb body (`:recommend-related`, ~52 MiB with maximal cold-start feature mappings) but **not** the largest batch body (`:batch-recommend` ~196 MiB, `:batch-recommend-related` ~13 GiB — the latter beyond even the 2 GiB clamp), which are refused with `413`. It blocks the GB-scale bodies Starlette would otherwise buffer and parse before validation. |
 | `RECOTEM_ARTIFACT_ROOT` | (empty) | If set, local `output.path` must lie under it. |
 | `RECOTEM_RECIPE_*` | — | Allow-listed for `${...}` recipe expansion. |
 | `RECOTEM_METADATA_FIELD_DENY` | (empty) | Comma-separated columns stripped from `/v1/recipes/{name}:recommend` and `:recommend-related` responses. |
@@ -234,6 +243,7 @@ uv run ruff format --check src tests
 | `RECOTEM_STARTUP_PARALLELISM` | (empty = auto) | Number of parallel threads used to load artifacts at `recotem serve` startup. Leave unset (default) for auto-sizing (`min(len(recipes), 8)`). Setting to `0` is NOT a sentinel — it clamps to 1 and emits an `env_var_clamped` warning. Clamped [1, 32]. Set to `1` to force sequential loading for debugging. |
 | `RECOTEM_MAX_SQL_ROWS` | 50_000_000 | Hard cap on rows returned by the SQL data source. Clamped [1_000, 500_000_000]. Caps **row count**, not DataFrame resident memory — see `docs/data-sources/sql.md` for the memory-bound caveat. |
 | `RECOTEM_SQL_ALLOW_PRIVATE` | (empty) | Truthy opts the SQL source into private/loopback DSN hosts (default deny, for SSRF). Covers every driver-routing form — netloc, `?host=`, `?hostaddr=`, `?service=`, `?unix_socket=`, absolute-path host, and network DSNs with no host info — all default-deny without this flag. Also disables the DNS-rebinding re-check before each probe/fetch — opting in means trusting the host end-to-end. |
+| `RECOTEM_MAX_FEATURE_DIM` | 5000 | Cap on the encoded feature dimension per side (item and user checked independently) for feature-aware iALS. Clamped [16, 100000]. Vocabulary is built from the whole fetched feature table (not just interaction-covered rows), so dimension scales with **catalog size, not interaction count**; `min_frequency` on high-cardinality `categorical`/`multi_label` columns is the only recipe-level lever. Cost is cubic in this number (dense `Fᵀ F` Cholesky) and multiplies with `training.parallelism`. See `docs/operations.md#feature-aware-ials-sizing`. |
 
 ## CI
 

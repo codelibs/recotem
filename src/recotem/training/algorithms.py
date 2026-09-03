@@ -54,6 +54,27 @@ SUPPORTED_CLASS_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# Algorithms that accept `user_features` / `item_features` constructor kwargs.
+# As of irspack 0.5.0 feature-aware iALS is not a distinct class -- it is
+# IALSRecommender with extra kwargs -- so this set holds exactly one entry.
+# Kept explicit (not derived) for the same reason as SUPPORTED_CLASS_NAMES:
+# a stable contract across irspack patch releases.
+FEATURE_CAPABLE_CLASS_NAMES: frozenset[str] = frozenset({"IALSRecommender"})
+
+
+def is_feature_capable(alias: str) -> bool:
+    """Return True when *alias* resolves to a feature-aware-capable class.
+
+    Unknown aliases return False rather than raising: ``training.algorithms``
+    has no load-time validation (recipe/models.py deliberately swallows
+    ``UnknownAlgorithmError``), and this helper must not change that.
+    """
+    try:
+        class_name = resolve_algorithm_name(alias)
+    except UnknownAlgorithmError:
+        return False
+    return class_name in FEATURE_CAPABLE_CLASS_NAMES
+
 
 # ---------------------------------------------------------------------------
 # Public helpers

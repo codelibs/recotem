@@ -24,10 +24,24 @@ from optuna.samplers import TPESampler
 
 # _compat applies IPython stub before irspack imports (see _compat.py).
 import recotem.training._compat  # noqa: F401
-from recotem.training.algorithms import get_recommender_cls, resolve_algorithm_name
+from recotem.training.algorithms import (
+    get_recommender_cls,
+    is_feature_capable,
+    resolve_algorithm_name,
+)
 from recotem.training.errors import SearchError, TrainingError, ZeroScoreError
 from recotem.training.evaluate import get_score
 from recotem.training.progress import ProgressReporter, make_trial_callback
+
+try:  # pragma: no cover - exercised by whichever irspack is installed
+    # Present from irspack 0.5.2 only, and not part of its public API surface
+    # (`irspack.__init__` does not re-export it), so import defensively rather
+    # than at the top with the supported imports.
+    from irspack.recommenders._ials_core import (
+        FeatureRidgeCholeskyError as _FeatureRidgeCholeskyError,
+    )
+except Exception:  # pragma: no cover - pre-0.5.2, or the symbol moved
+    _FeatureRidgeCholeskyError = None
 
 logger = structlog.get_logger(__name__)
 
@@ -135,6 +149,94 @@ def _make_storage(storage_path: str) -> optuna.storages.BaseStorage | None:
 
 
 # ---------------------------------------------------------------------------
+# Feature-aware construction helper
+# ---------------------------------------------------------------------------
+
+
+def is_feature_ridge_failure(exc: BaseException) -> bool:
+    """Return True for any irspack feature-ridge solver failure.
+
+    irspack raises these from three sites in ``cpp_source/als/IALSTrainer.hpp``
+    and they are deliberately checked BOTH by type and by message, because
+    neither alone covers the family:
+
+    - The two ``initialize_feature_weight_cache`` overloads throw
+      ``FeatureRidgeCholeskyError("Feature ridge Cholesky decomposition
+      failed.")`` when the ridge Gram's LLT does not succeed. The dedicated
+      type exists only from 0.5.2; in 0.5.0/0.5.1 these same two sites threw a
+      bare ``std::runtime_error`` with the identical message.
+    - ``solve_feature_weight``'s ``std::async`` worker throws a bare
+      ``std::runtime_error("Feature ridge solve failed.")`` when the LLT
+      *succeeded* but the solution is not finite. **This site was added in
+      0.5.1** by the feature-aware parallelisation, and 0.5.2's
+      typed-exception change did not cover it -- it is still untyped upstream,
+      and irspack's own ``optuna_trial_failure_exceptions`` misses it too.
+
+    So matching only the type misses the third site on every version, and
+    matching only the 0.5.0-era Cholesky message misses it as well. Matching
+    the ``"Feature ridge"`` prefix covers all three and survives a reworded
+    suffix; keeping the type check in front means a fully reworded message
+    still resolves for the two typed sites.
+
+    Every site is a ``RuntimeError`` subclass in Python (nanobind registers
+    ``FeatureRidgeCholeskyError`` with ``PyExc_RuntimeError`` as its base), so
+    callers can keep a narrow ``except RuntimeError`` and use this as the
+    discriminator inside it.
+    """
+    if _FeatureRidgeCholeskyError is not None and isinstance(
+        exc, _FeatureRidgeCholeskyError
+    ):
+        return True
+    return isinstance(exc, RuntimeError) and "Feature ridge" in str(exc)
+
+
+def _construct(
+    rec_cls: type,
+    X: sps.spmatrix,
+    params: dict[str, Any],
+    feature_kwargs: dict[str, sps.csr_matrix] | None,
+) -> Any:
+    """Construct a recommender, injecting feature matrices exactly once.
+
+    THE single construction point for feature-aware training: both search
+    paths here (the per-trial-timeout thread path and the default path) and
+    the final refit in ``pipeline._train_final``. It exists because irspack
+    fails asymmetrically: it raises for a feature matrix with lambda=0, but
+    silently trains PLAIN iALS for a lambda with no feature matrix. Routing
+    every site through here turns that one silent mistake into a raise.
+
+    The checks below are an explicit ``raise AssertionError`` rather than
+    ``assert`` because ``assert`` is stripped under ``-O`` / ``PYTHONOPTIMIZE``
+    -- which would restore exactly the silent plain-iALS training this helper
+    exists to prevent. ``AssertionError`` (not ``TrainingError``) is
+    deliberate: reaching here means recotem suggested a lambda without
+    plumbing through the matching matrix, which is a bug in this package, not
+    a bad recipe or bad data, so it must not claim one of the semantic exit
+    codes (2-8). It is left unmapped by ``_map_exception_to_exit`` and so
+    surfaces as ``_EXIT_UNKNOWN`` (exit 1, "unhandled / unmapped exception"),
+    which is the code reserved for bugs -- exit 4 would send the operator
+    looking at a recipe and data that are not at fault.
+
+    Scope of the guarantee: this catches only lambda-without-matrix. It does
+    not check that a supplied matrix has the right shape, dtype, or row order
+    -- axis alignment is covered separately by the alignment tests in
+    tests/unit/test_training_pipeline.py.
+    """
+    kwargs = dict(feature_kwargs or {})
+    if "lambda_item_feature" in params and kwargs.get("item_features") is None:
+        raise AssertionError(
+            "lambda_item_feature was suggested but no item_features matrix "
+            "was supplied; irspack would silently train plain iALS"
+        )
+    if "lambda_user_feature" in params and kwargs.get("user_features") is None:
+        raise AssertionError(
+            "lambda_user_feature was suggested but no user_features matrix "
+            "was supplied; irspack would silently train plain iALS"
+        )
+    return rec_cls(X, **params, **kwargs)
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -155,6 +257,7 @@ def run_search(
     recipe_name: str,
     run_id: str,
     metric: str = "ndcg",
+    feature_kwargs: dict[str, sps.csr_matrix] | None = None,
 ) -> SearchResult:
     """Run an Optuna hyperparameter search and return the best result.
 
@@ -184,6 +287,15 @@ def run_search(
         ``ProgressReporter`` instance for trial notifications.
     recipe_name, run_id:
         Carried in log events.
+    feature_kwargs:
+        Optional ``{"item_features": csr_matrix, "user_features": csr_matrix}``
+        produced by ``training.features.encode_for_axis`` (only present keys
+        for configured sides). Defaults to ``None`` so existing callers are
+        unaffected. Only forwarded to trials whose sampled algorithm is
+        feature-capable (``is_feature_capable``); every other trial gets
+        irspack's own ``(n, 0)`` auto-fill.  When present for a
+        feature-capable trial, a ``lambda_*_feature`` search dimension is
+        added per configured side.
 
     Returns
     -------
@@ -342,7 +454,64 @@ def run_search(
 
         rec_cls = get_recommender_cls(class_name)
 
+        # Feature-aware iALS: only inject matrices when the class sampled
+        # for THIS trial actually supports them. In a multi-algorithm search
+        # a non-capable class (e.g. TopPop) may be sampled in the same study
+        # as IALS; it must never receive item_features/user_features kwargs
+        # it does not accept.
+        trial_features: dict[str, sps.csr_matrix] = (
+            feature_kwargs
+            if (feature_kwargs and is_feature_capable(class_name))
+            else {}
+        )
+        # NB: this reuses the ONE feature-matrix object built per phase, so
+        # under parallelism>1 (Optuna n_jobs = threads, one process) every
+        # concurrent trial shares it. Safe because irspack 0.5.0 reads the
+        # feature matrices read-only -- unlike the interaction matrix X, which
+        # it defensively copies via .astype(). Do NOT add a per-trial .copy()
+        # (pure cost, no correctness gain today); if a future irspack ever
+        # mutates the feature buffers in place, that reliance breaks here.
+
         params: dict[str, Any] = rec_cls.default_suggest_parameter(trial, {})
+
+        # irspack ships no default search space for the feature ridge, and
+        # the constructor default (0.0) is a hard error whenever a feature
+        # matrix is present, so recotem defines the range. It matches
+        # upstream's only feature-aware example --
+        # examples/mind/mind_small_feature_aware_ials.py at v0.5.2 (NOT the
+        # ML-1M example, which has no feature code), which uses
+        # suggest_float("lambda_item_feature", 1.0, 1e6, log=True).
+        #
+        # The 1.0 floor is not cosmetic deference to upstream; it is the
+        # conditioning floor this encoder needs. irspack builds the ridge as
+        # `gram = Fw^T Fw; gram.diagonal() += lambda_feature` and factorises it
+        # by LLT in float32 (`using Real = float`) -- cpp_source/als/
+        # IALSTrainer.hpp:1105-1112 and definitions.hpp:6. recotem's encoder
+        # always appends an all-ones bias column that is deliberately collinear
+        # with every categorical one-hot block (see recotem._features's module
+        # docstring), so Fw^T Fw is EXACTLY singular by construction and
+        # lambda_feature is the sole eigenvalue along that null direction. The
+        # Gram's condition number is therefore ~(largest eigenvalue)/lambda,
+        # and float32 LLT stops being reliable once that approaches 1/eps
+        # (~8e6). Every decade below 1.0 spends a decade of that budget for a
+        # benefit recotem has never measured, which is why the floor tracks
+        # upstream rather than going under it.
+        #
+        # This is a ridge on A/B, not the feature-prior strength itself (that's
+        # reg/nu); a large enough value shrinks A/B toward zero and was
+        # measured bit-identical to plain iALS at lambda=1e8. 1e6 is just
+        # upstream's exercised value, NOT a verified features-off bound -- the
+        # search space is not guaranteed to contain a features-off model. Run
+        # two recipes for a true on/off comparison.
+        if trial_features:
+            if "item_features" in trial_features:
+                params["lambda_item_feature"] = trial.suggest_float(
+                    "lambda_item_feature", 1.0, 1e6, log=True
+                )
+            if "user_features" in trial_features:
+                params["lambda_user_feature"] = trial.suggest_float(
+                    "lambda_user_feature", 1.0, 1e6, log=True
+                )
 
         # Per-trial timeout: run the learn in a thread so we can interrupt.
         if has_per_trial_timeout:
@@ -353,8 +522,17 @@ def run_search(
             def _learn() -> None:
                 try:
                     try:
-                        rec = rec_cls(X_tv_train, **params)
-                        rec.learn_with_optimizer(evaluator, trial)
+                        rec = _construct(rec_cls, X_tv_train, params, trial_features)
+                        try:
+                            rec.learn_with_optimizer(evaluator, trial)
+                        except RuntimeError as exc:
+                            # Rank-deficient features make the feature ridge
+                            # unsolvable. This is data-dependent, so prune the
+                            # trial rather than failing the run -- matching
+                            # upstream's own feature-aware example.
+                            if is_feature_ridge_failure(exc):
+                                raise optuna.TrialPruned(str(exc)) from exc
+                            raise
                         result_holder.append(rec)
                     except (MemoryError, RecursionError):
                         # Re-raise without capture so the worker thread dies
@@ -362,6 +540,21 @@ def run_search(
                         # exit code instead of bookkeeping it as a trial
                         # failure that hints at per-trial timeout.
                         raise
+                    except optuna.TrialPruned as exc:
+                        # A pruned trial (e.g. the rank-deficient-feature-Gram
+                        # Cholesky failure above, or any other by-design prune
+                        # raised from inside learn_with_optimizer) is a normal,
+                        # expected outcome -- not a failure. TrialPruned
+                        # subclasses Exception, so without this clause the
+                        # generic handler below would catch it and log a
+                        # spurious trial_learn_failed WARNING, making an
+                        # expected prune look like an error under the
+                        # per-trial-timeout thread path while the
+                        # non-threaded path (which has no such generic catch)
+                        # stays silent for the identical prune. Still route
+                        # through exc_holder so it re-raises in the main
+                        # thread and Optuna records the trial as PRUNED.
+                        exc_holder.append(exc)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "trial_learn_failed",
@@ -452,8 +645,17 @@ def run_search(
                 raise exc_holder[0]
             recommender = result_holder[0]
         else:
-            recommender = rec_cls(X_tv_train, **params)
-            recommender.learn_with_optimizer(evaluator, trial)
+            recommender = _construct(rec_cls, X_tv_train, params, trial_features)
+            try:
+                recommender.learn_with_optimizer(evaluator, trial)
+            except RuntimeError as exc:
+                # Rank-deficient features make the feature ridge unsolvable.
+                # This is data-dependent, so prune the trial rather than
+                # failing the run -- matching upstream's own feature-aware
+                # example.
+                if is_feature_ridge_failure(exc):
+                    raise optuna.TrialPruned(str(exc)) from exc
+                raise
 
         score = get_score(evaluator, recommender)
 

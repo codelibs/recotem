@@ -25,6 +25,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW` — truthy downgrades the skew check to a
   warning, for operators who know their artifact's algorithm is unaffected.
 - `recotem_artifact_load_failures_total` gained a `version_skew` reason label.
+- **Feature-aware iALS.** A new optional `features:` recipe block (sibling to
+  `source:` / `item_metadata:`) declares item- and/or user-side attribute
+  tables — `categorical` (one-hot), `numerical` (standardized), and
+  `multi_label` (multi-hot) encodings, plus an implicit bias column — that
+  are encoded and fed to `IALSRecommender` during Optuna search and the
+  final refit. The mere presence of `features:` turns this on; there is no
+  separate flag. `lambda_item_feature` / `lambda_user_feature` are tuned by
+  Optuna over a recotem-owned range (`1.0`–`1e6`, log-scale) rather than
+  irspack's own `default_suggest_parameter`, because irspack ships no default
+  range for them and their `0.0` constructor default is a hard error whenever
+  the matching feature matrix is non-empty. The bounds match upstream's only
+  feature-aware example (`examples/mind/mind_small_feature_aware_ials.py`);
+  the floor is also a float32-Cholesky conditioning floor, because recotem's
+  always-on bias column makes the feature Gram exactly singular and
+  `lambda_*_feature` is the sole eigenvalue along that direction. See
+  `docs/recipe-reference.md#features`.
+- **Cold-start serving from side features.** `POST
+  /v1/recipes/{name}:recommend` accepts `user_features` to score an unknown
+  user from their profile alone; `POST /v1/recipes/{name}:recommend-related`
+  accepts `user_features` (profile prior added to an ad-hoc seed history) and
+  `item_features` (keyed by seed id, for seed items absent from training).
+  Both single and batch verbs support this. A known `user_id`'s supplied
+  `user_features` are deliberately **ignored**, not rejected — the learned
+  embedding from real interactions strictly dominates a profile prior. A
+  request that supplies feature values against a model with no matching
+  feature state gets a new `400 FEATURES_NOT_SUPPORTED` rather than a guess.
+  Separately, a supplied `numerical` value whose *standardized* magnitude
+  (raw value standardized against the column's training mean/std — not the
+  raw value itself) is large enough to make irspack's per-request cold-start
+  solve itself fail gets a new `400 FEATURE_VALUE_UNUSABLE` rather than an
+  unhandled `500` — distinct from `FEATURES_NOT_SUPPORTED` because the model
+  and feature side both support cold start here; only this particular value
+  does not. The `detail` message describes the standardized value as
+  numerically unusable, not the client's raw one, because a column with a
+  small enough training std can make an entirely ordinary raw value (e.g.
+  `10000`) standardize to an unusable magnitude just as easily as an
+  actually-extreme raw value against a normal-sized std. A `numerical` value
+  large enough to be meaningless but not large enough to break the solver is
+  **not** caught by this and degrades silently as `200` instead — clamping
+  that range was a deliberate, deferred modelling decision, not an
+  oversight. A non-finite supplied value (`Infinity`/`-Infinity`, or a
+  string like `"nan"`) increments `recotem_v1_feature_unknown_value_total`
+  rather than degrading invisibly; a missing or otherwise unparseable value
+  still degrades silently with no signal, unchanged. See
+  `docs/api-reference.md#feature-aware-cold-start`.
+- `RECOTEM_MAX_FEATURE_DIM` (default 5000, clamped [16, 100000]) — caps the
+  encoded feature dimension per side. The vocabulary is built from the whole
+  fetched feature table (so cold-start entities are representable), which
+  means encoded dimension scales with **catalog size, not interaction
+  count**; `min_frequency` on high-cardinality columns is the only
+  recipe-level lever. Cost is cubic in this number and multiplies with
+  `training.parallelism`. See `docs/operations.md#feature-aware-ials-sizing`.
+- Artifact headers for feature-aware models gain a `features` block
+  (`{"version": 1, "item": {...}, "user": {...}}`), inspectable via `recotem
+  inspect`. Serve checks this version before deserializing the payload:
+  absent → loads (old artifact or non-feature model); present but
+  unrecognized → refused (`ArtifactError`, reason `feature_version`) rather
+  than risk silently mis-encoding a request's features into the wrong vector
+  space.
+- New metrics: `recotem_v1_feature_unknown_value_total` (a request's
+  categorical/multi_label value was absent from the training vocabulary, or
+  a numerical value was non-finite — degrades to an all-zero segment /
+  contributes nothing rather than failing the request),
+  `recotem_v1_cold_start_requests_total` (cold-start traffic by case), and
+  `recotem_v1_feature_unknown_column_total` (a request carried a feature key
+  the recipe never declared — counted per request per side, with no
+  column-name label, to bound cardinality; the key is silently ignored and
+  the request still returns `200`).
+- New example: `examples/feature-aware/` — a small interactions CSV, an item
+  feature table exercising all three encodings, and a README walking
+  train → serve → cold-start `:recommend-related`.
+- **Request-body size cap.** `serve` now bounds the raw HTTP request body via a
+  `BodySizeLimitMiddleware` before Starlette buffers and JSON-parses it: a
+  declared `Content-Length` over the cap is rejected outright, and bodies with
+  no `Content-Length` (chunked / streamed) are counted as they arrive so the
+  header cannot be omitted to bypass the limit. Over-cap requests get a
+  `413 PAYLOAD_TOO_LARGE` in the standard error envelope. Previously an
+  authenticated client could make the process buffer and parse a multi-GB body.
+- `RECOTEM_MAX_BODY_BYTES` (default 128 MiB, clamped [1 MiB, 2 GiB]) tunes the
+  cap. It clears the largest schema-valid *single-verb* body —
+  `:recommend-related` tops out near 52 MiB once `user_features` /
+  `item_features` are filled to their per-field caps — but deliberately not the
+  largest *batch* body: `:batch-recommend` tops out near 196 MiB and
+  `:batch-recommend-related` near 13 GiB, the latter beyond even the 2 GiB
+  clamp. Batches that large are refused with `413`; raise the cap if you
+  genuinely send them. (The pre-feature maximum really was ~72 MiB; the new
+  cold-start fields raise the schema-valid ceiling by orders of magnitude.) A
+  new `PAYLOAD_TOO_LARGE` error code is added to the v1 API's `ErrorCode`
+  union.
+- **Cold-start feature-dict key-length caps.** Every feature-mapping KEY is now
+  bounded to 1–256 characters (parity with other identifier fields):
+  `user_features` column names, the `item_features` outer seed-id keys, and the
+  nested per-seed feature keys. Previously only string VALUES were capped and
+  `Field(max_length=64)` bounded only the key COUNT, leaving key length
+  unbounded. Over-length or empty keys now get a `422`; an over-length key
+  reports only its length, never its (possibly huge) text.
 
 ### Fixed
 
@@ -127,21 +223,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A numerical `features:` column with a tiny-but-nonzero training std is
+  now treated as zero-variance, like an exactly-constant column.** Previously
+  only an exact `std == 0.0` was floored; a column whose values differ only
+  by floating-point rounding noise (e.g. `std ≈ 1e-15`) passed that check but
+  still divided serve-time standardization by a near-zero denominator,
+  turning an ordinary request value into an astronomically large
+  standardized one and a false `400 FEATURE_VALUE_UNUSABLE`.
+  `build_encoder_state` now floors any std no larger than `1e-8 ×
+  max(abs(mean), 1.0)` (relative to the column's own scale) to zero. A
+  column caught by this floor degrades exactly like a missing value
+  (`feature_zero_variance_column` warning, unchanged) instead of ever
+  reaching the standardization divide. This changes training-time encoding
+  for any feature table containing such a column; retrain to pick it up. See
+  `docs/api-reference.md#feature-aware-cold-start`.
+- **Every recipe's `recipe_hash` changes on upgrade, features or not.** The
+  hash is computed by JSON-dumping the whole recipe with no `exclude_none`,
+  so adding the new optional `features` field emits `{"features": null}` for
+  every existing recipe and changes its hash — the same effect
+  `item_metadata` already has when absent. Nothing in Recotem compares or
+  gates on `recipe_hash` today; it is carried through to the artifact header
+  (`recotem inspect`) and the `GET /v1/recipes/{name}` response purely for
+  operators' own SIEM/audit rules. It is **not** readable from the
+  `train_done` log event: `log_redaction` rewrites every 64-hex string to
+  `[REDACTED-HEX64]`, so that field logs a constant regardless of the
+  recipe. The inference verbs do not echo it: `:recommend` returns
+  `request_id` / `recipe` / `model_version` / `items` only. If you pin or
+  diff `recipe_hash` in external tooling, expect every recipe to show a
+  changed hash on this upgrade even though nothing about the recipe's
+  behavior changed.
+
 - **irspack upgraded from 0.4.2 to 0.5.2.** irspack 0.5.0 adds feature-aware
   iALS, cache/Eigen performance work, and a reworked tuning API. Recotem drives
   Optuna itself and does not call `BaseRecommender.tune`, so none of irspack's
   documented breaking changes (`tune_with_study` removal, `fixed_params` →
   keyword arguments, `random_seed` → `tuning_random_seed`) affect Recotem.
   **IALS and BPRFM models trained on 0.4.x must be retrained** — see below.
-  The subsequent 0.5.1 (parallelised feature-aware iALS) and 0.5.2 (graceful
-  handling of a feature-ridge Cholesky failure during tuning) releases touch
-  code paths Recotem does not reach, and were verified not to change the
-  serialised model at all: for all six algorithms Recotem can build, an
+  The subsequent 0.5.1 (parallelised feature-aware iALS) and 0.5.2
+  (`FeatureRidgeCholeskyError`, a dedicated exception for a feature-ridge
+  Cholesky failure) both land in the feature-aware path, which the new
+  `features:` block *does* reach — recotem's search prunes the Optuna trial
+  on that failure rather than aborting the run. They were verified not to
+  change the serialised model: for all six algorithms Recotem can build, an
   identically-trained recommender pickles to a byte-identical payload under
   0.5.0 and 0.5.2 (SHA-256 compared), `IALSModelConfig.__setstate__` keeps its
   10-element arity, and artifacts interchange in both directions with
-  bit-exact recommendation scores. **No retrain is needed for a 0.5.x → 0.5.2
-  upgrade.**
+  bit-exact recommendation scores. That comparison was run on
+  non-feature-carrying payloads only, so it does not by itself certify a
+  0.5.0-trained *feature-aware* artifact on 0.5.2; train and serve on the same
+  irspack minor, as the skew guard already requires. **No retrain is needed
+  for a 0.5.x → 0.5.2 upgrade.**
 - **scikit-learn is now a direct, range-pinned dependency** (`>=1.8,<1.10`).
   It was already reachable transitively via irspack, which asks only for
   `>=0.21.0`. `TruncatedSVDRecommender` pickles an sklearn estimator into the
@@ -154,6 +285,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sklearn axis at all. If you need TruncatedSVD artifacts to be reproducible
   bit-exact, pin sklearn exactly or build train and serve from the same lock
   file.
+- **`recotem validate` labels each probed data source.** Because a recipe may
+  now declare feature-side sources (`features.item.source` /
+  `features.user.source`) alongside the top-level `source:`, the probe output
+  tags which one it is (`DataSource: probe OK (csv) [source]`, `DataSource probe
+  failed [features.item.source]: ...`) and the missing-discriminator message
+  reads `source is missing the 'type' discriminator.` rather than `Recipe
+  source is missing the 'type' discriminator.`. Exit codes are unchanged;
+  tooling that greps the exact `validate` output lines should update.
+
+### Fixed
+
+- **A cold-start feature value must now be a JSON scalar.** The per-value
+  length cap was `isinstance(val, str)`-gated and `_FeatureValues`'
+  `max_length` counts KEYS, so a JSON array or object was bounded by neither —
+  while `_features._tokens` reduces every value with `str(raw)`. One key
+  holding a large array therefore materialised a repr as large as
+  `RECOTEM_MAX_BODY_BYTES` allows. Such a value never encoded to anything
+  regardless (a Python repr does not match a training vocabulary entry), so
+  arrays and objects are now rejected with `422` instead of capped. Numbers,
+  booleans and `null` are unaffected.
+- **The request-body cap no longer swallows `MemoryError` / `RecursionError`.**
+  `BodySizeLimitMiddleware` deliberately absorbs whatever the inner app raises
+  once the cap is breached, because injecting `http.disconnect` is what made it
+  raise — but both of those are `Exception` subclasses, so an out-of-memory
+  unwind during an oversized request was reported to the client as a tidy
+  `413` instead of surfacing. They are now re-raised ahead of the broad clause,
+  matching how every other broad handler in the package treats them.
+- **A pruned trial no longer logs a spurious `trial_learn_failed` WARNING
+  under `per_trial_timeout_seconds`.** `optuna.TrialPruned` subclasses
+  `Exception`, so the generic handler in the threaded learn path caught every
+  by-design prune on its way out and logged it exactly like a genuine
+  failure — while the non-threaded path, which has no such handler, stayed
+  silent for the identical prune. **This is not features-only:** irspack
+  raises `TrialPruned` from `recommenders/base_earlystop.py` whenever
+  Optuna's pruner fires, so any existing recipe that sets
+  `per_trial_timeout_seconds` on an early-stopping algorithm (IALS included)
+  was emitting these. Optuna still records the trial as `PRUNED` and the
+  search outcome is unchanged; only the log stream is quieter. Alerting built
+  on the *count* of `trial_learn_failed` events will see it drop.
+- **Feature-aware iALS: every feature-ridge failure is now recognised, not
+  just the Cholesky one.** irspack raises this family from three sites in
+  `cpp_source/als/IALSTrainer.hpp` and types them inconsistently. On 0.5.0
+  there were two, both carrying `Feature ridge Cholesky decomposition
+  failed.`, so recotem's substring test covered the family completely.
+  **0.5.1 added a third** — `Feature ridge solve failed.`, raised inside the
+  `std::async` worker its feature-aware parallelisation introduced, when the
+  Cholesky succeeds but the solution is not finite — and 0.5.2 typed only the
+  first two as `FeatureRidgeCholeskyError`, leaving the third a bare
+  `std::runtime_error` (irspack's own `optuna_trial_failure_exceptions` has
+  the same gap). Against irspack 0.5.1+ that third failure did not match, so
+  it escaped `study.optimize` (called with no `catch=`) and **aborted the
+  entire search instead of pruning one trial**; in the final refit it missed
+  the `feature_cholesky_error` mapping and surfaced as an unmapped exit 1
+  rather than exit 4 with the `min_frequency` remedy. Recognition is now by
+  type **and** by the `Feature ridge` prefix, so all three sites are covered
+  on every 0.5.x — while the plain iALS solver's own `Cholesky decomposition
+  failed.` / `Cholesky solve failed.` stay unmatched, as before. Applies to
+  both search paths and the final refit.
+- **Feature-aware iALS: an all-dead-numerical `features:` block is now
+  refused.** The whole-block-dead guard keyed on `n_features == 1`, which a
+  block whose only column is a zero-variance (or all-null) `numerical` column
+  escaped — a numerical column always reserves width 1, so `n_features` stayed
+  2 even though it emits nothing. Such a block would sign an artifact
+  advertising `features` while serving bias-only (== plain iALS). The guard now
+  refuses a block when no column can emit a non-bias feature, matching the
+  existing all-categorical-dead and zero-id-overlap refusals.
+- **Feature-aware iALS: a finite-but-huge cold-start `numerical` value no
+  longer injects `inf`.** The non-finite check tested the raw parsed value, but
+  the matrix stores the value standardized and cast to `float32`; a value
+  finite in float64 whose standardized magnitude exceeds float32's max became
+  `±inf` in the matrix and was not counted. It is now counted as an unknown
+  value (`recotem_v1_feature_unknown_value_total`) and contributes nothing,
+  like any other unusable value.
+- **Cold-start feature request values are now length-capped.** Each string
+  value in `user_features` / `item_features` is capped at 8192 characters
+  (`422` on violation, like every other request-schema cap). Previously only
+  the key count was capped, leaving a single string value unbounded — a
+  memory-amplification vector via
+  `multi_label` tokenization, reachable with one API key and multiplied by
+  batch/related fan-out. The cap covers the batch verbs too.
+- **Feature-aware iALS training: an unrepresentable `numerical` column fails
+  with a training-domain error, not exit 1.** A `numerical` column carrying a
+  Python int too large for float64 (`>= 309` digits) raised an unmapped
+  `OverflowError` (exit 1) from the fit's own parser; it now raises a
+  `TrainingError` (exit 4) naming the column. A complex-valued column, which
+  previously trained silently on its real part, is now rejected explicitly.
+- **Recipe load rejects a `features.<side>.id_column` that also names a feature
+  column.** The collision is guaranteed to fail at train time (the id column is
+  consumed as the index); it is now caught at recipe load with a clear message.
+- **Feature-aware iALS: a non-finite value no longer silently kills an
+  otherwise-usable `numerical` column.** `pd.to_numeric` maps an overflow token
+  like `1e400` to `+inf`, and pandas `mean` / `std` do not skip `±inf`, so a
+  single such cell made the column's `std` non-finite and routed the whole
+  column to the zero-variance path — silently dropping a column that still held
+  usable finite values (like `[1, 2, 3]`) while the artifact continued to
+  advertise `features`, and emitting a `feature_zero_variance_column` warning
+  that misattributed the cause as "divide by zero." `build_encoder_state` now
+  computes mean/std over the finite values only, so a stray overflow cell
+  degrades to `unknown` at encode time — exactly as it already did per request —
+  instead of killing the column at fit time. A column that parses to no finite
+  value at all is still dropped, now with a distinct, accurate warning detail.
+  This changes training-time encoding for any feature table with such a column;
+  retrain to pick it up.
+- **`:recommend-related` cold-start paths now return `404 NO_CANDIDATES`
+  consistently.** The pre-existing all-seeds-known path raised `NO_CANDIDATES`
+  when the ranker produced no survivors, but the two cold-start branches (the
+  `user_features` profile prior, and `item_features` for a seed absent from
+  training) returned `200` with an empty `items` list for the identical
+  condition. Both branches now raise the same `NO_CANDIDATES`, so every path of
+  the verb — single and batch — reports an empty result the same way.
 
 ### Migrating to irspack 0.5.0
 

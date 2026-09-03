@@ -15,6 +15,9 @@ from pydantic import ValidationError
 
 from recotem.recipe.models import (
     CleansingConfig,
+    FeatureColumn,
+    FeaturesConfig,
+    FeatureSideConfig,
     ItemMetadataConfig,
     OutputConfig,
     Recipe,
@@ -619,3 +622,203 @@ def test_validate_source_warning_contains_error_class_and_message() -> None:
     warn = warnings[0]
     assert warn.get("error_class") == "RuntimeError"
     assert "plugin entry_point collision" in warn.get("error", "")
+
+
+# ---------------------------------------------------------------------------
+# Task 1: features block — FeatureColumn / FeatureSideConfig / FeaturesConfig
+# ---------------------------------------------------------------------------
+
+
+def test_feature_column_defaults():
+    col = FeatureColumn(name="genre", encoding="categorical")
+    assert col.delimiter is None
+    assert col.min_frequency == 1
+
+
+def test_feature_column_rejects_unknown_encoding():
+    with pytest.raises(ValidationError):
+        FeatureColumn(name="genre", encoding="one_hot")
+
+
+def test_delimiter_requires_multi_label():
+    with pytest.raises(ValidationError, match="delimiter is only valid"):
+        FeatureColumn(name="genre", encoding="categorical", delimiter="|")
+
+
+def test_multi_label_defaults_delimiter():
+    col = FeatureColumn(name="genres", encoding="multi_label")
+    assert col.delimiter == "|"
+
+
+def test_min_frequency_rejected_on_numerical():
+    with pytest.raises(ValidationError, match="min_frequency is only valid"):
+        FeatureColumn(name="year", encoding="numerical", min_frequency=5)
+
+
+def test_feature_side_requires_at_least_one_column():
+    with pytest.raises(ValidationError):
+        FeatureSideConfig(
+            source={"type": "csv", "path": "./x.csv"}, id_column="item_id", columns=[]
+        )
+
+
+def test_feature_side_rejects_duplicate_column_names():
+    with pytest.raises(ValidationError, match="duplicate"):
+        FeatureSideConfig(
+            source={"type": "csv", "path": "./x.csv"},
+            id_column="item_id",
+            columns=[
+                FeatureColumn(name="genre", encoding="categorical"),
+                FeatureColumn(name="genre", encoding="categorical"),
+            ],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fix H: an id_column equal to one of the columns[].name is guaranteed to fail
+# at train time (set_index consumes it, then build_encoder_state raises a
+# misleading "feature column '...' is not present"). Surface it early at recipe
+# load with a clear message.
+# ---------------------------------------------------------------------------
+
+
+def test_feature_side_rejects_id_column_colliding_with_feature_column():
+    with pytest.raises(ValidationError, match="id_column"):
+        FeatureSideConfig(
+            source={"type": "csv", "path": "./x.csv"},
+            id_column="x",
+            columns=[FeatureColumn(name="x", encoding="categorical")],
+        )
+
+
+def test_feature_side_id_column_distinct_from_columns_ok():
+    """The common case -- id_column not among the feature columns -- must still
+    construct, so the collision guard is not over-broad."""
+    cfg = FeatureSideConfig(
+        source={"type": "csv", "path": "./x.csv"},
+        id_column="item_id",
+        columns=[FeatureColumn(name="genre", encoding="categorical")],
+    )
+    assert cfg.id_column == "item_id"
+
+
+# ---------------------------------------------------------------------------
+# Characterization: an empty delimiter is rejected for BOTH multi_label (empty
+# is meaningless as a split token) and any other encoding (delimiter is only
+# valid for multi_label at all). Documents the existing FeatureColumn behavior.
+# ---------------------------------------------------------------------------
+
+
+def test_feature_column_multi_label_empty_delimiter_rejected():
+    with pytest.raises(ValidationError, match="delimiter must not be empty"):
+        FeatureColumn(name="tags", encoding="multi_label", delimiter="")
+
+
+def test_feature_column_categorical_empty_delimiter_rejected():
+    with pytest.raises(ValidationError, match="delimiter is only valid"):
+        FeatureColumn(name="genre", encoding="categorical", delimiter="")
+
+
+def test_features_config_requires_a_side():
+    with pytest.raises(ValidationError, match="at least one of"):
+        FeaturesConfig()
+
+
+def test_features_config_item_only_is_valid():
+    cfg = FeaturesConfig(
+        item=FeatureSideConfig(
+            source={"type": "csv", "path": "./x.csv"},
+            id_column="item_id",
+            columns=[FeatureColumn(name="genre", encoding="categorical")],
+        )
+    )
+    assert cfg.user is None
+
+
+# ---------------------------------------------------------------------------
+# Task 2: features block — Recipe-level validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def minimal_recipe_kwargs() -> dict:
+    return {
+        "name": "probe",
+        "source": {"type": "csv", "path": "./x.csv"},
+        "schema": {"user_column": "user_id", "item_column": "item_id"},
+        "training": TrainingConfig(algorithms=["IALS"]),
+        "output": {"path": "./out.recotem"},
+    }
+
+
+def _feature_side() -> FeatureSideConfig:
+    return FeatureSideConfig(
+        source={"type": "csv", "path": "./x.csv"},
+        id_column="item_id",
+        columns=[FeatureColumn(name="genre", encoding="categorical")],
+    )
+
+
+def test_features_without_feature_capable_algorithm_rejected(
+    minimal_recipe_kwargs,
+) -> None:
+    kwargs = dict(minimal_recipe_kwargs)
+    kwargs["features"] = FeaturesConfig(item=_feature_side())
+    kwargs["training"] = TrainingConfig(algorithms=["TopPop", "CosineKNN"])
+    with pytest.raises(ValidationError, match="no feature-capable algorithm"):
+        Recipe(**kwargs)
+
+
+def test_features_with_ials_accepted(minimal_recipe_kwargs) -> None:
+    kwargs = dict(minimal_recipe_kwargs)
+    kwargs["features"] = FeaturesConfig(item=_feature_side())
+    kwargs["training"] = TrainingConfig(algorithms=["TopPop", "IALS"])
+    assert Recipe(**kwargs).features is not None
+
+
+def test_unknown_algorithm_with_features_still_deferred_to_train_time(
+    minimal_recipe_kwargs,
+) -> None:
+    # An unresolvable name must not turn into a features error; it stays
+    # deferred to train time, matching the existing tolerance.
+    kwargs = dict(minimal_recipe_kwargs)
+    kwargs["features"] = FeaturesConfig(item=_feature_side())
+    kwargs["training"] = TrainingConfig(algorithms=["IALS", "NoSuchAlgo"])
+    assert Recipe(**kwargs).features is not None
+
+
+def test_feature_source_with_unregistered_type_rejected(
+    minimal_recipe_kwargs,
+) -> None:
+    """Direct Recipe(...) construction bypasses load_recipe's typed resolution.
+    Recipe.source is guarded by _validate_source; features.*.source must be too.
+    """
+    kwargs = dict(minimal_recipe_kwargs)
+    kwargs["features"] = FeaturesConfig(
+        item=FeatureSideConfig(
+            source={"type": "unknown_xyz"},
+            id_column="item_id",
+            columns=[FeatureColumn(name="genre", encoding="categorical")],
+        )
+    )
+    with pytest.raises(ValidationError, match="unknown_xyz"):
+        Recipe(**kwargs)
+
+
+def test_feature_source_with_registered_type_accepted(minimal_recipe_kwargs) -> None:
+    kwargs = dict(minimal_recipe_kwargs)
+    kwargs["features"] = FeaturesConfig(item=_feature_side())
+    assert Recipe(**kwargs).features.item is not None
+
+
+def test_user_side_feature_source_also_validated(minimal_recipe_kwargs) -> None:
+    kwargs = dict(minimal_recipe_kwargs)
+    kwargs["features"] = FeaturesConfig(
+        user=FeatureSideConfig(
+            source={"type": "unknown_xyz"},
+            id_column="user_id",
+            columns=[FeatureColumn(name="band", encoding="categorical")],
+        )
+    )
+    with pytest.raises(ValidationError, match="unknown_xyz"):
+        Recipe(**kwargs)

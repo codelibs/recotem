@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from recotem._idmap import ColdStartNumericalError
 from recotem.serving import metrics as _metrics
 from recotem.serving.registry import ModelEntry, ModelRegistry
 from tests.conftest import build_v1_app
@@ -45,6 +46,9 @@ def _enable_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
         "recotem_v1_batch_element_errors",
         "recotem_v1_metadata_degraded_items",
         "recotem_v1_validation_errors_outside_verb",
+        "recotem_v1_feature_unknown_value",
+        "recotem_v1_feature_unknown_column",
+        "recotem_v1_cold_start_requests",
     }
     for collector in list(prometheus_client.REGISTRY._collector_to_names):
         names = prometheus_client.REGISTRY._collector_to_names.get(collector, set())
@@ -61,6 +65,9 @@ def _enable_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
         "_V1_BATCH_ELEMENT_ERRORS",
         "_V1_METADATA_DEGRADED_ITEMS",
         "_V1_VALIDATION_ERRORS_OUTSIDE_VERB",
+        "_V1_FEATURE_UNKNOWN_VALUE",
+        "_V1_FEATURE_UNKNOWN_COLUMN",
+        "_V1_COLD_START_REQUESTS",
     ):
         monkeypatch.setattr(_metrics, attr, None, raising=False)
 
@@ -193,6 +200,101 @@ def test_recommend_related_records_no_candidates() -> None:
     assert r.status_code == 404
     assert r.json()["code"] == "NO_CANDIDATES"
     assert _label_value("recommend-related", "no_candidates") == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Feature-aware cold-start 400s are client-caused, not server errors
+# ---------------------------------------------------------------------------
+#
+# Both branches are reachable purely from request content: sending
+# ``user_features``/``item_features`` to a model that cannot act on them
+# (FEATURES_NOT_SUPPORTED), or sending a value that cannot be standardized
+# (FEATURE_VALUE_UNUSABLE). ``_request_metrics`` defaults the label to
+# "error", which docs/operations.md's "Recommend error rate" row pages
+# on-call at 10% — a threshold reserved for genuine 500s. These tests pin
+# the two branches to their own labels so a client cannot page on-call.
+
+
+def test_recommend_records_features_not_supported_status() -> None:
+    entry = _loaded_entry()
+    entry.recommender.get_recommendation_for_cold_user.side_effect = ValueError(
+        "this model has no user feature state; it was not trained with features.user"
+    )
+    registry = ModelRegistry()
+    registry.replace("demo", entry)
+    client = TestClient(build_v1_app(registry))
+
+    r = client.post(
+        "/v1/recipes/demo:recommend",
+        json={"user_id": "u-cold", "user_features": {"band": "young"}},
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == "FEATURES_NOT_SUPPORTED"
+    assert _label_value("recommend", "features_not_supported") == 1.0
+    assert _label_value("recommend", "error") == 0.0
+
+
+def test_recommend_records_feature_value_unusable_status() -> None:
+    entry = _loaded_entry()
+    entry.recommender.get_recommendation_for_cold_user.side_effect = (
+        ColdStartNumericalError("singular system")
+    )
+    registry = ModelRegistry()
+    registry.replace("demo", entry)
+    client = TestClient(build_v1_app(registry))
+
+    r = client.post(
+        "/v1/recipes/demo:recommend",
+        json={"user_id": "u-cold", "user_features": {"tight": 1e22}},
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == "FEATURE_VALUE_UNUSABLE"
+    assert _label_value("recommend", "feature_value_unusable") == 1.0
+    assert _label_value("recommend", "error") == 0.0
+
+
+def test_recommend_related_records_features_not_supported_status() -> None:
+    entry = _loaded_entry()
+    entry.recommender.get_recommendation_for_cold_seeds.side_effect = ValueError(
+        "this model has no item feature state; it was not trained with features.item"
+    )
+    registry = ModelRegistry()
+    registry.replace("demo", entry)
+    client = TestClient(build_v1_app(registry))
+
+    r = client.post(
+        "/v1/recipes/demo:recommend-related",
+        json={
+            "seed_items": ["cold-seed"],
+            "item_features": {"cold-seed": {"genre": "action"}},
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == "FEATURES_NOT_SUPPORTED"
+    assert _label_value("recommend-related", "features_not_supported") == 1.0
+    assert _label_value("recommend-related", "error") == 0.0
+
+
+def test_recommend_related_records_feature_value_unusable_status() -> None:
+    entry = _loaded_entry()
+    entry.recommender.get_recommendation_for_cold_seeds.side_effect = (
+        ColdStartNumericalError("singular system")
+    )
+    registry = ModelRegistry()
+    registry.replace("demo", entry)
+    client = TestClient(build_v1_app(registry))
+
+    r = client.post(
+        "/v1/recipes/demo:recommend-related",
+        json={
+            "seed_items": ["cold-seed"],
+            "item_features": {"cold-seed": {"tight": 1e22}},
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == "FEATURE_VALUE_UNUSABLE"
+    assert _label_value("recommend-related", "feature_value_unusable") == 1.0
+    assert _label_value("recommend-related", "error") == 0.0
 
 
 def test_validation_error_records_metric_for_matching_v1_path() -> None:

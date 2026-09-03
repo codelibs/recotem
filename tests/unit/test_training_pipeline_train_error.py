@@ -246,11 +246,21 @@ def test_run_training_emits_train_done_event_with_canonical_fields(
 
     X_sparse = sps.csr_matrix(np.ones((2, 2)))
 
+    from recotem.training.split import SplitResult
+
+    fake_split_result = SplitResult(
+        X_train_full=X_sparse,
+        X_val_test=X_sparse,
+        val_offset=1,
+        item_ids=["i1", "i2"],
+        row_user_ids=["u1", "u2"],
+    )
+
     with (
         patch("recotem.training.pipeline._fetch_data", return_value=mock_df),
         patch(
             "recotem.training.pipeline.split_interactions",
-            return_value=(X_sparse, X_sparse, 1),
+            return_value=fake_split_result,
         ),
         patch("recotem.training.pipeline.build_evaluator", return_value=MagicMock()),
         patch("recotem.training.pipeline.run_search", return_value=fake_search_result),

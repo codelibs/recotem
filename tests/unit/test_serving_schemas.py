@@ -319,6 +319,163 @@ def test_recommend_request_extra_fields_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fix C: cold-start feature request VALUES were the only uncapped request
+# field. `_FeatureValues`' `Field(max_length=64)` caps the KEY COUNT, but a
+# string VALUE was unbounded -- and `_tokens` does `str(raw).split(delimiter)`
+# with ~8x amplification, so a large multi_label value is a memory-DoS
+# reachable with one API key, multiplied by batch/related fan-out. Every other
+# request field is length-capped; this restores parity.
+# ---------------------------------------------------------------------------
+
+# Mirrors schemas._MAX_FEATURE_VALUE_CHARS; the sync test below pins them equal.
+_FEATURE_VALUE_CAP = 8192
+
+
+def test_feature_value_cap_matches_module_constant() -> None:
+    from recotem.serving.schemas import _MAX_FEATURE_VALUE_CHARS
+
+    assert _MAX_FEATURE_VALUE_CHARS == _FEATURE_VALUE_CAP
+
+
+def test_recommend_request_user_features_value_over_cap_rejected() -> None:
+    with pytest.raises(ValidationError):
+        RecommendRequest(
+            user_id="u1", user_features={"g": "a" * (_FEATURE_VALUE_CAP + 1)}
+        )
+
+
+def test_recommend_request_user_features_value_at_cap_accepted() -> None:
+    req = RecommendRequest(user_id="u1", user_features={"g": "a" * _FEATURE_VALUE_CAP})
+    assert len(req.user_features["g"]) == _FEATURE_VALUE_CAP
+
+
+def test_recommend_related_request_user_features_value_over_cap_rejected() -> None:
+    with pytest.raises(ValidationError):
+        RecommendRelatedRequest(
+            seed_items=["s1"],
+            user_features={"g": "a" * (_FEATURE_VALUE_CAP + 1)},
+        )
+
+
+def test_recommend_related_request_item_features_nested_value_over_cap_rejected() -> (
+    None
+):
+    """`item_features` is a nested dict (keyed by seed id); the cap must reach
+    into each cold-seed feature mapping's values, not only the outer keys."""
+    with pytest.raises(ValidationError):
+        RecommendRelatedRequest(
+            seed_items=["s1"],
+            item_features={"s1": {"g": "a" * (_FEATURE_VALUE_CAP + 1)}},
+        )
+
+
+def test_feature_value_cap_does_not_echo_the_value_or_touch_non_strings() -> None:
+    """The error names the offending column key but must NOT echo the value
+    (PII / log-safety), and a non-string scalar value is unaffected by the
+    char cap."""
+    blob = "a" * (_FEATURE_VALUE_CAP + 1)
+    with pytest.raises(ValidationError) as exc_info:
+        RecommendRequest(user_id="u1", user_features={"country": blob})
+    msg = str(exc_info.value)
+    assert "country" in msg, "the error must name the offending column key"
+    assert blob not in msg, "the error must not echo the (PII) value"
+
+    # A huge non-string scalar is not a char-cap violation.
+    req = RecommendRequest(user_id="u1", user_features={"n": 10**400})
+    assert req.user_features["n"] == 10**400
+
+
+def test_feature_value_cap_covers_batch_reparse_path() -> None:
+    """Batch verbs re-parse each element through these same request models via
+    `model_validate`, so the cap covers batch too -- pin that exact path."""
+    with pytest.raises(ValidationError):
+        RecommendRequest.model_validate(
+            {"user_id": "u1", "user_features": {"g": "a" * (_FEATURE_VALUE_CAP + 1)}}
+        )
+
+
+# ---------------------------------------------------------------------------
+# Feature-dict KEY length caps. `_FeatureValues`' `Field(max_length=64)` caps
+# the key COUNT and `_MAX_FEATURE_VALUE_CHARS` caps each string VALUE, but the
+# KEYS themselves were length-unbounded: `user_features` column names, the
+# `item_features` outer seed-id keys, and the nested per-seed feature keys.
+# All three are now capped at 256 chars (parity with `_ItemStr`), empty keys
+# rejected.
+# ---------------------------------------------------------------------------
+
+# Mirrors schemas._MAX_FEATURE_KEY_CHARS; the sync test below pins them equal.
+_FEATURE_KEY_CAP = 256
+
+
+def test_feature_key_cap_matches_module_constant() -> None:
+    from recotem.serving.schemas import _MAX_FEATURE_KEY_CHARS
+
+    assert _MAX_FEATURE_KEY_CHARS == _FEATURE_KEY_CAP
+
+
+def test_recommend_request_user_features_key_over_cap_rejected() -> None:
+    with pytest.raises(ValidationError):
+        RecommendRequest(
+            user_id="u1", user_features={"k" * (_FEATURE_KEY_CAP + 1): "v"}
+        )
+
+
+def test_recommend_request_user_features_key_at_cap_accepted() -> None:
+    req = RecommendRequest(user_id="u1", user_features={"k" * _FEATURE_KEY_CAP: "v"})
+    assert "k" * _FEATURE_KEY_CAP in req.user_features
+
+
+def test_recommend_request_user_features_empty_key_rejected() -> None:
+    with pytest.raises(ValidationError):
+        RecommendRequest(user_id="u1", user_features={"": "v"})
+
+
+def test_recommend_related_request_item_features_outer_key_over_cap_rejected() -> None:
+    """The `item_features` OUTER keys are seed item ids, capped like seed_items
+    (`_ItemStr`, 1..256)."""
+    with pytest.raises(ValidationError):
+        RecommendRelatedRequest(
+            seed_items=["s1"],
+            item_features={"s" * (_FEATURE_KEY_CAP + 1): {"g": "v"}},
+        )
+
+
+def test_recommend_related_request_item_features_empty_outer_key_rejected() -> None:
+    with pytest.raises(ValidationError):
+        RecommendRelatedRequest(
+            seed_items=["s1"],
+            item_features={"": {"g": "v"}},
+        )
+
+
+def test_recommend_related_request_item_features_inner_key_over_cap_rejected() -> None:
+    """The nested per-seed feature mapping's KEYS are also capped."""
+    with pytest.raises(ValidationError):
+        RecommendRelatedRequest(
+            seed_items=["s1"],
+            item_features={"s1": {"k" * (_FEATURE_KEY_CAP + 1): "v"}},
+        )
+
+
+def test_feature_key_over_cap_error_does_not_echo_key_text() -> None:
+    """An over-length key must report only its length, never its (possibly huge)
+    text, so it cannot amplify into the 422 body / logs."""
+    huge_key = "k" * (_FEATURE_KEY_CAP + 5000)
+    with pytest.raises(ValidationError) as exc_info:
+        RecommendRequest(user_id="u1", user_features={huge_key: "v"})
+    assert huge_key not in str(exc_info.value)
+
+
+def test_feature_key_cap_covers_batch_reparse_path() -> None:
+    """Batch verbs re-parse each element via `model_validate`; the key cap must
+    cover that path too."""
+    with pytest.raises(ValidationError):
+        RecommendRequest.model_validate(
+            {"user_id": "u1", "user_features": {"k" * (_FEATURE_KEY_CAP + 1): "v"}}
+        )
+
+
+# ---------------------------------------------------------------------------
 # Finding 6: Discriminated union extra-field enforcement
 # ---------------------------------------------------------------------------
 
@@ -588,3 +745,56 @@ def test_recipes_list_response_loaded_at_iso8601() -> None:
     # Normalise to UTC and verify the offset is zero
     dt_utc = dt.astimezone(UTC)
     assert dt_utc.utcoffset().total_seconds() == 0
+
+
+# ---------------------------------------------------------------------------
+# Cold-start feature values must be scalars.
+#
+# The value cap is `isinstance(val, str)`-gated, and `Field(max_length=64)`
+# counts KEYS, so a JSON array or object was bounded by neither -- yet
+# `_features._tokens` reduces every value with `str(raw)`. One key holding a
+# large array therefore materialised a repr as large as RECOTEM_MAX_BODY_BYTES
+# allows, while encoding to nothing (a Python repr never matches a training
+# vocabulary entry).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [["a", "b"], {"nested": "x"}])
+def test_non_scalar_feature_value_is_rejected(bad: object) -> None:
+    """An array or object feature value must 422, not encode to its repr."""
+    with pytest.raises(ValidationError) as exc_info:
+        RecommendRequest(user_id="u1", user_features={"tags": bad})
+    message = str(exc_info.value)
+    assert "must be a scalar" in message
+    assert "tags" in message
+
+
+def test_non_scalar_feature_value_is_rejected_inside_item_features() -> None:
+    """The nested ``item_features`` mapping is validated the same way.
+
+    ``item_features`` is ``dict[_ItemStr, _FeatureValues]``, so the outer
+    values are legitimately dicts; only the INNER per-column values must be
+    scalars. A guard written against the outer level would either miss this or
+    reject every well-formed request.
+    """
+    with pytest.raises(ValidationError, match="must be a scalar"):
+        RecommendRelatedRequest(
+            seed_items=["i1"],
+            item_features={"i1": {"tags": ["a", "b"]}},
+        )
+
+
+def test_well_formed_item_features_still_validates() -> None:
+    """Guard against the above rejecting the outer dict-of-dicts shape."""
+    req = RecommendRelatedRequest(
+        seed_items=["i1"],
+        item_features={"i1": {"category": "drama", "year": 2016}},
+    )
+    assert req.item_features == {"i1": {"category": "drama", "year": 2016}}
+
+
+@pytest.mark.parametrize("good", ["drama", 2016, 3.5, True, None])
+def test_scalar_feature_values_are_accepted(good: object) -> None:
+    """Every JSON scalar stays acceptable -- the fix must not narrow these."""
+    req = RecommendRequest(user_id="u1", user_features={"col": good})
+    assert req.user_features == {"col": good}

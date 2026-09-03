@@ -23,6 +23,9 @@ Metric inventory (matches docs/operations.md):
 | ``recotem_v1_batch_element_errors_total``          | Counter    | recipe, verb, code      |
 | ``recotem_v1_metadata_degraded_items_total``       | Counter    | recipe, verb, kind      |
 | ``recotem_v1_validation_errors_outside_verb_total``| Counter    | —                       |
+| ``recotem_v1_feature_unknown_value_total``         | Counter    | recipe, side, column    |
+| ``recotem_v1_feature_unknown_column_total``        | Counter    | recipe, side            |
+| ``recotem_v1_cold_start_requests_total``           | Counter    | recipe, case            |
 | ``recotem_model_loaded``                           | Gauge      | recipe                  |
 | ``recotem_artifact_load_failures_total``           | Counter    | recipe, reason          |
 | ``recotem_active_recipes``                         | Gauge      | —                       |
@@ -39,7 +42,8 @@ Metric inventory (matches docs/operations.md):
 
 Artifact-load reason taxonomy (``recotem_artifact_load_failures_total``):
 ``read``, ``parse``, ``hmac``, ``header_json``, ``deserialize``, ``metadata``,
-``yaml``, ``unexpected``, ``dir_scan``, ``timeout``, ``version_skew``.
+``yaml``, ``unexpected``, ``dir_scan``, ``timeout``, ``version_skew``,
+``feature_version``.
 """
 
 from __future__ import annotations
@@ -108,7 +112,7 @@ def _ensure_initialized() -> None:
         "recotem_artifact_load_failures_total",
         "Total artifact load failures (initial load and watcher reloads). "
         "reason ∈ {read, parse, hmac, header_json, deserialize, metadata, "
-        "yaml, unexpected, dir_scan, timeout, version_skew}.",
+        "yaml, unexpected, dir_scan, timeout, version_skew, feature_version}.",
         ["recipe", "reason"],
     )
     _ACTIVE_RECIPES = Gauge(
@@ -193,6 +197,11 @@ _LOAD_FAILURE_REASONS: frozenset[str] = frozenset(
         # Distinct from "read" (file could not be opened/parsed) because stat
         # timeouts are an infrastructure signal rather than a data signal.
         "timeout",
+        # Artifact's feature-encoder state version is unknown to this build
+        # (missing, newer, or malformed). Distinct from "version_skew"
+        # (irspack pickle compatibility) and from "deserialize" (the payload
+        # is never touched here -- the header alone is enough to refuse).
+        "feature_version",
     }
 )
 
@@ -202,8 +211,8 @@ def inc_artifact_load_failure(recipe: str, reason: str = "unexpected") -> None:
 
     *reason* must be one of the values in ``_LOAD_FAILURE_REASONS``
     (``read | parse | hmac | header_json | deserialize | metadata | yaml |
-    unexpected | dir_scan | timeout | version_skew``); any other value is
-    silently coerced
+    unexpected | dir_scan | timeout | version_skew | feature_version``); any
+    other value is silently coerced
     to ``"unexpected"`` so callers cannot accidentally explode the cardinality
     of the label.
     """
@@ -296,9 +305,11 @@ def inc_recipe_rescan_error(recipe: str) -> None:
 def inc_recommender_layout_unexpected(recipe: str) -> None:
     """Increment the per-recipe recommender-layout-unexpected counter.
 
-    Called when ``_any_seed_known`` encounters an ``AttributeError`` accessing
-    ``recommender._mapper.item_id_to_index``, indicating an unexpected irspack
-    internal layout.  A non-zero rate signals an API incompatibility.
+    Called when ``_resolve_recommend`` or ``_resolve_recommend_related``
+    encounters an ``AttributeError`` accessing
+    ``recommender._mapper.user_id_to_index`` / ``item_id_to_index``,
+    indicating an unexpected irspack internal layout.  A non-zero rate
+    signals an API incompatibility.
     """
     _ensure_initialized()
     if _RECOMMENDER_LAYOUT_UNEXPECTED is None:
@@ -330,6 +341,9 @@ _V1_BATCH_SIZE: Any = None
 _V1_BATCH_ELEMENT_ERRORS: Any = None
 _V1_METADATA_DEGRADED_ITEMS: Any = None
 _V1_VALIDATION_ERRORS_OUTSIDE_VERB: Any = None
+_V1_FEATURE_UNKNOWN_VALUE: Any = None
+_V1_FEATURE_UNKNOWN_COLUMN: Any = None
+_V1_COLD_START_REQUESTS: Any = None
 
 
 def _ensure_v1_initialized() -> None:
@@ -341,6 +355,8 @@ def _ensure_v1_initialized() -> None:
     global _V1_REQUEST_COUNTER, _V1_REQUEST_LATENCY, _V1_BATCH_SIZE
     global _V1_BATCH_ELEMENT_ERRORS
     global _V1_METADATA_DEGRADED_ITEMS, _V1_VALIDATION_ERRORS_OUTSIDE_VERB
+    global _V1_FEATURE_UNKNOWN_VALUE, _V1_FEATURE_UNKNOWN_COLUMN
+    global _V1_COLD_START_REQUESTS
     if _V1_REQUEST_COUNTER is not None:
         return
     if not metrics_enabled():
@@ -382,6 +398,30 @@ def _ensure_v1_initialized() -> None:
         "422 validation errors on non-v1-verb paths (e.g. /v1/recipes listing "
         "with bad query parameters).",
     )
+    _V1_FEATURE_UNKNOWN_VALUE = Counter(
+        "recotem_v1_feature_unknown_value_total",
+        "Request feature values absent from the training vocabulary, or "
+        "otherwise unusable. Fires on a categorical miss, a multi_label "
+        "value where any supplied token misses, or a non-finite numerical "
+        "value (+-inf, or NaN reached via a string). A missing or "
+        "unparseable numerical value still degrades silently and is NOT "
+        "counted here. See docs/api-reference.md#feature-aware-cold-start.",
+        ["recipe", "side", "column"],
+    )
+    _V1_FEATURE_UNKNOWN_COLUMN = Counter(
+        "recotem_v1_feature_unknown_column_total",
+        "Cold-start requests carrying at least one feature key the recipe "
+        "does not declare. Such a key is never read by the encoder, so the "
+        "request degrades toward a bias-only profile with an otherwise "
+        "normal 200. Counted once per request per side -- deliberately NOT "
+        "labelled by column name, which is unbounded request input.",
+        ["recipe", "side"],
+    )
+    _V1_COLD_START_REQUESTS = Counter(
+        "recotem_v1_cold_start_requests_total",
+        "Cold-start requests served from side features, by case.",
+        ["recipe", "case"],
+    )
 
 
 def record_v1_request(
@@ -392,7 +432,14 @@ def record_v1_request(
     *verb* ∈ {"recommend", "recommend-related", "batch-recommend",
     "batch-recommend-related"}.  *status* ∈ {"ok", "unknown_user",
     "unknown_seed_items", "no_candidates", "unavailable",
-    "recipe_not_found", "validation_error", "error"}.
+    "recipe_not_found", "validation_error", "features_not_supported",
+    "feature_value_unusable", "error"}.
+
+    ``features_not_supported`` / ``feature_value_unusable`` are the
+    single-verb counterparts of the identically-named batch ``code`` labels
+    on ``inc_batch_element_error``. They are client-caused 400s and must
+    stay OUT of ``"error"``, which docs/operations.md pages on-call for --
+    see that file's "Recommend error rate" row.
     """
     _ensure_v1_initialized()
     if _V1_REQUEST_COUNTER is None:
@@ -424,6 +471,10 @@ def inc_batch_element_error(recipe: str, verb: str, code: str) -> None:
 
 
 _DEGRADED_ITEM_KINDS: frozenset[str] = frozenset({"fallback", "dropped", "unexpected"})
+_FEATURE_SIDES: frozenset[str] = frozenset({"item", "user", "unexpected"})
+_COLD_START_CASES: frozenset[str] = frozenset(
+    {"features_only", "features_and_history", "cold_seeds", "unexpected"}
+)
 
 
 def inc_metadata_degraded_items(
@@ -443,6 +494,87 @@ def inc_metadata_degraded_items(
         return
     label = kind if kind in _DEGRADED_ITEM_KINDS else "unexpected"
     _V1_METADATA_DEGRADED_ITEMS.labels(recipe=recipe, verb=verb, kind=label).inc(count)
+
+
+def inc_feature_unknown_value(
+    recipe: str, side: str, column: str, count: int = 1
+) -> None:
+    """Increment the unknown-feature-value counter.
+
+    *side* must be ``"item"`` or ``"user"``; anything else is coerced to
+    ``"unexpected"`` to prevent label-cardinality explosion. *column* is NOT
+    coerced: it comes from the recipe, so its cardinality is bounded by the
+    operator's own column list, not by request input.
+
+    An unknown value cannot fail the request, but coverage is per-encoding,
+    not universal (see ``_row_values`` in ``recotem._features``): a
+    ``categorical`` miss always increments this counter, and a
+    ``multi_label`` miss increments it whenever *any* supplied token misses
+    the vocabulary -- a mixed value such as ``"Action|Thrller"`` still
+    increments it once for the column, even though the known token's bit is
+    also set. A ``numerical`` value increments this counter when it is
+    non-finite (``+inf``, ``-inf``, or a NaN reached via a string like
+    ``"nan"``) -- these parse successfully but cannot be standardized. A
+    ``numerical`` value that is missing or fails to parse as a number at all
+    still degrades to the standardized mean (0) with no signal -- that gap
+    is deliberate and separate, not fixed by the non-finite case above. See
+    ``docs/api-reference.md#feature-aware-cold-start`` for the full
+    breakdown.
+    """
+    _ensure_v1_initialized()
+    if _V1_FEATURE_UNKNOWN_VALUE is None:
+        return
+    label = side if side in _FEATURE_SIDES else "unexpected"
+    _V1_FEATURE_UNKNOWN_VALUE.labels(recipe=recipe, side=label, column=column).inc(
+        count
+    )
+
+
+def inc_feature_unknown_column(recipe: str, side: str) -> None:
+    """Increment the unknown-feature-column counter.
+
+    Called once per cold-start request per *side* whose supplied feature
+    mapping carries at least one key the recipe does not declare. Such a key
+    is never read (``_features._row_values`` iterates the recipe's columns
+    and does ``values.get(name)``), so the request silently degrades toward a
+    bias-only profile while still returning 200 -- a strictly more severe
+    degradation than an unknown VALUE, which
+    ``inc_feature_unknown_value`` already covers.
+
+    *side* must be ``"item"`` or ``"user"``; anything else is coerced to
+    ``"unexpected"``.
+
+    There is deliberately NO ``column`` label, and this is the one place that
+    asymmetry with ``inc_feature_unknown_value`` matters: that function's
+    ``column`` is safe precisely BECAUSE it comes from the recipe, so the
+    operator's own column list bounds its cardinality. An unknown column name
+    is unbounded request input -- labelling it would let any client mint
+    arbitrary time series and exhaust the scrape target's memory. The cost is
+    diagnosability: the counter says a caller is sending undeclared keys but
+    not which, and the remedy is to diff the client against the recipe's
+    ``features:`` block. Counted once per request per side rather than once
+    per key so the number stays normalizable against
+    ``recotem_v1_requests_total`` and does not scale with cold-seed fan-out.
+    """
+    _ensure_v1_initialized()
+    if _V1_FEATURE_UNKNOWN_COLUMN is None:
+        return
+    label = side if side in _FEATURE_SIDES else "unexpected"
+    _V1_FEATURE_UNKNOWN_COLUMN.labels(recipe=recipe, side=label).inc()
+
+
+def inc_cold_start_request(recipe: str, case: str) -> None:
+    """Increment the cold-start-request counter.
+
+    *case* is ``"features_only"`` (A), ``"features_and_history"`` (B), or
+    ``"cold_seeds"`` (C).  Any other value is coerced to ``"unexpected"`` to
+    prevent label-cardinality explosion.
+    """
+    _ensure_v1_initialized()
+    if _V1_COLD_START_REQUESTS is None:
+        return
+    label = case if case in _COLD_START_CASES else "unexpected"
+    _V1_COLD_START_REQUESTS.labels(recipe=recipe, case=label).inc()
 
 
 def inc_validation_error_outside_verb() -> None:

@@ -11,6 +11,7 @@ A recipe is a YAML file that defines what data to fetch, how to train, and where
 | `schema` | object | yes | Column mapping. |
 | `cleansing` | object | no | Data quality gates. |
 | `item_metadata` | object | no | Metadata joined into predict responses. |
+| `features` | object | no | Item/user side features for feature-aware iALS training and cold-start. |
 | `training` | object | yes | Algorithm and tuning settings. |
 | `output` | object | yes | Artifact path and versioning. |
 
@@ -174,6 +175,262 @@ Server-side field suppression is also available via `RECOTEM_METADATA_FIELD_DENY
 
 ---
 
+## `features`
+
+```yaml
+features:
+  item:
+    source:                                    # datasource discriminated union — same registry as `source`
+      type: bigquery
+      query: SELECT item_id, genres, release_year, country FROM items
+    id_column: item_id
+    columns:
+      - {name: genres,       encoding: multi_label, delimiter: "|"}
+      - {name: release_year, encoding: numerical}
+      - {name: country,      encoding: categorical, min_frequency: 5}
+  user:
+    source: {type: csv, path: ./users.csv}
+    id_column: user_id
+    columns:
+      - {name: age_band, encoding: categorical}
+```
+
+The mere presence of this block enables feature-aware iALS training — there
+is no separate flag. Item and user side features are declared, encoded, fed
+to `IALSRecommender` during Optuna search and the final refit, and persisted
+so that `:recommend` / `:recommend-related` can score unknown users and
+unknown seed items from their attributes alone. See
+[api-reference.md](api-reference.md) for the serving-side cold-start
+contract.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `features.item` | object | conditional | Item-side feature table. At least one of `features.item` / `features.user` must be present. |
+| `features.user` | object | conditional | User-side feature table. |
+
+Each side (`FeatureSideConfig`) has:
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `source` | object | yes | Same datasource discriminated union as top-level `source` (`csv`, `parquet`, `bigquery`, `sql`, or any plugin). Reuses the datasource registry — `FetchContext` carries no interaction-specific fields, so any registered source can serve as a feature table. |
+| `id_column` | string | yes | Column in the fetched table that holds the entity id (item id for `features.item`, user id for `features.user`). Non-empty, non-whitespace. Must **not** also appear in `columns` — the id column is consumed as the index and cannot also be a feature. |
+| `columns` | list | yes, non-empty | One entry per source column to encode. Column names must be unique within a side. |
+
+**Null and duplicate ids are dropped before the vocabulary is built.** A row
+whose `id_column` is null or empty is dropped and logged as
+`feature_table_null_ids_dropped` (`side`, `drop_count`). A row whose
+`id_column` repeats an id already seen is also dropped — the **first**
+occurrence wins (`keep="first"`) — and logged as
+`feature_table_duplicate_ids_dropped` (`side`, `drop_count`). Both log lines
+carry only a count, never the offending ids or column values, which are
+treated as user PII.
+
+Each entry in `columns` (`FeatureColumn`):
+
+| Field | Type | Required | Default | Notes |
+|-------|------|----------|---------|-------|
+| `name` | string | yes | — | Column name in the fetched feature table. |
+| `encoding` | string | yes | — | One of `categorical`, `numerical`, `multi_label`. |
+| `delimiter` | string | conditional | `"\|"` | Only valid when `encoding: multi_label`; rejected on any other encoding. Must not be empty. |
+| `min_frequency` | int | no | `1` | Must be `>= 1` — `min_frequency: 0` is rejected at schema-validation time; there is no upper bound. Only valid for `categorical` / `multi_label` (vocabulary-based encodings); rejected on `numerical`. Values occurring fewer than N times in the fetched feature table are dropped from the vocabulary. For `categorical` this is a row count (one value per row); for `multi_label` it counts token **occurrences** — a single row with `a\|a` contributes 2 toward the threshold. |
+
+### Ids are matched as strings, and zero overlap is fatal
+
+`id_column` values are matched against the interaction data's
+`schema.item_column` / `schema.user_column` **as strings** — both sides are
+normalized with `str()` before comparison. So `1` matches `"1"`, but `1.0` does
+**not** match `"1"`.
+
+An interaction id that is absent from the feature table is not an error: it
+encodes to the implicit bias column alone, degrading to plain iALS for that one
+entity. Partial coverage is expected and legitimate — the vocabulary is built
+from the whole fetched table precisely so that entities missing from the
+interaction data stay representable for cold-start scoring.
+
+**Zero** overlap is different: it aborts training with `TrainingError`
+(`feature_axis_error`, exit 4). If not one id matches, every entity encodes to
+bias-only, and the run would otherwise succeed and sign an artifact whose header
+advertises `features` for what is really plain iALS — a silent downgrade. The
+error samples ids from both sides so the mismatch is visible. Two causes account
+for essentially all of these:
+
+- An **id dtype mismatch**: one blank cell in an otherwise-integer id column
+  makes pandas infer `float64`, so `1` reads back as `1.0`. Pin the type at the
+  source — `dtype: {item_id: str}` on a `csv` source (`dtype` is csv-only; on
+  `bigquery` / `sql` cast in the query instead). recotem will not coerce it for
+  you: a column reading `1.0` is indistinguishable from one whose ids are
+  literally `"1.0"`, so coercion would risk silently rewriting valid ids.
+- An `id_column` naming a **wrong-but-existing column**, which passes the
+  presence check at fetch time and fails only at encode time.
+
+Coverage is logged per side per phase as `feature_axis_coverage` (`side`,
+`matched`, `total`). See
+[operations.md](operations.md#recotem-train-exits-4-with-feature_axis_error).
+
+### Encodings, and their missing/unknown behavior
+
+| Encoding | Behavior | Row missing entirely | Value missing / unknown |
+|---|---|---|---|
+| `categorical` | One-hot over the training vocabulary. | All-zero segment. | All-zero segment. |
+| `numerical` | Standardized by the training mean/std. | `0` (i.e. the mean). | `0` (i.e. the mean). |
+| `multi_label` | Split on `delimiter`, multi-hot. | All-zero segment. | Known tokens are retained; unknown tokens are dropped. |
+
+The `multi_label` distinction matters: `genres: "Action|Zzz"` with `Action`
+known yields `Action=1` and drops `Zzz` — it is not an all-zero segment.
+"Row missing" and "value unknown" coincide only for `categorical`.
+
+The same `str()`-matching caveat that applies to `id_column` above also
+applies to a `categorical` or `multi_label` **value** column — the vocabulary
+is fit from each value's string rendering, and a serve-time request value is
+matched the same way. If a blank cell makes pandas infer `float64` for an
+otherwise-integer column, its vocabulary is trained from `"1990.0"` (a
+`multi_label` column's tokens the same way), and a serve-time request sending
+the JSON integer `1990` (matched as `"1990"`) misses every key. So **declare
+id-like or numeric-looking attribute columns as strings at the source** — one
+blank cell is enough to flip the whole column to `float64` inference. Prefer
+consistent types over relying on the counter after the fact. Unlike the id
+axis, this is **not** refused at train time — the column varies across rows, so
+training stays self-consistent — so pin the type at the source (`dtype: {year:
+str}` on `csv`; `CAST(... AS STRING)` on `bigquery` / `sql`; fix the schema on
+`parquet`) exactly as for the id column. The mismatch is not silent, though: at
+serve time each such miss increments
+`recotem_v1_feature_unknown_value_total` (labelled by recipe / side / column —
+see [operations.md](operations.md#feature-aware-ials-sizing)), so a spike on a
+column you expected to match is the signal to check its source dtype. The **id
+axis** dtype trap is the stricter, train-time analogue: there the same `"1.0"`
+vs `"1"` mismatch drives coverage to 0% and aborts training with the
+[zero-overlap refusal](#ids-are-matched-as-strings-and-zero-overlap-is-fatal)
+(`feature_axis_error`, exit 4) rather than degrading silently at serve time.
+
+At serve time, each cold-start feature value supplied to `:recommend` /
+`:recommend-related` (`user_features`, and each `item_features` seed mapping) is
+length-capped: a string value longer than **8192 characters** is rejected with
+`422` (the error names the offending column, never the value). This bounds the
+`multi_label` tokenization work per request — 8192 characters is generous for a
+real token list while blocking megabyte-scale amplification. The same cap
+applies on the batch verbs, but a violation there surfaces as a per-element
+`VALIDATION_ERROR` inside the `200` batch response rather than failing the
+whole batch with `422`. Non-string scalar values are unaffected.
+
+If a `numerical` column is constant — or merely **near**-constant — in the
+training data, its segment is emitted as zeros and a warning is logged
+(`feature_zero_variance_column`). The trigger is not an exact `std == 0.0`
+check but a floor relative to the column's own scale: `std <= 1e-8 ×
+max(abs(mean), 1.0)`. A column whose values differ only by floating-point
+rounding noise (std ~1e-15) would survive an exact check and then divide
+serve-time standardization by a near-zero denominator, turning an ordinary
+request value into an astronomically large standardized one — which trips the
+cold-start solver's numerical guard for a reason the client cannot see or
+control. Such a column degrades exactly like a missing value instead. See
+[api-reference.md](api-reference.md#feature-aware-cold-start).
+
+An implicit all-ones **bias column** is appended per side (irspack adds no
+intercept on its own). It is deliberately collinear with every
+`categorical` column's one-hot block — a drop-first encoding was considered
+and rejected because it would make an unknown/missing value (all-zero
+segment) indistinguishable from the dropped reference level. The ridge
+(`lambda_*_feature`, below) absorbs the resulting rank deficiency at the
+tuned range. One consequence: if training fails with `Feature ridge
+Cholesky decomposition failed`, the message deliberately does not suggest
+dropping a column — recotem's own bias column is the more likely structural
+cause, and it cannot be removed from the recipe. See
+[operations.md](operations.md#feature-aware-ials-sizing) for the remedy
+(`min_frequency`).
+
+### `min_frequency` is the dimension-cap lever
+
+The encoder vocabulary is built from the **whole fetched feature table**,
+not restricted to items/users present in the interaction data — this
+maximizes cold-start coverage. Consequently the encoded dimension scales
+with **catalog size, not interaction count**: a 1M-item catalog whose
+interactions cover only 1k items still pays the full encoded dimension (and
+the full training cost — see below) for the other 999k items. Raising
+`min_frequency` on high-cardinality columns is the only lever against
+`RECOTEM_MAX_FEATURE_DIM` (default 5000; see
+[operations.md](operations.md#feature-aware-ials-sizing)); there is no
+recipe-level way to restrict the vocabulary to interaction-covered rows.
+
+Raising it too far fails **loudly but not fatally**. `min_frequency` has no
+upper bound and nothing cross-checks it against the catalog, so
+`min_frequency: 50` against a 3-row feature table validates happily and
+prunes every token. The column then encodes to `width=0` and contributes
+nothing — every row falls back to the implicit bias column — while the
+`feature_encoder_state_built` INFO event still lists the column as though it
+were active. Training logs a `feature_empty_vocabulary_column` **warning**
+(carrying the column name, its `encoding` and `min_frequency`, and the
+distinct/occurrence counts — never the token values) and continues. An
+all-null column reaches the same "contributes nothing" state by a different
+route and warns identically. Check the training logs after raising
+`min_frequency` aggressively.
+
+### `lambda_item_feature` / `lambda_user_feature` — the one exception to "not user-tunable"
+
+`training.algorithms`' hyperparameter ranges normally come from each
+recommender's `default_suggest_parameter` in irspack and are **not**
+user-tunable from the recipe (see the `algorithms` row above). The
+feature-ridge coefficients are the first exception: `lambda_item_feature`
+and `lambda_user_feature` are **recotem's own** search range —
+`suggest_float(..., 1.0, 1e6, log=True)` — applied only to the side(s)
+that have a `features.item` / `features.user` block, and only when the
+trial's class is `IALSRecommender`. They are not present as recipe fields;
+they cannot be set explicitly, only tuned.
+
+Two reasons this range is recotem's own rather than irspack's: irspack ships
+no default range for these parameters (`default_suggest_parameter` never
+suggests them), and the constructor default of `0.0` is a **hard error**
+whenever the matching feature matrix is non-empty (`ValueError: Feature
+weight regularization must be positive.`) — so leaving it untuned is not an
+option once a features block is present.
+
+Provenance of the bounds: they match upstream's only feature-aware example
+(`examples/mind/mind_small_feature_aware_ials.py` at irspack v0.5.2), which
+tunes `lambda_item_feature` over `1.0`–`1e6`.
+
+The `1.0` floor is a **conditioning** floor, not deference to upstream.
+irspack forms the ridge as `gram = Fᵀ F; gram.diagonal() += lambda_feature`
+and factorises it by Cholesky in **float32**. Recotem's encoder always
+appends an all-ones bias column that is deliberately collinear with every
+`categorical` one-hot block (see above), so `Fᵀ F` is *exactly* singular by
+construction and `lambda_feature` is the only eigenvalue along that null
+direction. The Gram's condition number is therefore roughly
+`(largest eigenvalue) / lambda`, and float32 Cholesky stops being reliable
+as that approaches `1/eps` (~8×10⁶). Every decade below `1.0` spends a decade
+of that budget, which is why the floor does not go lower.
+
+When the ridge is nonetheless unsolvable, irspack raises `Feature ridge
+Cholesky decomposition failed` or `Feature ridge solve failed`. **During the
+search that is not a training failure** — recotem prunes the trial and
+carries on. It is fatal only if the **final refit** hits it, which exits 4
+with subcode `feature_cholesky_error`; the completed search is discarded and
+no artifact is written. See
+[operations.md](operations.md#feature-aware-ials-sizing) for the
+`min_frequency` remedy.
+
+### Validation
+
+Recipe load rejects, with `RecipeError` (exit 2):
+
+- An `encoding` outside `categorical` / `numerical` / `multi_label`.
+- `delimiter` set on a column whose `encoding` is not `multi_label`.
+- `min_frequency` set (to anything other than the default) on a `numerical` column.
+- Duplicate column names within one side's `columns` list.
+- An `id_column` that also appears as a `columns[].name` on the same side —
+  the id column is consumed as the index, so a feature column of the same name
+  would be missing at encode time. Caught at load rather than at train time.
+- `features:` present but `training.algorithms` contains no feature-capable
+  algorithm (today: `IALS`). Either add `IALS` to `algorithms` or remove the
+  `features` block.
+- `features.item.source` / `features.user.source` fail the same
+  [path-scheme allow-list and mandatory-sha256-for-network-paths rules](#path-rules)
+  as the top-level `source`.
+
+`recotem validate` probes `features.item.source` / `features.user.source`
+connectivity the same way it probes `source` — each reported line carries a
+`[features.item.source]` / `[features.user.source]` label so a failure
+names which source failed.
+
+---
+
 ## `training`
 
 ```yaml
@@ -200,7 +457,7 @@ training:
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `algorithms` | list[string] | required | `IALS`, `CosineKNN` (alias `CosinekNN`), `TopPop`, `RP3beta`, `DenseSLIM`, `TruncatedSVD`, `BPRFM`. Full irspack class names (e.g. `IALSRecommender`) are also accepted. Hyperparameter ranges come from each recommender's `default_suggest_parameter` in irspack — they are not user-tunable from the recipe. |
+| `algorithms` | list[string] | required | `IALS`, `CosineKNN` (alias `CosinekNN`), `TopPop`, `RP3beta`, `DenseSLIM`, `TruncatedSVD`, `BPRFM`. Full irspack class names (e.g. `IALSRecommender`) are also accepted. Hyperparameter ranges come from each recommender's `default_suggest_parameter` in irspack — they are not user-tunable from the recipe, **with one exception**: when a [`features`](#features) block is present, `lambda_item_feature` / `lambda_user_feature` are tuned over recotem's own range (`1.0`–`1e6`, log-scale, matching upstream's feature-aware example), because irspack ships no default range for them and their constructor default of `0.0` is a hard error whenever the matching feature matrix is non-empty. |
 | `metric` | string | `ndcg` | One of `ndcg`, `map`, `recall`, `hit`. |
 | `cutoff` | int | `20` | Recommendation list length for evaluation (must be ≥ 1). |
 | `n_trials` | int | `40` | Total Optuna trial budget (must be ≥ 1). |
@@ -282,6 +539,12 @@ unvetted handlers from being reachable via recipe content. Chained fsspec
 protocols (paths containing `::`) are also rejected. Schemes `http://` and
 `https://` additionally require an `sha256` integrity pin on the same config
 block.
+
+These rules apply identically to a feature table's path
+(`features.item.source.path` / `features.user.source.path`) — the loader runs
+the same scheme allow-list, `::` rejection, embedded-credential rejection and
+network-scheme `sha256` requirement on every source block in the recipe, not
+only the top-level `source:`.
 
 > **Decompressed-size cap not enforced.** `RECOTEM_MAX_DOWNLOAD_BYTES` caps
 > raw I/O bytes only. Compressed CSV and columnar Parquet sources can expand

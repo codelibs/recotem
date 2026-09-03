@@ -37,6 +37,10 @@ from typing import TYPE_CHECKING, Any
 import fsspec
 import structlog
 
+from recotem._features import (
+    FEATURE_VERSION_MSG_PREFIX,
+    check_artifact_feature_version,
+)
 from recotem._irspack_compat import (
     SKEW_MSG_PREFIX,
     check_artifact_irspack_version,
@@ -1041,6 +1045,12 @@ class ArtifactWatcher(threading.Thread):
         # the recipe nor the remedy.
         check_artifact_irspack_version(header_dict, name=name)
 
+        # Preflight the feature-encoder state version for the same reason: an
+        # unknown shape would otherwise be silently mis-encoded rather than
+        # refused, and the failure would surface as wrong recommendations,
+        # not an exception.
+        check_artifact_feature_version(header_dict, name=name)
+
         recommender = unpickle_payload(payload_bytes)
 
         metadata_df = None
@@ -1148,6 +1158,11 @@ def _classify_artifact_error(err_msg: str) -> str:
     # cannot silently drop the message through to that catch-all.
     if lower.startswith(SKEW_MSG_PREFIX.lower()):
         return "version_skew"
+    # Same reasoning as the skew branch immediately above: the feature-version
+    # gate's message also contains "version", so it must be classified before
+    # the catch-all below or it silently collapses into "parse".
+    if lower.startswith(FEATURE_VERSION_MSG_PREFIX.lower()):
+        return "feature_version"
     if lower.startswith("deserialization failed:"):
         return "deserialize"
     if lower.startswith("metadata load failed:"):

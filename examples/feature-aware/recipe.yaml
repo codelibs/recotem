@@ -1,0 +1,64 @@
+# Feature-aware iALS example — trains on interactions.csv plus an item-side
+# features table (items.csv) so the model can score cold items at serve
+# time from their attributes alone.
+#
+# Walkthrough: examples/feature-aware/README.md
+#
+# i15 in items.csv is deliberately absent from interactions.csv — it is the
+# cold item used in the README's cold-start :recommend-related demo.
+
+name: feature_aware_demo
+
+source:
+  type: csv
+  path: examples/feature-aware/interactions.csv
+  dtype:
+    user_id: str
+    item_id: str
+
+schema:
+  user_column: user_id
+  item_column: item_id
+  # timestamp is present in the CSV but unused: split.scheme is `random`.
+
+cleansing:
+  drop_null_ids: true
+  dedup: keep_last
+  min_rows: 100
+  min_users: 10
+  min_items: 10
+
+# The features: block is what turns on feature-aware iALS -- there is no
+# separate flag. Only features.item is used here; features.user follows the
+# same shape (id_column + columns) and is independently optional. See
+# docs/recipe-reference.md#features for the full field reference.
+features:
+  item:
+    source:
+      type: csv
+      path: examples/feature-aware/items.csv
+    id_column: item_id
+    columns:
+      # one-hot over the training vocabulary; missing/unknown -> all-zero segment
+      - {name: category, encoding: categorical}
+      # standardized by training mean/std; missing -> 0 (the mean)
+      - {name: release_year, encoding: numerical}
+      # split on delimiter, multi-hot; unknown tokens dropped, known ones kept
+      - {name: tags, encoding: multi_label, delimiter: "|"}
+
+training:
+  # IALS is the only feature-capable algorithm today; at least one must be
+  # listed whenever `features:` is present.
+  algorithms: [IALS]
+  metric: ndcg
+  cutoff: 10
+  n_trials: 6
+  parallelism: 1
+  split:
+    scheme: random
+    heldout_ratio: 0.2
+    seed: 42
+
+output:
+  path: ./artifacts/feature_aware_demo.recotem
+  versioning: append_sha

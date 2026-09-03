@@ -304,6 +304,8 @@ def test_validation_error_handler_records_metric_when_enabled(
     monkeypatch.setattr(_metrics, "_V1_BATCH_ELEMENT_ERRORS", None)
     monkeypatch.setattr(_metrics, "_V1_METADATA_DEGRADED_ITEMS", None)
     monkeypatch.setattr(_metrics, "_V1_VALIDATION_ERRORS_OUTSIDE_VERB", None)
+    monkeypatch.setattr(_metrics, "_V1_FEATURE_UNKNOWN_VALUE", None)
+    monkeypatch.setattr(_metrics, "_V1_COLD_START_REQUESTS", None)
 
     client = _client_with(_loaded_entry(name="metric_recipe"))
 
@@ -698,6 +700,8 @@ def test_422_on_path_parameter_validation_no_metric_recorded(
     monkeypatch.setattr(_metrics, "_V1_BATCH_ELEMENT_ERRORS", None)
     monkeypatch.setattr(_metrics, "_V1_METADATA_DEGRADED_ITEMS", None)
     monkeypatch.setattr(_metrics, "_V1_VALIDATION_ERRORS_OUTSIDE_VERB", None)
+    monkeypatch.setattr(_metrics, "_V1_FEATURE_UNKNOWN_VALUE", None)
+    monkeypatch.setattr(_metrics, "_V1_COLD_START_REQUESTS", None)
 
     client = _client_with(_loaded_entry())
     # 'has spaces' contains a space and so does not match the {1,64} pattern.

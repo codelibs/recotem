@@ -985,7 +985,7 @@ def test_feature_aware_artifact_serve_roundtrip(
     Mutation guard
     --------------
     ``lambda_item_feature`` / ``lambda_user_feature`` are tuned over a
-    log-uniform ``[5e-2, 1e6]`` range (``training/search.py``); the top of
+    log-uniform ``[1.0, 1e6]`` range (``training/search.py``); the top of
     that range drives the feature contribution toward zero -- close to plain
     iALS. That means "the cold-start calls below returned 200" proves
     nothing about features actually being used: the exact same 200s would

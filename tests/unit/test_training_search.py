@@ -15,6 +15,7 @@ Tests:
 
 from __future__ import annotations
 
+import pathlib
 import time
 from unittest.mock import MagicMock, patch
 
@@ -1734,3 +1735,240 @@ def test_run_search_feature_kwargs_defaults_to_none() -> None:
     sig = inspect.signature(run_search)
     assert "feature_kwargs" in sig.parameters
     assert sig.parameters["feature_kwargs"].default is None
+
+
+# ---------------------------------------------------------------------------
+# Feature-ridge failure recognition.
+#
+# irspack raises the feature-ridge family from THREE sites in
+# cpp_source/als/IALSTrainer.hpp and types them inconsistently:
+#
+#   0.5.0  two sites, both `std::runtime_error("Feature ridge Cholesky
+#          decomposition failed.")`
+#   0.5.1  ADDS a third, `std::runtime_error("Feature ridge solve failed.")`,
+#          inside the std::async worker the feature-aware parallelisation
+#          introduced (LLT succeeded, solution not finite)
+#   0.5.2  converts the first two to `FeatureRidgeCholeskyError` and leaves
+#          the third untyped -- irspack's own
+#          `optuna_trial_failure_exceptions` misses it too
+#
+# recotem originally matched the 0.5.0 Cholesky message as a substring, which
+# covered 100% of the family on 0.5.0 and only 2/3 from 0.5.1 onward. An
+# unmatched third-site failure re-raises out of `study.optimize` (called with
+# no `catch=`) and kills the whole search instead of pruning one trial.
+# These tests pin the recognition contract in both directions.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected", "why"),
+    [
+        (
+            RuntimeError("Feature ridge Cholesky decomposition failed."),
+            True,
+            "the two 0.5.0-era decomposition sites",
+        ),
+        (
+            RuntimeError("Feature ridge solve failed."),
+            True,
+            "the third site 0.5.1 added and 0.5.2 left untyped",
+        ),
+        (
+            RuntimeError("Cholesky decomposition failed."),
+            False,
+            "the PLAIN iALS solver's own Cholesky site is a different "
+            "failure with no feature matrix involved; widening to it would "
+            "silently prune non-feature trials",
+        ),
+        (
+            RuntimeError("Cholesky solve failed."),
+            False,
+            "likewise the plain iALS solve site",
+        ),
+        (
+            ValueError("Feature ridge solve failed."),
+            False,
+            "every upstream site is a RuntimeError; a same-message "
+            "ValueError is not from this family",
+        ),
+        (
+            RuntimeError("some unrelated failure"),
+            False,
+            "unrelated RuntimeErrors must still propagate",
+        ),
+    ],
+)
+def test_is_feature_ridge_failure_truth_table(
+    exc: BaseException, expected: bool, why: str
+) -> None:
+    """Message-based recognition must cover the family and nothing else."""
+    from recotem.training.search import is_feature_ridge_failure
+
+    assert is_feature_ridge_failure(exc) is expected, why
+
+
+def test_is_feature_ridge_failure_matches_typed_exception_despite_reword() -> None:
+    """The typed check must carry a message recotem does not recognise.
+
+    Message matching alone would break if upstream ever rewords the string
+    (nothing in irspack's API promises it). The type check in front of the
+    substring test is what keeps the two typed sites recognised regardless.
+    Skips rather than passes vacuously when the symbol is absent, so a
+    pre-0.5.2 irspack cannot make this test look like it verified something.
+    """
+    from recotem.training import search
+
+    if search._FeatureRidgeCholeskyError is None:
+        pytest.skip("installed irspack predates FeatureRidgeCholeskyError (0.5.2)")
+
+    reworded = search._FeatureRidgeCholeskyError("completely different wording")
+    assert "Feature ridge" not in str(reworded), (
+        "this test is only meaningful if the message would NOT match on its own"
+    )
+    assert search.is_feature_ridge_failure(reworded) is True
+
+
+def test_feature_ridge_cholesky_error_is_a_runtime_error_subclass() -> None:
+    """The narrow ``except RuntimeError`` clauses must still see the typed one.
+
+    Both call sites catch ``RuntimeError`` and use ``is_feature_ridge_failure``
+    as the discriminator inside. That only works while nanobind keeps
+    registering ``FeatureRidgeCholeskyError`` with ``PyExc_RuntimeError`` as
+    its base; if upstream ever rebases it, the typed sites would stop being
+    caught at all and this test fails instead of the failure going silent.
+    """
+    from recotem.training import search
+
+    if search._FeatureRidgeCholeskyError is None:
+        pytest.skip("installed irspack predates FeatureRidgeCholeskyError (0.5.2)")
+
+    assert issubclass(search._FeatureRidgeCholeskyError, RuntimeError)
+
+
+@pytest.mark.parametrize("per_trial_timeout_seconds", [None, 1])
+def test_search_prunes_the_untyped_feature_ridge_solve_failure(
+    per_trial_timeout_seconds: int | None,
+) -> None:
+    """ "Feature ridge solve failed." must prune, on BOTH construction paths.
+
+    Parametrised over the two paths because they are separate ``except
+    RuntimeError`` blocks (the threaded ``per_trial_timeout_seconds`` path and
+    the default one) and a fix applied to only one of them would leave the
+    other aborting the whole search.
+    """
+    from recotem.training.progress import ProgressReporter
+    from recotem.training.search import run_search
+
+    class _SolveFailingRecommender:
+        learnt_config: dict = {}
+
+        def __init__(self, X, **kwargs):
+            pass
+
+        @staticmethod
+        def default_suggest_parameter(trial, space):
+            return {}
+
+        def learn_with_optimizer(self, evaluator, trial):
+            raise RuntimeError("Feature ridge solve failed.")
+
+        def learn(self):
+            return self
+
+    def _make_fake_completed(number: int) -> MagicMock:
+        t = MagicMock(spec=optuna.trial.FrozenTrial)
+        t.state = optuna.trial.TrialState.COMPLETE
+        t.value = -0.5
+        t.number = number
+        t.params = {"recommender_class_name": "TopPopRecommender"}
+        t.user_attrs = {"recommender_class_name": "TopPopRecommender"}
+        return t
+
+    fake_completed = [_make_fake_completed(i) for i in range(3)]
+    outcome: dict[str, object] = {}
+
+    with patch(
+        "recotem.training.search.get_recommender_cls",
+        return_value=_SolveFailingRecommender,
+    ):
+        with patch("recotem.training.search.optuna.create_study") as mock_study_fn:
+            mock_study = MagicMock()
+
+            def _optimize_one(objective, n_trials, **kwargs):
+                fake_t = MagicMock(spec=optuna.Trial)
+                fake_t.number = 0
+                fake_t.suggest_categorical.return_value = "TopPopRecommender"
+                fake_t.set_user_attr = MagicMock()
+                try:
+                    objective(fake_t)
+                except optuna.TrialPruned:
+                    outcome["pruned"] = True
+                except BaseException as exc:  # noqa: BLE001
+                    outcome["escaped"] = exc
+                mock_study.trials = fake_completed
+                mock_study.best_trial = fake_completed[0]
+
+            mock_study.trials = []
+            mock_study.optimize = _optimize_one
+            mock_study_fn.return_value = mock_study
+
+            with ProgressReporter(
+                n_trials=1, recipe_name="ridge_solve_test", run_id="rrs1"
+            ) as rep:
+                run_search(
+                    algorithms=["TopPopRecommender"],
+                    X_tv_train=sps.csr_matrix(np.ones((5, 3))),
+                    evaluator=MagicMock(),
+                    n_trials=1,
+                    per_algorithm_trials=None,
+                    per_trial_timeout_seconds=per_trial_timeout_seconds,
+                    timeout_seconds=None,
+                    parallelism=1,
+                    storage_path="",
+                    random_seed=42,
+                    reporter=rep,
+                    recipe_name="ridge_solve_test",
+                    run_id="rrs1",
+                )
+
+    assert outcome.get("pruned") is True, (
+        '"Feature ridge solve failed." must be converted to TrialPruned '
+        f"(per_trial_timeout_seconds={per_trial_timeout_seconds}); instead the "
+        f"objective raised {outcome.get('escaped')!r}, which escapes "
+        "study.optimize (called with no catch=) and aborts the whole search"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Feature-ridge lambda search range.
+#
+# The floor tracks upstream's only feature-aware example
+# (examples/mind/mind_small_feature_aware_ials.py at v0.5.2, which uses
+# 1.0-1e6) and is a conditioning floor, not deference: irspack adds lambda to
+# the Gram diagonal and factorises in float32, while recotem's encoder always
+# appends a bias column collinear with every categorical one-hot block, so
+# lambda is the SOLE eigenvalue along an exactly-singular direction.
+# ---------------------------------------------------------------------------
+
+
+def test_feature_ridge_lambda_range_matches_upstream_floor() -> None:
+    """Both lambdas must be suggested log-uniform over exactly [1.0, 1e6]."""
+    import re
+
+    from recotem.training import search as search_mod
+
+    source = pathlib.Path(search_mod.__file__).read_text()
+    for name in ("lambda_item_feature", "lambda_user_feature"):
+        m = re.search(
+            rf'"{name}",\s*([0-9eE.+-]+),\s*([0-9eE.+-]+),\s*log=True',
+            source,
+        )
+        assert m is not None, f"no suggest_float call found for {name}"
+        low, high = float(m.group(1)), float(m.group(2))
+        assert low == 1.0, (
+            f"{name}'s floor is {low}, not 1.0. Below 1.0 is a region upstream "
+            "has never exercised, and every decade down spends a decade of the "
+            "float32 LLT conditioning budget that recotem's always-on collinear "
+            "bias column already consumes."
+        )
+        assert high == 1e6, f"{name}'s ceiling is {high}, not 1e6"

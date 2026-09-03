@@ -2271,6 +2271,65 @@ def test_train_final_feature_cholesky_error_message_does_not_blame_a_column() ->
     assert "min_frequency" in message
 
 
+def test_train_final_maps_the_untyped_feature_ridge_solve_failure() -> None:
+    """The FINAL refit must map "Feature ridge solve failed." to exit 4 too.
+
+    irspack 0.5.1 added a third feature-ridge throw site inside the
+    parallelised solver (``solve_feature_weight``: LLT succeeded but the
+    solution was not finite) and 0.5.2 left it as a bare
+    ``std::runtime_error``, so it carries a message the original Cholesky
+    substring test never matched. Unmatched, it falls past this handler and
+    surfaces as an unmapped exit 1 -- the code CLAUDE.md reserves for bugs --
+    instead of exit 4 with the ``min_frequency`` remedy, sending the operator
+    to the wrong runbook after a fully successful search.
+    """
+    from recotem._features import build_encoder_state
+    from recotem.recipe.models import FeatureColumn
+    from recotem.training.errors import TrainingError
+    from recotem.training.features import FeatureTables
+    from recotem.training.pipeline import _train_final
+
+    df = pd.DataFrame({"user_id": ["u1", "u2"], "item_id": ["i1", "i2"]})
+    item_df = pd.DataFrame({"genre": ["a", "b"]}, index=["i1", "i2"])
+    tables = FeatureTables(
+        item_state=build_encoder_state(
+            item_df, [FeatureColumn(name="genre", encoding="categorical")]
+        ),
+        item_df=item_df,
+    )
+
+    class NonFiniteSolutionRec:
+        def __init__(
+            self, X, lambda_item_feature: float = 0.0, item_features=None
+        ) -> None:
+            pass
+
+        def learn(self):
+            raise RuntimeError("Feature ridge solve failed.")
+
+    with patch(
+        "recotem.training.pipeline.get_recommender_cls",
+        return_value=NonFiniteSolutionRec,
+    ):
+        with pytest.raises(TrainingError) as exc_info:
+            _train_final(
+                df,
+                user_column="user_id",
+                item_column="item_id",
+                class_name="IALSRecommender",
+                best_params={"lambda_item_feature": 1.0},
+                feature_tables=tables,
+            )
+
+    assert exc_info.value.code == "feature_cholesky_error", (
+        "an untyped feature-ridge solve failure must land on the same exit-4 "
+        f"subcode as the Cholesky ones; got code={exc_info.value.code!r}"
+    )
+    message = str(exc_info.value)
+    assert "min_frequency" in message
+    assert "drop" not in message.lower()
+
+
 def test_train_final_without_features_is_unaffected_by_feature_tables_param() -> None:
     """Back-compat: omitting ``feature_tables`` (the pre-Task-9 call shape)
     must behave exactly as before -- no feature kwargs, no feature state on

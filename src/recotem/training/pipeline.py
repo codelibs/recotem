@@ -48,7 +48,12 @@ from recotem.training.features import (
     load_feature_tables,
 )
 from recotem.training.progress import ProgressReporter
-from recotem.training.search import SearchResult, _construct, run_search
+from recotem.training.search import (
+    SearchResult,
+    _construct,
+    is_feature_ridge_failure,
+    run_search,
+)
 from recotem.training.split import split_interactions
 from recotem.version import __version__ as recotem_version
 
@@ -920,23 +925,29 @@ def _train_final(
             code="final_training_error",
         ) from exc
     except RuntimeError as exc:
-        # Rank-deficient features make the feature-ridge Cholesky solve
-        # fail. This CAN happen even when every search trial succeeded,
-        # because the final refit's matrix differs from every trial's
-        # matrix (full dataset vs. train+val split). Do not tell the user
-        # to drop a column: recotem's own always-on bias column is
-        # deliberately collinear with the categorical one-hots (see
-        # recotem._features's module docstring) and is the most likely
-        # structural cause, and it cannot be removed from the recipe.
-        if "Feature ridge Cholesky decomposition failed" in str(exc):
+        # Rank-deficient features make the feature ridge unsolvable. This CAN
+        # happen even when every search trial succeeded, because the final
+        # refit's matrix differs from every trial's matrix (full dataset vs.
+        # train+val split). Do not tell the user to drop a column: recotem's
+        # own always-on bias column is deliberately collinear with the
+        # categorical one-hots (see recotem._features's module docstring) and
+        # is the most likely structural cause, and it cannot be removed from
+        # the recipe.
+        #
+        # Unlike a search trial there is no sibling to fall back to, so this
+        # is fatal rather than pruned -- the completed search is lost and no
+        # artifact is written. `is_feature_ridge_failure` (not a bare
+        # substring test) is what makes the two untyped upstream variants land
+        # here as exit 4 instead of an unmapped exit 1; see its docstring.
+        if is_feature_ridge_failure(exc):
             raise TrainingError(
-                "Feature ridge Cholesky decomposition failed during final "
-                "training. The feature matrix for the full dataset is rank "
-                "deficient at the selected lambda. This can happen even "
-                "when every search trial succeeded, because the final "
-                "matrix differs from every trial's matrix. Raising "
-                "min_frequency on high-cardinality feature columns usually "
-                "resolves it; see docs/operations.md.",
+                f"Feature ridge solve failed during final training: {exc} "
+                "The feature matrix for the full dataset is rank deficient "
+                "at the selected lambda. This can happen even when every "
+                "search trial succeeded, because the final matrix differs "
+                "from every trial's matrix. Raising min_frequency on "
+                "high-cardinality feature columns usually resolves it; see "
+                "docs/operations.md.",
                 code="feature_cholesky_error",
             ) from exc
         raise

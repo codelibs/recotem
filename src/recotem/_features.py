@@ -87,8 +87,12 @@ Each categorical column's one-hot block sums to 1 for every row (when the
 value is known), which is linearly dependent on the always-1 bias column.
 This is accepted, not an oversight: drop-first encoding would make an
 unknown/missing value (all-zero block) indistinguishable from the dropped
-reference level, and the tuned ``lambda >= 5e-2`` search range absorbs the
-resulting rank deficiency in irspack's Cholesky solve.
+reference level. The rank deficiency this creates is exact, not approximate:
+``F^T F`` is singular by construction, and irspack's ``lambda_*_feature`` --
+added straight to the Gram diagonal and factorised in float32 -- is the sole
+eigenvalue along that null direction. That is why the tuned search range
+floors at ``lambda >= 1.0`` rather than going lower; see the range comment in
+``recotem.training.search``.
 """
 
 from __future__ import annotations

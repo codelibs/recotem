@@ -132,12 +132,12 @@ def test_random_scheme_ignores_time_column() -> None:
     config = SplitConfig(scheme="random", heldout_ratio=0.2, seed=42)
     common = dict(user_column="user_id", item_column="item_id")
 
-    _, with_time, _ = split_interactions(
+    with_time = split_interactions(
         df, **common, time_column="ts", split_config=config
-    )
-    _, without_time, _ = split_interactions(
+    ).X_val_test
+    without_time = split_interactions(
         df, **common, time_column=None, split_config=config
-    )
+    ).X_val_test
 
     assert _matrix_fingerprint(with_time) == _matrix_fingerprint(without_time), (
         "time_column changed the `random` split — it leaked into the scheme"
@@ -154,16 +154,16 @@ def test_random_scheme_with_time_column_is_not_a_recency_holdout() -> None:
     df = _synth_df(n_users=30, n_items_per_user=10)
     common = dict(user_column="user_id", item_column="item_id", time_column="ts")
 
-    _, random_split, _ = split_interactions(
+    random_split = split_interactions(
         df,
         **common,
         split_config=SplitConfig(scheme="random", heldout_ratio=0.2, seed=42),
-    )
-    _, recency_split, _ = split_interactions(
+    ).X_val_test
+    recency_split = split_interactions(
         df,
         **common,
         split_config=SplitConfig(scheme="time_user", heldout_ratio=0.2, seed=42),
-    )
+    ).X_val_test
 
     # Both calls shuffle users with the same seed and derive the item ordering
     # from the same frame in the same process, so row i is the same user in

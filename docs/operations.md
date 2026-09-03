@@ -473,12 +473,18 @@ per-user improvement, which is why the batch verbs
 (`:batch-recommend` / `:batch-recommend-related`) are the recommended path
 for any bulk cold-start workload.
 
-The recommender's default `n_threads=16` measurably hurts **single-request**
-latency: median 734–857 µs and p95 2.0–2.2 ms at the default, versus faster
-at `n_threads` 1–4. `n_threads` is baked into the pickled model at training
-time, and there is currently no serve-time override — if single-request
-cold-start latency matters for your workload, this is a training-time
-decision, not a serving-time one.
+A high `n_threads` measurably hurts **single-request** latency: median
+734–857 µs and p95 2.0–2.2 ms at `n_threads=16`, versus faster at
+`n_threads` 1–4. irspack has no fixed default here —
+`IALSRecommender(n_threads=None)` resolves through
+`irspack._threading.get_n_threads` to `$IRSPACK_NUM_THREADS_DEFAULT`, falling
+back to `os.cpu_count()`, so the effective default is the training host's
+core count (16 on the machine these numbers were measured on). Recotem never
+sets `n_threads`, and the resolved value is baked into the pickled model at
+training time — there is no serve-time override. If single-request cold-start
+latency matters for your workload, set `IRSPACK_NUM_THREADS_DEFAULT` in the
+**training** environment; it is a training-time decision, not a serving-time
+one.
 
 ---
 

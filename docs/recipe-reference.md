@@ -370,7 +370,7 @@ recommender's `default_suggest_parameter` in irspack and are **not**
 user-tunable from the recipe (see the `algorithms` row above). The
 feature-ridge coefficients are the first exception: `lambda_item_feature`
 and `lambda_user_feature` are **recotem's own** search range —
-`suggest_float(..., 5e-2, 1e6, log=True)` — applied only to the side(s)
+`suggest_float(..., 1.0, 1e6, log=True)` — applied only to the side(s)
 that have a `features.item` / `features.user` block, and only when the
 trial's class is `IALSRecommender`. They are not present as recipe fields;
 they cannot be set explicitly, only tuned.
@@ -381,6 +381,30 @@ suggests them), and the constructor default of `0.0` is a **hard error**
 whenever the matching feature matrix is non-empty (`ValueError: Feature
 weight regularization must be positive.`) — so leaving it untuned is not an
 option once a features block is present.
+
+Provenance of the bounds: they match upstream's only feature-aware example
+(`examples/mind/mind_small_feature_aware_ials.py` at irspack v0.5.2), which
+tunes `lambda_item_feature` over `1.0`–`1e6`.
+
+The `1.0` floor is a **conditioning** floor, not deference to upstream.
+irspack forms the ridge as `gram = Fᵀ F; gram.diagonal() += lambda_feature`
+and factorises it by Cholesky in **float32**. Recotem's encoder always
+appends an all-ones bias column that is deliberately collinear with every
+`categorical` one-hot block (see above), so `Fᵀ F` is *exactly* singular by
+construction and `lambda_feature` is the only eigenvalue along that null
+direction. The Gram's condition number is therefore roughly
+`(largest eigenvalue) / lambda`, and float32 Cholesky stops being reliable
+as that approaches `1/eps` (~8×10⁶). Every decade below `1.0` spends a decade
+of that budget, which is why the floor does not go lower.
+
+When the ridge is nonetheless unsolvable, irspack raises `Feature ridge
+Cholesky decomposition failed` or `Feature ridge solve failed`. **During the
+search that is not a training failure** — recotem prunes the trial and
+carries on. It is fatal only if the **final refit** hits it, which exits 4
+with subcode `feature_cholesky_error`; the completed search is discarded and
+no artifact is written. See
+[operations.md](operations.md#feature-aware-ials-sizing) for the
+`min_frequency` remedy.
 
 ### Validation
 
@@ -433,7 +457,7 @@ training:
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `algorithms` | list[string] | required | `IALS`, `CosineKNN` (alias `CosinekNN`), `TopPop`, `RP3beta`, `DenseSLIM`, `TruncatedSVD`, `BPRFM`. Full irspack class names (e.g. `IALSRecommender`) are also accepted. Hyperparameter ranges come from each recommender's `default_suggest_parameter` in irspack — they are not user-tunable from the recipe, **with one exception**: when a [`features`](#features) block is present, `lambda_item_feature` / `lambda_user_feature` are tuned over recotem's own range (`5e-2`–`1e6`, log-scale), because irspack ships no default range for them and their constructor default of `0.0` is a hard error whenever the matching feature matrix is non-empty. |
+| `algorithms` | list[string] | required | `IALS`, `CosineKNN` (alias `CosinekNN`), `TopPop`, `RP3beta`, `DenseSLIM`, `TruncatedSVD`, `BPRFM`. Full irspack class names (e.g. `IALSRecommender`) are also accepted. Hyperparameter ranges come from each recommender's `default_suggest_parameter` in irspack — they are not user-tunable from the recipe, **with one exception**: when a [`features`](#features) block is present, `lambda_item_feature` / `lambda_user_feature` are tuned over recotem's own range (`1.0`–`1e6`, log-scale, matching upstream's feature-aware example), because irspack ships no default range for them and their constructor default of `0.0` is a hard error whenever the matching feature matrix is non-empty. |
 | `metric` | string | `ndcg` | One of `ndcg`, `map`, `recall`, `hit`. |
 | `cutoff` | int | `20` | Recommendation list length for evaluation (must be ≥ 1). |
 | `n_trials` | int | `40` | Total Optuna trial budget (must be ≥ 1). |

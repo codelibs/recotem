@@ -32,10 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are encoded and fed to `IALSRecommender` during Optuna search and the
   final refit. The mere presence of `features:` turns this on; there is no
   separate flag. `lambda_item_feature` / `lambda_user_feature` are tuned by
-  Optuna over a new recotem-owned range (`5e-2`–`1e6`, log-scale) rather than
+  Optuna over a recotem-owned range (`1.0`–`1e6`, log-scale) rather than
   irspack's own `default_suggest_parameter`, because irspack ships no default
   range for them and their `0.0` constructor default is a hard error whenever
-  the matching feature matrix is non-empty. See
+  the matching feature matrix is non-empty. The bounds match upstream's only
+  feature-aware example (`examples/mind/mind_small_feature_aware_ials.py`);
+  the floor is also a float32-Cholesky conditioning floor, because recotem's
+  always-on bias column makes the feature Gram exactly singular and
+  `lambda_*_feature` is the sole eigenvalue along that direction. See
   `docs/recipe-reference.md#features`.
 - **Cold-start serving from side features.** `POST
   /v1/recipes/{name}:recommend` accepts `user_features` to score an unknown
@@ -242,15 +246,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documented breaking changes (`tune_with_study` removal, `fixed_params` →
   keyword arguments, `random_seed` → `tuning_random_seed`) affect Recotem.
   **IALS and BPRFM models trained on 0.4.x must be retrained** — see below.
-  The subsequent 0.5.1 (parallelised feature-aware iALS) and 0.5.2 (graceful
-  handling of a feature-ridge Cholesky failure during tuning) releases touch
-  code paths Recotem does not reach, and were verified not to change the
-  serialised model at all: for all six algorithms Recotem can build, an
+  The subsequent 0.5.1 (parallelised feature-aware iALS) and 0.5.2
+  (`FeatureRidgeCholeskyError`, a dedicated exception for a feature-ridge
+  Cholesky failure) both land in the feature-aware path, which the new
+  `features:` block *does* reach — recotem's search prunes the Optuna trial
+  on that failure rather than aborting the run. They were verified not to
+  change the serialised model: for all six algorithms Recotem can build, an
   identically-trained recommender pickles to a byte-identical payload under
   0.5.0 and 0.5.2 (SHA-256 compared), `IALSModelConfig.__setstate__` keeps its
   10-element arity, and artifacts interchange in both directions with
-  bit-exact recommendation scores. **No retrain is needed for a 0.5.x → 0.5.2
-  upgrade.**
+  bit-exact recommendation scores. That comparison was run on
+  non-feature-carrying payloads only, so it does not by itself certify a
+  0.5.0-trained *feature-aware* artifact on 0.5.2; train and serve on the same
+  irspack minor, as the skew guard already requires. **No retrain is needed
+  for a 0.5.x → 0.5.2 upgrade.**
 - **scikit-learn is now a direct, range-pinned dependency** (`>=1.8,<1.10`).
   It was already reachable transitively via irspack, which asks only for
   `>=0.21.0`. `TruncatedSVDRecommender` pickles an sklearn estimator into the
@@ -274,6 +283,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Feature-aware iALS: every feature-ridge failure is now recognised, not
+  just the Cholesky one.** irspack raises this family from three sites in
+  `cpp_source/als/IALSTrainer.hpp` and types them inconsistently. On 0.5.0
+  there were two, both carrying `Feature ridge Cholesky decomposition
+  failed.`, so recotem's substring test covered the family completely.
+  **0.5.1 added a third** — `Feature ridge solve failed.`, raised inside the
+  `std::async` worker its feature-aware parallelisation introduced, when the
+  Cholesky succeeds but the solution is not finite — and 0.5.2 typed only the
+  first two as `FeatureRidgeCholeskyError`, leaving the third a bare
+  `std::runtime_error` (irspack's own `optuna_trial_failure_exceptions` has
+  the same gap). Against irspack 0.5.1+ that third failure did not match, so
+  it escaped `study.optimize` (called with no `catch=`) and **aborted the
+  entire search instead of pruning one trial**; in the final refit it missed
+  the `feature_cholesky_error` mapping and surfaced as an unmapped exit 1
+  rather than exit 4 with the `min_frequency` remedy. Recognition is now by
+  type **and** by the `Feature ridge` prefix, so all three sites are covered
+  on every 0.5.x — while the plain iALS solver's own `Cholesky decomposition
+  failed.` / `Cholesky solve failed.` stay unmatched, as before. Applies to
+  both search paths and the final refit.
 - **Feature-aware iALS: an all-dead-numerical `features:` block is now
   refused.** The whole-block-dead guard keyed on `n_features == 1`, which a
   block whose only column is a zero-variance (or all-null) `numerical` column

@@ -150,7 +150,7 @@ class EchoSource:
            raise DataSourceError(str(exc)) from exc
    ```
 
-7. **Deferred imports.** Do not import optional dependencies at module top-level. Defer to `__init__` or `fetch()`:
+7. **<a id="deferred-imports"></a>Deferred imports.** Do not import optional dependencies at module top-level. Defer to `__init__` or `fetch()`:
 
    ```python
    def __init__(self, config: "MySource.Config") -> None:

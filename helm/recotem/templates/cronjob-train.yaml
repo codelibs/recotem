@@ -39,12 +39,32 @@ spec:
           {{- if not .Values.recipes.objectStore.initContainer }}
           {{- fail "recipes.source=objectStore requires recipes.objectStore.initContainer to be set" }}
           {{- end }}
+          {{- /* The chart's own mounts are MERGED into the operator's spec rather
+                 than emitted as sibling keys under it.  Emitting `volumeMounts:`
+                 (or `name:`) a second time in the same mapping is not an error for
+                 any validator in the path — helm lint, helm template and
+                 `kubectl apply --dry-run=server --validate=strict` all accept it —
+                 but Go's YAML decoder is last-key-wins, so the operator's own
+                 mounts (bucket credentials, a CA bundle) were silently dropped and
+                 the sync container failed at runtime for no visible reason.
+
+                 Precedence: an operator-supplied `name` wins, `sync-recipes` is
+                 only the default, so an existing spec that names its container
+                 keeps that name.  The chart's `recipes` mount is the exception —
+                 it is appended last and any operator entry of the same name is
+                 dropped, because redirecting it would leave train looping over an
+                 unpopulated emptyDir.  Keep this block identical to the one in
+                 deployment.yaml. */}}
+          {{- $ic := deepCopy .Values.recipes.objectStore.initContainer }}
+          {{- $mounts := list }}
+          {{- range default (list) $ic.volumeMounts }}
+          {{- if ne .name "recipes" }}{{ $mounts = append $mounts . }}{{ end }}
+          {{- end }}
+          {{- $mounts = append $mounts (dict "name" "recipes" "mountPath" $.Values.recipes.mountPath) }}
+          {{- $_ := set $ic "volumeMounts" $mounts }}
+          {{- $_ := set $ic "name" (default "sync-recipes" $ic.name) }}
           initContainers:
-            - name: sync-recipes
-              {{- toYaml .Values.recipes.objectStore.initContainer | nindent 14 }}
-              volumeMounts:
-                - name: recipes
-                  mountPath: {{ .Values.recipes.mountPath }}
+            {{- toYaml (list $ic) | nindent 12 }}
           {{- end }}
 
           containers:

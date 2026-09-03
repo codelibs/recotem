@@ -65,16 +65,24 @@ spec:
                 capabilities:
                   drop:
                     - ALL
-              # Train all recipes in /recipes.
+              # Train all recipes in /recipes.  Fail loudly when the directory
+              # is empty, so a wrong ConfigMap name surfaces here instead of as
+              # an unexplained 503 from serve.
               command:
                 - /bin/sh
                 - -c
                 - |
-                  set -e
+                  set -eu
+                  count=0
                   for recipe in /recipes/*.yaml; do
                     [ -f "$recipe" ] || continue
+                    count=$((count + 1))
                     recotem train "$recipe"
                   done
+                  if [ "$count" -eq 0 ]; then
+                    echo "no recipe files found under /recipes" >&2
+                    exit 1
+                  fi
               env:
                 - name: RECOTEM_LOG_FORMAT
                   value: "json"

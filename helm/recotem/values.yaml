@@ -163,10 +163,26 @@ recipes:
     # Use an init container to sync recipes from an object store before serve starts.
     # Provide a custom initContainer spec here.  The init container should write
     # YAML files to an emptyDir shared with the serve container at recipes.mountPath.
+    #
+    # The chart MERGES its own additions into this spec rather than emitting
+    # them alongside it, so your keys are never overwritten:
+    #   * `name` — yours wins; the chart defaults it to `sync-recipes`.
+    #   * `volumeMounts` — the chart appends its own mount of the shared
+    #     `recipes` volume at recipes.mountPath to your list.  That one entry
+    #     always wins: an entry of yours named `recipes` is dropped, because
+    #     redirecting it would leave serve reading an unpopulated emptyDir.
+    # Any volumeMounts you add must name a volume the chart declares — one of
+    # `recipes`, `artifacts` (when artifacts.enabled), `tmp` or `workspace`.
+    # There is no extraVolumes hook, so a mount naming anything else renders
+    # fine but is rejected by the API server at admission.
     initContainer: {}
+    #   name: s3-sync
     #   image: amazon/aws-cli:latest
     #   command: ["sh", "-c", "aws s3 sync s3://my-bucket/recipes /recipes"]
     #   env: []
+    #   volumeMounts:
+    #     - name: tmp          # the chart's shared scratch emptyDir
+    #       mountPath: /tmp
 
 # ── artifacts volume ──────────────────────────────────────────────────────────
 artifacts:

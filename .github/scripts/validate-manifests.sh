@@ -262,9 +262,7 @@ cat > "${VALUES_DIR}/06-objectstore-recipes.yaml" <<'YAML'
 recipes:
   source: objectStore
   objectStore:
-    # No `name:` here — the templates emit `- name: sync-recipes` themselves and
-    # then toYaml this spec under it, so supplying one produces a duplicate map
-    # key that kubeconform rejects.  Matches the example in values.yaml.
+    # Minimal spec, as documented in values.yaml: no `name`, no `volumeMounts`.
     initContainer:
       image: amazon/aws-cli:latest
       command: ["sh", "-c", "aws s3 sync s3://example-bucket/recipes /recipes"]
@@ -292,6 +290,29 @@ recipes:
           item_column: item_id
         output:
           path: /artifacts/news_articles.recotem
+YAML
+
+# The realistic objectStore spec: the sync container is named, and it mounts a
+# scratch dir of its own alongside the chart's /recipes mount.  The templates
+# used to emit `name:` and `volumeMounts:` a SECOND time under this spec; Go's
+# YAML decoder is last-key-wins, so the operator's mounts were silently
+# discarded.  kubeconform is the check that catches it ("key already set in
+# map") — but only once a permutation supplies these keys, which none did.
+# Mounts must name a volume the chart declares (recipes / artifacts / tmp /
+# workspace); the chart has no extraVolumes hook.
+cat > "${VALUES_DIR}/08-objectstore-operator-spec.yaml" <<'YAML'
+recipes:
+  source: objectStore
+  objectStore:
+    initContainer:
+      name: s3-sync
+      image: amazon/aws-cli:latest
+      command: ["sh", "-c", "aws s3 sync s3://example-bucket/recipes /recipes"]
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+train:
+  enabled: true
 YAML
 
 echo

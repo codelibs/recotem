@@ -665,6 +665,32 @@ def _compute_recipe_hash(recipe: Recipe) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _assert_schema_columns_present(df: pd.DataFrame, recipe: Recipe) -> None:
+    """Raise :class:`DataSourceError` if a ``schema:`` column is absent from *df*.
+
+    A column named in the recipe but missing from the fetched data is a
+    data-source problem (exit 3), not an internal error.  Left unchecked it
+    surfaces as a raw pandas ``KeyError`` from ``_cleanse`` — either from
+    ``dropna(subset=...)`` (``cleansing.drop_null_ids: true``) or from the
+    ``astype(str)`` id coercion (``drop_null_ids: false``) — which the CLI maps
+    to exit 1.
+    """
+    from recotem.datasource.base import DataSourceError  # noqa: PLC0415
+
+    required = [recipe.schema_.user_column, recipe.schema_.item_column]
+    if recipe.schema_.time_column is not None:
+        required.append(recipe.schema_.time_column)
+
+    present = set(df.columns)
+    missing = [col for col in required if col not in present]
+    if missing:
+        available = sorted(str(c) for c in df.columns)[:10]
+        raise DataSourceError(
+            f"schema column(s) {missing} not found in the fetched data for "
+            f"recipe {recipe.name!r}; available columns: {available}"
+        )
+
+
 def _fetch_data(recipe: Recipe, run_id: str) -> pd.DataFrame:
     """Fetch data using the recipe's datasource (per spec section 13 contract)."""
     from recotem.datasource.base import DataSourceError, FetchContext  # noqa: PLC0415
@@ -685,8 +711,30 @@ def _fetch_data(recipe: Recipe, run_id: str) -> pd.DataFrame:
     try:
         source_cls = get_source_class(str(type_name))
         source_instance = source_cls(source_config)
-        ctx = FetchContext(recipe_name=recipe.name, run_id=run_id)
+        # Hand the source the schema column names so it can reject a recipe
+        # that names a column the data does not have with a DataSourceError
+        # (exit 3) instead of letting a raw pandas KeyError escape from
+        # ``_cleanse`` as an unmapped exit 1.
+        #
+        # ONLY the interaction source gets this context.  Feature tables
+        # (``features.item`` / ``features.user``) legitimately do not carry the
+        # interaction columns, so ``training/features.py`` deliberately passes
+        # an empty ``extra``.
+        ctx = FetchContext(
+            recipe_name=recipe.name,
+            run_id=run_id,
+            extra={
+                "user_column": recipe.schema_.user_column,
+                "item_column": recipe.schema_.item_column,
+                "time_column": recipe.schema_.time_column,
+            },
+        )
         df = source_instance.fetch(ctx)
+        # Query-shaped sources (bigquery / sql) and third-party plugins build
+        # their own column set and cannot honour ``ctx.extra``, so repeat the
+        # check here.  Without it a schema/query mismatch still reaches
+        # ``_cleanse`` as a bare pandas KeyError (exit 1).
+        _assert_schema_columns_present(df, recipe)
     except DataSourceError:
         raise
     except TrainingError:

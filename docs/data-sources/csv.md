@@ -200,7 +200,7 @@ CSV-parse failures, missing files, and missing columns map to exit 3 (`DataSourc
 | Error | Exit | Message pattern |
 |-------|------|----------------|
 | File not found | 3 | `DataSourceError: No such file or path: ./data/interactions.csv` |
-| Column missing | 2 | `RecipeError: column 'user_id' not found` |
+| Column missing | 3 | `DataSourceError: required column 'user_id' not found in source './data/interactions.csv'; available columns: [...]` |
 | Empty file (after header) | 3 | `DataSourceError: file has no data rows` |
 | Parse error | 3 | `DataSourceError: ParserError: Error tokenizing data...` |
 | Corrupt Parquet | 3 | `DataSourceError: ArrowInvalid: ...` |

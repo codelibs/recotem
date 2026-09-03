@@ -410,3 +410,55 @@ def test_csv_no_extra_context_skips_column_validation(tmp_path: Path) -> None:
     # Must NOT raise — validation skipped when no column context is provided
     df = CSVSource(cfg).fetch(ctx)
     assert len(df) == 2
+
+
+# ---------------------------------------------------------------------------
+# ParquetSource gets the same required-column check as CSVSource: a schema
+# typo must exit 3 (DataSourceError), not 1 (bare pandas KeyError).
+# ---------------------------------------------------------------------------
+
+
+def _write_parquet(path: Path, frame: dict[str, list[str]]) -> None:
+    import pandas as pd
+
+    pd.DataFrame(frame).to_parquet(path, index=False)
+
+
+def test_parquet_missing_item_column_raises_data_source_error(tmp_path: Path) -> None:
+    """Parquet missing item_column must raise DataSourceError, not KeyError."""
+    from recotem.datasource.csv import ParquetConfig, ParquetSource
+
+    pq_path = tmp_path / "no_item.parquet"
+    _write_parquet(pq_path, {"user_id": ["u1", "u2"], "sku": ["a", "b"]})
+
+    cfg = ParquetConfig(type="parquet", path=str(pq_path))
+    ctx = FetchContext(
+        recipe_name="t",
+        run_id="r",
+        extra={"user_column": "user_id", "item_column": "item_id"},
+    )
+
+    with pytest.raises(DataSourceError) as exc_info:
+        ParquetSource(cfg).fetch(ctx)
+
+    msg = str(exc_info.value)
+    assert "item_id" in msg, f"error must name the missing column; got {msg!r}"
+    assert "sku" in msg, f"error must list available columns; got {msg!r}"
+
+
+def test_parquet_all_required_columns_present_no_error(tmp_path: Path) -> None:
+    """A Parquet file with every required column must fetch successfully."""
+    from recotem.datasource.csv import ParquetConfig, ParquetSource
+
+    pq_path = tmp_path / "full.parquet"
+    _write_parquet(pq_path, {"user_id": ["u1", "u2"], "item_id": ["a", "b"]})
+
+    cfg = ParquetConfig(type="parquet", path=str(pq_path))
+    ctx = FetchContext(
+        recipe_name="t",
+        run_id="r",
+        extra={"user_column": "user_id", "item_column": "item_id"},
+    )
+
+    df = ParquetSource(cfg).fetch(ctx)
+    assert len(df) == 2

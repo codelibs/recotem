@@ -47,10 +47,10 @@ Seed-item → items.
 to the model id-map (typically a client-side data issue).
 `NO_CANDIDATES` means at least one seed was known but the ranker did not
 produce any survivors after its internal filtering — typically a data
-distribution issue rather than a client mistake. `NO_CANDIDATES` is only
-possible on the pre-existing "all seeds known, no features supplied" path;
-see [Feature-aware cold start](#feature-aware-cold-start) for why the two
-feature-aware branches never raise it.
+distribution issue rather than a client mistake. Every branch of this verb
+raises it the same way — the pre-existing all-seeds-known path and both
+feature-aware cold-start branches (cases B and C) — so an empty result is
+reported identically regardless of which path served the request.
 
 ### `POST /v1/recipes/{name}:batch-recommend`
 Multi-user batch.  Body: `{ "requests": RecommendRequest[], "include_metadata": bool }` (1..256).
@@ -111,9 +111,10 @@ capped at 100, so a maximal single request is 100 solves.
 
 Each element accepts `user_features` / `item_features` exactly as the
 single `:recommend-related` endpoint does, including the case A/B/C
-precedence rules and the `200 {"items": []}` vs `NO_CANDIDATES` asymmetry
-described in [Feature-aware cold start](#feature-aware-cold-start) — both
-apply per-element here.
+precedence rules described in
+[Feature-aware cold start](#feature-aware-cold-start); an element that
+produces no survivors surfaces as `status=error, code=NO_CANDIDATES`, on
+every branch.
 
 **Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 413 (`PAYLOAD_TOO_LARGE`), 422 (`VALIDATION_ERROR` — only for whole-request shape), 503 (`RECIPE_UNAVAILABLE`).
 
@@ -311,21 +312,14 @@ is nowhere near the magnitude needed to break the solver. Serve-time has no
 such self-bound, because the request's value is standardized against a
 std fit without it.)
 
-**A pre-existing API asymmetry, documented rather than fixed.**
-`:recommend-related`'s original all-seeds-known branch (no `user_features`,
-no cold seeds) returns `404 NO_CANDIDATES` when the ranker produces zero
-survivors after its own filtering. The two feature-aware branches (B and C)
-never raise `NO_CANDIDATES` — an empty result from either comes back as
-`200 {"items": []}`. `:recommend` never had a `NO_CANDIDATES` code at all and
-returns `200`/`[]` in every case, so it is internally consistent already;
-`:recommend-related` is the one verb where the behavior differs by branch.
-This was a deliberate call, not an oversight: for a cold-start profile or a
-cold seed item, producing nothing is a property of an unproven input, not
-evidence that the ranker itself failed — so `200 {"items": []}` was judged
-the more defensible response. If your client treats an empty
-`:recommend-related` result as actionable (e.g. falling back to
-popularity-based recommendations), branch on `items == []` rather than on
-HTTP status for this verb.
+**Every `:recommend-related` branch reports an empty result the same way.**
+The all-seeds-known branch, the `user_features` profile-prior branch (case
+B), and the cold-seed branch (case C) all return `404 NO_CANDIDATES` when the
+ranker produces zero survivors after its own filtering. An earlier revision
+of this feature returned `200 {"items": []}` from the two cold-start
+branches; that asymmetry was fixed before release, so a client may branch on
+HTTP status for this verb. `:recommend` has no `NO_CANDIDATES` code at all
+and returns `200` with an empty `items` list in every case.
 
 **Length and size bounds on cold-start fields.** A cold-start feature mapping
 is bounded on three axes, each rejected before the model is consulted:
@@ -416,7 +410,7 @@ in every error case is one of the three forms above.
 | `RECIPE_NOT_FOUND`   | 404 | no such recipe in registry |
 | `UNKNOWN_USER`       | 404 | user not in idmap |
 | `UNKNOWN_SEED_ITEMS` | 404 | none of seed_items known to model |
-| `NO_CANDIDATES`      | 404 | seeds known, but ranker produced no survivors (only reachable on `:recommend-related`'s non-feature-aware path — see [Feature-aware cold start](#feature-aware-cold-start)) |
+| `NO_CANDIDATES`      | 404 | `:recommend-related` produced no survivors after ranker filtering — reachable on **every** branch of the verb, including both feature-aware cold-start branches (also surfaced per-element inside a `200` batch response) |
 | `VALIDATION_ERROR`   | 422 | Pydantic schema rejected the request (also used per-element inside batch responses) |
 | `FEATURES_NOT_SUPPORTED` | 400 | `user_features` / `item_features` supplied but the model has no matching feature state, or its search winner is not feature-capable (also used per-element inside batch responses) |
 | `FEATURE_VALUE_UNUSABLE` | 400 | a supplied `numerical` feature value, once standardized against the column's training mean/std, is large enough to make irspack's cold-start solver itself fail (the exact threshold is std/BLAS-dependent, not a fixed constant, and depends on the column's std as much as the raw value — see [Feature-aware cold start](#feature-aware-cold-start)) — the model and feature side both support cold start, but this particular value does not. Values large enough to be meaningless but not large enough to break the solver degrade silently as `200` instead (also used per-element inside batch responses) |

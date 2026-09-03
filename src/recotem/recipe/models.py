@@ -294,10 +294,14 @@ class FeaturesConfig(BaseModel, extra="forbid"):
     no separate flag. ``lambda_*_feature`` is a ridge on the feature-weight
     matrices ``A``/``B``, not the strength of the feature prior itself; a
     large enough value shrinks ``A``/``B`` toward zero and was measured
-    bit-identical to plain iALS at ``λ=1e8``. The tuned range's upper bound
-    (``1e6``) is only what upstream's own example exercises, not a verified
-    "features off" point, so the search space is not guaranteed to contain a
-    features-off model. Run two recipes if you need a true on/off comparison.
+    bit-identical to plain iALS at ``λ=1e8``. The tuned range (``1.0``-``1e6``)
+    matches upstream's only feature-aware example,
+    ``examples/mind/mind_small_feature_aware_ials.py``; its upper bound is
+    therefore just what upstream exercises, NOT a verified "features off"
+    point, so the search space is not guaranteed to contain a features-off
+    model. Run two recipes if you need a true on/off comparison. See the range
+    comment in ``recotem.training.search`` for why the floor does not go below
+    ``1.0``.
     """
 
     item: FeatureSideConfig | None = None

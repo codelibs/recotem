@@ -714,11 +714,16 @@ in full ahead of any pydantic validation. The middleware enforces the cap at two
 points so the header cannot be omitted to bypass it: a declared `Content-Length`
 over the cap is refused outright, and a chunked/streamed body with no
 `Content-Length` is counted as it arrives and cut off the moment the running
-total crosses the cap. The default preserves the entire legitimate request space
-— the largest well-formed body the API accepts is ~72 MiB (a 256-element batch,
-each sub-request carrying 1000 `exclude_items` of up to 256 chars) — while
-blocking GB-scale bodies. This bounds a **single request**; sustained rates are
-still the proxy's job.
+total crosses the cap. The default clears the largest schema-valid *single-verb*
+body — `:recommend-related` tops out near 52 MiB once `user_features` /
+`item_features` are filled to their per-field caps — but deliberately not the
+largest *batch* body: `:batch-recommend` tops out near 196 MiB and
+`:batch-recommend-related` near 13 GiB, the latter beyond even the 2 GiB clamp.
+Those are refused with `413`; an operator who genuinely sends batches that large
+must raise the cap. (Before the cold-start fields existed the schema-valid
+maximum really was ~72 MiB — a 256-element batch each carrying 1000
+`exclude_items` of up to 256 chars.) This bounds a **single request**; sustained
+rates are still the proxy's job.
 
 **Per-request input fields are all length- and count-bounded.** Every
 client-controlled request field has an explicit cap so a well-formed but huge

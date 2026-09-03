@@ -151,6 +151,7 @@ docker run --rm \
 | `RECOTEM_ALLOWED_ORIGINS` | no | `""` (deny) | Comma-separated CORS origins |
 | `RECOTEM_MAX_ARTIFACT_BYTES` | no | `2147483648` (2 GiB) | Per-artifact size cap (includes header + payload) |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | no | `536870912` (512 MiB) | Per-payload cap for serve-side deserialization (post-HMAC-verify). Clamped 1 MiB–16 GiB. Must be ≤ `RECOTEM_MAX_ARTIFACT_BYTES`; misconfiguration raises a `ConfigError` (exit 8) at startup. |
+| `RECOTEM_MAX_BODY_BYTES` | no | `134217728` (128 MiB) | Cap on each HTTP **request** body; over-cap requests get `413 PAYLOAD_TOO_LARGE` before the body is parsed. Clamped 1 MiB–2 GiB. |
 | `RECOTEM_MAX_DOWNLOAD_BYTES` | no | `268435456` (256 MiB) | Cap on source-path body for HTTP/HTTPS, local, and object-store reads (clamped 1 MiB–16 GiB) |
 | `RECOTEM_HTTP_TIMEOUT_SECONDS` | no | `30` | Connect/read timeout for HTTP/HTTPS source fetch (clamped 1–600) |
 | `RECOTEM_HTTP_ALLOW_PRIVATE` | no | `""` (blocked) | Set to `1`/`true`/`yes`/`on` to allow fetches to RFC1918/loopback/link-local destinations. Leave unset in production to block SSRF against cloud-metadata services. |

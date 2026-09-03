@@ -87,8 +87,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New metrics: `recotem_v1_feature_unknown_value_total` (a request's
   categorical/multi_label value was absent from the training vocabulary, or
   a numerical value was non-finite — degrades to an all-zero segment /
-  contributes nothing rather than failing the request) and
-  `recotem_v1_cold_start_requests_total` (cold-start traffic by case).
+  contributes nothing rather than failing the request),
+  `recotem_v1_cold_start_requests_total` (cold-start traffic by case), and
+  `recotem_v1_feature_unknown_column_total` (a request carried a feature key
+  the recipe never declared — counted per request per side, with no
+  column-name label, to bound cardinality; the key is silently ignored and
+  the request still returns `200`).
 - New example: `examples/feature-aware/` — a small interactions CSV, an item
   feature table exercising all three encodings, and a README walking
   train → serve → cold-start `:recommend-related`.
@@ -100,9 +104,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `413 PAYLOAD_TOO_LARGE` in the standard error envelope. Previously an
   authenticated client could make the process buffer and parse a multi-GB body.
 - `RECOTEM_MAX_BODY_BYTES` (default 128 MiB, clamped [1 MiB, 2 GiB]) tunes the
-  cap. The default clears the largest well-formed request `serve` already
-  accepts (~72 MiB) with headroom while blocking GB-scale bodies. A new
-  `PAYLOAD_TOO_LARGE` error code is added to the v1 API's `ErrorCode` union.
+  cap. It clears the largest schema-valid *single-verb* body —
+  `:recommend-related` tops out near 52 MiB once `user_features` /
+  `item_features` are filled to their per-field caps — but deliberately not the
+  largest *batch* body: `:batch-recommend` tops out near 196 MiB and
+  `:batch-recommend-related` near 13 GiB, the latter beyond even the 2 GiB
+  clamp. Batches that large are refused with `413`; raise the cap if you
+  genuinely send them. (The pre-feature maximum really was ~72 MiB; the new
+  cold-start fields raise the schema-valid ceiling by orders of magnitude.) A
+  new `PAYLOAD_TOO_LARGE` error code is added to the v1 API's `ErrorCode`
+  union.
 - **Cold-start feature-dict key-length caps.** Every feature-mapping KEY is now
   bounded to 1–256 characters (parity with other identifier fields):
   `user_features` column names, the `item_features` outer seed-id keys, and the
@@ -232,9 +243,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every existing recipe and changes its hash — the same effect
   `item_metadata` already has when absent. Nothing in Recotem compares or
   gates on `recipe_hash` today; it is carried through to the artifact header
-  (`recotem inspect`), the `train_done` log event, and the
-  `GET /v1/recipes/{name}` response purely for operators' own SIEM/audit
-  rules. The inference verbs do not echo it: `:recommend` returns
+  (`recotem inspect`) and the `GET /v1/recipes/{name}` response purely for
+  operators' own SIEM/audit rules. It is **not** readable from the
+  `train_done` log event: `log_redaction` rewrites every 64-hex string to
+  `[REDACTED-HEX64]`, so that field logs a constant regardless of the
+  recipe. The inference verbs do not echo it: `:recommend` returns
   `request_id` / `recipe` / `model_version` / `items` only. If you pin or
   diff `recipe_hash` in external tooling, expect every recipe to show a
   changed hash on this upgrade even though nothing about the recipe's

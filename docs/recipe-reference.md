@@ -540,6 +540,12 @@ protocols (paths containing `::`) are also rejected. Schemes `http://` and
 `https://` additionally require an `sha256` integrity pin on the same config
 block.
 
+These rules apply identically to a feature table's path
+(`features.item.source.path` / `features.user.source.path`) — the loader runs
+the same scheme allow-list, `::` rejection, embedded-credential rejection and
+network-scheme `sha256` requirement on every source block in the recipe, not
+only the top-level `source:`.
+
 > **Decompressed-size cap not enforced.** `RECOTEM_MAX_DOWNLOAD_BYTES` caps
 > raw I/O bytes only. Compressed CSV and columnar Parquet sources can expand
 > to a multiple of the raw size after decompression; the resulting DataFrame

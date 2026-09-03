@@ -368,7 +368,7 @@ Each model replica holds every loaded model in RAM. Plan accordingly.
 |--------|--------|
 | `RECOTEM_MAX_ARTIFACT_BYTES` | Hard cap per artifact file (default 2 GiB, clamped [1 MiB, 16 GiB]). Reduce this if you have many small models. |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | Cap on the deserialised payload per artifact (default 512 MiB, post-HMAC-verify). Must be ≤ `RECOTEM_MAX_ARTIFACT_BYTES`; if not, `recotem serve` fails at startup with `ConfigError` (exit 8). Reduces the memory spike from deserialization relative to the raw file size. |
-| `RECOTEM_MAX_BODY_BYTES` | Hard cap on each HTTP **request** body (default 128 MiB, clamped [1 MiB, 2 GiB]). A `413 PAYLOAD_TOO_LARGE` is returned before Starlette buffers/parses the body, so a single authenticated client cannot make the process allocate a multi-GB request. The default clears the largest well-formed request `serve` accepts (~72 MiB: a 256-element batch, each carrying 1000 exclude_items of up to 256 chars) with headroom. Reduce it if your legitimate batch sizes are small and you want a tighter bound; the cap applies both to a declared `Content-Length` and to chunked bodies with no length header. |
+| `RECOTEM_MAX_BODY_BYTES` | Hard cap on each HTTP **request** body (default 128 MiB, clamped [1 MiB, 2 GiB]). A `413 PAYLOAD_TOO_LARGE` is returned before Starlette buffers/parses the body, so a single authenticated client cannot make the process allocate a multi-GB request. The default clears the largest single-verb request — `:recommend-related` tops out near 52 MiB with maximal cold-start feature mappings — with headroom. It deliberately does **not** clear the largest schema-valid *batch* body: once `user_features` / `item_features` are filled to their per-field caps, `:batch-recommend` tops out near 196 MiB and `:batch-recommend-related` near 13 GiB, the latter beyond even the 2 GiB clamp. Such bodies are refused with `413`; raise the cap if you genuinely send batches that large. Reduce it if your legitimate batch sizes are small and you want a tighter bound; the cap applies both to a declared `Content-Length` and to chunked bodies with no length header. |
 | Number of recipes | Each recipe loads one model. 10 recipes × 500 MiB = 5 GiB baseline. |
 | Number of replicas | Each replica is independent. 2 replicas = 2× memory. |
 | Item metadata | DataFrame in-memory per recipe. Size ≈ rows × columns × 8 bytes. |
@@ -430,8 +430,10 @@ irspack forms a dense `Fᵀ F` Gram matrix per side and solves it by Cholesky
 decomposition. The two costs scale differently and are worth keeping apart
 when sizing a host: **time** grows **cubically** with the encoded dimension
 (the decomposition itself), while **memory** grows only **quadratically** —
-the Gram matrix is `dim² × 8` bytes at float64, which is exactly what the
-Memory column below reports. irspack never errors from either — it only
+the Gram matrix is `dim² × 8` bytes at float64, which closely tracks the
+Memory column below (the formula gives 200 MB / 800 MB / 3.2 GB against the
+measured 200 MB / 771 MB / 3 GB — the Gram dominates but is not the only
+allocation). irspack never errors from either — it only
 degrades. Measured per trial:
 
 | Encoded dimension | Time | Memory |
@@ -550,11 +552,15 @@ Enable Prometheus metrics:
 pip install "recotem[metrics]"
 ```
 
-The `/metrics` endpoint is opt-in and off by default. Set `RECOTEM_METRICS_ENABLED` to a truthy value (`1`, `true`, `yes`, `on`) to activate.
+The `/v1/metrics` endpoint is opt-in and off by default (a bare `/metrics` returns `404` — the route is mounted under the `/v1` router prefix). Set `RECOTEM_METRICS_ENABLED` to a truthy value (`1`, `true`, `yes`, `on`) to activate.
 
-> **Network exposure.** Both `/v1/metrics` and `/v1/health` are
-> unauthenticated by design — the same posture Prometheus and Kubernetes
-> liveness/readiness probes expect. The endpoints surface recipe names,
+> **Network exposure.** `/v1/health` is unauthenticated by design — the
+> posture Kubernetes liveness/readiness probes expect. `/v1/metrics` is
+> **not**: it carries `Depends(_require_auth)` like every other `/v1` route,
+> so a scrape without a valid `X-API-Key` gets `401`. Configure Prometheus
+> with the key (e.g. `http_headers` in the scrape config), or run the server
+> in its unauthenticated posture (no `RECOTEM_API_KEYS`, which forces the
+> loopback-only bind). The endpoints surface recipe names,
 > kid IDs, load-error strings, model-load timestamps, and per-verb
 > latency histograms.
 > **Restrict them with the cluster's NetworkPolicy** (`/v1/metrics` to

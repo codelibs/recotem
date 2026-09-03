@@ -90,7 +90,7 @@ hyperparameters — this is recotem's own tuned range, not irspack's (see
 [recipe-reference.md](../../docs/recipe-reference.md#features)). `n_items:
 14` (not 15): item `i15` never appears in `interactions.csv`, so it is not
 part of the trained id-map — that is what makes it a genuine cold item for
-step 6 below. `n_features: 13` is item `i15`'s only footprint in this
+step 7 below. `n_features: 13` is item `i15`'s only footprint in this
 header: it and every other item contributed to the vocabulary that produced
 that number, even though it is otherwise invisible to training.
 
@@ -128,7 +128,9 @@ determinism note above — but the shape and the HTTP 200 do not):
 
 ```json
 {
+  "request_id": "9e3d76dd7d0f",
   "recipe": "feature_aware_demo",
+  "model_version": "sha256:5273af9eaa0d…",
   "items": [
     {"item_id": "i11", "score": 0.000384},
     {"item_id": "i06", "score": 0.000319},
@@ -138,6 +140,9 @@ determinism note above — but the shape and the HTTP 200 do not):
   ]
 }
 ```
+
+`request_id` and `model_version` are always present — `request_id` echoes an
+`X-Request-ID` header when you send one and is otherwise generated.
 
 200, with real recommendations, for an item the model was never trained on.
 Compare with the same call **without** `item_features`:

@@ -17,10 +17,17 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
+
 from recotem.artifact.signing import KeyRing
 from recotem.config import ServeConfig
-from recotem.recipe.errors import RecipeError, describe_recipe_load_failure
-from recotem.serving.registry import ModelRegistry
+from recotem.recipe.errors import (
+    RecipeError,
+    describe_recipe_load_failure,
+    format_recipe_load_failure,
+)
+from recotem.recipe.loader import load_recipe
+from recotem.serving.registry import ModelRegistry, sanitize_load_error
 from recotem.serving.watcher import ArtifactWatcher
 from tests.conftest import ACTIVE_KEY_HEX, build_raw_artifact
 
@@ -68,6 +75,57 @@ def test_non_parse_categories_do_not_claim_a_parse_error() -> None:
 def test_non_recipe_exception_does_not_claim_a_parse_error() -> None:
     """The lenient loader also returns duplicate-name and unexpected errors."""
     assert "parse" not in describe_recipe_load_failure(ValueError("boom")).lower()
+
+
+def test_the_reason_survives_the_health_error_budget(tmp_path: Path) -> None:
+    """The 200-char budget must buy the reason, not the directory it sits in.
+
+    ``last_load_error`` is truncated before ``/v1/health/details`` serves it.
+    A message that opens with the recipe's absolute path spends that budget
+    on a fact the operator already supplied, so how deep the ``--recipes``
+    directory happens to sit decided whether the offending field survived the
+    cut at all.
+    """
+    recipes_dir = tmp_path / "srv" / "recotem" / "production" / "eu-west-1"
+    recipes_dir.mkdir(parents=True)
+    yaml_path = recipes_dir / "demo.yaml"
+    yaml_path.write_text(
+        _SCHEMA_VIOLATION.format(name="demo", artifact_path=tmp_path / "m.recotem")
+    )
+
+    with pytest.raises(RecipeError) as excinfo:
+        load_recipe(yaml_path)
+
+    surfaced = sanitize_load_error(
+        format_recipe_load_failure(excinfo.value, path=yaml_path, context="on rescan")
+    )
+
+    assert "training.n_trials" in surfaced, (
+        f"the offending field must survive the 200-char budget; got {surfaced!r}"
+    )
+    assert str(yaml_path.parent) not in surfaced, (
+        f"the directory is redundant with the filename; got {surfaced!r}"
+    )
+    assert "demo.yaml" in surfaced, f"the file must still be named; got {surfaced!r}"
+
+
+def test_a_message_that_does_not_name_the_file_still_gets_the_locus() -> None:
+    """Not every rejection quotes the file — a scheme refusal names the field.
+
+    Those still need the locus, or an operator watching a directory of
+    recipes cannot tell which one to open.
+    """
+    exc = RecipeError(
+        "'source.path' uses scheme 'ftp://' which is not supported for input "
+        "paths. Allowed: (none), file, s3, gs",
+        category="security",
+    )
+    surfaced = format_recipe_load_failure(
+        exc, path=Path("/srv/recotem/production/eu-west-1/demo.yaml")
+    )
+
+    assert "'demo.yaml'" in surfaced, f"the file must be named; got {surfaced!r}"
+    assert "/srv/recotem" not in surfaced, f"the directory is dropped; got {surfaced!r}"
 
 
 # ---------------------------------------------------------------------------

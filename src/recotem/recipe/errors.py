@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 # Valid category values for RecipeError.category.
 #
 # ``"security"``
@@ -80,3 +82,42 @@ def describe_recipe_load_failure(exc: Exception | None) -> str:
     if isinstance(exc, RecipeError) and exc.category == "parse":
         return "YAML parse failed"
     return "recipe load failed"
+
+
+def format_recipe_load_failure(
+    exc: Exception | None,
+    *,
+    path: Path,
+    context: str = "",
+) -> str:
+    """Compose the whole operator-facing string for a failed recipe load.
+
+    Serving stores this in ``ModelEntry.last_load_error``, which is truncated
+    to 200 characters before ``/v1/health/details`` serves it.  That budget,
+    not the message, decides what an operator actually gets to read, and
+    composing the string at each call site spent it on the same fact twice:
+    the caller named the file, then ``load_recipe`` named it again as an
+    absolute path.  A real rescan failure surfaced as::
+
+        recipe load failed on rescan in 'demo.yaml': Recipe '/very/long/
+        tmp/.../recipes/demo.yaml' failed va
+
+    — the offending field, the only part that says what to change, cut off
+    entirely, and how much of it survived depending on how deep the recipes
+    directory happened to sit.
+
+    So the directory is dropped and only the basename kept.  It carries
+    nothing the operator does not already have: every recipe a serve process
+    holds comes from the one ``--recipes`` directory it was started with.
+
+    *context* ("on rescan") qualifies *when* the load was attempted; it is
+    the caller's, since the exception cannot know.  The file is named in the
+    prefix only when the message does not already name it — most of
+    ``load_recipe``'s messages quote the file, but a scheme or credential
+    rejection quotes the offending *field* instead, and those still need the
+    locus to be actionable.
+    """
+    reason = str(exc).replace(str(path), path.name)
+    where = f" {context}" if context else ""
+    locus = "" if f"'{path.name}'" in reason else f" in '{path.name}'"
+    return f"{describe_recipe_load_failure(exc)}{where}{locus}: {reason}"

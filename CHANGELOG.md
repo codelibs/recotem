@@ -388,6 +388,37 @@ exit 8.
   neither `--quiet` nor an explicit `RECOTEM_LOG_FORMAT=json` is in force, so a
   redirected run captures the structured log alone. An interactive `recotem
   train` renders exactly as before.
+- **Four failures were reported under the wrong exit code.** The exit-code
+  table is what cron wrappers and CronJob retry policies branch on, so a
+  permanent failure reported as a transient one is retried forever.
+  - A SQL DSN refused by the SSRF guard exited **7** for six of its ten
+    routing forms (netloc host, `?host=`, `?hostaddr=`, IPv6 literal,
+    link-local, unresolvable hostname) and **3** for the other four
+    (`?service=`, `?unix_socket=`, absolute-path host, no host) — one guard,
+    one verdict, two answers, with `code=datasource_error` contradicting the
+    exit code in the structured log. The guard shares its IP check with the
+    HTTP fetcher and chained that `HttpFetchError`, which the exit mapper
+    walks; a SQL DSN is not an HTTP fetch, so the cause is no longer chained
+    and all ten forms now exit **3** as `docs/data-sources/sql.md` always
+    documented.
+  - A `sha256` mismatch on a local or object-store `source.path` exited **7**,
+    an `HttpFetchError` for a file never fetched over HTTP. It now exits **3**
+    alongside the byte-cap and read failures guarding the same read. An
+    `http://` / `https://` mismatch still exits 7 with the rest of that fetch
+    pipeline.
+  - The `train_error` event read `code` off any exception carrying that
+    attribute, so an unreachable `training.storage_path` reported SQLAlchemy's
+    documentation-shortlink slug (`code="e3q8"`) and, because `exc_info` keys
+    off `internal_error`, suppressed the traceback as well. `code` is now read
+    only when a recotem class in the exception's MRO declares it, so every
+    recotem subcode still appears and a third-party attribute of the same name
+    never does.
+  - An `output.path` on an object store with no usable credentials discarded
+    the trained model and exited **1** with the SDK's frames in the log, while
+    the local equivalent already exits **8** through the per-recipe lock's
+    permission check. It now exits **8** with
+    `code="artifact_write_credentials"` and a message naming the destination
+    and the credential error.
 - **Python warnings bypassed structured logging entirely.** Nothing in the
   source tree called `logging.captureWarnings`, so `warnings.warn` output went
   through the default `warnings.showwarning` straight to `sys.stderr`. Under

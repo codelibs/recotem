@@ -267,18 +267,32 @@ class SQLSource:
                         f"db://{host_for_check}", allow_private=False
                     )
                 except HttpFetchError as exc:
+                    # ``from None`` is deliberate.  ``assert_host_public`` is
+                    # shared with the HTTP fetcher and reports its verdict as
+                    # an HttpFetchError, but a SQL DSN is not an HTTP fetch —
+                    # nothing here speaks HTTP and none of the RECOTEM_HTTP_*
+                    # knobs apply.  ``_map_exception_to_exit`` walks
+                    # ``__cause__`` for HttpFetchError, so chaining it would
+                    # report exit 7 for these two refusals while the four
+                    # sibling refusals above (service file, Unix socket,
+                    # absolute-path host, no host) — the same guard reaching
+                    # the same verdict through a different routing form —
+                    # report exit 3.  Suppressing the cause keeps every
+                    # routing form on the exit code that the ``code``
+                    # attribute of this exception already advertises,
+                    # ``datasource_error``.
                     msg = str(exc)
                     if "does not resolve" in msg:
                         raise DataSourceError(
                             f"hostname {host!r} does not resolve; "
                             "verify the DSN host or set RECOTEM_SQL_ALLOW_PRIVATE=1 "
                             "to bypass for offline tests"
-                        ) from exc
+                        ) from None
                     raise DataSourceError(
                         f"refusing to connect to private/loopback host {host!r}; "
                         "set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in (intended for "
                         "in-cluster or compose service-name destinations)"
-                    ) from exc
+                    ) from None
                 if pinned_ips:
                     self._pinned_ips.update(pinned_ips)
 

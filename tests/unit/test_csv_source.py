@@ -112,15 +112,17 @@ def test_infer_compression_table(path: str, expected: str | None) -> None:
     assert _infer_compression(path) == expected
 
 
-def test_verify_sha256_match() -> None:
+@pytest.mark.parametrize("network", [True, False])
+def test_verify_sha256_match(network: bool) -> None:
     body = b"hello"
     digest = hashlib.sha256(body).hexdigest()
-    _verify_sha256(body, digest)  # must not raise
+    _verify_sha256(body, digest, network=network)  # must not raise
 
 
-def test_verify_sha256_mismatch_raises() -> None:
+@pytest.mark.parametrize("network", [True, False])
+def test_verify_sha256_mismatch_raises(network: bool) -> None:
     with pytest.raises(DataSourceError, match="sha256"):
-        _verify_sha256(b"hello", "0" * 64)
+        _verify_sha256(b"hello", "0" * 64, network=network)
 
 
 @contextmanager

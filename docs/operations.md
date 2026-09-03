@@ -221,12 +221,12 @@ logic instead of grepping stderr.
 | 0 | Success | — |
 | 1 | Unknown error | Bug, environment issue, schema generation failure |
 | 2 | RecipeError | YAML syntax, schema violation, invalid `--env-var`, `--dev-allow-unsigned` without companion confirmation flag, `--dev-allow-unsigned` outside `RECOTEM_ENV=development` |
-| 3 | DataSourceError | Source-layer failure NOT during HTTP fetch — CSV/Parquet format error, required column missing, local-FS path not found, BigQuery schema mismatch |
+| 3 | DataSourceError | Source-layer failure NOT during HTTP fetch — CSV/Parquet format error, required column missing, local-FS path not found, BigQuery schema mismatch, `sha256` mismatch on a local or object-store path, and every DSN the SQL source's SSRF guard refuses (private/loopback host, unresolvable host, `?service=`, `?unix_socket=`, absolute-path host, no host) |
 | 4 | TrainingError | Includes subcodes `signing_key_missing`, `min_data_violation`, `time_unit_required`, `time_column_parse_error`, `cutoff_exceeds_item_count`, `split_error`, `search_error`, `unknown_algorithm`, `final_training_error`, `no_completed_trials`, `zero_score`, `excessive_per_trial_timeouts`, `feature_table_error`, `feature_axis_error`, `feature_cholesky_error`. A `TrainingError` carrying no more specific code reports the generic `training_error` |
 | 5 | ArtifactError | Magic mismatch, kid unknown, HMAC mismatch, payload over cap, disallowed FQCN, header JSON over cap. A **malformed** `RECOTEM_SIGNING_KEYS` value is exit 8, not 5 — the artifact is fine, the environment is not |
 | 6 | LockContestedError | Recipe lock held by another process when `--fail-on-busy` is set |
-| 7 | HttpFetchError | Any failure during HTTP/HTTPS source fetch — SSRF guard refused the destination, connect/read timeout, HTTP 4xx/5xx, body cap exceeded, redirect cap, scheme-changing redirect, sha256 mismatch on a network-fetched source |
-| 8 | Configuration error | Missing `RECOTEM_SIGNING_KEYS` (also for `recotem inspect` when signing keys are absent and `--dev-allow-unsigned` not passed), a malformed `RECOTEM_SIGNING_KEYS` entry (non-hex, wrong length, no separator, empty kid, empty key) on `train` / `serve` / `inspect`, bind port already in use, other env-var misconfiguration such as `RECOTEM_MAX_PAYLOAD_BYTES` exceeding `RECOTEM_MAX_ARTIFACT_BYTES` |
+| 7 | HttpFetchError | Any failure during HTTP/HTTPS source fetch — SSRF guard refused the destination, connect/read timeout, HTTP 4xx/5xx, body cap exceeded, redirect cap, scheme-changing redirect, sha256 mismatch on a network-fetched source. Only an `http://` / `https://` fetch reports 7; the same checks on other schemes report 3 |
+| 8 | Configuration error | Missing `RECOTEM_SIGNING_KEYS` (also for `recotem inspect` when signing keys are absent and `--dev-allow-unsigned` not passed), a malformed `RECOTEM_SIGNING_KEYS` entry (non-hex, wrong length, no separator, empty kid, empty key) on `train` / `serve` / `inspect`, bind port already in use, an unwritable local `output.path` (the per-recipe lock cannot be created) or an unauthenticated remote one (`code=artifact_write_credentials`), other env-var misconfiguration such as `RECOTEM_MAX_PAYLOAD_BYTES` exceeding `RECOTEM_MAX_ARTIFACT_BYTES` |
 
 `--fail-on-busy` surfaces as exit 6, not exit 4 — `LockContestedError` is
 raised outside the `TrainingError` hierarchy. Without `--fail-on-busy`
@@ -237,7 +237,11 @@ code when you need visibility into skipped runs without treating them as errors.
 On any non-zero exit, `recotem train` emits a single `train_error` JSON log
 event with `code=<subcode>` so log aggregators can alert by subcode without
 re-parsing exit strings. For non-domain exceptions (bugs, unexpected library
-errors) the code field is `internal_error`.
+errors) the code field is `internal_error` and the event carries the
+traceback. The subcode is read only from recotem's own exception types, so a
+third-party exception that happens to define its own `code` attribute (for
+example SQLAlchemy's documentation-shortlink slug) is still reported as
+`internal_error`.
 
 ## Training pipeline events
 

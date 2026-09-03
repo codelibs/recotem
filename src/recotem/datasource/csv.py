@@ -39,12 +39,30 @@ _redact_url_userinfo = redact_url_userinfo
 _infer_compression = infer_compression
 
 
-def _verify_sha256(actual: bytes, expected_hex: str) -> None:
-    """sha256 verification that raises :class:`DataSourceError` on mismatch."""
+def _verify_sha256(actual: bytes, expected_hex: str, *, network: bool) -> None:
+    """sha256 verification that raises :class:`DataSourceError` on mismatch.
+
+    *network* selects which exit code the failure reports.  ``verify_sha256``
+    always signals with an :class:`HttpFetchError` and
+    ``_map_exception_to_exit`` walks ``__cause__`` for that type, so the
+    chaining decision here *is* the exit-code decision.
+
+    For an ``http://`` / ``https://`` source the pin is the closing step of the
+    fetch pipeline, so the cause is kept and the mismatch reports exit 7
+    alongside the redirect, timeout and byte-cap failures of the same fetch.
+
+    For a local or object-store path no HTTP fetch ever happened.  Chaining
+    would label a permanent content mismatch as a transient network failure —
+    the exact distinction cron and CronJob retry logic branches on — so the
+    cause is suppressed and the mismatch reports exit 3, matching the
+    byte-cap and read failures that guard the same local read.
+    """
     try:
         verify_sha256(actual, expected_hex)
     except HttpFetchError as exc:
-        raise DataSourceError(str(exc)) from exc
+        if network:
+            raise DataSourceError(str(exc)) from exc
+        raise DataSourceError(str(exc)) from None
 
 
 def _get_max_download_bytes() -> int:
@@ -282,7 +300,7 @@ class CSVSource:
             # sha256 is guaranteed present by the recipe loader's
             # _enforce_sha256_for_network_paths post-validator. Verify here.
             assert cfg.sha256 is not None  # noqa: S101 — loader invariant
-            _verify_sha256(raw_bytes, cfg.sha256)
+            _verify_sha256(raw_bytes, cfg.sha256, network=True)
             sha256_verified = True
 
             compression = _infer_compression(cfg.path)
@@ -344,7 +362,7 @@ class CSVSource:
                     f"CSV file '{safe_path}' exceeds RECOTEM_MAX_DOWNLOAD_BYTES ({cap}) — "
                     "increase the cap or split the file."
                 )
-            _verify_sha256(raw_bytes, cfg.sha256)
+            _verify_sha256(raw_bytes, cfg.sha256, network=False)
             sha256_verified = True
             compression = _infer_compression(cfg.path)
             read_kwargs: dict[str, object] = {
@@ -526,7 +544,7 @@ class ParquetSource:
                 run_id=ctx.run_id,
             )
             assert cfg.sha256 is not None  # noqa: S101 — loader invariant
-            _verify_sha256(raw_bytes, cfg.sha256)
+            _verify_sha256(raw_bytes, cfg.sha256, network=True)
             sha256_verified = True
             try:
                 df = pd.read_parquet(BytesIO(raw_bytes))
@@ -574,7 +592,7 @@ class ParquetSource:
                     f"Parquet file '{safe_path}' exceeds RECOTEM_MAX_DOWNLOAD_BYTES ({cap}) — "
                     "increase the cap or split the file."
                 )
-            _verify_sha256(raw_bytes, cfg.sha256)
+            _verify_sha256(raw_bytes, cfg.sha256, network=False)
             sha256_verified = True
             try:
                 df: pd.DataFrame = pd.read_parquet(BytesIO(raw_bytes))

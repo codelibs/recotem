@@ -144,6 +144,7 @@ source:
 | Missing driver for dialect | 3 | `DataSourceError: psycopg driver is required for dialect 'postgresql'. Install it with: pip install 'recotem[postgres]'` |
 | Query exceeds row cap | 3 | `DataSourceError: query result exceeds RECOTEM_MAX_SQL_ROWS=50000000 rows; tighten the query or raise the cap` |
 | Private/loopback host refused | 3 | `DataSourceError: refusing to connect to private/loopback host '10.0.0.5'; set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in (intended for in-cluster or compose service-name destinations)` |
+| DSN hostname does not resolve | 3 | `DataSourceError: hostname 'db.internal' does not resolve; verify the DSN host or set RECOTEM_SQL_ALLOW_PRIVATE=1 to bypass for offline tests` |
 | libpq service-file routing refused | 3 | `DataSourceError: DSN routes via libpq service file (?service=...); this bypasses the network SSRF guard. Set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
 | MySQL Unix-socket routing refused | 3 | `DataSourceError: DSN routes via Unix socket (?unix_socket=...); this bypasses the network SSRF guard. Set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
 | Absolute-path host refused | 3 | `DataSourceError: DSN host is an absolute path (libpq Unix-socket form); this bypasses the network SSRF guard. Set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
@@ -155,6 +156,14 @@ source:
 All SQL failures are wrapped in `DataSourceError` and produce exit 3 — including a missing
 `schema:` column, which is a data-source problem (the query did not produce what the recipe
 names), not a recipe-schema problem. The full error type is included in the stderr JSON line.
+
+That covers every routing form the SSRF guard refuses — netloc host, `?host=`,
+`?hostaddr=`, `?service=`, `?unix_socket=`, an absolute-path host, and a network DSN
+with no host at all. The guard shares its public/private IP check with the HTTP source
+fetcher, but a SQL DSN is not an HTTP fetch: it never reports exit 7, and none of the
+`RECOTEM_HTTP_*` settings apply to it. Retry logic that treats exit 7 as transient will
+therefore never see a DSN refusal, which is correct — a refused DSN is a permanent
+configuration decision, not a transient network condition.
 
 ## Notes
 

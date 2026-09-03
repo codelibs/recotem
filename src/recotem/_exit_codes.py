@@ -15,7 +15,7 @@ Exit code table
 |    5 | _EXIT_ARTIFACT      | ArtifactError                              |
 |    6 | _EXIT_LOCK_CONTESTED| LockContestedError                         |
 |    7 | _EXIT_HTTP_FETCH    | HttpFetchError                             |
-|    8 | _EXIT_CONFIG        | ConfigError / missing signing keys         |
+|    8 | _EXIT_CONFIG        | ConfigError / config-coded TrainingError   |
 
 Design note on imports
 ----------------------
@@ -58,8 +58,18 @@ def _map_exception_to_exit(exc: BaseException) -> int:  # noqa: C901
     DataSourceError wrapping an HttpFetchError maps to exit 7 (transient
     network) rather than exit 3 (structural datasource failure).  CronJob
     retry logic distinguishes the two.
+
+    That walk means chaining an HttpFetchError *is* a claim that the failure
+    happened during an HTTP fetch.  Callers that reuse the fetcher's helpers
+    (``assert_host_public``, ``verify_sha256``) on a non-HTTP transport must
+    therefore suppress the cause — see ``datasource/sql.py``'s SSRF guard and
+    ``datasource/csv.py``'s ``_verify_sha256`` — or their failure is reported
+    as a transient network error and retried forever.
     """
-    # --- configuration errors (signing_key_missing TrainingError subclass) ---
+    # --- configuration errors (TrainingError carrying a config-shaped code) ---
+    # ``artifact_write_credentials`` joins ``signing_key_missing`` here: both
+    # are deployment misconfigurations that happen to be discovered inside
+    # run_training, and neither is fixed by retrying the training job.
     try:
         from recotem.training.errors import (
             TrainingError as _TrainingError,  # noqa: PLC0415
@@ -67,6 +77,7 @@ def _map_exception_to_exit(exc: BaseException) -> int:  # noqa: C901
 
         if isinstance(exc, _TrainingError) and getattr(exc, "code", "") in (
             "signing_key_missing",
+            "artifact_write_credentials",
         ):
             return _EXIT_CONFIG
     except (ImportError, AttributeError):

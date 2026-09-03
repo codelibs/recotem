@@ -360,6 +360,116 @@ def test_train_error_internal_error_code_for_keyerror(
     )
 
 
+def test_recotem_error_code_survives_for_every_recotem_exception() -> None:
+    """Every recotem exception declaring ``code`` keeps reporting it.
+
+    ``code`` is declared on five unrelated roots with no common base class, so
+    a hand-written list of the classes to trust goes stale the moment a sixth
+    is added — and the failure is quiet: a domain error starts logging as
+    ``internal_error`` with a traceback.  This test discovers the classes
+    instead of naming them, so a new one is covered automatically.
+    """
+    import importlib
+    import inspect
+    import pkgutil
+
+    import recotem
+    from recotem.training.pipeline import _recotem_error_code
+
+    modules = [recotem]
+    for info in pkgutil.walk_packages(recotem.__path__, "recotem."):
+        try:
+            modules.append(importlib.import_module(info.name))
+        except ImportError:  # optional extra not installed in this env
+            continue
+
+    checked: dict[str, str] = {}
+    for module in modules:
+        for obj in vars(module).values():
+            if not inspect.isclass(obj) or not issubclass(obj, BaseException):
+                continue
+            if not obj.__module__.startswith("recotem"):
+                continue
+            declaring = next((k for k in obj.__mro__ if "code" in vars(k)), None)
+            if declaring is None or not declaring.__module__.startswith("recotem"):
+                continue
+            # ``__new__`` without ``__init__`` — the declared class attribute is
+            # what matters and the signatures differ across these classes.
+            instance = obj.__new__(obj)
+            code = _recotem_error_code(instance)
+            assert code == obj.code, (
+                f"{obj.__module__}.{obj.__qualname__} declares code={obj.code!r} "
+                f"but the pipeline would report {code!r}"
+            )
+            checked[f"{obj.__module__}.{obj.__qualname__}"] = obj.code
+
+    # Guard against the discovery loop silently matching nothing.
+    assert len(checked) >= 5, f"expected the known code-bearing classes; got {checked}"
+
+
+def test_train_error_ignores_third_party_code_attribute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A foreign ``code`` attribute must not be reported as a recotem code.
+
+    ``code`` is a recotem convention (``TrainingError``, ``DataSourceError``).
+    SQLAlchemy uses the same attribute name for its documentation shortlink
+    slug, so an unreachable ``training.storage_path`` surfaced as
+    ``code="e3q8"`` — and because ``exc_info`` is gated on the code being
+    ``internal_error``, the foreign code also suppressed the traceback for
+    what is, by definition, an unexpected failure.
+    """
+    from recotem.training import pipeline as pipeline_mod
+
+    # Build the exception the real failure produces rather than a stand-in, so
+    # the test still fails if SQLAlchemy stops populating ``code``.
+    from recotem.training.search import _make_storage
+
+    with pytest.raises(Exception) as raised:  # noqa: B017 — type asserted below
+        _make_storage(str(tmp_path / "no_such_dir" / "optuna.db"))
+    storage_exc = raised.value
+    assert getattr(storage_exc, "code", None) == "e3q8", (
+        "expected SQLAlchemy's documentation-shortlink slug on the exception; "
+        f"got {getattr(storage_exc, 'code', None)!r}"
+    )
+
+    spy_logger = MagicMock()
+    monkeypatch.setattr(pipeline_mod, "logger", spy_logger)
+
+    recipe = _make_recipe_good(tmp_path)
+    kr = _make_key_ring()
+
+    with patch(
+        "recotem.training.pipeline._run_training_locked",
+        side_effect=storage_exc,
+    ):
+        with pytest.raises(type(storage_exc)):
+            pipeline_mod.run_training(
+                recipe,
+                key_ring=kr,
+                signing_key="active",
+                no_lock=True,
+                quiet=True,
+            )
+
+    train_error_calls = [
+        call
+        for call in spy_logger.error.call_args_list
+        if call.args and call.args[0] == "train_error"
+    ]
+    assert train_error_calls, "train_error must be emitted"
+    kwargs = train_error_calls[0].kwargs
+    assert kwargs.get("code") == "internal_error", (
+        "a third-party 'code' attribute must not be reported as a recotem "
+        f"error code; got {kwargs.get('code')!r}"
+    )
+    assert kwargs.get("exc_info") is True, (
+        "an exception carrying no recotem code is unexpected, so its "
+        "traceback must not be suppressed"
+    )
+
+
 # ---------------------------------------------------------------------------
 # D3. CLI train does not double-emit train_error (exactly once)
 # ---------------------------------------------------------------------------

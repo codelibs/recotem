@@ -380,6 +380,23 @@ exit 8.
 - **The ADC failure message ran two sentences together with a doubled period**
   (`... for more information.. Ensure Application Default Credentials ...`),
   because the wrapped Google exception already ends in one.
+- **Load-error redaction ate the scheme allow-list, so a path-scheme mistake
+  became unreadable.** `sanitize_load_error`'s URI pattern ended in `\S+`, which
+  matched the bare schemes in Recotem's own help text as readily as a real
+  object-store URI. An operator who wrote `output.path: http://...` got back
+  `uses scheme '<redacted-uri> which is not supported. Allowed: (bare path),
+  <redacted-uri> <redacted-uri> <redacted-uri> file://, <redacted-uri> s3://`
+  — the offending scheme gone along with its closing quote, and the allow-list
+  surviving only where the regex happened not to reach (`file://` is not in
+  the alternation; `s3://` sat at end-of-string). Whether the mistake was
+  legible depended on which wrong scheme you picked: `ftp://` came through
+  intact for the same reason. Worse, `<redacted-uri>` is 14 characters and
+  `gs://,` is 6, so redaction *grew* the message — the input-path variant went
+  from 163 to 201 characters and then lost its tail to the 200-char cap that
+  redaction had just pushed it over, defeating the budgeting work in the same
+  release. The pattern now requires one non-delimiter character after `://`, so
+  a scheme with no bucket or key behind it is left alone and real URIs are
+  redacted exactly as before.
 
 - **An artifact was never bound to the recipe serving it.** Every artifact
   header records the `recipe_name` it was trained for, but nothing on the serve

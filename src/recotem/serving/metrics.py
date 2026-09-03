@@ -212,6 +212,11 @@ _LOAD_FAILURE_REASONS: frozenset[str] = frozenset(
         # all, remedied by a retrain) because it means the artifact is
         # internally inconsistent -- a mis-built or partially-tampered file.
         "feature_state",
+        # Artifact header's "recipe_name" names a different recipe than the
+        # one loading it -- two recipes are writing one output.path. Distinct
+        # from every reason above because the artifact itself is fine; it is
+        # the wiring between recipe and file that is wrong.
+        "recipe_name",
     }
 )
 
@@ -222,7 +227,7 @@ def inc_artifact_load_failure(recipe: str, reason: str = "unexpected") -> None:
     *reason* must be one of the values in ``_LOAD_FAILURE_REASONS``
     (``read | parse | hmac | header_json | deserialize | metadata | yaml |
     unexpected | dir_scan | timeout | version_skew | feature_version |
-    feature_state``); any other value is silently coerced
+    feature_state | recipe_name``); any other value is silently coerced
     to ``"unexpected"`` so callers cannot accidentally explode the cardinality
     of the label.
     """

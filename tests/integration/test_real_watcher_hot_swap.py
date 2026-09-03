@@ -32,8 +32,14 @@ def _make_serve_config() -> ServeConfig:
     return cfg
 
 
-def _write_artifact(path: Path, payload_tag: str) -> None:
-    """Write a signed artifact with a dict payload containing a tag."""
+def _write_artifact(
+    path: Path, payload_tag: str, recipe_name: str = "swap_test"
+) -> None:
+    """Write a signed artifact with a dict payload containing a tag.
+
+    *recipe_name* must match the recipe that loads the file: serving refuses
+    an artifact whose header names a different recipe.
+    """
     import pickle  # noqa: S403  # test fixture: payload built locally
 
     payload = pickle.dumps({"tag": payload_tag}, protocol=4)  # noqa: S301
@@ -41,7 +47,7 @@ def _write_artifact(path: Path, payload_tag: str) -> None:
         kid="active",
         key_hex=ACTIVE_KEY_HEX,
         header_dict={
-            "recipe_name": "swap_test",
+            "recipe_name": recipe_name,
             "best_class": "TopPop",
             "trained_at": "2026-01-01T00:00:00Z",
         },
@@ -168,7 +174,7 @@ def test_real_watcher_hot_swap_concurrent_reads_safe(tmp_path: Path) -> None:
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
 
-    _write_artifact(artifact_path, "concurrent_test")
+    _write_artifact(artifact_path, "concurrent_test", "concurrent_recipe")
     yaml_path = _write_recipe_yaml(recipes_dir, "concurrent_recipe", artifact_path)
 
     kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")
@@ -217,7 +223,7 @@ def test_real_watcher_hot_swap_concurrent_reads_safe(tmp_path: Path) -> None:
 
     # Let watcher + readers run, then write a new artifact
     time.sleep(0.3)
-    _write_artifact(artifact_path, "concurrent_test_v2")
+    _write_artifact(artifact_path, "concurrent_test_v2", "concurrent_recipe")
     time.sleep(0.3)
 
     stop_flag.set()
@@ -253,7 +259,7 @@ def test_watcher_does_not_reload_when_sha256_unchanged(
     recipes_dir.mkdir()
     artifact_path = tmp_path / "no_reload.recotem"
 
-    _write_artifact(artifact_path, "stable_version")
+    _write_artifact(artifact_path, "stable_version", "no_reload_recipe")
     yaml_path = _write_recipe_yaml(recipes_dir, "no_reload_recipe", artifact_path)
 
     kr = KeyRing(f"active:{ACTIVE_KEY_HEX}")

@@ -343,6 +343,35 @@ exit 8.
 
 ### Fixed
 
+- **An artifact was never bound to the recipe serving it.** Every artifact
+  header records the `recipe_name` it was trained for, but nothing on the serve
+  side compared it with the recipe whose `output.path` the file was read from.
+  A correctly-signed artifact therefore loaded under *any* recipe pointing at
+  it, with no signal anywhere: the swap logged at INFO, `/v1/health` and
+  `/v1/health/details` both said `ok`, and `/v1/recipes/{name}` reported the
+  *other* recipe's `best_algorithm`, `best_params` and `recipe_hash`. Four
+  recipes aimed at one artifact all reported success. HMAC does not catch this —
+  both artifacts are signed by the same key ring, which is the point of a key
+  ring — so the realistic trigger is mundane: copy a recipe, forget to change
+  `output.path`, and two training runs overwrite one file, after which one
+  endpoint serves the other's model permanently. Both load paths (serve startup
+  and the watcher's hot-swap) now refuse a header whose `recipe_name` names a
+  different recipe, with `reason="recipe_name"` on
+  `recotem_artifact_load_failures_total` and an error naming both recipes and
+  the remedy. A refused hot-swap keeps the previous model serving and flips
+  `/v1/health/details` to `degraded`. A header carrying **no** `recipe_name`
+  (pre-2.0 artifact) still loads — an absent field is not evidence of a
+  mismatch — and logs `artifact_recipe_name_absent_from_header`.
+- **A schema violation was reported as a YAML parse error.** Serving labelled
+  every rejected recipe file "YAML parse", producing the self-contradictory
+  `recipe YAML parse error ... failed validation: - training.metric: ...` on
+  `/v1/health/details`. The file parsed; the schema rejected it, and an operator
+  reading that goes looking for a syntax error that does not exist. Startup and
+  both watcher-rescan paths now distinguish the two: a genuine `yaml.YAMLError`
+  still reads "YAML parse failed", everything else reads "recipe load failed"
+  and lets the rest of the message name the field, the security check, or the
+  OS error. The `skipped` accounting is unchanged — a rejected file is still
+  excluded from the readiness `total`.
 - **Python warnings bypassed structured logging entirely.** Nothing in the
   source tree called `logging.captureWarnings`, so `warnings.warn` output went
   through the default `warnings.showwarning` straight to `sys.stderr`. Under

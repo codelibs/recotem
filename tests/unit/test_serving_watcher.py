@@ -49,8 +49,13 @@ def _make_entry(name: str = "recipe1") -> ModelEntry:
     )
 
 
-def _write_valid_artifact(path: Path) -> None:
-    """Write a signed artifact (dict payload) to path."""
+def _write_valid_artifact(path: Path, recipe_name: str = "test") -> None:
+    """Write a signed artifact (dict payload) to path.
+
+    *recipe_name* must match the recipe whose ``output.path`` is *path*:
+    serving refuses an artifact whose header names a different recipe (see
+    ``recotem._artifact_identity``).
+    """
     import pickle  # noqa: S403
 
     payload = pickle.dumps({"key": "test"}, protocol=4)  # noqa: S301
@@ -58,7 +63,7 @@ def _write_valid_artifact(path: Path) -> None:
         kid="active",
         key_hex=ACTIVE_KEY_HEX,
         header_dict={
-            "recipe_name": "test",
+            "recipe_name": recipe_name,
             "best_class": "TopPop",
             "trained_at": "2026-01-01T00:00:00Z",
         },
@@ -178,7 +183,7 @@ def test_malformed_swap_keeps_old_model_marks_health_error(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "test_bad")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "test_bad", artifact_path)
 
@@ -266,7 +271,7 @@ def test_yaml_deleted_removes_entry_from_registry(tmp_path: Path) -> None:
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "removable")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "removable", artifact_path)
 
@@ -355,7 +360,7 @@ def test_hot_swap_metadata_failure_marks_last_load_error(tmp_path: Path) -> None
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "with_metadata")
 
     metadata_csv = tmp_path / "items.csv"
     pd.DataFrame({"item_id": ["i1"], "title": ["A"]}).to_csv(metadata_csv, index=False)
@@ -479,7 +484,7 @@ def test_watcher_picks_up_runtime_added_yaml(tmp_path: Path) -> None:
 
     # Now create the artifact and YAML
     artifact_path = tmp_path / "new_model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "new_recipe")
     _write_recipe_yaml(recipes_dir, "new_recipe", artifact_path)
 
     # Wait for watcher to pick it up
@@ -585,7 +590,7 @@ def test_artifact_disappearance_sets_last_load_error_and_increments_metric(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "vanishing.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "vanishing")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "vanishing", artifact_path)
 
@@ -775,7 +780,7 @@ def test_watcher_marks_error_via_registry_set_load_error(tmp_path: Path) -> None
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "error_recipe")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "error_recipe", artifact_path)
 
@@ -1039,7 +1044,7 @@ def test_watcher_uses_registry_setter_for_loaded_marker(tmp_path: Path) -> None:
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "marker_recipe")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "marker_recipe", artifact_path)
     from recotem.recipe.loader import load_recipe
@@ -1123,7 +1128,7 @@ def test_artifact_stat_future_raise_increments_failure_metric(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "stat_fail_recipe")
 
     registry = ModelRegistry()
     cfg = _make_serve_config()
@@ -1287,7 +1292,7 @@ def test_scan_recipes_dir_add_and_remove_in_same_tick(tmp_path: Path) -> None:
 
     # ── Create OLD recipe ────────────────────────────────────────────────────
     old_artifact = tmp_path / "old_model.recotem"
-    _write_valid_artifact(old_artifact)
+    _write_valid_artifact(old_artifact, "old_recipe")
     old_yaml = _write_recipe_yaml(recipes_dir, "old_recipe", old_artifact)
 
     from recotem.recipe.loader import load_recipe
@@ -1315,7 +1320,7 @@ def test_scan_recipes_dir_add_and_remove_in_same_tick(tmp_path: Path) -> None:
     old_yaml.unlink()
 
     new_artifact = tmp_path / "new_model.recotem"
-    _write_valid_artifact(new_artifact)
+    _write_valid_artifact(new_artifact, "new_recipe")
     _write_recipe_yaml(recipes_dir, "new_recipe", new_artifact)
 
     # ── Single _scan_recipes_dir call ────────────────────────────────────────
@@ -1404,7 +1409,7 @@ def test_rescan_yaml_syntax_error_keeps_loaded_model(tmp_path: Path) -> None:
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "rescan_test")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "rescan_test", artifact_path)
 
@@ -1480,7 +1485,7 @@ def test_rescan_recipe_truly_deleted_removes_entry(tmp_path: Path) -> None:
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "to_delete")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "to_delete", artifact_path)
 
@@ -1537,7 +1542,7 @@ def test_stat_marker_permission_error_sets_descriptive_load_error(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "perm_recipe")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "perm_recipe", artifact_path)
 
@@ -1625,7 +1630,7 @@ def test_hot_swap_triggered_by_etag_change_on_object_store(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "etag_recipe")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "etag_recipe", artifact_path)
 
@@ -2594,7 +2599,7 @@ def test_scan_recipes_dir_yaml_corrupt_on_rescan_keeps_loaded_entry(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "n8_recipe")
 
     # Write a recipe whose name matches the stem (simplest case for M-6 path)
     yaml_path = _write_recipe_yaml(recipes_dir, "n8_recipe", artifact_path)
@@ -2669,7 +2674,7 @@ def _build_loaded_watcher(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, name)
     yaml_path = _write_recipe_yaml(recipes_dir, name, artifact_path)
 
     registry = ModelRegistry()
@@ -2820,7 +2825,7 @@ def test_scan_recipes_dir_new_broken_yaml_still_registers_stub(
 
     # ── Repair it ────────────────────────────────────────────────────────────
     newcomer_artifact = artifact_path.parent / "newcomer.recotem"
-    _write_valid_artifact(newcomer_artifact)
+    _write_valid_artifact(newcomer_artifact, "newcomer")
     _write_recipe_yaml(recipes_dir, "newcomer", newcomer_artifact)
     watcher._scan_recipes_dir()
     watcher._executor.shutdown(wait=False)
@@ -2870,7 +2875,7 @@ def test_repeated_stat_error_same_class_demoted_to_debug(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "obs1_recipe")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "obs1_recipe", artifact_path)
 
@@ -2955,7 +2960,7 @@ def test_sidecar_only_path_updates_last_marker(tmp_path: Path) -> None:
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "marker_stable")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "marker_stable", artifact_path)
 
@@ -3036,7 +3041,7 @@ def test_replace_with_marker_is_atomic_no_stale_window(tmp_path: Path) -> None:
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "atomic_recipe")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "atomic_recipe", artifact_path)
 
@@ -3119,7 +3124,7 @@ def test_hot_swap_corrupt_artifact_preserves_stale_entry_real_registry(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "stale_real")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "stale_real", artifact_path)
 
@@ -3210,7 +3215,7 @@ def test_etag_change_detection_reads_artifact_exactly_once(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "one_read_recipe")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "one_read_recipe", artifact_path)
 
@@ -3414,7 +3419,7 @@ def test_build_initial_states_transient_stat_error_resolves_on_second_tick(
     4. Assert recipe loads on first poll tick.
     """
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "transient_recipe")
 
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
@@ -3574,7 +3579,7 @@ def test_poll_artifacts_respects_stop_event_mid_tick(tmp_path: Path) -> None:
     n_recipes = 5
     for i in range(n_recipes):
         artifact_path = tmp_path / f"model_{i}.recotem"
-        _write_valid_artifact(artifact_path)
+        _write_valid_artifact(artifact_path, f"stop_test_{i}")
         yaml_path = _write_recipe_yaml(recipes_dir, f"stop_test_{i}", artifact_path)
         state = MagicMock()
         state.artifact_path = str(artifact_path)
@@ -3635,7 +3640,7 @@ def test_poll_artifacts_per_future_timeout_marks_load_error(
     recipes_dir.mkdir()
 
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "timeout_recipe")
     _write_recipe_yaml(recipes_dir, "timeout_recipe", artifact_path)
 
     from recotem.recipe.loader import load_recipe
@@ -3731,9 +3736,12 @@ def test_sidecar_failure_does_not_increment_consecutive_errors(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
 
-    # Healthy artifact
-    good_path = tmp_path / "good.recotem"
-    _write_valid_artifact(good_path)
+    # Healthy artifacts -- one per recipe, since an artifact is bound to the
+    # recipe named in its header.
+    good_a_path = tmp_path / "good_a.recotem"
+    _write_valid_artifact(good_a_path, "healthy_a")
+    good_b_path = tmp_path / "good_b.recotem"
+    _write_valid_artifact(good_b_path, "healthy_b")
 
     # Corrupt artifact (triggers ArtifactError on _build_entry)
     bad_path = tmp_path / "bad.recotem"
@@ -3741,8 +3749,8 @@ def test_sidecar_failure_does_not_increment_consecutive_errors(
 
     # Write 3 recipe YAMLs
     for name, art_path in [
-        ("healthy_a", good_path),
-        ("healthy_b", good_path),
+        ("healthy_a", good_a_path),
+        ("healthy_b", good_b_path),
         ("corrupt", bad_path),
     ]:
         _write_recipe_yaml(recipes_dir, name, art_path)
@@ -3756,8 +3764,8 @@ def test_sidecar_failure_does_not_increment_consecutive_errors(
 
     initial_states: dict[str, _RecipeWatchState] = {}
     for name, art_path in [
-        ("healthy_a", good_path),
-        ("healthy_b", good_path),
+        ("healthy_a", good_a_path),
+        ("healthy_b", good_b_path),
         ("corrupt", bad_path),
     ]:
         yaml_path = recipes_dir / f"{name}.yaml"
@@ -3955,7 +3963,7 @@ def test_scan_recipes_dir_skips_load_recipe_when_mtime_unchanged(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "cached_recipe")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "cached_recipe", artifact_path)
 
@@ -4065,7 +4073,7 @@ def test_no_redundant_load_on_first_tick_when_sidecar_prepopulated(
     recipes_dir.mkdir()
 
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "pre_sidecar")
     yaml_path = _write_recipe_yaml(recipes_dir, "pre_sidecar", artifact_path)
 
     sidecar_path = Path(str(artifact_path) + ".sha256")
@@ -4136,7 +4144,7 @@ def test_scan_evicts_stale_yaml_path_keys(tmp_path: Path) -> None:
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "rotating")
 
     yaml_path_v1 = _write_recipe_yaml(recipes_dir, "rotating", artifact_path)
 
@@ -4202,7 +4210,7 @@ def test_scan_path_cache_does_not_leak_over_repeated_rotations(tmp_path: Path) -
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "loop_recipe")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "loop_recipe", artifact_path)
 
@@ -4523,7 +4531,7 @@ def test_post_hmac_deserialize_failure_emits_distinct_event(tmp_path: Path) -> N
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "deser_recipe")
 
     registry = ModelRegistry()
     cfg = _make_serve_config()
@@ -4588,7 +4596,7 @@ def test_post_hmac_deserialize_failure_streak_triggers_repeated_event(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "streak_recipe")
 
     registry = ModelRegistry()
     cfg = _make_serve_config()
@@ -4648,7 +4656,7 @@ def test_post_hmac_deserialize_streak_reset_on_success(tmp_path: Path) -> None:
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "reset_recipe")
 
     registry = ModelRegistry()
     cfg = _make_serve_config()
@@ -4987,7 +4995,7 @@ def test_rescan_stub_removed_when_yaml_fixed(tmp_path: Path) -> None:
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "fixable")
 
     registry = ModelRegistry()
     cfg = _make_serve_config()
@@ -5301,7 +5309,7 @@ def test_hot_swap_version_skewed_artifact_keeps_serving_old_model(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "model.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "skew_real")
 
     yaml_path = _write_recipe_yaml(recipes_dir, "skew_real", artifact_path)
 
@@ -5432,7 +5440,7 @@ def test_malformed_recipe_leaves_valid_recipe_serving_and_health_ok(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "good.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "good")
     _write_recipe_yaml(recipes_dir, "good", artifact_path)
     _write_broken_yaml(recipes_dir)
 
@@ -5477,7 +5485,7 @@ def test_malformed_recipe_does_not_create_phantom_second_entry(
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "good.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "good")
     _write_recipe_yaml(recipes_dir, "good", artifact_path)
     _write_broken_yaml(recipes_dir)
 
@@ -5509,7 +5517,7 @@ def test_malformed_recipe_error_names_the_offending_file(tmp_path: Path) -> None
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "good.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "good")
     _write_recipe_yaml(recipes_dir, "good", artifact_path)
     _write_broken_yaml(recipes_dir, stem="typo_here")
 
@@ -5559,7 +5567,7 @@ def test_malformed_recipe_does_not_reemit_error_every_tick(tmp_path: Path) -> No
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "good.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "good")
     _write_recipe_yaml(recipes_dir, "good", artifact_path)
     _write_broken_yaml(recipes_dir)
 
@@ -5599,7 +5607,7 @@ def test_malformed_recipe_stub_evicted_when_file_deleted(tmp_path: Path) -> None
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     artifact_path = tmp_path / "good.recotem"
-    _write_valid_artifact(artifact_path)
+    _write_valid_artifact(artifact_path, "good")
     _write_recipe_yaml(recipes_dir, "good", artifact_path)
     broken = _write_broken_yaml(recipes_dir)
 

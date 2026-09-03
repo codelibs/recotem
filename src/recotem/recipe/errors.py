@@ -57,3 +57,26 @@ class RecipeError(Exception):
             f"RecipeError({self.message!r}, line={self.line!r}, "
             f"category={self.category!r})"
         )
+
+
+def describe_recipe_load_failure(exc: Exception | None) -> str:
+    """Return the phrase naming what actually failed, for an operator-facing string.
+
+    ``load_recipe`` already distinguishes a YAML *syntax* error (category
+    ``"parse"``) from every other way a recipe can be rejected, but serving
+    labelled them all "YAML parse", producing the self-contradictory::
+
+        YAML parse failed: Recipe '...' failed validation:
+          - training.metric: ...
+
+    The file parsed; the schema rejected it. An operator reading that goes
+    hunting for a syntax error that does not exist.
+
+    Two phrases, not five: a syntax error is the only case whose remedy
+    ("open the file in an editor") is not already spelled out by the rest of
+    the message, which names the offending field, the security check, or the
+    OS error on its own.
+    """
+    if isinstance(exc, RecipeError) and exc.category == "parse":
+        return "YAML parse failed"
+    return "recipe load failed"

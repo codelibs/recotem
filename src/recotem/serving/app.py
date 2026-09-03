@@ -39,6 +39,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from recotem._artifact_identity import check_artifact_recipe_name
 from recotem._features import (
     check_artifact_feature_state,
     check_artifact_feature_version,
@@ -47,6 +48,7 @@ from recotem._irspack_compat import check_artifact_irspack_version
 from recotem.artifact.format import ArtifactError, parse_header_from_bytes
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
 from recotem.config import ConfigError, ServeConfig, get_max_body_bytes
+from recotem.recipe.errors import describe_recipe_load_failure
 from recotem.recipe.loader import load_recipes_directory_lenient
 from recotem.serving import metrics as _metrics
 from recotem.serving._header_utils import extract_algorithms, normalize_config_digest
@@ -342,7 +344,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
 
     for yaml_path, recipe, exc in lenient_results:
         if recipe is None:
-            # YAML parse failed — insert stub keyed by file stem so /health
+            # Recipe unusable — insert stub keyed by file stem so /health
             # surfaces the problem.  File stem is the only available identifier
             # (recipe.name is unknown).
             stem = yaml_path.stem
@@ -351,10 +353,14 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
             stub_name = dedup_stub_name(stem, lambda n: n in _yaml_names_seen)
             _yaml_names_seen[stub_name] = yaml_path.name
             yaml_failed_stub_paths[stub_name] = yaml_path
+            # ``category`` distinguishes a syntax error from a schema
+            # violation in the structured log; the event name is left alone
+            # because operators alert on it.
             logger.warning(
                 "recipe_yaml_parse_failed_at_startup",
                 file=yaml_path.name,
                 name=stub_name,
+                category=getattr(exc, "category", "unknown"),
                 error=str(exc),
             )
             yaml_failed_stubs.append(
@@ -364,7 +370,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
                     header={},
                     kid="",
                     metadata_df=None,
-                    last_load_error=f"YAML parse failed: {exc}",
+                    last_load_error=f"{describe_recipe_load_failure(exc)}: {exc}",
                     artifact_path="",
                     loaded=False,
                     skipped=True,
@@ -977,6 +983,22 @@ def _try_load_artifact(
             _failed_entry(recipe, f"header JSON decode failed: {exc}"),
             "header_json",
         )
+
+    # Bind the artifact to the recipe it is being loaded for before any other
+    # gate: an artifact trained for a different recipe is wrong no matter what
+    # the rest of the header says, and the check needs only the dict already
+    # in hand. WARNING rather than ERROR per the rule above -- a shared
+    # output.path is an operator misconfiguration, not a security signal.
+    try:
+        check_artifact_recipe_name(header_dict, name=recipe.name)
+    except ArtifactError as exc:
+        logger.warning(
+            "initial_artifact_recipe_name_mismatch",
+            name=recipe.name,
+            kid=hdr.kid,
+            error=str(exc),
+        )
+        return _failed_entry(recipe, str(exc)), "recipe_name"
 
     # Preflight the irspack version before deserializing: an unverified
     # (algorithm, version) combination may fail inside the C++ __setstate__

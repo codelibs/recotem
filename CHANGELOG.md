@@ -527,6 +527,24 @@ and every existing recipe, which stays valid as written. Every recipe's
   memoises only successful parses, logging a warning each time at the default
   5-second interval. A malformed recipe file no longer creates a duplicate or
   unevictable entry, and fixing the YAML now restores health without a restart.
+- **A repaired recipe YAML left `/v1/health/details` reporting `degraded`
+  forever.** The other half of the case above, for a recipe that was *already
+  loaded* when its YAML was edited into a syntax error. The rescan records the
+  parse failure as `last_load_error` and deliberately keeps the trained model
+  serving (M-2), but the watcher's recovery branch only fired for a YAML-failure
+  *stub* — an entry with no artifact path. An already-loaded recipe has one, so
+  when the file parsed again nothing ran: the error was never retracted, the
+  corrected recipe body was never adopted, and `/v1/health/details` answered 503
+  for the life of the process. Only a new artifact forcing a full reload, or a
+  restart, cleared it. `/v1/health` stayed 200 throughout — it is count-based
+  and the model never stopped serving — so this degraded diagnostics rather than
+  availability, but it made the operator endpoint useless as an alert source
+  once any recipe had been edited badly even once. The rescan-parse path now
+  records that it owns the outstanding error, so a successful reparse clears
+  exactly that error and reloads the corrected recipe. An artifact load failure
+  (HMAC mismatch, missing file, irspack version skew) never sets that marker and
+  so is never cleared by a YAML reparse — it stays visible until the artifact
+  itself loads.
 - **Log redaction blanked non-secret fields and whole event names.** Two
   over-broad rules fired on things that carry no secret. The key-name substring
   patterns `auth` and `key(?!s\b)` matched `auth_enabled` and

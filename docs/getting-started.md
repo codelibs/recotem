@@ -54,8 +54,12 @@ Expected last log line (JSON):
 
 ```json
 {"event":"train_done","name":"purchase_log","exit_code":0,
- "artifact":"./artifacts/purchase_log....recotem","best_class":"IALSRecommender",...}
+ "artifact":"/workspace/artifacts/purchase_log....recotem","best_class":"IALSRecommender",...}
 ```
+
+`artifact` is always an absolute path: `output.path` in the recipe is the
+CWD-relative `./artifacts/purchase_log.recotem`, and the event reports it
+resolved against the container's working directory (`/workspace`).
 
 ### 3. Serve
 
@@ -84,7 +88,7 @@ Expected (the exact items / scores depend on training):
 
 ```json
 {
-  "request_id": "req_01HZX...",
+  "request_id": "a7d279d50b3e",
   "recipe": "purchase_log",
   "model_version": "sha256:abc...",
   "items": [
@@ -93,6 +97,11 @@ Expected (the exact items / scores depend on training):
   ]
 }
 ```
+
+`request_id` is a bare 12-character hex string — there is no `req_` prefix and
+no fixed value; it changes per request and is also returned in the
+`X-Request-ID` response header. Send your own `X-Request-ID` (1–128 chars of
+`[A-Za-z0-9_-]`) and Recotem echoes it back instead of generating one.
 
 ### 4b. Recommend related items
 
@@ -192,7 +201,9 @@ uv run python examples/sql-sqlite/seed.py
 export RECOTEM_RECIPE_DB_DSN="sqlite:///$(pwd)/examples/sql-sqlite/events.db"
 export $(uv run recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
 
-# Train. Artifact lands in examples/sql-sqlite/artifacts/.
+# Train.  output.path is CWD-relative, so the artifact lands in ./artifacts/
+# of wherever you run this from — the repo root if you followed the steps above,
+# not examples/sql-sqlite/.
 mkdir -p artifacts
 uv run recotem train examples/sql-sqlite/recipe.yaml
 ```

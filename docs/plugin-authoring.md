@@ -232,15 +232,16 @@ name: echo_test
 
 source:
   type: echo
-  n_users: 50
+  n_users: 200
   n_items: 100
-  n_rows: 500
+  n_rows: 6000    # see the note below before shrinking these
   seed: 42        # optional; omit to use the default seed
 
 schema:
   user_column: user_id
   item_column: item_id
   time_column: timestamp   # EchoSource emits integer epoch-second timestamps
+  time_unit: s             # required: a numeric time_column has no implied unit
 
 training:
   algorithms: [TopPop]
@@ -257,6 +258,29 @@ Train:
 ```bash
 recotem train recipe.yaml
 ```
+
+> `time_unit` is mandatory whenever the column named by `schema.time_column`
+> holds numbers rather than strings or datetimes — omitting it exits 4 with
+> `code: time_unit_required`. `recotem validate` does **not** catch this: it
+> checks the recipe schema and probes the source, but the unit is only needed
+> once rows are parsed, so a recipe missing `time_unit` validates clean and
+> then fails at `recotem train`. If your source emits epoch integers, say so
+> in the plugin's README so recipe authors set the unit up front.
+
+> **Why the row counts are this large.** EchoSource samples user/item pairs
+> uniformly at random, so the data carries no signal for a recommender to
+> find: the reported `best_score` is noise around zero and says nothing about
+> model quality. That matters operationally, because training exits 4 with
+> `code: zero_score` when the best trial scores *exactly* 0.0. With a small
+> synthetic dataset that is a real possibility — at `n_users: 50` /
+> `n_rows: 500` roughly one run in thirty landed on 0.0, varying between
+> otherwise identical runs because `split.seed` does not control the id
+> ordering irspack derives the held-out set from — the *size* of the held-out
+> set is fixed, but *which* interactions land in it is not. The counts above
+> put 511 interactions in the held-out set instead of 31, which makes an
+> all-miss evaluation vanishingly unlikely. Shrink them and the walkthrough
+> becomes intermittently red for reasons that have nothing to do with your
+> plugin.
 
 ## FetchContext
 

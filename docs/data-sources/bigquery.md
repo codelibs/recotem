@@ -236,7 +236,7 @@ curl -X POST http://localhost:8080/v1/recipes/{name}:recommend \
 | ADC credentials not found | 3 | `DataSourceError: Failed to create BigQuery client: ... Ensure Application Default Credentials (ADC) are configured.` |
 | Permission denied on dataset | 3 | `DataSourceError: BigQuery query execution failed: 403 Access Denied: Table my-project:analytics_123456789.events ...` |
 | Query syntax error | 3 | `DataSourceError: BigQuery query execution failed: 400 Syntax error: ...` |
-| Table not found | 3 | `DataSourceError: BigQuery query execution failed: 404 Table my-project:dataset.tbl was not found in location US` |
+| Table not found | 3 | `DataSourceError: BigQuery query execution failed: 404 Not found: Table my-project:dataset.tbl was not found in location US; reason: notFound, ...` |
 | Query returned no rows | 3 | `DataSourceError: source 'bigquery' returned no rows for recipe '<name>'; the query or file matched no data. ...` |
 | Column missing after query | 3 | `DataSourceError: schema column(s) ['ts'] not found in the fetched data for recipe '<name>'; available columns: [...]` |
 | Storage Read API download failure (non-IAM) | 3 | `DataSourceError: BigQuery Storage Read API failed with ResourceExhausted: ... The query itself completed — this is a result-download failure. REST fallback skipped ...` |

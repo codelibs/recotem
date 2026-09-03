@@ -114,7 +114,7 @@ curl -X POST http://localhost:8080/v1/recipes/top_picks:recommend-related \
 
 ```json
 {
-  "request_id": "req_01HZX...",
+  "request_id": "a7d279d50b3e",
   "recipe": "top_picks",
   "model_version": "sha256:abc...",
   "items": [{"item_id": "i00", "score": 0.91}]

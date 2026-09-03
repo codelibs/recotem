@@ -114,6 +114,78 @@ def test_time_user_split_is_deterministic_for_same_seed() -> None:
 
 
 # ---------------------------------------------------------------------------
+# `random` ignores time_column
+# ---------------------------------------------------------------------------
+#
+# Recipes routinely declare `schema.time_column` regardless of split scheme
+# (the pipeline still parses and validates it), and the pipeline forwards it to
+# `split_interactions` unconditionally.  irspack's splitter switches to a
+# per-user *recency* holdout the moment it receives a time column, so without
+# the normalisation in `split_interactions` a `scheme: random` recipe would
+# silently be split as `time_user`.
+
+
+def test_random_scheme_ignores_time_column() -> None:
+    """`random` must produce the same split with or without a time column."""
+    df = _synth_df(n_users=30, n_items_per_user=10)
+    config = SplitConfig(scheme="random", heldout_ratio=0.2, seed=42)
+    common = dict(user_column="user_id", item_column="item_id")
+
+    _, with_time, _ = split_interactions(
+        df, **common, time_column="ts", split_config=config
+    )
+    _, without_time, _ = split_interactions(
+        df, **common, time_column=None, split_config=config
+    )
+
+    assert _matrix_fingerprint(with_time) == _matrix_fingerprint(without_time), (
+        "time_column changed the `random` split — it leaked into the scheme"
+    )
+
+
+def test_random_scheme_with_time_column_is_not_a_recency_holdout() -> None:
+    """`random` + a time column must not hold out each user's latest N.
+
+    ``time_user`` is exactly "hold out each user's most recent
+    ``heldout_ratio`` interactions", so comparing against it row by row is a
+    direct assertion that the ``random`` holdout is *not* time-ordered.
+    """
+    df = _synth_df(n_users=30, n_items_per_user=10)
+    common = dict(user_column="user_id", item_column="item_id", time_column="ts")
+
+    _, random_split, _ = split_interactions(
+        df,
+        **common,
+        split_config=SplitConfig(scheme="random", heldout_ratio=0.2, seed=42),
+    )
+    _, recency_split, _ = split_interactions(
+        df,
+        **common,
+        split_config=SplitConfig(scheme="time_user", heldout_ratio=0.2, seed=42),
+    )
+
+    # Both calls shuffle users with the same seed and derive the item ordering
+    # from the same frame in the same process, so row i is the same user in
+    # both matrices and column indices are directly comparable.
+    random_csr = random_split.tocsr()
+    recency_csr = recency_split.tocsr()
+    assert random_csr.shape == recency_csr.shape
+
+    n_users = random_csr.shape[0]
+    matches = sum(
+        set(random_csr[row].indices) == set(recency_csr[row].indices)
+        for row in range(n_users)
+    )
+    # Each user has 10 interactions with 2 held out, so a genuinely random
+    # holdout coincides with the recency one for 1 user in 45; matching for
+    # even half the users means the split is time-ordered.
+    assert matches < n_users // 2, (
+        f"`random` held out each user's most recent interactions for "
+        f"{matches}/{n_users} users — time_column leaked into the scheme"
+    )
+
+
+# ---------------------------------------------------------------------------
 # time_global semantics
 # ---------------------------------------------------------------------------
 

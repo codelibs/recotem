@@ -112,6 +112,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full recipe-YAML-to-train path that the previous class-only unit tests never
   exercised.
 
+- **`split.scheme: random` was not random when the recipe declared a time
+  column.** The pipeline forwards `schema.time_column` to the splitter for any
+  recipe that declares one, and irspack switches to a per-user *recency*
+  holdout the moment it receives one -- so `random` silently behaved as
+  `time_user`, contradicting the documented "`time_column` is unused". Measured
+  on 30 users, the holdout matched each user's most recent interactions 30/30
+  times. Since the split defines the validation set the Optuna search scores
+  against, the search was optimising for a different task than the recipe
+  asked for. `split_interactions` now ignores `time_column` under `random`.
+  **Behaviour change:** such a recipe will split differently on its next train
+  and its reported metric may move; existing artifacts are unaffected until
+  retrained, and `scheme: time_user` restores the old behaviour explicitly.
+
 ### Changed
 
 - **irspack upgraded from 0.4.2 to 0.5.2.** irspack 0.5.0 adds feature-aware

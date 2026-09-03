@@ -16,6 +16,7 @@ problem with the resulting split.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import pandas as pd
@@ -137,8 +138,12 @@ def split_interactions(
     X_val_test: sps.spmatrix = val.X_test
     if X_val_test.nnz == 0:
         raise SplitError(
-            "Split produced an empty held-out test set. "
-            "Try reducing heldout_ratio or increasing the dataset size."
+            _empty_holdout_message(
+                df,
+                user_column=user_column,
+                item_column=item_column,
+                split_config=split_config,
+            )
         )
 
     X_train_full: sps.spmatrix = sps.vstack([train.X_train, val.X_train])
@@ -167,6 +172,120 @@ def split_interactions(
         val_offset=val_offset,
         item_ids=item_ids,
         row_user_ids=row_user_ids,
+    )
+
+
+def _min_interactions_for_holdout(heldout_ratio: float) -> int:
+    """Smallest per-user interaction count that yields one held-out interaction.
+
+    irspack holds out ``floor(n * heldout_ratio)`` interactions per user
+    (``ceil_n_heldout`` defaults to False and recotem never overrides it), so
+    the answer is the smallest ``n`` with ``floor(n * ratio) >= 1``.  Searched
+    upward from ``floor(1 / ratio)`` using the same float arithmetic irspack
+    performs, rather than returned as ``ceil(1 / ratio)``, so a ratio that is
+    not exactly representable in binary cannot shift the answer by one and
+    make the advice wrong at the boundary.
+    """
+    n = max(1, math.floor(1.0 / heldout_ratio))
+    while math.floor(n * heldout_ratio) < 1:
+        n += 1
+    return n
+
+
+def _empty_holdout_message(
+    df: pd.DataFrame,
+    *,
+    user_column: str,
+    item_column: str,
+    split_config: SplitConfig,
+) -> str:
+    """Diagnose an empty held-out set against the frame that produced it.
+
+    The generic advice this replaced ("increase the dataset size") is wrong
+    for the two per-user schemes: the holdout is floored PER USER, so more
+    users at the same per-user depth changes nothing.  Only per-user depth,
+    ``heldout_ratio`` or ``test_user_ratio`` move the outcome, and which one
+    applies is decided here from the actual counts.  Runs only on the failure
+    path, so the extra groupby costs nothing in the normal case.
+    """
+    ratio = split_config.heldout_ratio
+    scheme = split_config.scheme
+    test_user_ratio = split_config.test_user_ratio
+
+    if scheme == "time_global":
+        # No per-user floor here: the cutoff is global, and every interaction
+        # at or after it is held out.  An empty result therefore means the
+        # post-cutoff interactions all belong to users that were not drawn as
+        # validation users.
+        return (
+            "Split produced an empty held-out test set. The 'time_global' "
+            "scheme holds out every interaction at or after the "
+            f"{1.0 - ratio:g} quantile of the time column, then evaluates only "
+            "the users drawn as validation users out of those that have a "
+            f"post-cutoff interaction (test_user_ratio={test_user_ratio:g}); "
+            "none of the post-cutoff interactions belong to a drawn user. "
+            "Raise training.split.test_user_ratio (1.0 draws every such user) "
+            "or raise training.split.heldout_ratio to move the cutoff earlier."
+        )
+
+    # irspack drops duplicate (user, item) pairs before splitting, so a user's
+    # effective depth is their distinct-item count, not their row count.
+    per_user = df.groupby(user_column, observed=True)[item_column].nunique()
+    n_users = int(per_user.size)
+    if n_users == 0:
+        return (
+            "Split produced an empty held-out test set: the frame handed to "
+            "the splitter contains no users."
+        )
+
+    deepest = int(per_user.max())
+    min_depth = _min_interactions_for_holdout(ratio)
+    n_qualifying = int((per_user >= min_depth).sum())
+    # irspack draws int(n_users * test_user_ratio) validation users; only
+    # their interactions are candidates for the holdout.
+    n_val_users = int(n_users * test_user_ratio)
+
+    rule = (
+        f"Split produced an empty held-out test set. The {scheme!r} scheme "
+        "holds out floor(n_interactions * heldout_ratio) interactions PER "
+        f"USER, so at heldout_ratio={ratio:g} a user needs at least "
+        f"{min_depth} distinct items before any of them can be held out"
+    )
+
+    if n_qualifying == 0:
+        # Ceiling to two decimals keeps the suggestion readable and stays
+        # above the exact threshold 1/deepest.
+        suggested = math.ceil(100.0 / deepest) / 100.0
+        remedy = (
+            f"Raise training.split.heldout_ratio to {suggested:g} or more, or "
+            "supply deeper per-user histories."
+            if suggested < 1.0
+            else (
+                "No heldout_ratio below 1.0 can hold out an interaction from a "
+                f"{deepest}-interaction user; supply deeper per-user histories."
+            )
+        )
+        return (
+            f"{rule}; none of the {n_users} users reach that (the deepest has "
+            f"{deepest}). Adding more users does not help — only per-user "
+            f"depth does. {remedy}"
+        )
+
+    if n_val_users == 0:
+        return (
+            f"{rule}; {n_qualifying} of {n_users} users reach it, but "
+            f"test_user_ratio={test_user_ratio:g} draws "
+            f"int({n_users} * {test_user_ratio:g}) = 0 validation users, so no "
+            "interaction was eligible for the holdout. Raise "
+            "training.split.test_user_ratio (1.0 draws every user)."
+        )
+
+    return (
+        f"{rule}; {n_qualifying} of {n_users} users reach it (the deepest has "
+        f"{deepest}), but none of them were among the {n_val_users} validation "
+        f"users drawn at test_user_ratio={test_user_ratio:g}. Raise "
+        "training.split.test_user_ratio (1.0 draws every user), or raise "
+        "training.split.heldout_ratio so more users qualify."
     )
 
 

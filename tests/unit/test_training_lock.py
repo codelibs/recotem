@@ -939,6 +939,172 @@ def test_osopen_enospc_propagates_as_oserror(tmp_path: Path, monkeypatch) -> Non
 
 
 # ---------------------------------------------------------------------------
+# EROFS: a read-only mount is a config error, not an unhandled exception
+# ---------------------------------------------------------------------------
+#
+# A read-only filesystem (readOnlyRootFilesystem: true, a read-only PVC, a
+# read-only bind mount) raises OSError(EROFS), which is NOT a PermissionError
+# subclass.  Guarding on the exception type alone let it escape to
+# _EXIT_UNKNOWN with a traceback, even though it is the same class of
+# deployment mistake as EACCES and has the same remedy shape.
+
+
+def _patch_os_open_to_raise_oserror(monkeypatch, err: int) -> None:
+    """Make os.open raise a plain OSError (not PermissionError) for .lock."""
+    original_os_open = os.open
+
+    def _fake_os_open(path, flags, mode=0o600):
+        if "lock" in str(path):
+            raise OSError(err, os.strerror(err))
+        return original_os_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", _fake_os_open)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+@pytest.mark.parametrize("fail_on_busy", [True, False])
+def test_osopen_erofs_raises_lock_permission_error(
+    tmp_path: Path, monkeypatch, fail_on_busy: bool
+) -> None:
+    """A read-only lock filesystem must map to exit 8, not exit 1."""
+    import errno as _errno
+
+    from recotem._exit_codes import _EXIT_CONFIG, _map_exception_to_exit
+
+    _patch_os_open_to_raise_oserror(monkeypatch, _errno.EROFS)
+    output_path = tmp_path / f"erofs_{fail_on_busy}.recotem"
+
+    with pytest.raises(LockPermissionError) as exc_info:
+        with recipe_lock(output_path, fail_on_busy=fail_on_busy):
+            pass  # pragma: no cover — must not be reached
+
+    exc = exc_info.value
+    assert _map_exception_to_exit(exc) == _EXIT_CONFIG
+    assert not isinstance(exc, LockContestedError)
+
+    # chmod cannot fix a read-only mount, so the remedy must be the writable
+    # location, not the ownership advice EACCES gets.
+    message = str(exc)
+    assert str(output_path) + ".lock" in message
+    assert "read-only" in message
+    assert "RECOTEM_LOCK_DIR" in message
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_mkdir_erofs_raises_lock_permission_error(tmp_path: Path, monkeypatch) -> None:
+    """The parent-directory mkdir must classify EROFS the same way.
+
+    Under a read-only root the mkdir fails before os.open is ever reached.
+    """
+    import errno as _errno
+
+    original_mkdir = Path.mkdir
+
+    def _fake_mkdir(self, *args, **kwargs):
+        if str(tmp_path) in str(self):
+            raise OSError(_errno.EROFS, os.strerror(_errno.EROFS))
+        return original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", _fake_mkdir)
+
+    with pytest.raises(LockPermissionError) as exc_info:
+        with recipe_lock(tmp_path / "sub" / "erofs_mkdir.recotem"):
+            pass  # pragma: no cover — must not be reached
+
+    assert "read-only" in str(exc_info.value)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_mkdir_enospc_still_propagates_as_oserror(tmp_path: Path, monkeypatch) -> None:
+    """The mkdir guard must stay errno-scoped, not swallow every OSError."""
+    import errno as _errno
+
+    original_mkdir = Path.mkdir
+
+    def _fake_mkdir(self, *args, **kwargs):
+        if str(tmp_path) in str(self):
+            raise OSError(_errno.ENOSPC, "No space left on device")
+        return original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", _fake_mkdir)
+
+    with pytest.raises(OSError) as exc_info:
+        with recipe_lock(tmp_path / "sub" / "enospc_mkdir.recotem"):
+            pass  # pragma: no cover — must not be reached
+
+    assert exc_info.value.errno == _errno.ENOSPC
+    assert not isinstance(exc_info.value, LockPermissionError)
+
+
+def test_windows_osopen_erofs_raises_lock_permission_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """EROFS is never a sharing violation, so Windows must fail loudly too.
+
+    Unlike EACCES — ambiguous on Windows between "denied" and "in use" —
+    EROFS carries no contention meaning, so returning None (contested) would
+    make `recotem train` exit 0 without training.
+    """
+    import errno as _errno
+
+    # Fake msvcrt so the Windows branch is importable on POSIX CI.
+    monkeypatch.setitem(
+        sys.modules,
+        "msvcrt",
+        types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, locking=lambda *_: None),
+    )
+    _patch_os_open_to_raise_oserror(monkeypatch, _errno.EROFS)
+
+    from recotem.training.lock import _try_acquire_windows
+
+    with pytest.raises(LockPermissionError):
+        _try_acquire_windows(tmp_path / "win_erofs.recotem.lock")
+
+
+# ---------------------------------------------------------------------------
+# Contention message: only reachable with --fail-on-busy already passed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_fail_on_busy_message_does_not_recommend_the_flag_in_use(
+    tmp_path: Path,
+) -> None:
+    """The advice must be actionable for the operator who already used it."""
+    import fcntl
+
+    output_path = tmp_path / "busy_message.recotem"
+    lock_path = Path(str(output_path) + ".lock")
+
+    def _hold_lock(lock_path_str: str, ready_event, release_event) -> None:
+        fd = os.open(lock_path_str, os.O_CREAT | os.O_WRONLY, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ready_event.set()
+        release_event.wait(timeout=5.0)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Event()
+    release = ctx.Event()
+    p = ctx.Process(target=_hold_lock, args=(str(lock_path), ready, release))
+    p.start()
+    ready.wait(timeout=3.0)
+
+    try:
+        with pytest.raises(LockContestedError) as exc_info:
+            with recipe_lock(output_path, fail_on_busy=True):
+                pass  # pragma: no cover — must not be reached
+    finally:
+        release.set()
+        p.join(timeout=5.0)
+
+    message = str(exc_info.value)
+    assert "Pass --fail-on-busy" not in message
+    assert "--lock-timeout" in message
+
+
+# ---------------------------------------------------------------------------
 # LEAK-2: lock_timeout propagation through recipe_lock
 # ---------------------------------------------------------------------------
 

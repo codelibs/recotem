@@ -676,6 +676,30 @@ and every existing recipe, which stays valid as written. Every recipe's
   precedence and the example CronJob's empty-directory guard with a
   duplicate-key-rejecting YAML loader (`yaml.safe_load` takes the last key, so a
   normal parse of a broken render looks healthy).
+- **The empty-held-out-set error advised a fix that does not work.** It suggested
+  "increasing the dataset size", but the holdout is `floor(n * heldout_ratio)`
+  **per user**: 4,000 users with 8 interactions each fails exactly like 400 users
+  with 8 interactions each. The message now states the per-user rule, the minimum
+  distinct items per user implied by the configured `heldout_ratio`, how many
+  users actually clear it, the deepest user observed, and a `heldout_ratio` that
+  would work for that data — and distinguishes "no user is deep enough" from
+  "deep users exist but `test_user_ratio` drew none of them", which have
+  different remedies. `time_global`, which has no per-user floor, gets its own
+  message. `docs/recipe-reference.md` documents the rule under **Per-user holdout
+  depth** and records that the hash-ordering nondeterminism can flip a marginal
+  dataset between exit 0 and a `zero_score` exit 4, not merely perturb
+  `best_score`.
+- **A read-only filesystem on the lock path exited 1 instead of 8.** The guard
+  caught `PermissionError` (EACCES/EPERM) only, but a read-only mount raises
+  `OSError(EROFS)`, which is not a `PermissionError` — so `readOnlyRootFilesystem:
+  true`, a read-only PVC, or a read-only bind mount produced an unhandled
+  traceback and `"code": "internal_error"` instead of the configuration error the
+  handler was written for. EROFS now raises `LockPermissionError` (exit 8) from
+  the `mkdir`, POSIX `open`, and Windows `open` paths, with a remedy that fits the
+  cause: `chmod` advice for EACCES, a writable `RECOTEM_LOCK_DIR` for EROFS. The
+  guard stays errno-scoped, so ENOSPC and friends still propagate. Also, the
+  contention message raised under `--fail-on-busy` no longer recommends passing
+  `--fail-on-busy`, which the reader has by definition already done.
 
 ### Migrating to irspack 0.5.0
 

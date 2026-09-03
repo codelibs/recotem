@@ -271,7 +271,10 @@ def run_training(
         # For unexpected non-domain errors (KeyError, AttributeError, etc.),
         # emit code="internal_error" so operators can distinguish bugs from
         # expected failure modes when alerting on the code field.
-        declared_code = getattr(exc, "code", None)
+        # ``code`` is read only when a recotem class declares it — see
+        # _recotem_error_code for why the attribute cannot simply be
+        # ``getattr``-ed off any exception.
+        declared_code = _recotem_error_code(exc)
         if declared_code:
             error_code = declared_code
         elif isinstance(exc, TrainingError):
@@ -577,13 +580,22 @@ def _run_training_locked(
             features_header["user"] = user_desc
         header_dict["features"] = features_header
 
-    artifact_path: str = write_artifact_fn(
-        trained_recommender,
-        header_dict,
-        key_ring,
-        recipe.output.path,
-        versioning=recipe.output.versioning,
-    )
+    try:
+        artifact_path: str = write_artifact_fn(
+            trained_recommender,
+            header_dict,
+            key_ring,
+            recipe.output.path,
+            versioning=recipe.output.versioning,
+        )
+    except Exception as exc:
+        # The model is trained and about to be discarded, so the failure must
+        # name its own cause rather than arriving as an unmapped exit 1 under
+        # a stack of object-store SDK frames.
+        credentials_error = _artifact_write_credentials_error(exc, recipe.output.path)
+        if credentials_error is not None:
+            raise credentials_error from exc
+        raise
 
     # Canonical end-of-train marker.
     # Schema: name, run_id, exit_code, artifact, best_class, best_score,
@@ -630,6 +642,92 @@ def _run_training_locked(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _recotem_error_code(exc: BaseException) -> str | None:
+    """Return ``exc.code`` when a recotem class declares it, else ``None``.
+
+    ``code`` is a recotem convention, but it is declared on five independent
+    roots — ``TrainingError``, ``DataSourceError``, ``LockContestedError``,
+    ``LockPermissionError`` and ``KeyRingConfigError`` — with no common base
+    class to ``isinstance`` against.  Enumerating them here is exactly what a
+    maintainer adding a sixth would silently break (the failure mode is a
+    domain error suddenly logged as ``internal_error`` with a traceback), so
+    the check asks the structural question instead: which class in the MRO
+    actually *declares* ``code``, and is that class one of ours?
+
+    A plain ``getattr(exc, "code", None)`` cannot be used because third-party
+    exceptions use the same attribute name for unrelated things.  SQLAlchemy
+    stores its documentation-shortlink slug there, so an unreachable
+    ``training.storage_path`` reported ``code="e3q8"`` — and, because the
+    ``exc_info`` gate keys off ``internal_error``, that foreign code
+    suppressed the traceback of an unexpected failure as well.
+    """
+    for klass in type(exc).__mro__:
+        if "code" not in vars(klass):
+            continue
+        module = klass.__module__
+        if module != "recotem" and not module.startswith("recotem."):
+            return None
+        code = getattr(exc, "code", None)
+        return code if isinstance(code, str) and code else None
+    return None
+
+
+# Credential-resolution failures raised by the object-store SDKs that fsspec
+# drives for a remote ``output.path``.  They are matched by class name because
+# every one of those SDKs is an optional dependency of recotem — importing them
+# for an isinstance check would either fail or, worse, pull boto3 / google-auth
+# into every train run.  The names are long-lived public API in each SDK's
+# exceptions module.
+_CREDENTIAL_ERROR_NAMES: frozenset[str] = frozenset(
+    {
+        "NoCredentialsError",  # botocore — s3://
+        "PartialCredentialsError",  # botocore — s3://
+        "CredentialRetrievalError",  # botocore — s3://
+        "DefaultCredentialsError",  # google.auth — gs://
+        "RefreshError",  # google.auth — gs://
+        "ClientAuthenticationError",  # azure.core — az:// / abfs://
+    }
+)
+
+
+def _artifact_write_credentials_error(
+    exc: BaseException, output_path: str
+) -> TrainingError | None:
+    """Return a config-coded ``TrainingError`` if *exc* is a credential failure.
+
+    A local ``output.path`` the process cannot write to already fails as a
+    configuration error (exit 8) — the per-recipe lock is taken next to the
+    artifact and ``LockPermissionError`` is a ``ConfigError``.  A remote
+    ``output.path`` has no such lock (remote outputs lock in a host-local
+    directory), so an unauthenticated bucket used to surface as the raw SDK
+    exception: an unmapped exit 1 carrying the SDK's frames, for a deployment
+    mistake that no amount of retrying will fix.  This restores the local
+    path's answer for the remote one.
+
+    ``code="artifact_write_credentials"`` puts the failure on the same
+    ``TrainingError``-with-a-config-code route as ``signing_key_missing``, so
+    ``_map_exception_to_exit`` reports exit 8 and the ``train_error`` event
+    carries a recotem code instead of ``internal_error``.
+
+    Returns ``None`` for every other write failure, which keeps its current
+    classification — a transient object-store error is not a config error.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if type(cur).__name__ in _CREDENTIAL_ERROR_NAMES:
+            return TrainingError(
+                f"could not authenticate to write the artifact to "
+                f"{output_path!r}: {type(cur).__name__}: {cur}.  Training "
+                "succeeded but the model was not persisted — configure "
+                "credentials for the destination and re-run.",
+                code="artifact_write_credentials",
+            )
+        cur = cur.__cause__ or cur.__context__
+    return None
 
 
 def _normalize_paths_for_hash(obj: Any) -> Any:

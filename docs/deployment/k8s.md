@@ -9,6 +9,78 @@ Two Kubernetes objects cover the Recotem lifecycle:
 
 Recipes can be delivered to both objects via ConfigMap (small, static recipes), PVC (read-write volume), or object storage (S3/GCS — recipes and artifacts both live remotely).
 
+## First install: seed an artifact before serve starts
+
+**Read this before your first `helm install` or `kubectl apply`.** Train and
+serve are ordered: serve cannot start healthy until train has produced an
+artifact for every recipe, and nothing in the chart or the example manifests
+runs train for you at install time.
+
+`recotem serve` loads one artifact per recipe at startup. Until every recipe
+has one, `/v1/health` answers **503** with
+`{"status":"degraded","total":1,"loaded":0}`. On an empty artifact store that
+means:
+
+```
+Warning  Unhealthy  kubelet  Startup probe failed: HTTP probe failed with statuscode: 503
+```
+
+...repeatedly, until the startup probe's `failureThreshold` is reached and the
+container is restarted — a crash loop that looks like a bug but is only a
+missing artifact. `helm install --wait` fails with a rollout timeout, and the
+CronJob's default `schedule: "0 2 * * *"` means nothing produces the artifact
+for up to a day.
+
+**Always train before serving.** Pick whichever fits your setup:
+
+**A. Helm — install with training enabled, seed, then verify.** Install
+without `--wait` (the serve pods will not be Ready yet), kick off the CronJob
+immediately as a one-off Job, then wait:
+
+```bash
+helm upgrade --install recotem ./helm/recotem -n recotem \
+  -f values-prod.yaml --set train.enabled=true      # no --wait
+
+kubectl -n recotem create job bootstrap-0 --from=cronjob/recotem-train
+kubectl -n recotem wait --for=condition=complete job/bootstrap-0 --timeout=30m
+
+kubectl -n recotem rollout status deployment/recotem --timeout=10m
+```
+
+**B. Raw manifests — apply the bundled bootstrap Job.**
+`examples/k8s/bootstrap-job.yaml` is a one-shot `recotem train` Job with the
+same container spec as the CronJob; `kubectl apply -f examples/k8s/` creates
+it alongside the Deployment. See
+[`examples/k8s/README.md`](../../examples/k8s/README.md).
+
+**C. Train out-of-cluster.** Run `recotem train` anywhere that can write the
+recipe's `output.path` (an `s3://` / `gs://` URI, or the PVC mounted on a
+workstation) before creating the Deployment at all. Signing keys must match
+the ones serve is configured with.
+
+In every case the serve pods recover on their own once an artifact appears —
+the watcher picks it up within `RECOTEM_WATCH_INTERVAL` seconds and the next
+probe succeeds. No rollout restart is needed.
+
+> **Why no post-install hook in the chart?** Training is an unbounded
+> operation — the CronJob allows it an hour (`activeDeadlineSeconds: 3600`).
+> Wiring it into `helm install` would make every first install block on it and
+> fail against Helm's `--timeout` (5 minutes by default), trading a legible
+> "no artifact yet" crash loop for an opaque failed release. Seeding is kept
+> as an explicit step for that reason.
+
+**Recovering an install that is already crash-looping** is the same fix — the
+pods need no manual intervention beyond producing the artifact:
+
+```bash
+kubectl -n recotem create job recover-0 --from=cronjob/recotem-train
+kubectl -n recotem logs -f job/recover-0
+```
+
+If `train.enabled=false` (the chart default) there is no CronJob to copy from;
+either enable it, or apply `examples/k8s/bootstrap-job.yaml` with the image,
+Secret and volume names adjusted to your release.
+
 ## CronJob (train)
 
 ```yaml
@@ -29,7 +101,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: train
-              image: ghcr.io/codelibs/recotem:2.0.0
+              image: ghcr.io/codelibs/recotem:2.1.0
               command: ["recotem", "train", "/recipes/my_recipe.yaml"]
               volumeMounts:
                 - name: recipes
@@ -105,7 +177,7 @@ spec:
       terminationGracePeriodSeconds: 35
       containers:
         - name: serve
-          image: ghcr.io/codelibs/recotem:2.0.0
+          image: ghcr.io/codelibs/recotem:2.1.0
           command: ["recotem", "serve", "--recipes", "/recipes/"]
           ports:
             - containerPort: 8080
@@ -313,7 +385,7 @@ Key values (excerpt from `helm/recotem/values.yaml`):
 ```yaml
 image:
   repository: ghcr.io/codelibs/recotem
-  tag: "2.0.0"
+  tag: "2.1.0"
   pullPolicy: IfNotPresent
 
 # serve Deployment
@@ -355,13 +427,21 @@ recipes:
 networkPolicy:
   enabled: true
   # ingressFromPodSelector restricts which pods may reach recotem-serve.
-  # Empty map ({}) → no ingress rule is rendered → combined with
-  # policyTypes:[Ingress], this is the canonical Kubernetes "deny all
-  # inbound" pattern.  Set a label selector to allow specific scrapers,
-  # probes, or ingress controllers:
+  # Empty map ({}) renders no podSelector-based rule.  Set a label selector
+  # to allow specific scrapers or ingress controllers:
   #   ingressFromPodSelector:
   #     app.kubernetes.io/name: ingress-nginx
   ingressFromPodSelector: {}
+
+  # allowKubeletProbes adds a rule opening service.targetPort with no `from:`
+  # — which in NetworkPolicy means ALL sources, not none.  Required because
+  # kubelet probes originate from the node network and no podSelector can
+  # match them.  See the warning below before turning this off.
+  allowKubeletProbes: true
+
+  # Restrict the probe rule to specific node CIDRs instead of all sources.
+  kubeletCIDRs: []
+  #   - "10.0.0.0/8"
 
 hpa:
   enabled: false
@@ -369,6 +449,53 @@ hpa:
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
 ```
+
+### NetworkPolicy: the defaults are not deny-all inbound
+
+> ⚠️ **With chart defaults, inbound to port 8080 is open to every source.**
+> `ingressFromPodSelector: {}` on its own would render no ingress rule, but
+> the default `allowKubeletProbes: true` renders a rule with **no `from:`
+> field**, and in the Kubernetes NetworkPolicy API an ingress rule with no
+> `from:` matches **all** sources — the opposite of deny-all. Verify what you
+> actually got:
+>
+> ```console
+> $ kubectl get networkpolicy recotem -o jsonpath='{.spec.ingress}'
+> [{"ports":[{"port":8080,"protocol":"TCP"}]}]
+> ```
+>
+> That single rule, with `ports` but no `from`, is "any source may reach TCP
+> 8080". The canonical deny-all-inbound form is `ingress: []` with
+> `policyTypes` including `Ingress`.
+
+`allowKubeletProbes` defaults to `true` for a reason: kubelet health checks
+originate from the **node** network rather than from a pod, so no
+`podSelector` rule can match them. Set it to `false` and readiness/liveness
+probes are silently dropped, pods never become Ready, and the Deployment
+never converges.
+
+To narrow inbound while keeping probes working, do **not** set
+`allowKubeletProbes: false` — instead list your node CIDRs, which converts
+the probe rule from "any source" to an `ipBlock` match:
+
+```yaml
+networkPolicy:
+  enabled: true
+  ingressFromPodSelector:
+    app.kubernetes.io/name: ingress-nginx   # who may call the API
+  allowKubeletProbes: true
+  kubeletCIDRs:                             # where probes may come from
+    - "10.0.0.0/8"
+```
+
+Only set `allowKubeletProbes: false` when a separate NetworkPolicy or CNI
+mechanism already admits node-originating traffic; with it false and
+`ingressFromPodSelector` empty, the chart does render a true `ingress: []`
+deny-all.
+
+Note that `policyTypes` always includes `Egress`, and the egress rules are
+port-based only (53, 443, 8080) with no destination restriction. Add your own
+policy if you need to constrain which hosts the pod may reach.
 
 Create the auth Secret before installing the chart, e.g.:
 

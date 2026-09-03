@@ -4,7 +4,15 @@
 # For production use the Helm chart at helm/recotem/ instead —
 # this file is intended for quick experimentation or GitOps without Helm.
 #
+# This pod spec sets `serviceAccountName: recotem`, so 00-serviceaccount.yaml
+# must be applied first (or in the same `kubectl apply -f examples/k8s/`) —
+# Kubernetes refuses to create pods for a ServiceAccount that does not exist.
+#
+# Serve stays NotReady (503 "degraded") until an artifact exists for every
+# recipe; apply bootstrap-job.yaml to seed one. See README.md.
+#
 # Apply:
+#   kubectl apply -f examples/k8s/00-serviceaccount.yaml
 #   kubectl apply -f examples/k8s/serve-deployment.yaml
 #   kubectl apply -f examples/k8s/serve-service.yaml
 
@@ -16,7 +24,7 @@ metadata:
   labels:
     app.kubernetes.io/name: recotem
     app.kubernetes.io/component: serve
-    app.kubernetes.io/version: "2.0.0"
+    app.kubernetes.io/version: "2.1.0"
 spec:
   replicas: 2
   selector:
@@ -56,7 +64,7 @@ spec:
 
       containers:
         - name: serve
-          image: ghcr.io/codelibs/recotem:2.0.0
+          image: ghcr.io/codelibs/recotem:2.1.0
           imagePullPolicy: IfNotPresent
           command: ["recotem", "serve", "--recipes", "/recipes"]
 

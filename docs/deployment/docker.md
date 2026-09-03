@@ -14,7 +14,7 @@ Pushed by `.github/workflows/docker.yml` to `ghcr.io/codelibs/recotem`:
 | `main` (branch ref) | mutable, head of `main` | smoke-tests only |
 | `sha-<short>` | immutable | reproducing a specific commit |
 
-`:latest` is updated on every push to `main`. The tutorial `compose.yaml` references `:latest`; in production always pin to a semver tag (e.g. `2.0.0`). The Helm chart and `examples/k8s/` already pin `2.0.0`.
+`:latest` is updated on every push to `main`. The tutorial `compose.yaml` references `:latest`; in production always pin to a semver tag (e.g. `2.0.0`). The Helm chart and `examples/k8s/` already pin `2.1.0`.
 
 The image is multi-arch (`linux/amd64`, `linux/arm64`). SBOM and SLSA
 provenance attestations are attached at push time (`provenance: mode=max`,
@@ -27,6 +27,21 @@ The repository includes `compose.yaml` (the Docker Compose v2 default
 filename — `docker compose` picks it up automatically without `-f`). Here
 is an annotated version:
 
+> ⚠️ **`command:` does not include the `recotem` binary.** The image sets
+> `ENTRYPOINT ["recotem"]`, and Compose's `command:` replaces the image's
+> **CMD**, not its ENTRYPOINT. Compose appends `command:` to the entrypoint,
+> so `command: recotem train ...` produces the argv
+> `recotem recotem train ...` and the container dies immediately with
+> `Error: No such command 'recotem'.` (exit 2). Pass **subcommand and flags
+> only**: `command: ["train", "/recipes/my_recipe.yaml"]`.
+>
+> Kubernetes is the opposite: a container's `command:` **replaces** the image
+> ENTRYPOINT, so the manifests in `examples/k8s/` and `docs/deployment/k8s.md`
+> correctly spell it `command: ["recotem", "serve", "--recipes", "/recipes"]`.
+> The same key means different things in the two systems — do not copy an
+> argv list from one to the other without adding or removing the leading
+> `recotem`.
+
 ```yaml
 services:
 
@@ -36,7 +51,7 @@ services:
   # ------------------------------------------------------------------
   train:
     image: ghcr.io/codelibs/recotem:latest    # pin to a semver tag in production
-    command: recotem train /recipes/my_recipe.yaml
+    command: ["train", "/recipes/my_recipe.yaml"]   # ENTRYPOINT is already `recotem`
     working_dir: /workspace
     volumes:
       - ./examples/tutorial-purchase-log:/recipes:ro  # bind-mount recipe dir read-only
@@ -51,7 +66,7 @@ services:
   # ------------------------------------------------------------------
   serve:
     image: ghcr.io/codelibs/recotem:latest    # pin to a semver tag in production
-    command: recotem serve --recipes /recipes/
+    command: ["serve", "--recipes", "/recipes"]     # ENTRYPOINT is already `recotem`
     working_dir: /workspace
     ports:
       - "8080:8080"
@@ -125,7 +140,7 @@ Replace the one-shot `train` service with a cron wrapper or use the host cron to
 0 3 * * * docker compose -f /opt/recotem/compose.yaml run --rm train
 ```
 
-Or run the `train` image as a separate, throwaway container that shares the artifact volume:
+Or run the `train` image as a separate, throwaway container that shares the artifact volume. Everything after the image name is appended to the image's `ENTRYPOINT ["recotem"]`, so start at the subcommand:
 
 ```bash
 docker run --rm \
@@ -134,7 +149,7 @@ docker run --rm \
   -v /opt/recotem/recipes:/recipes:ro \
   -e RECOTEM_SIGNING_KEYS="${RECOTEM_SIGNING_KEYS}" \
   ghcr.io/codelibs/recotem:latest \
-  recotem train /recipes/my_recipe.yaml
+  train /recipes/my_recipe.yaml
 ```
 
 ## Environment variables reference

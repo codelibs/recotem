@@ -49,6 +49,7 @@ version. During Phase 5 (dev bump) leave them on the last released tag.
 | `helm/recotem/values.yaml` | `image.tag` |
 | `examples/k8s/serve-deployment.yaml` | `image:` tag + `app.kubernetes.io/version` label |
 | `examples/k8s/cronjob.yaml` | `image:` tag |
+| `examples/k8s/bootstrap-job.yaml` | `image:` tag |
 | `docs/deployment/k8s.md` | `image:` tags + the `values.yaml` excerpt |
 | `docs/deployment/docker.md` | the "already pin ..." sentence — **only that one** |
 
@@ -80,6 +81,7 @@ string. An array subscripted with `[@]` behaves identically in both shells.
 ```bash
 PINS=(helm/recotem/values.yaml helm/recotem/Chart.yaml \
       examples/k8s/serve-deployment.yaml examples/k8s/cronjob.yaml \
+      examples/k8s/bootstrap-job.yaml \
       docs/deployment/k8s.md)
 
 # guards: refuse to run on an unsubstituted placeholder or a wrong PREV
@@ -128,6 +130,7 @@ uv run python -c "from recotem.version import __version__; print(__version__)"
 # 3. every deployment pin equals the release version
 PINS=(helm/recotem/values.yaml helm/recotem/Chart.yaml \
       examples/k8s/serve-deployment.yaml examples/k8s/cronjob.yaml \
+      examples/k8s/bootstrap-job.yaml \
       docs/deployment/k8s.md docs/deployment/docker.md)
 PAT='ghcr\.io/codelibs/recotem:[0-9][^ "]*|^ *tag: "[0-9][^"]*"|^version: [0-9][^ ]*'
 PAT="$PAT"'|^appVersion: "[0-9][^"]*"|app\.kubernetes\.io/version: "[0-9][^"]*"'

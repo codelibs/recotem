@@ -54,8 +54,12 @@ spec:
               {{- if .Values.train.recipeFiles }}
               # Train specific recipe files listed in .Values.train.recipeFiles.
               # recipeFiles must be a YAML list (e.g. ["a.yaml","b.yaml"]).
-              # String values (legacy comma-separated) are also accepted via
-              # IFS splitting but are deprecated — migrate to the list form.
+              # A legacy comma-separated string is also accepted but deprecated —
+              # migrate to the list form.  Both forms are split here at *render*
+              # time and emitted as one `recotem train` line per recipe, so the
+              # generated script stays POSIX sh: /bin/sh in the image is dash,
+              # which has neither arrays, `<<<` here-strings, nor `${var// /}`
+              # substitution.
               command:
                 - /bin/sh
                 - -c
@@ -66,12 +70,16 @@ spec:
                   recotem train {{ $.Values.recipes.mountPath }}/{{ $r }}{{ if $.Values.train.failOnBusy }} --fail-on-busy{{ end }}
                   {{- end }}
                   {{- else }}
-                  IFS=, read -ra _recipes <<< {{ .Values.train.recipeFiles | quote }}
-                  for recipe in "${_recipes[@]}"; do
-                    recipe="${recipe// /}"
-                    [ -n "$recipe" ] || continue
-                    recotem train {{ .Values.recipes.mountPath }}/${recipe}{{ if .Values.train.failOnBusy }} --fail-on-busy{{ end }}
-                  done
+                  {{- $legacy := list }}
+                  {{- range $r := splitList "," (toString .Values.train.recipeFiles) }}
+                  {{- with trim $r }}{{ $legacy = append $legacy . }}{{ end }}
+                  {{- end }}
+                  {{- if not $legacy }}
+                  {{- fail (printf "train.recipeFiles is the string %q but contains no recipe file names; use a YAML list, e.g. recipeFiles: [\"news.yaml\"]" (toString .Values.train.recipeFiles)) }}
+                  {{- end }}
+                  {{- range $r := $legacy }}
+                  recotem train {{ $.Values.recipes.mountPath }}/{{ $r }}{{ if $.Values.train.failOnBusy }} --fail-on-busy{{ end }}
+                  {{- end }}
                   {{- end }}
               {{- else }}
               # Train all *.yaml recipes in the recipes directory.

@@ -6,7 +6,14 @@
 # This is a standalone example; for a Helm-managed CronJob, enable
 # .Values.train.enabled=true in the recotem Helm chart instead.
 #
+# This pod spec sets `serviceAccountName: recotem`, so 00-serviceaccount.yaml
+# must be applied first (or in the same `kubectl apply -f examples/k8s/`).
+#
+# This CronJob only produces the FIRST artifact at its next scheduled run
+# (02:00 UTC by default).  Use bootstrap-job.yaml to seed the store now.
+#
 # Usage:
+#   kubectl apply -f examples/k8s/00-serviceaccount.yaml
 #   kubectl apply -f examples/k8s/cronjob.yaml
 
 apiVersion: batch/v1
@@ -47,7 +54,7 @@ spec:
 
           containers:
             - name: train
-              image: ghcr.io/codelibs/recotem:2.0.0
+              image: ghcr.io/codelibs/recotem:2.1.0
               imagePullPolicy: IfNotPresent
               # Container-level security context — fields like
               # allowPrivilegeEscalation / readOnlyRootFilesystem are only

@@ -216,6 +216,43 @@ failure mode a request-count or error-rate metric cannot catch. See
 [operations.md — Feature-aware iALS sizing](operations.md#feature-aware-ials-sizing)
 for the operational detail (event name, metric label).
 
+### Feature header/payload reconciliation
+
+The version gate above reads `features.version` and nothing else, so on its own
+it validates the descriptor against nothing: the rest of the `features` object
+describes an encoder state the gate never sees. After deserialization — the
+first point at which both halves exist — serve reconciles the two and refuses
+(reason `feature_state`) when they disagree:
+
+- the payload carries encoder state the header does not declare (including the
+  case where the whole `features` key was removed, which would otherwise delete
+  the version gate along with it);
+- the header declares a side the payload does not back;
+- `n_features` or `columns` differ from the deserialized state;
+- the state's own version is not the version this build implements;
+- the descriptor carries a key this build does not understand — accepted-and-
+  ignored is how a reader admits a fabricated field;
+- `features.active` contradicts the payload recommender's actual ability to
+  consume feature state.
+
+Absent `features` over a payload with no state passes untouched: that is every
+pre-feature artifact, and every features-less recipe since.
+
+**This is defence in depth, not a trust boundary.** Reaching any of these
+refusals requires a validly-signed artifact — i.e. possession of the HMAC
+signing key, which already permits substituting the model wholesale, so this
+adds no privilege separation. What it buys is that an internally inconsistent
+artifact — a mis-built one, or one partially tampered with by something holding
+the key — fails loudly at load rather than serving quietly wrong answers.
+
+One disagreement is deliberately **not** detected: a payload vocabulary
+permuted within an unchanged shape. That is the genuinely wrong vector space,
+but no header field can catch it. Header and payload are built from the *same*
+in-memory state object at train time, so a fingerprint of the state would be a
+hash of one value compared against itself — it cannot diverge through a bug —
+and against a key holder it is defeated by recomputing the fingerprint. The
+protection against that case is the HMAC, not the descriptor.
+
 ### Request-side PII: `user_features` / `item_features`
 
 `user_features` (on `:recommend` and `:recommend-related`) and per-seed

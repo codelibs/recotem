@@ -39,7 +39,10 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from recotem._features import check_artifact_feature_version
+from recotem._features import (
+    check_artifact_feature_state,
+    check_artifact_feature_version,
+)
 from recotem._irspack_compat import check_artifact_irspack_version
 from recotem.artifact.format import ArtifactError, parse_header_from_bytes
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
@@ -1017,6 +1020,21 @@ def _try_load_artifact(
             error=str(exc),
         )
         return _failed_entry(recipe, f"deserialize failed: {exc}"), "deserialize"
+
+    # Reconcile the header's feature descriptor with the state the payload
+    # actually carries. Only possible after deserialization -- the version gate
+    # above sees the header alone, so on its own it validates the descriptor
+    # against nothing.
+    try:
+        check_artifact_feature_state(header_dict, recommender, name=recipe.name)
+    except ArtifactError as exc:
+        logger.warning(
+            "initial_artifact_feature_state_refused",
+            name=recipe.name,
+            kid=hdr.kid,
+            error=str(exc),
+        )
+        return _failed_entry(recipe, str(exc)), "feature_state"
 
     metadata_df = None
     metadata_index = None

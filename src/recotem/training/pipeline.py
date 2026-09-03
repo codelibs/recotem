@@ -541,7 +541,27 @@ def _run_training_locked(
     # Omit the "features" key entirely when features are off, so a
     # non-feature artifact's header stays byte-identical to today's.
     if feature_tables.enabled:
-        features_header: dict[str, Any] = {"version": FEATURE_STATE_VERSION}
+        # `active` records whether the search WINNER can consume the encoder
+        # state the payload carries. A features: recipe only requires that ONE
+        # listed algorithm be feature-capable (Recipe._validate_features_
+        # algorithms), so `algorithms: [IALS, TopPop]` may legitimately be won
+        # by TopPop -- a valid, non-feature artifact whose header would
+        # otherwise advertise `features` for what is really plain iALS, the
+        # exact outcome training/features.py's zero-overlap and
+        # whole-block-dead guards refuse a recipe to avoid.
+        #
+        # The flag is recorded rather than the descriptor omitted, deliberately.
+        # Omitting would desynchronise the header from the payload, which
+        # persists the encoder state unconditionally (see _train_final's
+        # closing comment) -- and a header with no `features` key is a header
+        # with no version gate, so a shape change in a state the payload still
+        # carries would go unchecked. Keeping the descriptor and adding one
+        # boolean also only GROWS the key set, so an existing reader of
+        # `recotem inspect` output never loses a field it reads today.
+        features_header: dict[str, Any] = {
+            "version": FEATURE_STATE_VERSION,
+            "active": is_feature_capable(search_result.best_class_name),
+        }
         item_desc = state_descriptor(feature_tables.item_state)
         if item_desc is not None:
             features_header["item"] = item_desc
@@ -1012,7 +1032,9 @@ def _train_final(
     # reads them at serve time. Symmetrizing this return with the
     # is_feature_capable gate above would make such an artifact's header
     # claim features that the payload does not carry, silently breaking
-    # header/payload parity.
+    # header/payload parity -- which `check_artifact_feature_state` now
+    # refuses at load time rather than serving. The winner's inability to USE
+    # the state is recorded as `features.active: false` in the header instead.
     return IDMappedRecommender(
         recommender,
         uids_str,

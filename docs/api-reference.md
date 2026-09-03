@@ -155,6 +155,13 @@ feature state (or whose search winner is not feature-capable — see
 `docs/recipe-reference.md#features`) responds `400 FEATURES_NOT_SUPPORTED`
 rather than silently ignoring the field or guessing.
 
+Whether a given artifact can serve these cases is readable up front, without
+sending a request: `recotem inspect` prints `features.active`, which is `true`
+only when the search winner can actually consume the encoder state. An artifact
+with no `features` key at all, or with `"active": false`, will answer
+`FEATURES_NOT_SUPPORTED` — see
+[recipe-reference.md — What the artifact header records](recipe-reference.md#what-the-artifact-header-records).
+
 Three cold-start cases, spread across two verbs:
 
 | Case | Verb | Trigger | What it does |

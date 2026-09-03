@@ -429,6 +429,46 @@ connectivity the same way it probes `source` — each reported line carries a
 `[features.item.source]` / `[features.user.source]` label so a failure
 names which source failed.
 
+### What the artifact header records
+
+A `features:` recipe adds a `features` object to the artifact header, readable
+with `recotem inspect` without deserializing the payload:
+
+```json
+"features": {
+  "version": 1,
+  "active": true,
+  "item": {"n_features": 38, "columns": ["genres", "release_year", "country"]},
+  "user": {"n_features": 4,  "columns": ["age_band"]}
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `version` | Encoder-state format version. Serve refuses an artifact whose version it does not implement — see [security.md](security.md). |
+| `active` | Whether the search **winner** can actually consume the encoder state. |
+| `item` / `user` | Encoded dimension and column names per side. Present only for the sides the recipe declares. |
+
+`active: false` is not an error. `features:` requires only that *one* listed
+algorithm be feature-capable, so `algorithms: [IALS, TopPop]` may legitimately
+be won by TopPop — a valid, ordinary artifact that simply cannot serve
+feature-based cold start (those requests get `400 FEATURES_NOT_SUPPORTED`; see
+[api-reference.md](api-reference.md)). The flag exists so `recotem inspect`,
+dashboards, and alerting can tell that case apart from a feature-aware model
+without deserializing the payload. The encoder state is still persisted in the
+payload, and the descriptor still describes it, so the two halves can be
+reconciled at load time.
+
+To get `active: true` deterministically, restrict `training.algorithms` to
+feature-capable algorithms (today: `IALS`).
+
+Serve refuses an artifact whose `features` header disagrees with the encoder
+state in its payload — an undeclared state, a missing side, a `n_features` /
+`columns` mismatch, an unrecognised descriptor key, or an `active` flag that
+contradicts the winner. That is a defence-in-depth check against a mis-built or
+partially-tampered artifact; the failure is counted under the
+`feature_state` reason label (see [operations.md](operations.md)).
+
 ---
 
 ## `training`

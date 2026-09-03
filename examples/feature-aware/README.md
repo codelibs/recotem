@@ -57,7 +57,7 @@ recotem inspect ./artifacts/feature_aware_demo.recotem
 ```
 
 Example output (the structural fields below — `best_class`, `n_items: 14`,
-`features.version: 1`, `n_features: 13`, `columns` — are stable across
+`features.version: 1`, `features.active: true`, `n_features: 13`, `columns` — are stable across
 runs; `best_params`' numeric values are **not**: `training.split.scheme:
 random` picks a fresh item/user vocabulary order per Python process for
 string ids, so Optuna explores the search space in a different order each
@@ -77,6 +77,7 @@ is pre-existing recotem behavior, unrelated to `features:`):
   "data_stats": {"n_rows": 144, "n_users": 30, "n_items": 14, ...},
   "features": {
     "version": 1,
+    "active": true,
     "item": {
       "n_features": 13,
       "columns": ["category", "release_year", "tags"]
@@ -84,6 +85,13 @@ is pre-existing recotem behavior, unrelated to `features:`):
   }
 }
 ```
+
+`"active": true` says the search winner can actually consume the encoder
+state. This recipe pins `algorithms: [IALS]`, so it always can. Add a
+non-feature-capable algorithm (e.g. `algorithms: [IALS, TopPop]`) and TopPop
+may win the search — a perfectly valid artifact, but one whose cold-start
+calls in step 7 would answer `400 FEATURES_NOT_SUPPORTED`. `active` is how you
+tell the two apart without sending a request.
 
 `best_params` carries `lambda_item_feature` alongside iALS's usual
 hyperparameters — this is recotem's own tuned range, not irspack's (see

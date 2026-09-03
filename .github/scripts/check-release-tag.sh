@@ -3,7 +3,9 @@
 #
 # Publishing is irreversible: PyPI never lets a filename be reused, so a
 # `.dev0` / `a0` / `rc1` uploaded by accident is permanent.  This script is the
-# gate that runs before any build or upload step in .github/workflows/publish.yml.
+# gate that runs before any build or upload step in .github/workflows/publish.yml,
+# and — on tag-triggered runs only — before any build or push step in
+# .github/workflows/docker.yml, so both release paths enforce one set of rules.
 #
 # It enforces two things:
 #   1. The tag is a clean PEP 440 *final release* — vMAJOR.MINOR.PATCH with no
@@ -51,9 +53,10 @@ echo "Release tag: ${TAG}"
 # 2. The tag must be a PEP 440 final release
 # ---------------------------------------------------------------------------
 # Deliberately strict: exactly three numeric segments, no pre/post/dev/local
-# suffix.  docker.yml's `type=semver` metadata patterns emit no version tag for
-# anything else, so a non-final tag would also publish an image with no
-# version tag — the two gates agree on the same shape.
+# suffix.  docker.yml's guard job calls this same script, so the container and
+# PyPI paths accept exactly one tag shape — and docker.yml's `type=semver`
+# metadata patterns, which emit no version tag for anything else, never get
+# handed one.
 if [[ ! "${TAG}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
     SUFFIX_HINT="it is not of the form vMAJOR.MINOR.PATCH"
     case "${TAG}" in

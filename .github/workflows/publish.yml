@@ -130,4 +130,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
-          generate-attestations: true
+          # Input name is `attestations`, not `generate-attestations`: the
+          # latter is silently ignored, so the `attestations: write` permission
+          # above would be load-bearing only by upstream's default.
+          attestations: true

@@ -3,6 +3,13 @@ name: recotem / docker
 # Build-only on pull requests; build + push on main branch and version tags.
 # Image: ghcr.io/codelibs/recotem
 # Dockerfile: Dockerfile
+#
+# Job graph:
+#   smoke (amd64, arm64) ──┬──> trivy ──> build (push)
+#                          └───────────────^
+# Nothing is pushed until BOTH the runtime smoke test and the vulnerability
+# scan have passed.  `build` is the only job that logs in to GHCR.
+#
 # Security note: no untrusted user input (PR titles, commit messages, etc.) is
 # interpolated into any run: command. All github.event.* data is used only
 # via docker/metadata-action which handles escaping internally.
@@ -36,10 +43,24 @@ jobs:
   # A multi-stage venv copy can silently produce an image whose entrypoint
   # cannot exec or whose `recotem` package never made it into the venv — a
   # build that succeeds and a `docker run` that fails are entirely compatible.
-  # `build` needs this job, so a broken image is never pushed to GHCR.
+  #
+  # Both published architectures are exercised on native runners
+  # (ubuntu-24.04-arm is a GitHub-hosted arm64 runner, free for public repos),
+  # so arm64 is executed rather than only built.  No QEMU is involved: emulated
+  # numpy/scipy startup is both slow and a known source of flakes.
   smoke:
-    name: image smoke test
-    runs-on: ubuntu-24.04
+    name: image smoke test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
     steps:
       - uses: actions/checkout@v7
 
@@ -47,7 +68,8 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       # Single-arch so the image can be `load`ed into the local daemon and run.
-      # Populates the shared gha cache that `build` and `trivy` then reuse.
+      # Populates a per-arch gha cache scope that `build` and `trivy` reuse;
+      # distinct scopes stop the two matrix legs clobbering each other's cache.
       - name: Build local image for smoke test
         uses: docker/build-push-action@v7
         with:
@@ -56,9 +78,9 @@ jobs:
           push: false
           load: true
           tags: recotem:smoke
-          platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=smoke-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=smoke-${{ matrix.arch }}
 
       - name: Entrypoint runs and the package is importable
         run: |
@@ -67,17 +89,93 @@ jobs:
           docker run --rm --entrypoint python recotem:smoke \
             -c 'import recotem, irspack; print(recotem.__version__, irspack.__version__)'
 
-      - name: Serve answers 200 on /v1/health
+      # `train` exiting 0 is not evidence that it trained anything: the image
+      # has already shipped a bug where an unwritable artifacts mount made the
+      # lock look contended and training skipped silently with exit 0 (see the
+      # /workspace/artifacts note in the Dockerfile).  Require a real artifact
+      # on disk, and require `inspect` to verify its HMAC.
+      - name: Train a recipe inside the image and verify the artifact
         run: |
           set -euo pipefail
-          mkdir -p "${RUNNER_TEMP}/smoke-recipes"
+          RECIPES="${RUNNER_TEMP}/smoke-recipes"
+          DATA="${RUNNER_TEMP}/smoke-data"
+          ARTIFACTS="${RUNNER_TEMP}/smoke-artifacts"
+          mkdir -p "${RECIPES}" "${DATA}" "${ARTIFACTS}"
+          # The container runs as uid 1000; the runner user is a different uid,
+          # so a bind-mounted host directory needs to be group/other writable
+          # for `train` to create the artifact and its lock file.
+          chmod 0777 "${ARTIFACTS}"
 
-          # Throwaway key for this run only; serve refuses to start unsigned.
+          python3 - "${DATA}/interactions.csv" <<'PY'
+          import csv
+          import random
+          import sys
+
+          random.seed(42)
+          with open(sys.argv[1], "w", newline="") as handle:
+              writer = csv.writer(handle)
+              writer.writerow(["user_id", "item_id"])
+              for _ in range(2000):
+                  writer.writerow(
+                      [f"u{random.randrange(100)}", f"i{random.randrange(50)}"]
+                  )
+          PY
+
+          cat > "${RECIPES}/smoke.yaml" <<'YAML'
+          name: smoke
+          source:
+            type: csv
+            path: /data/interactions.csv
+          schema:
+            user_column: user_id
+            item_column: item_id
+          training:
+            algorithms: [TopPop]
+            n_trials: 2
+            split:
+              scheme: random
+              heldout_ratio: 0.1
+              seed: 42
+          output:
+            path: /artifacts/smoke.recotem
+            versioning: always_overwrite
+          YAML
+
+          # Throwaway key for this run only.
+          SIGNING_KEY="ci:$(openssl rand -hex 32)"
+          echo "::add-mask::${SIGNING_KEY}"
+          echo "SMOKE_SIGNING_KEY=${SIGNING_KEY}" >> "${GITHUB_ENV}"
+
+          docker run --rm \
+            -e RECOTEM_SIGNING_KEYS="${SIGNING_KEY}" \
+            -v "${RECIPES}:/recipes:ro" \
+            -v "${DATA}:/data:ro" \
+            -v "${ARTIFACTS}:/artifacts" \
+            recotem:smoke train /recipes/smoke.yaml
+
+          if [ ! -s "${ARTIFACTS}/smoke.recotem" ]; then
+            echo "::error::train exited 0 but wrote no artifact at /artifacts/smoke.recotem"
+            ls -la "${ARTIFACTS}"
+            exit 1
+          fi
+          echo "train wrote $(stat -c %s "${ARTIFACTS}/smoke.recotem") bytes"
+
+          # Verifies magic, version and HMAC without deserialising the payload.
+          docker run --rm \
+            -e RECOTEM_SIGNING_KEYS="${SIGNING_KEY}" \
+            -v "${ARTIFACTS}:/artifacts:ro" \
+            recotem:smoke inspect /artifacts/smoke.recotem
+
+      - name: Serve the trained model and answer a recommendation
+        run: |
+          set -euo pipefail
           # No API keys are set, so serve binds 127.0.0.1 inside the container
-          # and every probe below runs via `docker exec`.
+          # and every probe below runs via `docker exec`.  Authentication is
+          # covered by tests/e2e/run.sh, which runs the authenticated posture.
           docker run -d --name recotem-smoke \
-            -e RECOTEM_SIGNING_KEYS="ci:$(openssl rand -hex 32)" \
+            -e RECOTEM_SIGNING_KEYS="${SMOKE_SIGNING_KEY}" \
             -v "${RUNNER_TEMP}/smoke-recipes:/recipes:ro" \
+            -v "${RUNNER_TEMP}/smoke-artifacts:/artifacts:ro" \
             recotem:smoke serve --recipes /recipes
 
           PROBE=$(cat <<'PY'
@@ -93,6 +191,10 @@ jobs:
           )
 
           for _ in $(seq 1 60); do
+            if [ "$(docker inspect -f '{{.State.Running}}' recotem-smoke)" != "true" ]; then
+              echo "::error::serve container exited before becoming ready (exit $(docker inspect -f '{{.State.ExitCode}}' recotem-smoke))"
+              exit 1
+            fi
             code=$(docker exec recotem-smoke python -c "$PROBE" /v1/health || echo 000)
             if [ "$code" = "200" ]; then break; fi
             sleep 1
@@ -115,6 +217,62 @@ jobs:
             exit 1
           fi
           echo "/health -> 404 (as expected)"
+
+          # /v1/health returning ok with total=0 is what an EMPTY recipes
+          # directory produces, and it used to be all this job asserted.
+          # Require a model to actually be loaded, then require it to answer.
+          docker exec -i recotem-smoke python - <<'PY'
+          import json
+          import sys
+          import urllib.request
+
+          BASE = "http://127.0.0.1:8080"
+
+
+          def get(path):
+              with urllib.request.urlopen(BASE + path, timeout=10) as resp:
+                  return resp.status, json.load(resp)
+
+
+          def post(path, payload):
+              req = urllib.request.Request(
+                  BASE + path,
+                  data=json.dumps(payload).encode(),
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  return resp.status, json.load(resp)
+
+
+          status, health = get("/v1/health")
+          print("/v1/health ->", status, health)
+          if status != 200:
+              sys.exit(f"/v1/health returned {status}, expected 200")
+          if health.get("status") != "ok":
+              sys.exit(f"/v1/health status is {health.get('status')!r}, expected 'ok'")
+          if health.get("total", 0) < 1:
+              sys.exit(
+                  "no recipes registered — an empty recipes dir also reports "
+                  f"status=ok, so this assertion is the gate: {health}"
+              )
+          if health.get("loaded") != health.get("total"):
+              sys.exit(f"not every recipe loaded: {health}")
+
+          status, body = post(
+              "/v1/recipes/smoke:recommend", {"user_id": "u0", "limit": 5}
+          )
+          print("/v1/recipes/smoke:recommend ->", status)
+          if status != 200:
+              sys.exit(f":recommend returned {status}, expected 200")
+          items = body.get("items")
+          if not isinstance(items, list) or not items:
+              sys.exit(f":recommend returned no items: {body}")
+          if not body.get("model_version"):
+              sys.exit(f":recommend response has no model_version: {body}")
+          print("recommended", len(items), "items from", body["model_version"][:23])
+          print("OK: image trained, signed, loaded and served a model")
+          PY
 
       - name: Image HEALTHCHECK reports healthy
         run: |
@@ -142,10 +300,80 @@ jobs:
         if: always()
         run: docker rm -f recotem-smoke || true
 
+  # Gate: scan BEFORE the push, not after.
+  #
+  # This job used to run `needs: build`, so a fixable HIGH/CRITICAL turned the
+  # run red only once the image — and the mutable `latest` tag — was already
+  # live on GHCR.  It now sits between `smoke` and `build`.
+  trivy:
+    name: trivy vulnerability scan
+    runs-on: ubuntu-24.04
+    needs: smoke
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build local image for scanning
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: recotem:scan
+          platforms: linux/amd64
+          cache-from: type=gha,scope=smoke-amd64
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: recotem:scan
+          format: sarif
+          output: trivy-results.sarif
+          severity: "CRITICAL,HIGH"
+          # Without this, `format: sarif` causes trivy-action to override
+          # TRIVY_SEVERITY to include all severities ("Building SARIF report
+          # with all severities"), which makes `exit-code: 1` fire on
+          # MEDIUM/LOW findings too — defeating the `severity` filter.
+          limit-severities-for-sarif: true
+          # Skip CVEs without an upstream fix.  Slim base images frequently
+          # carry HIGH OS CVEs (libcap2, ncurses-bin, libudev1, ...) that
+          # have no fixed Debian version yet — gating CI on these would mean
+          # the pipeline is permanently red with nothing the project can do
+          # about it.
+          #
+          # Fixable ones are a different matter, and this gate now blocks the
+          # push rather than merely reporting after it.  The Dockerfile runs
+          # `apt-get upgrade` in the base stage so that the moment Debian
+          # publishes a fix for one of the currently-unfixed base CVEs, the
+          # image picks it up — otherwise this job would turn red on a branch
+          # that changed nothing, with no repo-side remedy available until
+          # python:3.12-slim itself is rebuilt.
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Upload Trivy SARIF as artifact (for download)
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+
   build:
     name: docker build
     runs-on: ubuntu-24.04
-    needs: smoke
+    needs: [smoke, trivy]
     steps:
       - uses: actions/checkout@v7
 
@@ -185,65 +413,10 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
+          cache-from: |
+            type=gha
+            type=gha,scope=smoke-amd64
+            type=gha,scope=smoke-arm64
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
-
-  trivy:
-    name: trivy vulnerability scan
-    runs-on: ubuntu-24.04
-    needs: build
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build local image for scanning
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile
-          push: false
-          load: true
-          tags: recotem:scan
-          platforms: linux/amd64
-          cache-from: type=gha
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: recotem:scan
-          format: sarif
-          output: trivy-results.sarif
-          severity: "CRITICAL,HIGH"
-          # Without this, `format: sarif` causes trivy-action to override
-          # TRIVY_SEVERITY to include all severities ("Building SARIF report
-          # with all severities"), which makes `exit-code: 1` fire on
-          # MEDIUM/LOW findings too — defeating the `severity` filter.
-          limit-severities-for-sarif: true
-          # Skip CVEs without an upstream fix.  Slim base images frequently
-          # carry HIGH OS CVEs (libcap2, ncurses-bin, libudev1, ...) that
-          # have no fixed Debian version yet — gating CI on these would mean
-          # the pipeline is permanently red with nothing the project can do
-          # about it.  We rebuild on every push, so as soon as a fix lands
-          # in the base image we pick it up automatically.
-          ignore-unfixed: true
-          exit-code: "1"
-
-      - name: Upload Trivy SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        with:
-          sarif_file: trivy-results.sarif
-
-      - name: Upload Trivy SARIF as artifact (for download)
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: trivy-results
-          path: trivy-results.sarif

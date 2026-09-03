@@ -1,0 +1,90 @@
+name: recotem / manifests
+
+# Validates the deployment trees nothing else covers: the Helm chart,
+# examples/k8s/, and compose.yaml.
+#
+# test.yml filters PRs to src/, tests/, pyproject.toml and uv.lock; docker.yml
+# adds only Dockerfile and .dockerignore.  A change under helm/ or
+# examples/k8s/ therefore used to run no CI at all, and two HIGH defects
+# shipped through that gap in one release cycle — a dangling
+# `serviceAccountName` in examples/k8s/, and a CronJob template rendering
+# bash-only syntax into a `/bin/sh` command.  Both are caught by
+# .github/scripts/validate-manifests.sh, which this job runs.
+#
+# The script is the whole gate and is runnable locally:
+#   bash .github/scripts/validate-manifests.sh
+#
+# No untrusted input (issue titles, PR bodies, etc.) is used in run: steps.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "helm/**"
+      - "examples/k8s/**"
+      - "compose.yaml"
+      - ".github/scripts/validate-manifests.sh"
+      - ".github/workflows/manifests.yml"
+
+permissions:
+  contents: read
+
+env:
+  # Pinned, with checksums, so a tool release cannot change the verdict
+  # without a commit here — and so CI runs exactly the versions a contributor
+  # reproduces locally.
+  HELM_VERSION: v4.2.4
+  HELM_SHA256: c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+  YQ_VERSION: v4.53.6
+  YQ_SHA256: c5f056448f973ae7d39b5401949648a78f2dc1947d6a8eb65be60d5c504b9385
+
+jobs:
+  manifests:
+    name: helm + k8s examples + compose
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install helm, kubeconform and yq
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+
+          curl -sSfL -o "${tmp}/helm.tar.gz" \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${tmp}/helm.tar.gz" | sha256sum -c -
+          tar -xzf "${tmp}/helm.tar.gz" -C "${tmp}" linux-amd64/helm
+          sudo install -m 0755 "${tmp}/linux-amd64/helm" /usr/local/bin/helm
+
+          curl -sSfL -o "${tmp}/kubeconform.tar.gz" \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  ${tmp}/kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf "${tmp}/kubeconform.tar.gz" -C "${tmp}" kubeconform
+          sudo install -m 0755 "${tmp}/kubeconform" /usr/local/bin/kubeconform
+
+          curl -sSfL -o "${tmp}/yq" \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  ${tmp}/yq" | sha256sum -c -
+          sudo install -m 0755 "${tmp}/yq" /usr/local/bin/yq
+
+          rm -rf "${tmp}"
+
+      - name: Tool versions
+        run: |
+          set -euo pipefail
+          helm version --short
+          kubeconform -v
+          yq --version
+          # dash is /bin/sh on Ubuntu and in the python:3.12-slim runtime
+          # image; the rendered-command check needs a real POSIX shell, since
+          # bash in POSIX mode still accepts the bashisms we are hunting.
+          dash -c 'echo "dash available"'
+          docker compose version
+
+      - name: Validate helm chart, examples/k8s and compose.yaml
+        run: bash .github/scripts/validate-manifests.sh

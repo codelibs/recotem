@@ -1,12 +1,20 @@
 name: recotem / test
 
-# Triggered on push to main (post-merge gate) and PRs targeting main.
+# Triggered on push to main (post-merge gate), on v* tags (release gate), and
+# on PRs targeting main.
 # Avoids duplicate runs on feature branches that already have an open PR.
-# No untrusted input (issue titles, PR bodies, etc.) is used in run: steps.
+#
+# The tag trigger matters because a tag can be created on any commit, not just
+# a tested main: without it, the full matrix and the e2e gate never ran between
+# tagging and the PyPI upload.  publish.yml does not wait on this workflow —
+# it carries its own release-blocking `test` job — so the two run in parallel
+# and this one adds the 3.13/3.14 legs plus e2e.
 on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
   pull_request:
     branches:
       - main

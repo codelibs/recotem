@@ -2,15 +2,25 @@
 # Recotem end-to-end test script.
 #
 # Steps:
-#   1. Generate a small synthetic CSV of interactions
-#   2. Write a recipe pointing at it
+#   1. Generate a signing key and an API key
+#   2. Generate a small synthetic CSV of interactions + a recipe pointing at it
 #   3. recotem train -> artifact
-#   4. recotem serve & (background)
-#   5. curl /predict/{name} -> assert JSON shape
-#   6. Cleanup
+#   4. recotem serve & (background, authenticated)
+#   5. Assert X-API-Key enforcement: none -> 401, wrong -> 401, correct -> 200
+#   6. curl the /v1 verbs with the key -> assert JSON shape
+#   7. Cleanup
 #
-# Requirements: recotem installed, RECOTEM_SIGNING_KEYS set.
-# Usage: bash tests/e2e/run.sh [--no-movielens]
+# The server is started in the production posture: X-API-Key authentication is
+# ON (no --insecure-no-auth), so the gate exercises key parsing, the
+# _require_auth dependency, and 401 handling on every request it makes.
+#
+# Requirements: recotem installed.  Signing and API keys are generated here.
+# Usage: bash tests/e2e/run.sh [--tutorial]
+#
+# Environment:
+#   RECOTEM_E2E_PORT     port the throwaway server binds (default 18080).
+#                        Override to run two copies concurrently on one host.
+#   RECOTEM_E2E_NETWORK  required for --tutorial (fetches over HTTPS).
 
 set -euo pipefail
 
@@ -29,7 +39,7 @@ fi
 WORKDIR="/tmp/recotem_e2e_$$"
 ARTIFACTS_DIR="${WORKDIR}/artifacts"
 RECIPE_NAME="e2e_test"
-SERVE_PORT="18080"
+SERVE_PORT="${RECOTEM_E2E_PORT:-18080}"
 SERVE_PID=""
 
 cleanup() {
@@ -46,11 +56,33 @@ trap cleanup EXIT
 mkdir -p "${WORKDIR}" "${ARTIFACTS_DIR}"
 
 # ---------------------------------------------------------------------------
-# 1. Generate signing key
+# 1. Generate signing key + API key
 # ---------------------------------------------------------------------------
 echo "[e2e] Generating signing key..."
 SIGNING_KEY_HEX=$(python3 -c "import os; print(os.urandom(32).hex())")
 export RECOTEM_SIGNING_KEYS="e2e-key:${SIGNING_KEY_HEX}"
+
+# The API key is produced by `recotem keygen`, so the gate covers the exact
+# hash construction the CLI emits rather than a hand-rolled digest.
+#
+# NOTE: nothing below may echo KEYGEN_OUT, API_KEY_PLAINTEXT or
+# RECOTEM_API_KEYS.  The `secrets-in-logs` CI job greps this script's captured
+# output for `sha256:<hex64>` and fails the build if a key value appears.
+echo "[e2e] Generating API key..."
+KEYGEN_OUT=$(recotem keygen --type api --kid e2e-api)
+API_KEY_PLAINTEXT=$(printf '%s\n' "${KEYGEN_OUT}" | sed -n 's/^plaintext=//p')
+API_KEY_HASH=$(printf '%s\n' "${KEYGEN_OUT}" | sed -n 's/^hash=//p')
+if [ -z "${API_KEY_PLAINTEXT}" ] || [ -z "${API_KEY_HASH}" ]; then
+    echo "[e2e] ERROR: could not parse 'recotem keygen --type api' output."
+    exit 1
+fi
+export RECOTEM_API_KEYS="e2e-api:${API_KEY_HASH}"
+unset KEYGEN_OUT API_KEY_HASH
+
+# A syntactically valid but unregistered key, used for the negative auth test.
+# Must clear the server's minimum-length check so the request reaches the
+# constant-time comparison rather than being rejected on shape alone.
+WRONG_API_KEY=$(python3 -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip('='))")
 
 # ---------------------------------------------------------------------------
 # 2. Generate synthetic CSV + recipe (default mode) OR use tutorial recipe
@@ -134,25 +166,103 @@ else
     cp "${WORKDIR}/recipe.yaml" "${WORKDIR}/recipes/${RECIPE_NAME}.yaml"
 fi
 
-export RECOTEM_ENV=test
+# Pre-flight: refuse to start when something already holds the port.  Without
+# this the script would either burn the full MAX_WAIT and blame a slow startup
+# (when the squatter never answers) or — worse — validate every assertion below
+# against a FOREIGN server that happens to answer 200 on /v1/health.
+if ! python3 - "${SERVE_PORT}" <<'PYEOF'
+import socket
+import sys
+
+sock = socket.socket()
+try:
+    sock.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    sys.exit(1)
+finally:
+    sock.close()
+PYEOF
+then
+    echo "[e2e] ERROR: 127.0.0.1:${SERVE_PORT} is already in use."
+    echo "[e2e]   A stale recotem serve or a concurrent e2e run is holding it."
+    echo "[e2e]   Set RECOTEM_E2E_PORT to a free port and re-run, e.g.:"
+    echo "[e2e]     RECOTEM_E2E_PORT=18081 bash tests/e2e/run.sh"
+    exit 1
+fi
+
 recotem serve \
     --recipes "${WORKDIR}/recipes" \
-    --port "${SERVE_PORT}" \
-    --insecure-no-auth &
+    --port "${SERVE_PORT}" &
 SERVE_PID=$!
 
 echo "[e2e] Waiting for server to start (pid=${SERVE_PID})..."
 MAX_WAIT=30
 WAITED=0
-while ! curl -sf "http://127.0.0.1:${SERVE_PORT}/v1/health" > /dev/null 2>&1; do
+while true; do
+    # Liveness first: a server that already exited can never answer, and its
+    # own exit code (8 = config/bind failure, 5 = artifact error, ...) is the
+    # diagnostic worth printing.  Reporting a timeout here would send the
+    # reader hunting a slow startup that never happened.
+    if ! kill -0 "${SERVE_PID}" 2>/dev/null; then
+        SERVE_RC=0
+        wait "${SERVE_PID}" 2>/dev/null || SERVE_RC=$?
+        SERVE_PID=""
+        echo "[e2e] ERROR: recotem serve exited with code ${SERVE_RC} before" \
+             "becoming ready (waited ${WAITED}s)."
+        echo "[e2e]   Exit 8 means a configuration or bind failure — check" \
+             "that 127.0.0.1:${SERVE_PORT} is free and RECOTEM_HOST is unset."
+        exit 1
+    fi
+    if curl -sf "http://127.0.0.1:${SERVE_PORT}/v1/health" > /dev/null 2>&1; then
+        break
+    fi
     sleep 1
     WAITED=$((WAITED + 1))
     if [ "${WAITED}" -ge "${MAX_WAIT}" ]; then
-        echo "[e2e] ERROR: server did not start within ${MAX_WAIT}s"
+        echo "[e2e] ERROR: server did not start within ${MAX_WAIT}s" \
+             "(pid ${SERVE_PID} is still running)"
         exit 1
     fi
 done
 echo "[e2e] Server is up."
+
+# ---------------------------------------------------------------------------
+# 5b. Authentication (production posture)
+# ---------------------------------------------------------------------------
+# /v1/health is deliberately probe-safe (unauthenticated) so kubelet can reach
+# it; every other /v1 route carries Depends(_require_auth).  Assert both halves
+# of that contract on a route that matters.
+echo "[e2e] Checking X-API-Key enforcement on /v1/recipes..."
+
+auth_status() {
+    # $1: extra curl args (may be empty).  Prints the HTTP status code.
+    curl -s -o /dev/null -w '%{http_code}' "$@" \
+        "http://127.0.0.1:${SERVE_PORT}/v1/recipes"
+}
+
+NO_KEY_CODE=$(auth_status)
+if [ "${NO_KEY_CODE}" != "401" ]; then
+    echo "[e2e] ERROR: request with no X-API-Key returned ${NO_KEY_CODE}," \
+         "expected 401"
+    exit 1
+fi
+echo "[e2e] no X-API-Key -> 401"
+
+BAD_KEY_CODE=$(auth_status -H "X-API-Key: ${WRONG_API_KEY}")
+if [ "${BAD_KEY_CODE}" != "401" ]; then
+    echo "[e2e] ERROR: request with a wrong X-API-Key returned" \
+         "${BAD_KEY_CODE}, expected 401"
+    exit 1
+fi
+echo "[e2e] wrong X-API-Key -> 401"
+
+GOOD_KEY_CODE=$(auth_status -H "X-API-Key: ${API_KEY_PLAINTEXT}")
+if [ "${GOOD_KEY_CODE}" != "200" ]; then
+    echo "[e2e] ERROR: request with the correct X-API-Key returned" \
+         "${GOOD_KEY_CODE}, expected 200"
+    exit 1
+fi
+echo "[e2e] correct X-API-Key -> 200"
 
 # ---------------------------------------------------------------------------
 # 6. Health check
@@ -173,6 +283,7 @@ fi
 echo "[e2e] Calling /v1/recipes/${RECIPE_NAME}:recommend..."
 PREDICT=$(curl -sf \
     -X POST \
+    -H "X-API-Key: ${API_KEY_PLAINTEXT}" \
     -H "Content-Type: application/json" \
     -d "{\"user_id\": \"${PREDICT_USER_ID}\", \"limit\": 5}" \
     "http://127.0.0.1:${SERVE_PORT}/v1/recipes/${RECIPE_NAME}:recommend")
@@ -193,7 +304,8 @@ PYEOF
 
 # ---- 8. GET /v1/recipes ----
 echo "[e2e] Calling GET /v1/recipes..."
-RECIPES_LIST=$(curl -sf "http://127.0.0.1:${SERVE_PORT}/v1/recipes")
+RECIPES_LIST=$(curl -sf -H "X-API-Key: ${API_KEY_PLAINTEXT}" \
+    "http://127.0.0.1:${SERVE_PORT}/v1/recipes")
 echo "[e2e] GET /v1/recipes response: ${RECIPES_LIST}"
 
 python3 - <<PYEOF
@@ -208,7 +320,8 @@ PYEOF
 
 # ---- 9. GET /v1/recipes/{name} ----
 echo "[e2e] Calling GET /v1/recipes/${RECIPE_NAME}..."
-RECIPE_DETAIL=$(curl -sf "http://127.0.0.1:${SERVE_PORT}/v1/recipes/${RECIPE_NAME}")
+RECIPE_DETAIL=$(curl -sf -H "X-API-Key: ${API_KEY_PLAINTEXT}" \
+    "http://127.0.0.1:${SERVE_PORT}/v1/recipes/${RECIPE_NAME}")
 echo "[e2e] GET /v1/recipes/${RECIPE_NAME} response: ${RECIPE_DETAIL}"
 
 python3 - <<PYEOF
@@ -240,6 +353,7 @@ echo "[e2e] Using seed item_id='${SEED_ITEM_ID}' for :recommend-related"
 echo "[e2e] Calling /v1/recipes/${RECIPE_NAME}:recommend-related..."
 RELATED=$(curl -sf \
     -X POST \
+    -H "X-API-Key: ${API_KEY_PLAINTEXT}" \
     -H "Content-Type: application/json" \
     -d "{\"seed_items\": [\"${SEED_ITEM_ID}\"], \"limit\": 5}" \
     "http://127.0.0.1:${SERVE_PORT}/v1/recipes/${RECIPE_NAME}:recommend-related")
@@ -262,6 +376,7 @@ echo "[e2e] Calling /v1/recipes/${RECIPE_NAME}:batch-recommend..."
 # Send two requests: one known user and one unknown user
 BATCH=$(curl -sf \
     -X POST \
+    -H "X-API-Key: ${API_KEY_PLAINTEXT}" \
     -H "Content-Type: application/json" \
     -d "{\"requests\": [{\"user_id\": \"${PREDICT_USER_ID}\", \"limit\": 3}, {\"user_id\": \"__definitely_unknown_user__\", \"limit\": 3}]}" \
     "http://127.0.0.1:${SERVE_PORT}/v1/recipes/${RECIPE_NAME}:batch-recommend")
@@ -296,6 +411,7 @@ PYEOF
 echo "[e2e] Testing X-Request-ID echo via :recommend..."
 TRACED=$(curl -sf \
     -X POST \
+    -H "X-API-Key: ${API_KEY_PLAINTEXT}" \
     -H "Content-Type: application/json" \
     -H "X-Request-ID: e2e-trace-001" \
     -d "{\"user_id\": \"${PREDICT_USER_ID}\", \"limit\": 3}" \

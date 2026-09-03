@@ -19,7 +19,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 # Install system dependencies needed by irspack / scipy / pandas at runtime.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#
+# `apt-get upgrade` is deliberate, not incidental.  The trivy gate in
+# .github/workflows/docker.yml passes `ignore-unfixed: true`; without it the
+# scan reports ~18 HIGH/CRITICAL findings, every one of them a Debian base
+# package and none of them a Python package.  Those findings start counting the
+# moment Debian publishes a fix — and `apt-get install libgomp1` only refreshes
+# libgomp1's own dependency closure, so the rest of the base would stay stale
+# until python:3.12-slim itself is rebuilt.  The gate would then go red on a
+# branch that changed nothing, with no repo-side remedy.  Upgrading here pulls
+# each fix in as soon as Debian ships it, which is the repo-side remedy.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 

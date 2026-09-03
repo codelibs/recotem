@@ -36,7 +36,11 @@ uv lock          # rewrites the recotem entry in uv.lock; never edit it by hand
 
 `pyproject.toml` and `version.py` are independent strings (hatchling reads a
 static version), so they will not self-sync. A mismatch between them nearly
-shipped in 2.0.0 — always change both.
+shipped in 2.0.0 — always change both, and prove it with
+`.github/scripts/check-release-tag.sh` rather than by eye (see the verification
+block below). `uv.lock` is outside that script's scope: `uv lock --check` covers
+it locally, and `uv sync --frozen` in `publish.yml`'s pre-publish test gate
+catches a stale lockfile at the tag.
 
 ## Deployment image tags — bump at release, NOT for dev cycles
 
@@ -119,10 +123,14 @@ Do **not** run the pin check during Phase 5: the dev bump deliberately leaves th
 manifests on the last released version, and this block would flag them.
 
 ```bash
-# 1. all three package-version locations agree
-grep '^version' pyproject.toml
-grep . src/recotem/version.py
-grep -A1 'name = "recotem"' uv.lock | grep version
+# 1. all three package-version locations agree.
+#    check-release-tag.sh is authoritative for the first two: it is the same
+#    script publish.yml's `guard` job runs at the tag, it fails closed, and it
+#    checks both declarations against the tag *together* — so it catches a
+#    partial bump (pyproject.toml moved, version.py not) that three greps read
+#    by eye do not. uv.lock is not in its scope; `uv lock --check` covers that.
+bash .github/scripts/check-release-tag.sh "v$NEW"   # MUST print "OK: ..."
+uv lock --check                                     # MUST exit 0
 
 # 2. the installed package reports the right version
 uv run python -c "from recotem.version import __version__; print(__version__)"
@@ -174,8 +182,11 @@ pattern the verification uses, so the two cannot disagree:
 
 ```bash
 # Every frozen/archived version directory. These keep the version they
-# document and must NOT be rewritten. Add the newly frozen directory here as
-# part of Phase 4A (releasing 2.1 freezes 2.0, so 2.0 joins this list).
+# document and must NOT be rewritten. Each minor/major release adds the
+# directory its Phase 4A freezes: `2\.0` is already listed for the 2.1
+# release's freeze, so a 2.1 release adds nothing here — the next minor, which
+# freezes 2.1, adds `2\.1`. The STRAY assertion below fails if this list has
+# fallen behind, so it does not have to be remembered.
 ARCHIVE_RE='(^|/)(1\.0|2\.0)/'
 
 PAT='recotem:[0-9][^ "]*|tag: "[0-9][^"]*"|already pin `[0-9][^`]*`|すでに `[0-9][^`]*` にピン留め'
@@ -189,6 +200,20 @@ while IFS= read -r f; do DOCS+=("$f"); done < <(
 (( ${#DOCS[@]} )) || { echo "FAIL: no pinned docs found — discovery is broken"; exit 1; }
 printf 'will bump: %s\n' "${DOCS[@]}"
 
+# Phase 4B runs AFTER Phase 4A — freezing after bumping copies the new
+# version's pins into the archive that is supposed to document the old one
+# (SKILL.md, Phase 4). Assert the order instead of trusting it: once 4A has
+# promoted the preview into the root and deleted it, no version directory may
+# remain in the live set. At a patch release 4A is skipped and the preview is
+# legitimately still live — that is the only case where STRAY is non-empty.
+# This also fires when ARCHIVE_RE has fallen behind, since a freshly frozen
+# directory it does not match lands in DOCS too.
+STRAY=$(printf '%s\n' "${DOCS[@]}" | sed 's#^\./##' | grep -E '^[0-9]+\.[0-9]+/' || true)
+case "$NEW" in
+  *.0) [ -z "$STRAY" ] || { echo "FAIL: run Phase 4A first, or ARCHIVE_RE is missing an archive:"; echo "$STRAY"; exit 1; } ;;
+  *)   [ -n "$STRAY" ] || echo "note: no preview tree in the live set — expected one at a patch release" ;;
+esac
+
 perl -pi -e "s/\Qrecotem:$PREV\E/recotem:$NEW/g; \
              s/\Qtag: \"$PREV\"\E/tag: \"$NEW\"/g; \
              s/\Qalready pin \`$PREV\`\E/already pin \`$NEW\`/g; \
@@ -198,10 +223,21 @@ perl -pi -e "s/\Qrecotem:$PREV\E/recotem:$NEW/g; \
 git diff --stat "${DOCS[@]}"    # MUST be non-empty
 ```
 
-Print the discovered list and read it. At a 2.1.0 release run *before* Phase 4A
-it should name eight files (root four + `2.1/` four); run *after* Phase 4A, when
-`2.1/` has been promoted and removed, it should name four. If it names four when
-you expected eight, a tree is being skipped.
+Print the discovered list and read it. There is only one legitimate order —
+Phase 4B runs after Phase 4A — so the expected list follows from the release
+kind, not from when you happen to run the bump:
+
+| Release | Phase 4A | Live trees | Files |
+|---|---|---|---|
+| minor / major (`X.Y.0`) | ran | root only (the preview was promoted and deleted) | 4 |
+| patch (`X.Y.Z`, `Z > 0`) | skipped | root + the still-live `X.(Y+1)/` preview | 8 |
+
+Four files per tree: `docs/deployment/docker.md`,
+`docs/deployment/kubernetes.md`, and their `ja/` counterparts. A different count
+means a tree is being skipped or an extra one has been picked up — stop and read
+the list before bumping. **Never "fix" the `STRAY` failure by running the bump
+before Phase 4A**: that is the forbidden order, and it is invisible afterwards
+(see below).
 
 The `docker.md` files share the "already pin" / "すでに...ピン留め" sentence with
 an illustrative "e.g. `2.0.0`" / "例: `2.0.0`" on the same line — the targeted
@@ -224,14 +260,33 @@ STALE=$(echo "$ALL" | grep -v "$NEW")
 [ -z "$STALE" ] || { echo "FAIL: stale pins:"; echo "$STALE"; exit 1; }
 echo "OK: all $(echo "$ALL" | wc -l | tr -d ' ') live doc pins = $NEW"
 
-# The bump must not have reached into an archive.
-git diff --name-only | grep -E "$ARCHIVE_RE" \
-  && { echo "FAIL: an archived version directory was rewritten"; exit 1; } \
-  || echo "OK: archives untouched"
+# The bump must not have reached into an archive that was already committed.
+TOUCHED=$(git diff --name-only | grep -E "$ARCHIVE_RE" || true)
+[ -z "$TOUCHED" ] || { echo "FAIL: an archived version directory was rewritten:"; echo "$TOUCHED"; exit 1; }
+echo "OK: no committed archive was rewritten"
+
+# ...and no archive may CONTAIN $NEW. An archive documents the version in its
+# own name, so $NEW inside one means Phase 4A froze a root that this bump had
+# already rewritten — the forbidden order. `git diff` cannot see that: the
+# frozen directory is brand new and still untracked, so it has no diff, and
+# ARCHIVE_RE keeps it out of the live check above. Without this both guards
+# print OK over an archive claiming the wrong version.
+ARCHIVED=$(grep -rnoE "$PAT" --include='*.md' . | grep -v node_modules | grep -E "$ARCHIVE_RE" || true)
+LEAKED=$(printf '%s\n' "$ARCHIVED" | grep -F "$NEW" || true)
+[ -z "$LEAKED" ] || { echo "FAIL: an archive carries $NEW (was the freeze run after the bump?):"; echo "$LEAKED"; exit 1; }
+echo "OK: no archive carries $NEW"
 ```
 
 An empty match list is a failure, not a pass — same rule as the main
-verification block. Note the verification is written with an explicit `STALE`
-variable rather than `grep … && { … } || echo OK`: in the `&&`/`||` form the
-`OK` branch also runs when the `FAIL` branch's `exit` is skipped for any
-reason, which makes a broken check read as a passing one.
+verification block. Note that every guard here is written with an explicit
+variable (`STALE`, `TOUCHED`, `LEAKED`) rather than
+`grep … && { … } || echo OK`: in the `&&`/`||` form the `OK` branch also runs
+when the `FAIL` branch's `exit` is skipped for any reason, which makes a broken
+check read as a passing one.
+
+`ARCHIVED` is the one exception to the non-empty rule, and deliberately so: it
+may legitimately match nothing, because `1.0/` documents the legacy 1.x app and
+carries none of these pins. What it asserts is the invariant that matters —
+nothing under an archived directory names the version being released. (That
+holds for the documented process, in which archives are frozen once and never
+re-bumped. A backport release on an archived line is outside Phase 4 entirely.)

@@ -29,6 +29,8 @@ from recotem.config import (
 from recotem.datasource.base import DataSourceError, FetchContext
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import pandas as pd
 
 logger = structlog.get_logger(__name__)
@@ -91,6 +93,20 @@ def _validate_required_columns(
         can diagnose typos in the recipe schema without needing to load the
         file manually.
     """
+    _validate_column_names(list(df.columns), ctx, safe_path)
+
+
+def _validate_column_names(
+    columns: Sequence[object],
+    ctx: FetchContext,
+    safe_path: str,
+) -> None:
+    """Column-name-only core of :func:`_validate_required_columns`.
+
+    ``probe_columns`` knows the column names without ever building a
+    DataFrame — a CSV header row, a Parquet footer schema — so the rule and
+    its message live here and both entry points share one definition.
+    """
     user_col: str | None = ctx.extra.get("user_column")  # type: ignore[assignment]
     item_col: str | None = ctx.extra.get("item_column")  # type: ignore[assignment]
     time_col: str | None = ctx.extra.get("time_column")  # type: ignore[assignment]
@@ -106,10 +122,10 @@ def _validate_required_columns(
     if not cols_to_check:
         return  # no schema context — skip
 
-    df_columns = set(df.columns)
+    present = set(columns)
     for col in cols_to_check:
-        if col not in df_columns:
-            available = sorted(str(c) for c in df.columns)[:10]
+        if col not in present:
+            available = sorted(str(c) for c in columns)[:10]
             raise DataSourceError(
                 f"required column {col!r} not found in source {safe_path!r}; "
                 f"available columns: {available}"
@@ -179,6 +195,57 @@ class CSVSource:
     def probe(self) -> None:
         """Verify the CSV file exists and is readable without loading it."""
         _probe_fsspec_path(self._config.path, kind="CSV")
+
+    def probe_columns(self, ctx: FetchContext) -> bool:
+        """Check the recipe's schema columns without reading any data row.
+
+        ``recotem validate`` is the documented pre-flight gate, so it makes the
+        same call ``train`` makes about a recipe naming a column the data does
+        not have — but only where the answer is cheap.  ``nrows=0`` stops the
+        parser after the header row, so this costs a buffer read rather than a
+        scan of the file.
+
+        Returns
+        -------
+        bool
+            ``True`` when the columns were checked.  ``False`` when the answer
+            is not obtainable cheaply, so the caller reports the check as
+            skipped instead of implying it passed.  ``http(s)://`` paths
+            return ``False``: reading the header means downloading the body,
+            which is where the ``sha256`` pin, the byte cap, and the
+            redirect-scheme policy live — all fetch-time controls that a probe
+            must not run a second, unguarded time.
+
+        Raises
+        ------
+        DataSourceError
+            If a column named in ``ctx.extra`` is absent from the header.
+        """
+        import pandas as pd
+
+        cfg = self._config
+        safe_path = _redact_url_userinfo(cfg.path)
+        if urlparse(cfg.path).scheme.lower() in _NETWORK_SCHEMES:
+            return False
+
+        try:
+            header = pd.read_csv(
+                cfg.path,
+                sep=cfg.delimiter,
+                encoding=cfg.encoding,
+                header=cfg.header,
+                compression=_infer_compression(cfg.path),
+                nrows=0,
+            )
+        except (MemoryError, RecursionError):
+            raise
+        except Exception as exc:
+            raise DataSourceError(
+                f"Failed to read the CSV header from '{safe_path}': {exc}"
+            ) from exc
+
+        _validate_column_names(list(header.columns), ctx, safe_path)
+        return True
 
     def fetch(self, ctx: FetchContext) -> pd.DataFrame:
         """Fetch the CSV file and return a DataFrame.
@@ -398,6 +465,33 @@ class ParquetSource:
     def probe(self) -> None:
         """Verify the Parquet file exists and is readable without loading it."""
         _probe_fsspec_path(self._config.path, kind="Parquet")
+
+    def probe_columns(self, ctx: FetchContext) -> bool:
+        """Check the recipe's schema columns without reading any row group.
+
+        Same contract as :meth:`CSVSource.probe_columns`.  A Parquet file
+        carries its schema in the footer, so this reads metadata only.
+        """
+        import fsspec
+        import pyarrow.parquet as pq
+
+        cfg = self._config
+        safe_path = _redact_url_userinfo(cfg.path)
+        if urlparse(cfg.path).scheme.lower() in _NETWORK_SCHEMES:
+            return False
+
+        try:
+            with fsspec.open(cfg.path, "rb") as f:
+                names = list(pq.read_schema(f).names)
+        except (MemoryError, RecursionError):
+            raise
+        except Exception as exc:
+            raise DataSourceError(
+                f"Failed to read the Parquet schema from '{safe_path}': {exc}"
+            ) from exc
+
+        _validate_column_names(names, ctx, safe_path)
+        return True
 
     def fetch(self, ctx: FetchContext) -> pd.DataFrame:
         """Fetch the Parquet file and return a DataFrame.

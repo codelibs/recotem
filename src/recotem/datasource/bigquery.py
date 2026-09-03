@@ -48,6 +48,25 @@ def _storage_api_available() -> bool:
     return True
 
 
+def _assert_storage_api_capability() -> None:
+    """Enforce ``RECOTEM_BQ_REQUIRE_STORAGE_API``'s dependency precondition.
+
+    Shared by ``probe()`` and ``fetch()``.  It is a pure import check that
+    needs no query and no credentials, so ``recotem validate`` can answer it
+    for free — leaving it to ``fetch()`` alone meant validate green-lit a
+    configuration that ``train`` then refused on identical config and env.
+    """
+    if not is_truthy_env(os.environ.get("RECOTEM_BQ_REQUIRE_STORAGE_API")):
+        return
+    if _storage_api_available():
+        return
+    raise DataSourceError(
+        "RECOTEM_BQ_REQUIRE_STORAGE_API is set but "
+        "google-cloud-bigquery-storage is not installed, so the "
+        "BigQuery Storage Read API cannot be used. " + _STORAGE_EXTRA_HINT
+    )
+
+
 # ---------------------------------------------------------------------------
 # Config schema
 # ---------------------------------------------------------------------------
@@ -154,10 +173,16 @@ class BigQuerySource:
         Raises
         ------
         DataSourceError
-            On ADC failure, network error, or invalid SQL / parameters.
+            On a strict-mode dependency violation, ADC failure, network error,
+            or invalid SQL / parameters.
         """
         from google.api_core.exceptions import GoogleAPICallError
         from google.cloud import bigquery
+
+        # Checked first: a strict-mode violation needs no client, no
+        # credentials, and no round trip, and it is what ``fetch()`` would
+        # refuse on anyway.
+        _assert_storage_api_capability()
 
         cfg = self._config
         try:
@@ -377,16 +402,11 @@ class BigQuerySource:
         # warns and silently downloads over REST when the storage dependency is
         # absent (see ``_storage_api_available``), so waiting for an error would
         # leave strict mode doing nothing at all.
+        _assert_storage_api_capability()
         strict_storage_api = is_truthy_env(
             os.environ.get("RECOTEM_BQ_REQUIRE_STORAGE_API")
         )
         storage_api_available = _storage_api_available()
-        if strict_storage_api and not storage_api_available:
-            raise DataSourceError(
-                "RECOTEM_BQ_REQUIRE_STORAGE_API is set but "
-                "google-cloud-bigquery-storage is not installed, so the "
-                "BigQuery Storage Read API cannot be used. " + _STORAGE_EXTRA_HINT
-            )
 
         job_config = bigquery.QueryJobConfig()
         if cfg.query_parameters:

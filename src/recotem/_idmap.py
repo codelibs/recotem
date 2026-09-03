@@ -293,6 +293,10 @@ class IDMappedRecommender:
         operators can tell "retrain with features" (no state) apart from
         "retrain restricting algorithms to a feature-capable one" (state
         present, winner incapable) at a glance.
+
+        *missing* is spliced into ``it has no {missing}``, which already
+        supplies the determiner -- pass a bare noun phrase with no leading
+        article, or the 400 body reads "it has no the ..." / "it has no a ...".
         """
         if not ok:
             raise ValueError(
@@ -383,7 +387,7 @@ class IDMappedRecommender:
             )
         self._require_capability(
             self._is_feature_capable(),
-            missing="a `user_features`-aware `get_score_cold_user`",
+            missing="`user_features`-aware `get_score_cold_user`",
         )
         matrix, unknown = encode_one(self.user_feature_state, user_features)
         X_seed = self._mapper.list_of_user_profile_to_matrix([seeds])
@@ -522,7 +526,7 @@ class IDMappedRecommender:
         self._require_capability(
             self._is_feature_capable(),
             missing=(
-                "the item-embedding API (`get_item_embedding` / "
+                "item-embedding API (`get_item_embedding` / "
                 "`compute_item_embedding_from_features` / "
                 "`get_score_from_user_embedding`)"
             ),

@@ -684,7 +684,7 @@ def validate(
         code = _map_exception_to_exit(exc)
         _exit(code, f"Recipe validation failed: {exc}")
 
-    def _probe_source(source_cfg: Any, where: str) -> None:
+    def _probe_source(source_cfg: Any, where: str) -> tuple[Any, str]:
         from recotem.datasource.registry import get_source_class
 
         type_name = getattr(source_cfg, "type", None)
@@ -710,27 +710,79 @@ def validate(
             typer.echo(
                 f"DataSource: extras OK ({type_name}, no probe defined) [{where}]"
             )
+        return source, str(type_name)
 
-    # (source_cfg, where) pairs to probe: the top-level source plus any
-    # configured feature-side sources.  ``where`` is carried by the *caller*
-    # (this loop), not by mutating the exception's .args in place -- some
-    # exception types (e.g. pydantic_core.ValidationError) implement __str__
-    # in Rust and ignore .args entirely, which would silently drop the
-    # ``where`` tag.  Building the message here works for any exception type
-    # from any plugin, regardless of its __str__.
-    sources: list[tuple[Any, str]] = [(loaded_recipe.source, "source")]
+    def _check_schema_columns(source: Any, type_name: str, where: str) -> None:
+        """Report whether the recipe's ``schema:`` columns exist in the source.
+
+        ``train`` rejects a recipe naming a column the data does not have with
+        a ``DataSourceError`` (exit 3).  ``validate`` is documented as the
+        pre-flight gate for exactly that class of mistake, so it asks the same
+        question wherever the source can answer it cheaply — a CSV header row,
+        a Parquet footer schema.  Query-shaped sources (bigquery / sql) and
+        third-party plugins cannot answer without running the query, so the
+        line says the check was skipped rather than implying it passed.
+        """
+        from recotem.datasource.base import FetchContext
+
+        probe_columns = getattr(source, "probe_columns", None)
+        if not callable(probe_columns):
+            typer.echo(
+                f"Schema columns: not checked ({type_name} has no header-only "
+                f"column probe; verified at train time) [{where}]"
+            )
+            return
+
+        ctx = FetchContext(
+            recipe_name=loaded_recipe.name,
+            run_id="validate",
+            extra={
+                "user_column": loaded_recipe.schema_.user_column,
+                "item_column": loaded_recipe.schema_.item_column,
+                "time_column": loaded_recipe.schema_.time_column,
+            },
+        )
+        if probe_columns(ctx):
+            typer.echo(f"Schema columns: OK ({type_name}) [{where}]")
+        else:
+            typer.echo(
+                f"Schema columns: not checked ({type_name} cannot list columns "
+                f"without a full fetch) [{where}]"
+            )
+
+    # (source_cfg, where, is_interaction_source) triples to probe: the
+    # top-level source plus any configured feature-side sources.  ``where`` is
+    # carried by the *caller* (this loop), not by mutating the exception's
+    # .args in place -- some exception types (e.g. pydantic_core.
+    # ValidationError) implement __str__ in Rust and ignore .args entirely,
+    # which would silently drop the ``where`` tag.  Building the message here
+    # works for any exception type from any plugin, regardless of its __str__.
+    #
+    # Only the interaction source carries the ``schema:`` columns.  Feature
+    # tables legitimately do not (``training/features.py`` passes an empty
+    # ``ctx.extra`` for the same reason), so the flag keeps the column check
+    # off them.
+    sources: list[tuple[Any, str, bool]] = [(loaded_recipe.source, "source", True)]
     if loaded_recipe.features is not None:
         for side_name in ("item", "user"):
             side = getattr(loaded_recipe.features, side_name)
             if side is not None:
-                sources.append((side.source, f"features.{side_name}.source"))
+                sources.append((side.source, f"features.{side_name}.source", False))
 
-    for source_cfg, where in sources:
+    for source_cfg, where, is_interaction_source in sources:
         try:
-            _probe_source(source_cfg, where)
+            source, type_name = _probe_source(source_cfg, where)
         except Exception as exc:
             code = _map_exception_to_exit(exc)
             _exit(code, f"DataSource probe failed [{where}]: {exc}")
+
+        if not is_interaction_source:
+            continue
+        try:
+            _check_schema_columns(source, type_name, where)
+        except Exception as exc:
+            code = _map_exception_to_exit(exc)
+            _exit(code, f"Schema column check failed [{where}]: {exc}")
 
     typer.echo("Validation passed.")
 
@@ -791,7 +843,17 @@ def schema() -> None:
             source=(source_union, ...),
             features=(schema_features | None, None),
         )
-        schema_dict = schema_recipe.model_json_schema()
+        # Declare the dialect explicitly: this command exists to feed editors,
+        # and a JSON Schema document without ``$schema`` leaves them guessing
+        # which draft's keywords apply.  Read from pydantic rather than
+        # hard-coded so the emitted dialect cannot drift from the one that
+        # actually generated the document.
+        from pydantic.json_schema import GenerateJsonSchema
+
+        schema_dict = {
+            "$schema": GenerateJsonSchema.schema_dialect,
+            **schema_recipe.model_json_schema(),
+        }
         typer.echo(json.dumps(schema_dict, indent=2))
     except Exception as exc:
         code = _map_exception_to_exit(exc)

@@ -435,7 +435,16 @@ class Recipe(BaseModel, extra="forbid"):
     cleansing: CleansingConfig = Field(default_factory=CleansingConfig)
     item_metadata: ItemMetadataConfig | None = None
     features: FeaturesConfig | None = None
-    training: TrainingConfig = Field(default_factory=TrainingConfig)
+    # No default: ``TrainingConfig.algorithms`` is ``Field(min_length=1)`` with
+    # no default of its own, so ``TrainingConfig()`` always raises and a
+    # ``default_factory=TrainingConfig`` could never succeed.  Declaring it
+    # optional made ``recotem schema`` omit ``training`` from the top-level
+    # ``required`` list — an editor validating against the shipped schema
+    # accepted recipes the product then rejected — and let the factory's
+    # ValidationError escape before Recipe's own errors were collected, so a
+    # recipe missing both ``schema:`` and ``training:`` reported only
+    # "algorithms: Field required" with no ``training.`` prefix on the loc.
+    training: TrainingConfig
     output: OutputConfig
 
     model_config = {"populate_by_name": True, "validate_assignment": True}

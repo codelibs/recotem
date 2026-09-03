@@ -7,7 +7,7 @@
 # ── image ─────────────────────────────────────────────────────────────────────
 image:
   repository: ghcr.io/codelibs/recotem
-  tag: "2.0.0"
+  tag: "2.1.0"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -179,6 +179,20 @@ artifacts:
     readOnly: true
 
 # ── train CronJob ─────────────────────────────────────────────────────────────
+#
+# FIRST INSTALL: the serve Deployment cannot become Ready until an artifact
+# exists for every recipe — /v1/health answers 503 ("degraded") and the
+# startup probe restarts the container until one appears.  The chart does not
+# train at install time, and this CronJob's default schedule is 02:00 UTC, so
+# a fresh install crash-loops until the first scheduled run unless you seed
+# the store yourself:
+#
+#   helm upgrade --install ... --set train.enabled=true     # no --wait
+#   kubectl -n <ns> create job bootstrap-0 --from=cronjob/<release>-train
+#   kubectl -n <ns> wait --for=condition=complete job/bootstrap-0 --timeout=30m
+#
+# See docs/deployment/k8s.md "First install: seed an artifact before serve
+# starts" for the alternatives (bundled bootstrap Job, out-of-cluster train).
 train:
   enabled: false
 
@@ -190,9 +204,13 @@ train:
   #   recipeFiles:
   #     - "news.yaml"
   #     - "products.yaml"
-  # Legacy comma-separated string ("news.yaml,products.yaml") is also accepted
-  # but deprecated — migrate to list form. If empty, the CronJob iterates all
-  # *.yaml files in the directory.
+  # Legacy comma-separated string ("news.yaml, products.yaml") is also accepted
+  # but deprecated — migrate to list form. Surrounding whitespace around each
+  # entry is trimmed. Both forms are split when the chart renders, so the
+  # CronJob's generated script is plain POSIX sh either way. A string that
+  # contains no file names (e.g. "," or "  ") fails the render rather than
+  # producing a CronJob that silently trains nothing.
+  # If empty, the CronJob iterates all *.yaml files in the directory.
   recipeFiles: []
 
   # Additional environment variables for the train job (non-secret).

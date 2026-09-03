@@ -173,4 +173,13 @@ This is the default and is safe for standard cron setups but means **the schedul
 recotem train --fail-on-busy /etc/recotem/recipes/my_recipe.yaml
 ```
 
-Exit will be non-zero when the lock is held, which most monitoring systems treat as a failure. Pair this with a cron schedule whose interval comfortably exceeds the p99 training duration; `recotem train --quiet` log lines include the run duration for sizing.
+Exit will be non-zero when the lock is held, which most monitoring systems treat as a failure. Pair this with a cron schedule whose interval comfortably exceeds the p99 training duration.
+
+To measure that duration: `recotem train` does not emit an elapsed-time field, but every structured log line carries an ISO-8601 `timestamp`, so subtract the `training_started` timestamp from the `train_done` one. With `--quiet` those two events are still emitted:
+
+```bash
+recotem train --quiet /etc/recotem/recipes/my_recipe.yaml 2>&1 \
+  | jq -r 'select(.event=="training_started" or .event=="train_done") | .timestamp'
+```
+
+Or let the scheduler time it — `systemd-analyze` on a timer unit, or wrapping the cron entry in `/usr/bin/time`.

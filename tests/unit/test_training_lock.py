@@ -17,7 +17,12 @@ from pathlib import Path
 
 import pytest
 
-from recotem.training.lock import LockContestedError, LockTimeoutError, recipe_lock
+from recotem.training.lock import (
+    LockContestedError,
+    LockPermissionError,
+    LockTimeoutError,
+    recipe_lock,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -788,56 +793,125 @@ def test_windows_lock_contention_fail_on_busy_true(tmp_path: Path, monkeypatch) 
 
 
 # ---------------------------------------------------------------------------
-# Finding #2: os.open failure mapping (EACCES → LockContestedError or yield False)
+# os.open failure mapping: EACCES/EPERM is a config error, never contention
 # ---------------------------------------------------------------------------
+#
+# flock() is advisory, so a lock held by another process never makes os.open()
+# fail.  EACCES/EPERM here therefore always means "this path is not writable",
+# which no retry fixes.  Treating it as contention used to make `recotem train`
+# exit 0 without training — a scheduled run reporting success while the model
+# went stale.  Both fail_on_busy modes must raise.
+
+
+def _patch_os_open_to_fail(monkeypatch, err: int) -> None:
+    """Make os.open raise *err* for the .lock path only."""
+    original_os_open = os.open
+
+    def _fake_os_open(path, flags, mode=0o600):
+        if "lock" in str(path):
+            raise PermissionError(err, os.strerror(err))
+        return original_os_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", _fake_os_open)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
-def test_osopen_eacces_fail_on_busy_true_raises_lock_contested(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize("fail_on_busy", [True, False])
+@pytest.mark.parametrize("err_name", ["EACCES", "EPERM"])
+def test_osopen_permission_error_raises_lock_permission_error(
+    tmp_path: Path, monkeypatch, fail_on_busy: bool, err_name: str
 ) -> None:
-    """When os.open raises EACCES (permission denied on lock dir/file),
-    recipe_lock must raise LockContestedError when fail_on_busy=True.
-    Must NOT propagate as raw OSError or map to _EXIT_UNKNOWN.
+    """An unwritable lock path must raise, in BOTH fail_on_busy modes.
+
+    Yielding False for ``fail_on_busy=False`` would let the caller exit 0
+    having trained nothing.
     """
     import errno as _errno
 
-    output_path = tmp_path / "eacces_model.recotem"
+    _patch_os_open_to_fail(monkeypatch, getattr(_errno, err_name))
+    output_path = tmp_path / f"perm_{err_name}_{fail_on_busy}.recotem"
 
-    original_os_open = os.open
+    with pytest.raises(LockPermissionError) as exc_info:
+        with recipe_lock(output_path, fail_on_busy=fail_on_busy):
+            pass  # pragma: no cover — must not be reached
 
-    def _fake_os_open(path, flags, mode=0o600):
-        if "lock" in str(path):
-            raise PermissionError(_errno.EACCES, "Permission denied")
-        return original_os_open(path, flags, mode)
-
-    monkeypatch.setattr(os, "open", _fake_os_open)
-
-    with pytest.raises(LockContestedError):
-        with recipe_lock(output_path, fail_on_busy=True):
-            pass
+    # The message has to be actionable from a scheduler log: it must name the
+    # path that failed and say what to change.
+    message = str(exc_info.value)
+    assert str(output_path) + ".lock" in message
+    assert "RECOTEM_LOCK_DIR" in message
+    assert exc_info.value.code == "lock_permission_denied"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
-def test_osopen_eacces_fail_on_busy_false_yields_false(
+def test_lock_permission_error_is_not_lock_contested(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """When os.open raises EACCES and fail_on_busy=False, recipe_lock yields False."""
+    """LockPermissionError must not be catchable as contention.
+
+    Schedulers branch on exit 6 to mean "another run holds the lock, try
+    later". A permission failure must not land there, or the misconfiguration
+    is retried forever instead of being surfaced.
+    """
     import errno as _errno
 
-    output_path = tmp_path / "eacces_yieldsfalse.recotem"
+    from recotem._exit_codes import _EXIT_CONFIG, _map_exception_to_exit
 
-    original_os_open = os.open
+    _patch_os_open_to_fail(monkeypatch, _errno.EACCES)
 
-    def _fake_os_open(path, flags, mode=0o600):
-        if "lock" in str(path):
-            raise PermissionError(_errno.EACCES, "Permission denied")
-        return original_os_open(path, flags, mode)
+    with pytest.raises(LockPermissionError) as exc_info:
+        with recipe_lock(tmp_path / "not_contention.recotem"):
+            pass  # pragma: no cover — must not be reached
 
-    monkeypatch.setattr(os, "open", _fake_os_open)
+    exc = exc_info.value
+    assert not isinstance(exc, LockContestedError)
+    assert _map_exception_to_exit(exc) == _EXIT_CONFIG
 
-    with recipe_lock(output_path, fail_on_busy=False) as acquired:
-        assert acquired is False
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_unwritable_lock_directory_raises_lock_permission_error(tmp_path: Path) -> None:
+    """A read-only *directory* must fail the same way as an unwritable file.
+
+    This is the real-world shape of the bug: a volume mounted with the wrong
+    ownership, or a mistyped RECOTEM_LOCK_DIR. No monkeypatching — the
+    filesystem denies the write.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses directory permission checks")
+
+    ro_dir = tmp_path / "readonly"
+    ro_dir.mkdir()
+    ro_dir.chmod(0o500)  # r-x: traversable, not writable
+    try:
+        with pytest.raises(LockPermissionError):
+            with recipe_lock(ro_dir / "model.recotem"):
+                pass  # pragma: no cover — must not be reached
+    finally:
+        # Restore so tmp_path cleanup can remove the directory.
+        ro_dir.chmod(0o700)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_uncreatable_lock_directory_raises_lock_permission_error(
+    tmp_path: Path,
+) -> None:
+    """The parent-directory mkdir must fail the same way, not as exit 1.
+
+    Reached when RECOTEM_LOCK_DIR (or output.path) points below a directory
+    the process cannot write — the mkdir raises before os.open is ever tried.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses directory permission checks")
+
+    ro_dir = tmp_path / "readonly_parent"
+    ro_dir.mkdir()
+    ro_dir.chmod(0o500)
+    try:
+        with pytest.raises(LockPermissionError):
+            with recipe_lock(ro_dir / "subdir" / "model.recotem"):
+                pass  # pragma: no cover — must not be reached
+    finally:
+        ro_dir.chmod(0o700)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")

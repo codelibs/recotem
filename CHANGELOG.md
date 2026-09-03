@@ -631,6 +631,33 @@ and every existing recipe, which stays valid as written. Every recipe's
   is exit 3 / `DataSourceError`; the strict-mode section described enforcement
   that did not happen; and the quoted type-mismatch message was not what BigQuery
   returns. The same incorrect exit-2 row was corrected in `sql.md`.
+- **The Helm chart silently discarded the objectStore init container's
+  `volumeMounts`.** `deployment.yaml` and `cronjob-train.yaml` both emitted
+  `name:` and `volumeMounts:` a second time in the same mapping — once from
+  `toYaml`-ing `recipes.objectStore.initContainer`, once from the chart's own
+  `/recipes` entry. Go's YAML decoder is last-key-wins, so an operator's mounts
+  (bucket credentials, a CA bundle) never reached the pod and the sync container
+  failed for no visible reason; `helm lint`, `helm template` and
+  `kubectl apply --dry-run=server --validate=strict` all accept a duplicate key.
+  Both templates now merge into the operator's spec instead of appending a
+  sibling key: an operator-supplied `name` wins (`sync-recipes` stays the
+  default), and the chart's `recipes` mount is appended last and always wins over
+  an operator entry of the same name, so the shared emptyDir cannot be
+  redirected. `values.yaml` documents the merge and the fact that a mount must
+  name a volume the chart declares — there is no `extraVolumes` hook.
+- **`examples/k8s/cronjob.yaml` exited 0 on an empty recipes directory.** Its
+  training loop trained nothing and reported success, so a wrong ConfigMap name
+  or an unsynced PVC surfaced only later as a 503 from serve. It now counts the
+  recipes it trained and exits 1 with
+  `no recipe files found under /recipes`, matching both siblings — the chart's
+  all-recipes CronJob branch and `examples/k8s/bootstrap-job.yaml`.
+- **The manifest gate did not exercise a realistic objectStore spec.** Its only
+  `objectStore` permutation supplied neither `name` nor `volumeMounts`, which is
+  why the duplicate-key defect above rendered green. A permutation supplying both
+  was added, and `tests/unit/test_k8s_manifests.py` now covers the merge
+  precedence and the example CronJob's empty-directory guard with a
+  duplicate-key-rejecting YAML loader (`yaml.safe_load` takes the last key, so a
+  normal parse of a broken render looks healthy).
 
 ### Migrating to irspack 0.5.0
 

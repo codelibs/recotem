@@ -115,7 +115,7 @@ spec:
           # RECOTEM_ALLOWED_HOSTS is configured to for external traffic.
           readinessProbe:
             httpGet:
-              path: /health
+              path: /v1/health
               port: http
               httpHeaders:
                 - name: Host
@@ -127,7 +127,7 @@ spec:
 
           livenessProbe:
             httpGet:
-              path: /health
+              path: /v1/health
               port: http
               httpHeaders:
                 - name: Host

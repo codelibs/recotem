@@ -139,7 +139,7 @@ spec:
                   key: RECOTEM_API_KEYS
           readinessProbe:
             httpGet:
-              path: /health
+              path: /v1/health
               port: 8080
               httpHeaders:
                 - name: Host
@@ -150,7 +150,7 @@ spec:
             failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /health
+              path: /v1/health
               port: 8080
               httpHeaders:
                 - name: Host

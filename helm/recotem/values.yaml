@@ -110,7 +110,7 @@ env:
   #                                      # blocked to prevent SSRF against cloud-metadata
   #                                      # services).  Set to "1" only in isolated dev
   #                                      # environments — never in production.
-  # RECOTEM_METRICS_ENABLED: ""          # default unset (Prometheus /metrics disabled).
+  # RECOTEM_METRICS_ENABLED: ""          # default unset (Prometheus /v1/metrics disabled).
   #                                      # Set to "1" to enable.  Requires the recotem[metrics]
   #                                      # extra (prometheus-client) to be installed in the
   #                                      # image; see Dockerfile build args or custom image.

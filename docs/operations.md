@@ -511,13 +511,15 @@ Full list of environment variables recognised by Recotem. Variables marked `serv
 | `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | train | Raw I/O bytes cap for HTTP/HTTPS, local, and object-store source reads (clamped [1 MiB, 16 GiB]). Does **not** cap the decompressed DataFrame. |
 | `RECOTEM_HTTP_TIMEOUT_SECONDS` | 30 | train | Connect/read timeout for HTTP/HTTPS source fetch (clamped [1, 600]). |
 | `RECOTEM_HTTP_ALLOW_PRIVATE` | (unset) | train | Truthy (`1`/`true`/`yes`/`on`) allows HTTP fetches to private/loopback/link-local destinations. Leave unset in production to block SSRF against cloud-metadata services. |
+| `RECOTEM_MAX_SQL_ROWS` | 50 000 000 | train | Hard cap on rows returned by the SQL data source (clamped [1 000, 500 000 000]). Caps the **row count**, not DataFrame resident memory — see [sql.md](data-sources/sql.md). |
+| `RECOTEM_SQL_ALLOW_PRIVATE` | (unset) | train | Truthy (`1`/`true`/`yes`/`on`) allows SQL DSNs whose host is private/loopback/link-local. Leave unset in production to block SSRF; opting in also disables the DNS-rebinding re-check before each probe/fetch. |
 | `RECOTEM_ALLOWED_HOSTS` | 127.0.0.1,localhost | serve | `TrustedHostMiddleware` allow-list (comma-separated). Whitespace-only input falls back to default. |
 | `RECOTEM_ALLOWED_ORIGINS` | (empty) | serve | CORS allow-list (comma-separated). Empty = deny. |
-| `RECOTEM_ENV` | (empty) | serve | Deployment environment tag. `--insecure-no-auth` is permitted only when set to `development`, `dev`, or `test`; `--dev-allow-unsigned` only when set to `development`. When set to `production`, `prod`, or `staging`, the `/docs`, `/redoc`, and `/openapi.json` endpoints are disabled. |
+| `RECOTEM_ENV` | (empty) | serve | Deployment environment tag. `--insecure-no-auth` is permitted only when set to `development`, `dev`, or `test`; `--dev-allow-unsigned` only when set to `development`. The `/docs`, `/redoc`, and `/openapi.json` endpoints are gated by an **allow-list**: they are served only when this is `development`, `dev`, or `test` (case-insensitive) and return `404` for every other value, including unset. |
 | `RECOTEM_DRAIN_SECONDS` | 30 | serve | SIGTERM graceful drain window (clamped [1, 300]). Set `terminationGracePeriodSeconds` ≥ this + 5 in Kubernetes. |
 | `RECOTEM_LOG_FORMAT` | auto | train + serve | `auto` / `json` / `console`. |
 | `RECOTEM_METADATA_FIELD_DENY` | (empty) | serve | Comma-separated columns stripped from `/v1/recipes/{name}:recommend` and `:recommend-related` responses after the metadata join. |
-| `RECOTEM_METRICS_ENABLED` | (unset) | serve | Truthy enables the Prometheus `/metrics` endpoint. Requires `recotem[metrics]` extra. |
+| `RECOTEM_METRICS_ENABLED` | (unset) | serve | Truthy enables the Prometheus endpoint at **`/v1/metrics`** (a bare `/metrics` is `404`). The route carries `Depends(_require_auth)`, so a scrape without a valid `X-API-Key` gets `401`. Requires `recotem[metrics]` extra. |
 | `RECOTEM_ARTIFACT_ROOT` | (empty) | train | Local `output.path` must lie under this directory (symlink escapes rejected). |
 | `RECOTEM_LOCK_DIR` | (empty) | train | Override directory for per-recipe training lock files. Needed when `output.path` is a remote URI (`s3://`, `gs://`, …); falls back to `<tempdir>/recotem-locks/`. |
 | `RECOTEM_STARTUP_PARALLELISM` | (auto) | serve | Threads used to load artifacts at startup (clamped [1, 32]). Default: `min(len(recipes), 8)`. Setting to `0` clamps to 1 with a warning. |

@@ -8,6 +8,9 @@ Commands:
   schema    Emit the JSON Schema for the Recipe model.
   keygen    Generate a signing or API key (kid, plaintext, hash triple).
 
+Global options:
+  --version / -V   Print the version and exit (eager; no subcommand needed).
+
 Exit codes:
   0  success
   1  unexpected / unknown error
@@ -46,12 +49,43 @@ from recotem._exit_codes import (
     _EXIT_UNKNOWN,
     _map_exception_to_exit,
 )
+from recotem.version import __version__
 
 app = typer.Typer(
     name="recotem",
     help="Recipe-driven recommender training and serving.",
     add_completion=False,
 )
+
+
+def _version_callback(value: bool) -> None:
+    """Print the version and exit, before any subcommand is resolved.
+
+    Eager so ``recotem --version`` works with no subcommand at all.  The
+    version is the single most useful thing to establish first in a bug
+    report: a ``pip install recotem`` and a working copy of this repository
+    routinely differ, and every artifact header records ``recotem_version``,
+    so the reader needs a way to ask the binary what it is.
+    """
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit(code=_EXIT_SUCCESS)
+
+
+@app.callback()
+def _main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            help="Show the Recotem version and exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
+) -> None:
+    """Recipe-driven recommender training and serving."""
 
 
 # ---------------------------------------------------------------------------

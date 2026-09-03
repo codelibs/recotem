@@ -91,7 +91,9 @@ export RECOTEM_API_KEYS="key1:sha256:<hex64>"
 uv run recotem train examples/tutorial-purchase-log/recipe.yaml
 
 # Serve from a directory of recipes
-uv run recotem serve --recipes ./recipes/ --port 8080
+# --port/-p and --host/-H override RECOTEM_PORT / RECOTEM_HOST for one run;
+# the no-API-keys loopback force still wins over --host.
+uv run recotem serve --recipes ./recipes/ --host 127.0.0.1 --port 8080
 
 # Recommend
 curl -X POST http://localhost:8080/v1/recipes/news_articles:recommend \
@@ -210,18 +212,31 @@ reintroducing exit 3.
 uv run pytest tests                          # full suite (~5s without slow)
 uv run pytest tests -m slow                  # MovieLens100K end-to-end
 uv run pytest tests/integration tests/fuzz   # cross-module + hypothesis
+uv run bash tests/e2e/run.sh                 # train → serve → curl (see below)
 uv run ruff check src tests
 uv run ruff format --check src tests
 ```
 
+`tests/e2e/run.sh` calls the `recotem` console script directly, so it must be
+launched through `uv run` (or from an activated venv). Under bare `bash` it
+exits **127** with `run.sh: line 72: recotem: command not found` immediately
+after `[e2e] Generating API key...`, which reads like a keygen failure rather
+than a PATH problem.
+
 ## Environment variables
+
+A value that fails to parse is **fatal** only for the variables marked ⚠ below
+— `ConfigError` / `KeyRingConfigError`, exit 8, before the port is bound. Every
+other numeric variable logs `env_var_unparseable` (WARN) and silently falls
+back to its default, so a typo in e.g. `RECOTEM_MAX_PAYLOAD_BYTES` leaves the
+server running with a limit you did not choose.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RECOTEM_SIGNING_KEYS` | (required) | `kid:hex64,kid2:hex64` for HMAC sign/verify (64 hex = 32 bytes). |
-| `RECOTEM_API_KEYS` | (empty) | `kid:sha256:hex64,...` for serve auth. Empty forces 127.0.0.1 bind. |
-| `RECOTEM_HOST` / `RECOTEM_PORT` | 127.0.0.1 / 8080 | uvicorn bind. Must be `0.0.0.0` inside Docker; overridden to 127.0.0.1 when no API keys are set. |
-| `RECOTEM_WATCH_INTERVAL` | 5 | Watcher poll seconds (clamped 1–30). |
+| ⚠ `RECOTEM_SIGNING_KEYS` | (required) | `kid:hex64,kid2:hex64` for HMAC sign/verify (64 hex = 32 bytes). Malformed → `KeyRingConfigError`, exit 8. |
+| ⚠ `RECOTEM_API_KEYS` | (empty) | `kid:sha256:hex64,...` for serve auth. Empty forces 127.0.0.1 bind. A malformed or duplicate-kid entry is fatal. |
+| `RECOTEM_HOST` / ⚠ `RECOTEM_PORT` | 127.0.0.1 / 8080 | uvicorn bind. Must be `0.0.0.0` inside Docker; overridden to 127.0.0.1 when no API keys are set. A non-integer or out-of-range `RECOTEM_PORT` is fatal; `RECOTEM_HOST` is taken as-is. |
+| ⚠ `RECOTEM_WATCH_INTERVAL` | 5 | Watcher poll seconds (clamped 1–30). Unlike the other numeric variables a non-numeric value is fatal, not a warn-and-default. |
 | `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. Clamped [1 MiB, 16 GiB]. |
 | `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Raw I/O bytes cap on source-path reads (HTTP/HTTPS, local, and object-store). Clamped [1 MiB, 16 GiB]. Does NOT cap the decompressed DataFrame size — see `docs/security.md#decompressed-size-cap-not-enforced-medium-5`. |
 | `RECOTEM_HTTP_TIMEOUT_SECONDS` | 30 | Connect/read timeout for HTTP/HTTPS source fetch. Clamped [1, 600]. |
@@ -230,8 +245,8 @@ uv run ruff format --check src tests
 | `RECOTEM_ALLOWED_ORIGINS` | (empty) | CORS allow-list. Empty = deny. |
 | `RECOTEM_ENV` | (empty) | `--insecure-no-auth` permitted when set to `development`, `dev`, or `test`; `--dev-allow-unsigned` permitted only when set to `development`. See `docs/security.md`. |
 | `RECOTEM_DRAIN_SECONDS` | 30 | SIGTERM grace window. Clamped [1, 300]. |
-| `RECOTEM_LOG_FORMAT` | auto | `auto` / `json` / `console`. |
-| `RECOTEM_MAX_PAYLOAD_BYTES` | 512 MiB | Per-payload cap (post-HMAC-verify) for serve-side deserialization. Clamped [1 MiB, 16 GiB]. Smaller than `RECOTEM_MAX_ARTIFACT_BYTES` to bound deserialization memory expansion. |
+| ⚠ `RECOTEM_LOG_FORMAT` | auto | `auto` / `json` / `console`. Any other value is fatal. |
+| `RECOTEM_MAX_PAYLOAD_BYTES` | 512 MiB | Per-payload cap (post-HMAC-verify) for serve-side deserialization. Clamped [1 MiB, 16 GiB]. Smaller than `RECOTEM_MAX_ARTIFACT_BYTES` to bound deserialization memory expansion; a configured value that exceeds it is fatal (that cross-check is enforced, the parse is not). |
 | `RECOTEM_MAX_BODY_BYTES` | 128 MiB | Max serve-side HTTP **request** body size. Clamped [1 MiB, 2 GiB]. A `BodySizeLimitMiddleware` returns `413 PAYLOAD_TOO_LARGE` when the declared `Content-Length` exceeds the cap, and enforces a running byte count on chunked/streamed bodies with no `Content-Length` so the header cannot be omitted to bypass it. The default clears the largest schema-valid single-verb body (`:recommend-related`, ~52 MiB with maximal cold-start feature mappings) but **not** the largest batch body (`:batch-recommend` ~196 MiB, `:batch-recommend-related` ~13 GiB — the latter beyond even the 2 GiB clamp), which are refused with `413`. It blocks the GB-scale bodies Starlette would otherwise buffer and parse before validation. |
 | `RECOTEM_ARTIFACT_ROOT` | (empty) | If set, local `output.path` must lie under it. |
 | `RECOTEM_RECIPE_*` | — | Allow-listed for `${...}` recipe expansion. |

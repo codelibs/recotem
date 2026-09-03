@@ -517,6 +517,48 @@ training:
 
 Hyperparameter ranges are irspack's, not the recipe's, and some are wide relative to a small catalogue — `TruncatedSVD` searches `n_components` over [4, 512], and any value at or above your item count is clamped to `n_items - 1`, which reconstructs the matrix almost exactly and generalises poorly. On a small catalogue a low `n_trials` may never sample a usable value; if an algorithm scores far below its peers, raise `n_trials` before concluding it is a poor fit.
 
+#### Two reasons an even split wastes budget
+
+**A budgeted slot is spent whether the trial completes or is pruned, and only
+`IALS` can be pruned.** Pruning needs intermediate values, and `IALS` is the
+only algorithm here that reports them — it is the only one built on irspack's
+early-stopping base, so it alone calls `trial.report()` / `should_prune()` per
+epoch. Slots are pre-enqueued once per algorithm before the study runs, so a
+pruned trial is not re-enqueued: it consumes one of that algorithm's slots and
+returns nothing. Measured on `examples/quickstart/interactions.csv` with
+`IALS: 20` and four rivals at `5` each, `n_trials: 40`:
+
+| Algorithm | Budget | Completed | Pruned |
+|---|---|---|---|
+| `IALS` | 20 | 12 | 8 |
+| `CosineKNN` | 5 | 5 | 0 |
+| `TopPop` | 5 | 5 | 0 |
+| `DenseSLIM` | 5 | 5 | 0 |
+| `TruncatedSVD` | 5 | 5 | 0 |
+
+`IALS` explored 12 of the 20 configurations it was budgeted; every other
+algorithm got 100% of its. Budget `IALS` above the count of configurations you
+actually want explored.
+
+**The algorithms do not have comparable amounts to search.** Trials are what a
+sampler needs to cover a search space, and these spaces differ by a factor of
+four in dimension:
+
+| Algorithm | Tunable hyperparameters |
+|---|---|
+| `TopPop` | 0 |
+| `DenseSLIM` | 1 (`reg`) |
+| `TruncatedSVD` | 1 (`n_components`) |
+| `IALS` | 3 (`n_components`, `alpha0`, `reg`) — plus `lambda_*_feature` per configured side when [`features`](#features) is set |
+| `RP3beta` | 3 (`top_k`, `beta`, `normalize_weight`) |
+| `CosineKNN` | 4 (`top_k`, `shrinkage`, `normalize`, `feature_weighting`) |
+
+Leaving `per_algorithm_trials` unset splits the budget evenly, so `TopPop` —
+which has nothing to tune — is handed as many trials as `CosineKNN`. In the run
+above its five trials returned the same objective value five times over, because
+each one retrains and re-evaluates an identical model. Give `TopPop` one trial
+and spend the rest on the algorithms that can use them.
+
 Split scheme semantics:
 
 - `random` — interactions are held out uniformly at random per user. `time_column` is unused: if `schema.time_column` is set, the `random` scheme ignores it.

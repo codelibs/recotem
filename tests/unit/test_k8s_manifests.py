@@ -29,10 +29,13 @@ Tests:
 - The Service keeps train pods out of its Endpoints only because `targetPort`
   is the *name* `http`, which the train container does not declare — pinned,
   because that safety is a side effect rather than a statement of intent.
+- docs/deployment/k8s.md's manifest excerpts do not contradict the files they
+  name (subset check, so a doc may still trim what it is not teaching).
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -471,3 +474,81 @@ def test_example_k8s_sh_commands_parse_under_dash(tmp_path: Path) -> None:
             )
             checked += 1
     assert checked, "no /bin/sh -c commands found under examples/k8s/"
+
+
+# ---------------------------------------------------------------------------
+# docs/deployment/k8s.md excerpt drift
+# ---------------------------------------------------------------------------
+DEPLOY_DOC = REPO_ROOT / "docs" / "deployment" / "k8s.md"
+
+_DOC_EXCERPT_RE = re.compile(
+    r"^```yaml\n(# examples/k8s/(?P<name>[\w.-]+)\n.*?)^```$",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _doc_excerpts() -> list[tuple[str, str]]:
+    """Return (filename, yaml text) for every excerpt tagged with its source.
+
+    Only fenced blocks whose first line names a file under examples/k8s/ are
+    returned.  Blocks quoting chart values (``networkPolicy:``, ``image:``)
+    carry no such tag and are deliberately out of scope here.
+    """
+    text = DEPLOY_DOC.read_text(encoding="utf-8")
+    return [(m.group("name"), m.group(1)) for m in _DOC_EXCERPT_RE.finditer(text)]
+
+
+def _assert_subset(excerpt: Any, actual: Any, where: str) -> None:
+    """Assert *excerpt* is a non-contradicting subset of *actual*.
+
+    Subset, not equality: a doc may legitimately trim a manifest down to the
+    fields it is teaching.  What it may never do is show a value the file does
+    not have — that is the drift this catches (a stale ``schedule:``, a probe
+    pointing at a port number the manifest renamed, a single-recipe ``command``
+    the file replaced with a loop).  Lists are matched order-independently
+    because an excerpt may reorder or drop ``env`` entries without being wrong.
+    """
+    if isinstance(excerpt, dict):
+        assert isinstance(actual, dict), f"{where}: expected a mapping in the file"
+        for key, value in excerpt.items():
+            assert key in actual, f"{where}: doc has key {key!r}, file does not"
+            _assert_subset(value, actual[key], f"{where}.{key}")
+    elif isinstance(excerpt, list):
+        assert isinstance(actual, list), f"{where}: expected a list in the file"
+        for i, item in enumerate(excerpt):
+            matched = False
+            for candidate in actual:
+                try:
+                    _assert_subset(item, candidate, where)
+                except AssertionError:
+                    continue
+                matched = True
+                break
+            assert matched, f"{where}[{i}]: {item!r} matches no entry in the file"
+    else:
+        assert excerpt == actual, f"{where}: doc says {excerpt!r}, file says {actual!r}"
+
+
+def test_deployment_doc_excerpts_match_their_manifests() -> None:
+    """Every ``# examples/k8s/…``-tagged excerpt must agree with that file.
+
+    The excerpts had drifted: the CronJob showed ``schedule: "0 3 * * *"`` and a
+    single-recipe ``recotem train /recipes/my_recipe.yaml`` command, the
+    Deployment showed ``RECOTEM_WATCH_INTERVAL: "30"`` and probes on a numeric
+    port, and the Service showed ``targetPort: 8080`` — none of which the named
+    files contain.  A reader copying the doc got a manifest that differs from
+    the one ``kubectl apply -f examples/k8s/`` installs.
+    """
+    excerpts = _doc_excerpts()
+    assert {name for name, _ in excerpts} == {
+        "cronjob.yaml",
+        "serve-deployment.yaml",
+        "serve-service.yaml",
+    }, f"unexpected set of tagged excerpts: {[n for n, _ in excerpts]}"
+
+    for name, text in excerpts:
+        docs = _load_all_strict(text)
+        assert len(docs) == 1, f"{name}: excerpt must hold exactly one document"
+        actual = _load_all_strict((K8S_EXAMPLES / name).read_text(encoding="utf-8"))
+        assert len(actual) == 1, f"{name}: manifest must hold exactly one document"
+        _assert_subset(docs[0], actual[0], f"k8s.md::{name}")

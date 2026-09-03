@@ -673,7 +673,7 @@ Two unsafe flags exist and are gated by `RECOTEM_ENV`:
 | `--insecure-no-auth` | `RECOTEM_ENV` in `development`, `dev`, `test` | Disables API key check; also disables the no-auth → `127.0.0.1` forced bind so `RECOTEM_HOST` is honoured (e.g. for dev containers); repeating warn banner every 60 s |
 | `--dev-allow-unsigned` | `RECOTEM_ENV=development` AND `--i-understand-this-loads-arbitrary-code` | Skips HMAC verify; never use outside controlled testing |
 
-> **OpenAPI schema in production.** When `RECOTEM_ENV` is set to `production`, `prod`, or `staging`, the `/docs`, `/redoc`, and `/openapi.json` endpoints are disabled at app construction time. Requests to those paths return 404. Development and test environments keep the endpoints enabled for developer ergonomics.
+> **OpenAPI schema in production.** The `/docs`, `/redoc`, and `/openapi.json` endpoints are gated by an allow-list evaluated at app construction time: they are served only when `RECOTEM_ENV` is `development`, `dev`, or `test` (case-insensitive), for developer ergonomics. Every other value — `production`, `staging`, an unrecognised tag such as `qa`, or `RECOTEM_ENV` unset — disables them, and requests to those paths return 404. The gate is fail-secure by construction: a deployment that never sets `RECOTEM_ENV` does not expose the schema.
 
 Both flags are rejected at startup in any environment not matching the requirement, with an explicit error message.
 

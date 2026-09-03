@@ -89,32 +89,100 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: recotem-train
+  namespace: recotem
+  labels:
+    app.kubernetes.io/name: recotem
+    app.kubernetes.io/component: train
 spec:
-  schedule: "0 3 * * *"
-  concurrencyPolicy: Forbid          # skip if a previous run is still active
+  # Daily at 02:00 UTC.
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
+      # Hard deadline: 2 hours per training run.
+      activeDeadlineSeconds: 7200
       template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: recotem
+            app.kubernetes.io/component: train
         spec:
+          serviceAccountName: recotem
           restartPolicy: OnFailure
+          # Pod-level security context — only fields valid at this scope.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            # fsGroup ensures mounted PVC files are owned by GID 1000 (appuser),
+            # matching the Dockerfile USER.  Without this, PVC data may be
+            # inaccessible when the volume's on-disk owner differs from runAsUser.
+            fsGroup: 1000
+
           containers:
             - name: train
               image: ghcr.io/codelibs/recotem:2.0.0
-              command: ["recotem", "train", "/recipes/my_recipe.yaml"]
+              imagePullPolicy: IfNotPresent
+              # Container-level security context — fields like
+              # allowPrivilegeEscalation / readOnlyRootFilesystem are only
+              # valid here, not under spec.securityContext.
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              # Train all recipes in /recipes.  Fail loudly when the directory
+              # is empty, so a wrong ConfigMap name surfaces here instead of as
+              # an unexplained 503 from serve.
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  count=0
+                  for recipe in /recipes/*.yaml; do
+                    [ -f "$recipe" ] || continue
+                    count=$((count + 1))
+                    recotem train "$recipe"
+                  done
+                  if [ "$count" -eq 0 ]; then
+                    echo "no recipe files found under /recipes" >&2
+                    exit 1
+                  fi
+              env:
+                - name: RECOTEM_LOG_FORMAT
+                  value: "json"
+                - name: RECOTEM_SIGNING_KEYS
+                  valueFrom:
+                    secretKeyRef:
+                      name: recotem-auth
+                      key: RECOTEM_SIGNING_KEYS
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 2Gi
+                limits:
+                  cpu: "4"
+                  memory: 8Gi
               volumeMounts:
                 - name: recipes
                   mountPath: /recipes
                   readOnly: true
                 - name: artifacts
                   mountPath: /artifacts
-              env:
-                - name: RECOTEM_SIGNING_KEYS
-                  valueFrom:
-                    secretKeyRef:
-                      name: recotem-auth
-                      key: RECOTEM_SIGNING_KEYS
+                  readOnly: false
+                - name: tmp
+                  mountPath: /tmp
+                # /workspace is the Dockerfile WORKDIR and the process cwd.
+                # readOnlyRootFilesystem=true forbids writes to the container root
+                # filesystem, so this emptyDir provides a writable cwd for lock
+                # files and any tooling that creates temp files relative to cwd.
+                - name: workspace
+                  mountPath: /workspace
+
           volumes:
             - name: recipes
               configMap:
@@ -122,6 +190,10 @@ spec:
             - name: artifacts
               persistentVolumeClaim:
                 claimName: recotem-artifacts
+            - name: tmp
+              emptyDir: {}
+            - name: workspace
+              emptyDir: {}
 ```
 
 Set `concurrencyPolicy: Forbid` so overlapping runs skip rather than corrupt the artifact. Recotem's own file lock provides a secondary guard, but the K8s policy is cheaper.
@@ -157,9 +229,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: recotem-serve
+  namespace: recotem
   labels:
     app.kubernetes.io/name: recotem
     app.kubernetes.io/component: serve
+    app.kubernetes.io/version: "2.0.0"
 spec:
   replicas: 2
   selector:
@@ -172,47 +246,94 @@ spec:
         app.kubernetes.io/name: recotem
         app.kubernetes.io/component: serve
     spec:
-      # terminationGracePeriodSeconds >= RECOTEM_DRAIN_SECONDS + 5 (default 30+5=35).
-      # The bundled Helm chart adds a 5 s preStop sleep so its default is 5+30+5=40.
+      serviceAccountName: recotem
+      # terminationGracePeriodSeconds must be >= RECOTEM_DRAIN_SECONDS + 5.
+      # Default RECOTEM_DRAIN_SECONDS=30, so 35 is the minimum recommended value.
       terminationGracePeriodSeconds: 35
+      # Spread replicas across nodes for availability.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: recotem
+              app.kubernetes.io/component: serve
+
+      # Pod-level security context — only fields valid at this scope.
+      # See https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#podsecuritycontext-v1-core
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # fsGroup ensures mounted PVC files are owned by GID 1000 (appuser),
+        # matching the Dockerfile USER.  Without this, PVC data may be
+        # inaccessible when the volume's on-disk owner differs from runAsUser.
+        fsGroup: 1000
+
       containers:
         - name: serve
           image: ghcr.io/codelibs/recotem:2.0.0
-          command: ["recotem", "serve", "--recipes", "/recipes/"]
-          ports:
-            - containerPort: 8080
-          volumeMounts:
-            - name: recipes
-              mountPath: /recipes
-              readOnly: true
-            - name: artifacts
-              mountPath: /artifacts
-              readOnly: true
+          imagePullPolicy: IfNotPresent
+          command: ["recotem", "serve", "--recipes", "/recipes"]
+
+          # Container-level security context — fields like
+          # allowPrivilegeEscalation / readOnlyRootFilesystem / capabilities
+          # are only valid here, not under spec.securityContext.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
           env:
             - name: RECOTEM_HOST
               value: "0.0.0.0"
             - name: RECOTEM_PORT
               value: "8080"
+            - name: RECOTEM_WATCH_INTERVAL
+              value: "10"
             - name: RECOTEM_LOG_FORMAT
               value: "json"
-            - name: RECOTEM_WATCH_INTERVAL
-              value: "30"
+            - name: RECOTEM_ENV
+              value: "production"
             - name: RECOTEM_DRAIN_SECONDS
               value: "30"
-            - name: RECOTEM_SIGNING_KEYS
-              valueFrom:
-                secretKeyRef:
-                  name: recotem-auth
-                  key: RECOTEM_SIGNING_KEYS
+            # TrustedHostMiddleware defaults to "127.0.0.1,localhost".
+            # External Service / Ingress traffic arrives with a different Host
+            # header and will be rejected with HTTP 400. Set the hosts you
+            # actually expose the API under (Service DNS, Ingress hostnames).
+            # Example:
+            #   - name: RECOTEM_ALLOWED_HOSTS
+            #     value: "recotem.example.com,recotem-serve.recotem.svc.cluster.local"
+            # API keys and signing keys from Secret.
+            # The Secret data keys match the env var names so what the app
+            # reads, what kubectl shows, and what the Secret stores are all
+            # spelled identically.
             - name: RECOTEM_API_KEYS
               valueFrom:
                 secretKeyRef:
                   name: recotem-auth
                   key: RECOTEM_API_KEYS
+            - name: RECOTEM_SIGNING_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: recotem-auth
+                  key: RECOTEM_SIGNING_KEYS
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          # Probes set Host: localhost so they pass TrustedHostMiddleware
+          # (default allowlist: 127.0.0.1,localhost) regardless of what
+          # RECOTEM_ALLOWED_HOSTS is configured to for external traffic.
           readinessProbe:
             httpGet:
               path: /v1/health
-              port: 8080
+              port: http
               httpHeaders:
                 - name: Host
                   value: localhost
@@ -220,10 +341,11 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
+
           livenessProbe:
             httpGet:
               path: /v1/health
-              port: 8080
+              port: http
               httpHeaders:
                 - name: Host
                   value: localhost
@@ -231,6 +353,30 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+
+          volumeMounts:
+            - name: recipes
+              mountPath: /recipes
+              readOnly: true
+            - name: artifacts
+              mountPath: /artifacts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            # /workspace is the Dockerfile WORKDIR and the process cwd.
+            # readOnlyRootFilesystem=true forbids writes to the container root
+            # filesystem, so this emptyDir provides a writable cwd.
+            - name: workspace
+              mountPath: /workspace
+
       volumes:
         - name: recipes
           configMap:
@@ -238,7 +384,16 @@ spec:
         - name: artifacts
           persistentVolumeClaim:
             claimName: recotem-artifacts
+        - name: tmp
+          emptyDir: {}
+        - name: workspace
+          emptyDir: {}
 ```
+
+The `terminationGracePeriodSeconds: 35` above is the minimum for this manifest,
+which has no preStop hook: `RECOTEM_DRAIN_SECONDS` (30) plus a 5 s buffer. The
+bundled Helm chart adds a 5 s `preStop` sleep (`preStopSleepSeconds`), so its
+default is 5 + 30 + 5 = 40.
 
 Note on multiple replicas: each pod holds its own in-memory copy of every model and runs its own watcher thread. This is intentional — there is no shared cache. With 2 GiB max artifact size and 10 recipes, plan for up to 20 GiB per pod before allocating replicas.
 
@@ -293,15 +448,20 @@ apiVersion: v1
 kind: Service
 metadata:
   name: recotem-serve
+  namespace: recotem
+  labels:
+    app.kubernetes.io/name: recotem
+    app.kubernetes.io/component: serve
 spec:
+  type: ClusterIP
   selector:
     app.kubernetes.io/name: recotem
     app.kubernetes.io/component: serve
   ports:
     - name: http
       port: 8080
-      targetPort: 8080
-  type: ClusterIP
+      targetPort: http
+      protocol: TCP
 ```
 
 Expose externally via an Ingress or a LoadBalancer. Do not expose the pod port directly without a TLS-terminating proxy in front.

@@ -163,7 +163,11 @@ for the Helm bootstrap sequence.
 
 ## Production checklist
 
-- [ ] Replace `latest` image tag with a pinned version (e.g. `2.0.0`).
+- [ ] Repin the image tag. Every manifest here already ships pinned to the
+      release it was written against — no `latest` anywhere — so this is about
+      moving the pin to the version you intend to run, and ideally pinning by
+      digest (`ghcr.io/codelibs/recotem@sha256:…`) so a retagged image cannot
+      change under a rollout.
 - [ ] Configure resource requests / limits sized for your dataset.
 - [ ] Add a NetworkPolicy restricting egress to only the data sources and
       object-store endpoints you need.

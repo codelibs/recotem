@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from recotem._exit_codes import _EXIT_SUCCESS
 from recotem.cli import app
 
 runner = CliRunner()
@@ -3567,3 +3568,40 @@ output:
 
     assert result.exit_code == 2, out
     assert "training.algorithms: Field required" in out, out
+
+
+# ---------------------------------------------------------------------------
+# --version
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flag", ["--version", "-V"])
+def test_version_flag_prints_package_version(flag: str) -> None:
+    """`recotem --version` prints the version and exits 0, with no subcommand.
+
+    The flag is eager, so it must resolve before Typer requires a COMMAND.
+    A `pip install recotem` and a working copy of this repository routinely
+    report different versions, and every artifact header records
+    `recotem_version`, so a reader needs a way to ask the binary what it is.
+    """
+    from recotem.version import __version__
+
+    result = runner.invoke(app, [flag])
+    assert result.exit_code == _EXIT_SUCCESS, result.output
+    assert result.stdout.strip() == __version__
+
+
+def test_version_matches_package_dunder() -> None:
+    """The printed version is the one `import recotem` exposes."""
+    import recotem
+
+    result = runner.invoke(app, ["--version"])
+    assert result.stdout.strip() == recotem.__version__
+
+
+def test_subcommands_still_reachable_with_root_callback() -> None:
+    """Adding the root callback must not shadow the existing subcommands."""
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == _EXIT_SUCCESS, result.output
+    for command in ("train", "serve", "inspect", "validate", "schema", "keygen"):
+        assert command in result.stdout, result.stdout

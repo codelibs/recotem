@@ -169,6 +169,12 @@ recotem train examples/tutorial-purchase-log/recipe.yaml
 recotem serve --recipes examples/tutorial-purchase-log/
 ```
 
+`--port` / `-p` and `--host` / `-H` override `RECOTEM_PORT` and `RECOTEM_HOST`
+for a single invocation — `recotem serve --recipes … -H 0.0.0.0 -p 9000`. The
+loopback posture still wins over the flag: with no `RECOTEM_API_KEYS` and no
+`--insecure-no-auth`, the bind host is forced back to `127.0.0.1` whatever you
+pass, and a `host_forced_to_loopback` warning records what you asked for.
+
 ### 4. Recommend
 
 ```bash
@@ -226,6 +232,7 @@ See `docs/data-sources/sql.md` for PostgreSQL / MySQL recipes.
 ## Next steps
 
 - [docs/recipe-reference.md](recipe-reference.md) — every recipe field
+- [docs/api-reference.md](api-reference.md) — every `/v1` verb, including `:batch-recommend` and `:batch-recommend-related`
 - [docs/data-sources/csv.md](data-sources/csv.md) — full CSV/Parquet documentation including schemes
 - [docs/deployment/docker.md](deployment/docker.md) — production Docker patterns
 - [docs/deployment/k8s.md](deployment/k8s.md) — Helm chart and CronJob

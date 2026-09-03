@@ -5,11 +5,16 @@ name: recotem / docker
 # Dockerfile: Dockerfile
 #
 # Job graph:
-#   guard ──> smoke (amd64, arm64) ──┬──> trivy ──> build (push)
-#                                    └───────────────^
-# Nothing is pushed until the release-tag guard, the runtime smoke test and the
-# vulnerability scan have all passed.  `build` is the only job that logs in to
-# GHCR.
+#   guard ──┬──> smoke (amd64, arm64) ──┬──> trivy ──┬──> build (push)
+#           │                           └────────────┤
+#           └──> test ────────────────────────────────┘
+# Nothing is pushed until the release-tag guard, the test suite, the runtime
+# smoke test and the vulnerability scan have all passed.  `build` is the only
+# job that logs in to GHCR.
+#
+# `build` gates the push by gating the whole job: the registry login and the
+# `push: true` build are steps inside it, so a failed dependency skips `build`
+# entirely rather than merely shortening it.
 #
 # Security note: no untrusted user input (PR titles, commit messages, etc.) is
 # interpolated into any run: command. All github.event.* data is used only
@@ -31,9 +36,13 @@ on:
       - ".dockerignore"
       - ".github/workflows/docker.yml"
 
+# Workflow default is read-only.  `packages: write` is granted on `build`
+# alone — the one job that logs in to GHCR — rather than here, so a job added
+# later without its own `permissions:` block inherits no registry write.  It
+# used to be granted at this level, which handed `smoke` and `trivy` a scope
+# neither ever uses.
 permissions:
   contents: read
-  packages: write
 
 env:
   REGISTRY: ghcr.io
@@ -66,6 +75,49 @@ jobs:
       - name: Tag is a final release and matches pyproject.toml + version.py + Chart.yaml
         if: startsWith(github.ref, 'refs/tags/')
         run: bash .github/scripts/check-release-tag.sh
+
+  # Gate: the code.
+  #
+  # test.yml and this workflow share no dependency edge — GitHub gives none
+  # between workflows — so both start at once on a push to main or a version
+  # tag, and `build` used to reach GHCR while pytest was still running or had
+  # already failed.  A red unit, integration or fuzz test therefore blocked the
+  # PyPI upload (publish.yml carries its own `test` job for exactly this
+  # reason) but not the container image, and `latest` moves on every push to
+  # main.  This is that missing job on the container path.
+  #
+  # Deliberately a single interpreter and no e2e, unlike test.yml: the point is
+  # to stop a broken build being published, not to re-run the release matrix.
+  # 3.12 specifically, because that is the interpreter the image ships
+  # (`FROM python:3.12-slim` in the Dockerfile) — test.yml's 3.13 and 3.14 legs
+  # cover the PyPI package, where the user picks the interpreter, and a failure
+  # confined to those says nothing about the container.  e2e is likewise
+  # redundant here: `smoke` below already exercises train → sign → serve →
+  # recommend inside the built image on both published architectures, which is
+  # the e2e script's coverage applied to the artefact that actually ships.
+  test:
+    name: pre-push test gate
+    runs-on: ubuntu-24.04
+    needs: guard
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies (all extras)
+        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite
+
+      - name: ruff check
+        run: uv run ruff check src/ tests/
+
+      - name: ruff format (check only)
+        run: uv run ruff format --check src/ tests/
+
+      - name: Run unit + integration + fuzz tests
+        run: uv run pytest tests/unit tests/integration tests/fuzz --tb=short -q -m "not slow"
 
   # Gate: prove the built image actually runs before anything is published.
   # A multi-stage venv copy can silently produce an image whose entrypoint
@@ -402,7 +454,11 @@ jobs:
   build:
     name: docker build
     runs-on: ubuntu-24.04
-    needs: [smoke, trivy]
+    needs: [test, smoke, trivy]
+    # The only job that logs in to GHCR, and so the only one granted write.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v7
 

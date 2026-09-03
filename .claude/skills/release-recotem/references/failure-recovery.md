@@ -81,10 +81,25 @@ gh run rerun --repo codelibs/recotem <id> --failed
 
 ## Red Trivy on the tag run
 
-`trivy` is `needs: build`, so it runs *after* `Build and push` has already made
-the image public. A red Trivy does not mean the image was withheld — it is
-already on GHCR. The remedy is a patch release with the bumped dependency, not
-a retag.
+`trivy` is `needs: smoke` and `build` is `needs: [smoke, trivy]`, so the scan
+runs *before* `Build and push`. A red Trivy means the push **was** withheld:
+nothing reached GHCR, and there is nothing published to replace or un-publish.
+PyPI publishes from a separate workflow and is unaffected, so the release is
+half-landed — the version is on PyPI with no image beside it, and a green
+`publish` hides that. Say so before doing anything else.
+
+Fix it forward; the tag does not move. `ignore-unfixed: true` means the finding
+is fixable, so there are two cases:
+
+1. Debian has published the fix since the run. The Dockerfile's `apt-get
+   upgrade` picks it up on a plain re-run, with no repo change at all:
+
+   ```bash
+   gh run rerun --repo codelibs/recotem <docker-run-id> --failed
+   ```
+
+2. The fix needs a repo change. It has to be in the *tagged* tree, so it takes
+   a patch release — that is the only case where one is warranted here.
 
 ## Tag landed on the wrong commit
 

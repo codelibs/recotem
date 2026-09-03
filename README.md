@@ -112,14 +112,20 @@ curl -X POST http://localhost:8080/v1/recipes/top_picks:recommend-related \
   -d '{"seed_items": ["i00"], "limit": 5}'
 ```
 
+Expected (the exact items / scores depend on training):
+
 ```json
 {
   "request_id": "a7d279d50b3e",
   "recipe": "top_picks",
   "model_version": "sha256:abc...",
-  "items": [{"item_id": "i00", "score": 0.91}]
+  "items": [{"item_id": "i10", "score": 50.0}, {"item_id": "i06", "score": 48.0}]
 }
 ```
+
+`score` is whatever the winning algorithm produces, on that algorithm's own
+scale — it is not a probability and is not normalised to 0–1. This recipe
+trains TopPop, so the scores above are raw interaction counts.
 
 The recipe itself is 11 lines — every other field has a sensible default.
 See [`examples/quickstart/recipe.yaml`](examples/quickstart/recipe.yaml)
@@ -164,6 +170,7 @@ Full documentation site: **[recotem.org](https://recotem.org)**.
 
 - [Getting started](docs/getting-started.md) — Docker Compose / pip walkthrough end-to-end
 - [Recipe reference](docs/recipe-reference.md) — every field documented
+- [API reference](docs/api-reference.md) — `/v1` endpoints and the request/response shape of every inference verb, including the batch ones
 - [Operations](docs/operations.md) — key rotation, sizing, troubleshooting
 - [Security](docs/security.md) — threat model, IAM scopes, secrets handling
 - [Plugin authoring](docs/plugin-authoring.md) — write a custom data source

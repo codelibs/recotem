@@ -216,6 +216,43 @@ in the seed-history matrix that case B's solve uses, so running case B alone
 would silently drop that seed's contribution. Case C is the only path that
 can actually use a cold seed's features.
 
+### Cold-start `score` is uncalibrated — rank it, do not threshold it
+
+A cold-start `score` is an uncalibrated similarity. **Its magnitude is not
+comparable with a warm `:recommend` score from the same model, and it is not
+stable across training runs of the same recipe.** Rankings are unaffected —
+the ordering within one response is meaningful, the absolute numbers are not.
+
+The reason is the feature ridge `lambda_item_feature` /
+`lambda_user_feature`, which Optuna samples log-uniformly over `[1, 1e6]`
+(see [recipe-reference.md — features](recipe-reference.md#features)). Holding
+every other iALS hyperparameter fixed on `examples/feature-aware/` and varying
+only that ridge:
+
+| `lambda_item_feature` | ndcg@10 (the search objective) | warm top score | cold top score |
+|---|---|---|---|
+| `1` | 0.7733973654 | 5.81e-01 | 1.70e-01 |
+| `10` | 0.7796865566 | 5.65e-01 | 3.83e-02 |
+| `100` | 0.7808524871 | 5.54e-01 | 4.50e-03 |
+| `1000` | 0.7981623067 | 5.53e-01 | 4.57e-04 |
+| `10000` | 0.7981623067 | 5.53e-01 | 4.57e-05 |
+| `100000` | 0.7981623067 | 5.53e-01 | 4.58e-06 |
+| `1000000` | 0.7981623067 | 5.53e-01 | 4.58e-07 |
+
+Two things follow. The cold-start score falls roughly as `1/lambda` — four
+orders of magnitude across the table, six across the full sampled range —
+while the warm score moves by about 5%. And above `lambda ≈ 1e3` the search
+objective is **identical to ten decimal places**, so Optuna has nothing to
+choose on across the top three decades of its own sampling range and settles
+somewhere in that band arbitrarily. Two runs of one unchanged recipe can
+therefore land three orders of magnitude apart in cold-start score while
+scoring identically on the metric you asked it to optimise.
+
+So: sort by `score`, take the top *k*, and show them. Do not compare a
+cold-start `score` against a warm one, do not set a numeric relevance
+threshold on it, and do not persist it as a feature for a downstream model
+that will see a differently-tuned artifact after the next retrain.
+
 **A known `user_id` with `user_features` supplied is not an error.** The
 learned embedding from that user's real interaction history strictly
 dominates a profile prior, so the server always prefers it and simply

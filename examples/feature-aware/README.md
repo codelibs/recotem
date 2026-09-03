@@ -40,6 +40,7 @@ recotem validate examples/feature-aware/recipe.yaml
 ```
 Recipe 'feature_aware_demo': schema OK
 DataSource: probe OK (csv) [source]
+Schema columns: OK (csv) [source]
 DataSource: probe OK (csv) [features.item.source]
 Validation passed.
 ```

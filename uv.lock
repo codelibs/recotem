@@ -2293,7 +2293,7 @@ requires-dist = [
     { name = "rich", specifier = ">=13,<16" },
     { name = "s3fs", marker = "extra == 's3'", specifier = ">=2024.6,<2026" },
     { name = "scikit-learn", specifier = ">=1.8,<1.10" },
-    { name = "scipy", specifier = ">=1.11,<2" },
+    { name = "scipy", specifier = ">=1.13,<2" },
     { name = "sqlalchemy", marker = "extra == 'mysql'", specifier = ">=2,<3" },
     { name = "sqlalchemy", marker = "extra == 'postgres'", specifier = ">=2,<3" },
     { name = "sqlalchemy", marker = "extra == 'sqlite'", specifier = ">=2,<3" },

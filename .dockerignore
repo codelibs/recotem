@@ -39,6 +39,17 @@ tests/
 # Examples (not needed in the image; operators use volume mounts)
 examples/
 
+# Recotem runtime artifacts (local dev only).
+# Every getting-started and example walkthrough trains into ./artifacts at the
+# repository root, so by the time a reader reaches docs/deployment/docker.md
+# the build context holds model files hundreds of MB in size. The Dockerfile
+# never COPYs them, so this is upload cost rather than a leak — but the upload
+# happens before the first COPY is evaluated. Mirrors .gitignore.
+artifacts/
+*.recotem
+*.recotem.lock
+*.recotem.tmp
+
 # Editor / OS artifacts
 .DS_Store
 Thumbs.db

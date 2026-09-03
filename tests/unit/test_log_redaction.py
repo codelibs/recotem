@@ -917,3 +917,364 @@ def test_unrelated_keys_still_pass_through() -> None:
     out = _invoke(dict(event))
     assert out["recipe"] == "movies"
     assert out["limit"] == 10
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: the REAL processor chain, asserting on RENDERED output.
+#
+# Everything above this point calls ``redact_sensitive_keys`` directly, and the
+# rest of the suite reaches for ``structlog.testing.capture_logs()`` -- which
+# replaces the processor chain wholesale and so never runs redaction at all.
+# That blind spot is why two over-redaction defects reached production logs:
+# ``security.posture`` losing ``auth_enabled`` / ``signing_key_status``, and
+# 43+ character event names rendering as ``[REDACTED-B64URL43]``.
+#
+# The tests below go through ``recotem.logging.configure_logging`` -- the real
+# chain, the real JSON renderer -- and assert on the rendered line.
+# ---------------------------------------------------------------------------
+
+# Synthetic test material.  Structurally valid for the value-side patterns but
+# obviously fabricated: never a real credential.
+_FAKE_SIGNING_KEY_HEX = "0123456789abcdef" * 4  # 64 hex chars
+_FAKE_API_KEY_B64URL = "Fake-Api-Key-Material-For-Tests-Only-Not-Real"  # 45 base64url
+_FAKE_AWS_SECRET = "FAKEawsSECRETaccessKEYmaterialFORtestsONLY0"  # 43 base64url
+
+
+class _RenderedLog:
+    """Reader over the rendered output of the real structlog chain."""
+
+    def __init__(self, buf) -> None:
+        self._buf = buf
+
+    @property
+    def raw(self) -> str:
+        return self._buf.getvalue()
+
+    def clear(self) -> None:
+        self._buf.seek(0)
+        self._buf.truncate(0)
+
+    def lines(self) -> list[dict]:
+        import json
+
+        return [json.loads(x) for x in self.raw.splitlines() if x.strip()]
+
+    def emit(self, event: str, **kw) -> dict:
+        """Log one event through the real chain; return the rendered line."""
+        import structlog
+
+        self.clear()
+        structlog.get_logger("test.redaction").info(event, **kw)
+        assert self.raw, "nothing was rendered"
+        return self.lines()[0]
+
+    def event(self, name: str) -> dict:
+        """Return the single rendered line whose event name is *name*."""
+        matches = [x for x in self.lines() if x.get("event") == name]
+        assert matches, f"no {name!r} line rendered; got {self.raw!r}"
+        return matches[0]
+
+
+@pytest.fixture
+def rendered():
+    """Install the real logging chain and capture its rendered output.
+
+    ``configure_logging`` builds the production processor chain (redaction
+    first) and the production JSON renderer; only the handler's output stream
+    is swapped for an in-memory buffer.  Unlike ``capture_logs()``, this
+    exercises redaction.
+    """
+    import io
+    import logging as stdlib_logging
+
+    import structlog
+
+    from recotem.logging import configure_logging
+
+    root = stdlib_logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    saved_config = structlog.get_config()
+    try:
+        configure_logging("json")
+        buf = io.StringIO()
+        for handler in root.handlers:
+            handler.setStream(buf)
+        yield _RenderedLog(buf)
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+        structlog.configure(**saved_config)
+
+
+# --- (a) security.posture keeps the two fields it exists to convey ----------
+
+
+def test_rendered_security_posture_keeps_auth_enabled(rendered) -> None:
+    """``auth_enabled`` is a computed bool -- an r"auth" false positive."""
+    line = rendered.emit("security.posture", auth_enabled=True)
+    assert line["auth_enabled"] is True, (
+        f"auth_enabled must survive redaction; rendered {rendered.raw!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["configured", "missing", "dev_allow_unsigned", "construction_failed"],
+)
+def test_rendered_security_posture_keeps_signing_key_status(
+    rendered, status: str
+) -> None:
+    """``signing_key_status`` is a closed-set status -- a r"key" false positive."""
+    line = rendered.emit("security.posture", signing_key_status=status)
+    assert line["signing_key_status"] == status, (
+        f"signing_key_status must survive redaction; rendered {rendered.raw!r}"
+    )
+
+
+def test_rendered_security_posture_from_the_real_call_site(rendered) -> None:
+    """Exercise ``serving/app.py``'s real emission, not a hand-built event dict."""
+    from recotem.config import ServeConfig
+    from recotem.serving.app import _emit_security_posture
+
+    rendered.clear()
+    _emit_security_posture(ServeConfig(), None)
+
+    line = rendered.event("security.posture")
+    assert isinstance(line["auth_enabled"], bool), (
+        f"auth_enabled must render as a bool, got {line['auth_enabled']!r}"
+    )
+    assert line["signing_key_status"] in {
+        "configured",
+        "missing",
+        "dev_allow_unsigned",
+        "construction_failed",
+    }, f"signing_key_status must render as a status, got {line!r}"
+
+
+# --- (b) long snake_case event names survive --------------------------------
+
+
+@pytest.mark.parametrize(
+    "event_name",
+    [
+        # Every recotem event name at or past the 43-char base64url threshold.
+        "sql_statement_timeout_unsupported_on_sqlite",  # 43 (datasource/sql.py)
+        "recipe_yaml_parse_failed_on_rescan_new_file",  # 43 (serving/watcher.py)
+        "source_registry_unavailable_during_validation",  # 45 (recipe/models.py)
+        # A Prometheus metric name -- same shape, same trap, should one be logged.
+        "recotem_v1_validation_errors_outside_verb_total",  # 47
+    ],
+)
+def test_rendered_long_snake_case_event_name_survives(
+    rendered, event_name: str
+) -> None:
+    """A 43+ char snake_case identifier is an event name, not key material."""
+    assert len(event_name) >= 43, "test data must exceed the base64url threshold"
+    line = rendered.emit(event_name)
+    assert line["event"] == event_name, (
+        f"event name destroyed by value-side scrubbing; rendered {rendered.raw!r}"
+    )
+
+
+def test_rendered_sqlite_timeout_warning_from_the_real_call_site(
+    rendered, monkeypatch
+) -> None:
+    """The warning ``docs/data-sources/sql.md`` promises must be readable.
+
+    ``tests/unit/test_datasource_sql.py`` asserts this event through
+    ``capture_logs()``, which bypasses the processor chain -- so it kept
+    passing while the rendered line read ``[REDACTED-B64URL43]``.
+    """
+    from unittest.mock import MagicMock
+
+    from recotem.datasource.sql import SQLConfig, SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    source = SQLSource(
+        SQLConfig(
+            type="sql",
+            dsn_env="RECOTEM_RECIPE_DB_DSN",
+            query="SELECT user_id, item_id FROM events",
+        )
+    )
+
+    rendered.clear()
+    source._apply_statement_timeout(MagicMock())
+
+    line = rendered.event("sql_statement_timeout_unsupported_on_sqlite")
+    assert line["requested_seconds"], f"warning lost its context: {line!r}"
+
+
+# --- (c) real credential material is STILL redacted in rendered output ------
+
+
+def test_rendered_signing_key_still_redacted(rendered) -> None:
+    rendered.emit("startup", recotem_signing_keys=_FAKE_SIGNING_KEY_HEX)
+    assert _FAKE_SIGNING_KEY_HEX not in rendered.raw, (
+        f"signing key leaked into {rendered.raw!r}"
+    )
+
+
+def test_rendered_api_key_still_redacted(rendered) -> None:
+    rendered.emit("request", **{"x-api-key": _FAKE_API_KEY_B64URL})
+    assert _FAKE_API_KEY_B64URL not in rendered.raw, (
+        f"api key leaked into {rendered.raw!r}"
+    )
+
+
+def test_rendered_aws_secret_still_redacted(rendered) -> None:
+    rendered.emit("boot", aws_secret_access_key=_FAKE_AWS_SECRET)
+    assert _FAKE_AWS_SECRET not in rendered.raw, (
+        f"aws secret leaked into {rendered.raw!r}"
+    )
+
+
+@pytest.mark.parametrize("field", ["note", "detail", "message", "recipe", "path"])
+@pytest.mark.parametrize(
+    "material", [_FAKE_SIGNING_KEY_HEX, _FAKE_API_KEY_B64URL, _FAKE_AWS_SECRET]
+)
+def test_rendered_key_material_under_innocuous_key_name_still_redacted(
+    rendered, field: str, material: str
+) -> None:
+    """The value-side passes are what catch a key under a harmless field name.
+
+    This is the case the snake_case exemption must not weaken: the key name
+    gives no hint, so only the value pattern stands between the credential and
+    the log.
+    """
+    rendered.emit("evt", **{field: material})
+    assert material not in rendered.raw, (
+        f"key material leaked under {field!r}: {rendered.raw!r}"
+    )
+
+
+def test_rendered_key_material_in_the_event_field_still_redacted(rendered) -> None:
+    """``event`` keeps its value-side scrubbing.
+
+    ``configure_logging`` installs a ``foreign_pre_chain``, so stdlib loggers
+    (uvicorn, SQLAlchemy, urllib3) render interpolated *messages* into
+    ``event`` -- exactly the text most likely to carry a stray credential.
+    Exempting the ``event`` key wholesale would have given this up; narrowing
+    the value pattern instead keeps it.
+    """
+    rendered.emit(f"connecting with key {_FAKE_API_KEY_B64URL}")
+    assert _FAKE_API_KEY_B64URL not in rendered.raw, (
+        f"api key leaked via event text: {rendered.raw!r}"
+    )
+
+    rendered.emit(f"loaded signing key {_FAKE_SIGNING_KEY_HEX}")
+    assert _FAKE_SIGNING_KEY_HEX not in rendered.raw, (
+        f"signing key leaked via event text: {rendered.raw!r}"
+    )
+
+    rendered.emit("connecting to postgresql://u:hunter2@db.internal/x")
+    assert "hunter2" not in rendered.raw, (
+        f"DSN password leaked via event text: {rendered.raw!r}"
+    )
+
+
+def test_rendered_allowlisted_key_still_gets_value_side_scrubbing(rendered) -> None:
+    """Name-allowlisting must not disable the value passes on that field.
+
+    ``signing_key_status`` should only ever hold a closed-set status, but if a
+    regression put key material there the value pattern must still fire.
+    """
+    rendered.emit("security.posture", signing_key_status=_FAKE_SIGNING_KEY_HEX)
+    assert _FAKE_SIGNING_KEY_HEX not in rendered.raw, (
+        f"allowlisted key bypassed value scrubbing: {rendered.raw!r}"
+    )
+
+
+# --- (d) existing benign-name behaviour is unchanged ------------------------
+
+
+@pytest.mark.parametrize("name", ["monkey", "turkey", "donkey", "hockey", "jockey"])
+def test_rendered_preexisting_benign_names_unchanged(rendered, name: str) -> None:
+    line = rendered.emit("zoo", **{name: "value"})
+    assert line[name] == "value", (
+        f"{name} must not be redacted; rendered {rendered.raw!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["api_key", "signing_key", "apikey", "x-api-key", "auth_header", "db_password"],
+)
+def test_rendered_sensitive_names_still_redacted_by_name(rendered, name: str) -> None:
+    """The allowlist is exact-match: near-miss names must still be redacted."""
+    line = rendered.emit("evt", **{name: "some-value"})
+    assert line[name] == _REDACTED, (
+        f"{name} must be redacted; rendered {rendered.raw!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Unit-level coverage of the two narrowed rules.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_redacted"),
+    [
+        # Newly allowlisted -- exact match only.
+        ("auth_enabled", False),
+        ("AUTH_ENABLED", False),  # allowlist is applied to the lowercased name
+        ("signing_key_status", False),
+        # Near misses must NOT inherit the allowlist.
+        ("auth_enabled_key", True),
+        ("signing_key_status_token", True),
+        ("auth", True),
+        ("signing_key", True),
+    ],
+)
+def test_should_redact_allowlist_is_exact_match(
+    name: str, expected_redacted: bool
+) -> None:
+    assert _should_redact(name) is expected_redacted
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "sql_statement_timeout_unsupported_on_sqlite",
+        "source_registry_unavailable_during_validation",
+        "recotem_v1_validation_errors_outside_verb_total",
+        "a_" + "b" * 60,
+    ],
+)
+def test_scrub_preserves_lowercase_snake_case_identifiers(value: str) -> None:
+    from recotem.log_redaction import _scrub_string_value
+
+    assert _scrub_string_value(value) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        _FAKE_API_KEY_B64URL,  # mixed case + hyphens
+        _FAKE_AWS_SECRET,  # mixed case
+        "A" * 43,  # uppercase run
+        "a" * 43,  # lowercase, but no underscore separator
+        "abc_def" + "G" * 40,  # mixed case -- not a snake_case identifier
+        "_" + "a" * 43,  # leading underscore -- not an identifier shape
+        "a" * 43 + "_",  # trailing underscore
+        "ab__" + "c" * 42,  # doubled underscore
+    ],
+)
+def test_scrub_still_redacts_non_identifier_base64url_runs(value: str) -> None:
+    from recotem.log_redaction import _scrub_string_value
+
+    assert value not in _scrub_string_value(value), f"{value!r} was not redacted"
+
+
+def test_scrub_redacts_key_material_adjacent_to_an_identifier() -> None:
+    """A long identifier in the same string must not shelter real key material."""
+    from recotem.log_redaction import _scrub_string_value
+
+    text = (
+        f"event=sql_statement_timeout_unsupported_on_sqlite key={_FAKE_API_KEY_B64URL}"
+    )
+    out = _scrub_string_value(text)
+    assert "sql_statement_timeout_unsupported_on_sqlite" in out
+    assert _FAKE_API_KEY_B64URL not in out

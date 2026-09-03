@@ -586,6 +586,10 @@ The redaction processor is the first in the chain and runs at every log level in
 
 If a value is replaced with `[REDACTED]` in a log line you are debugging, the field name matched one of the patterns above. This is intentional.
 
+**Exact-name exceptions.** A small allow-list (`_BENIGN_EXACT_NAMES` in `log_redaction.py`) exempts field names that match a pattern above but are non-secret by construction — currently the `security.posture` fields `auth_enabled` (a computed bool) and `signing_key_status` (one of `configured` / `missing` / `dev_allow_unsigned` / `construction_failed`), which would otherwise be eaten by `*auth*` and `*key*` and leave the event unable to answer the two questions it exists to answer. Matching is exact after lowercasing, so `auth_enabled_key` is still redacted, and value-side scrubbing (below) still applies to allow-listed fields.
+
+**Value-side scrubbing.** Independently of the field name, string values are scanned for 64+ hex chars (`[REDACTED-HEX64]`) and 43+ base64url chars (`[REDACTED-B64URL43]`). The base64url pass skips runs that are lowercase `snake_case` identifiers: recotem's own event and metric names reach 43 characters (e.g. `sql_statement_timeout_unsupported_on_sqlite`), and redacting them destroys the only information those log lines carry. A `keygen`-issued key never has that shape — it is drawn from the full 64-character base64url alphabet.
+
 **URL userinfo redaction.** Any URL containing embedded credentials (e.g. `https://user:pass@host/path`) is logged as `https://[REDACTED]@host/path` at the HTTP-fetcher boundary via `redact_url_userinfo`. The recipe loader rejects userinfo-bearing URLs at parse time, so this redaction applies only to internally-constructed URLs and redirect targets. Do not log raw URLs with userinfo in your own application code — strip credentials before logging.
 
 ## Artifact security posture flags

@@ -43,7 +43,10 @@ training:
   algorithms: [IALS, CosineKNN, TopPop]
   # Choices: ndcg, map, recall, hit.
   metric: ndcg
-  cutoff: 20
+  # cutoff must not exceed the number of distinct items in the data, otherwise
+  # irspack's evaluator raises "cutoff must not exeeed the number of items."
+  # interactions.csv.gz has 15 distinct item_id values, so keep this <= 15.
+  cutoff: 10
   n_trials: 30
   timeout_seconds: 600
   parallelism: 1

@@ -346,7 +346,73 @@ def serve(
         # Never collapse OOM/recursion — the operator needs the real cause to
         # size the host correctly.  Round-12 OOM-propagation policy.
         raise
+    except SystemExit as exc:
+        # uvicorn does NOT let bind errors reach the ``except OSError`` branch
+        # below.  ``uvicorn.Server.startup`` catches the bind ``OSError``
+        # itself, logs it, and calls ``sys.exit(uvicorn.config.STARTUP_FAILURE)``.
+        # ``SystemExit`` derives from ``BaseException``, so it sails past both
+        # ``except OSError`` and ``except Exception`` and the process would exit
+        # with uvicorn's own code (3) — which collides with _EXIT_DATASOURCE and
+        # breaks the documented exit-code contract.  Translate it here.
+        #
+        # Every ``sys.exit(STARTUP_FAILURE)`` site in uvicorn is a startup /
+        # configuration failure (bind EADDRINUSE / EACCES / EADDRNOTAVAIL, unix
+        # socket chmod, ASGI app or factory import, custom loop setup, lifespan
+        # refusing to start, reload/workers misuse), so _EXIT_CONFIG is the
+        # correct mapping for the whole sentinel rather than for bind alone.
+        # We deliberately key off that single sentinel value instead of trying
+        # to detect "bind specifically": the alternatives are worse.  A
+        # pre-flight bind probe would be racy (TOCTOU — the port can be taken
+        # between probe and uvicorn's own bind) and would still miss the
+        # non-bind startup failures above; scraping uvicorn's log text would be
+        # far more brittle than one integer constant.
+        #
+        # FRAGILITY: this depends on a uvicorn internal.  ``STARTUP_FAILURE`` is
+        # not part of uvicorn's public API and could change value or move in a
+        # future release; pyproject pins ``uvicorn[standard]>=0.30,<0.52``.  The
+        # import is guarded and falls back to the literal 3 used across that
+        # range.  ``tests/unit/test_cli.py`` asserts the constant is still 3 and
+        # an integration test exercises a real bind collision end-to-end, so a
+        # uvicorn change breaks the suite loudly rather than silently.
+        #
+        # Our own ``_exit()`` raises ``typer.Exit`` (a RuntimeError subclass,
+        # NOT SystemExit), so this handler cannot re-catch and double-convert
+        # the codes we raise ourselves.
+        try:
+            from uvicorn.config import (  # noqa: PLC0415
+                STARTUP_FAILURE as _UVICORN_STARTUP_FAILURE,
+            )
+        except ImportError:  # pragma: no cover - uvicorn moved the constant
+            _UVICORN_STARTUP_FAILURE = 3
+
+        code = exc.code
+        if code is None or code == 0:
+            # Normal interpreter exit requested from inside the server.
+            raise typer.Exit(code=_EXIT_SUCCESS) from exc
+        if code == _UVICORN_STARTUP_FAILURE:
+            _srv_log.error(
+                "serve_bind_failed",
+                error=f"uvicorn startup failed (exit {code})",
+                host=cfg.host,
+                port=cfg.port,
+            )
+            _exit(
+                _EXIT_CONFIG,
+                f"Server startup failed: uvicorn could not start on "
+                f"{cfg.host}:{cfg.port} (address in use, permission denied, "
+                f"address not available, or an invalid startup configuration). "
+                f"See the uvicorn error above for the precise cause.",
+            )
+        # Any other SystemExit code originates below us and is not part of the
+        # recotem contract — normalise rather than leak it to the shell.
+        _srv_log.error("serve_startup_failed", error=f"SystemExit({code!r})")
+        raise typer.Exit(code=_EXIT_UNKNOWN) from exc
     except OSError as exc:
+        # Retained as defence in depth.  Unreachable for the standard
+        # host/port bind path on uvicorn 0.30–0.51 (see the SystemExit branch
+        # above), but the supported range is wide and a future uvicorn could
+        # propagate the OSError instead of calling sys.exit; keeping this
+        # branch means the contract holds either way.
         import errno as _errno  # noqa: PLC0415
 
         if exc.errno in (_errno.EADDRINUSE, _errno.EACCES, _errno.EADDRNOTAVAIL):

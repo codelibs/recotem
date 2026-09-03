@@ -32,9 +32,120 @@ env:
   IMAGE_NAME: codelibs/recotem
 
 jobs:
+  # Gate: prove the built image actually runs before anything is published.
+  # A multi-stage venv copy can silently produce an image whose entrypoint
+  # cannot exec or whose `recotem` package never made it into the venv — a
+  # build that succeeds and a `docker run` that fails are entirely compatible.
+  # `build` needs this job, so a broken image is never pushed to GHCR.
+  smoke:
+    name: image smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Single-arch so the image can be `load`ed into the local daemon and run.
+      # Populates the shared gha cache that `build` and `trivy` then reuse.
+      - name: Build local image for smoke test
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: recotem:smoke
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Entrypoint runs and the package is importable
+        run: |
+          set -euo pipefail
+          docker run --rm recotem:smoke --help > /dev/null
+          docker run --rm --entrypoint python recotem:smoke \
+            -c 'import recotem, irspack; print(recotem.__version__, irspack.__version__)'
+
+      - name: Serve answers 200 on /v1/health
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/smoke-recipes"
+
+          # Throwaway key for this run only; serve refuses to start unsigned.
+          # No API keys are set, so serve binds 127.0.0.1 inside the container
+          # and every probe below runs via `docker exec`.
+          docker run -d --name recotem-smoke \
+            -e RECOTEM_SIGNING_KEYS="ci:$(openssl rand -hex 32)" \
+            -v "${RUNNER_TEMP}/smoke-recipes:/recipes:ro" \
+            recotem:smoke serve --recipes /recipes
+
+          PROBE=$(cat <<'PY'
+          import sys, urllib.error, urllib.request
+          try:
+              print(urllib.request.urlopen(
+                  "http://127.0.0.1:8080" + sys.argv[1], timeout=3).status)
+          except urllib.error.HTTPError as exc:
+              print(exc.code)
+          except Exception:
+              print("000")
+          PY
+          )
+
+          for _ in $(seq 1 60); do
+            code=$(docker exec recotem-smoke python -c "$PROBE" /v1/health || echo 000)
+            if [ "$code" = "200" ]; then break; fi
+            sleep 1
+          done
+
+          code=$(docker exec recotem-smoke python -c "$PROBE" /v1/health || echo 000)
+          if [ "$code" != "200" ]; then
+            echo "::error::/v1/health returned $code, expected 200"
+            exit 1
+          fi
+          echo "/v1/health -> 200"
+
+          # The API router is mounted under /v1. Bare /health used to be what
+          # every probe in the repo targeted, which made containers permanently
+          # unhealthy and k8s pods CrashLoopBackOff. Assert it stays a 404 so a
+          # future edit cannot quietly reintroduce the wrong path.
+          code=$(docker exec recotem-smoke python -c "$PROBE" /health || echo 000)
+          if [ "$code" != "404" ]; then
+            echo "::error::bare /health returned $code, expected 404"
+            exit 1
+          fi
+          echo "/health -> 404 (as expected)"
+
+      - name: Image HEALTHCHECK reports healthy
+        run: |
+          set -euo pipefail
+          # Guards the HEALTHCHECK line in the Dockerfile itself: start_period
+          # is 30s and interval 30s, so allow a generous window.
+          for _ in $(seq 1 60); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' recotem-smoke)
+            if [ "$status" = "healthy" ] || [ "$status" = "unhealthy" ]; then break; fi
+            sleep 3
+          done
+          status=$(docker inspect -f '{{.State.Health.Status}}' recotem-smoke)
+          if [ "$status" != "healthy" ]; then
+            echo "::error::container health is '$status', expected 'healthy'"
+            docker inspect -f '{{json .State.Health}}' recotem-smoke
+            exit 1
+          fi
+          echo "container health -> healthy"
+
+      - name: Serve logs
+        if: always()
+        run: docker logs recotem-smoke 2>&1 | tail -50 || true
+
+      - name: Tear down smoke container
+        if: always()
+        run: docker rm -f recotem-smoke || true
+
   build:
     name: docker build
     runs-on: ubuntu-24.04
+    needs: smoke
     steps:
       - uses: actions/checkout@v7
 

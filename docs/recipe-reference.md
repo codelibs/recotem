@@ -427,7 +427,8 @@ training:
     scheme: time_user                       # random | time_global | time_user
     heldout_ratio: 0.1
     test_user_ratio: 1.0
-    seed: 42
+    seed: 42                                # also needs PYTHONHASHSEED=0 to
+                                            # reproduce a run — see Reproducibility
 ```
 
 | Field | Type | Default | Notes |
@@ -444,17 +445,39 @@ training:
 | `split.scheme` | string | `random` | `random`, `time_global`, or `time_user`. See semantics below. |
 | `split.heldout_ratio` | float | `0.1` | Fraction of interactions held out. Must be in (0, 1). |
 | `split.test_user_ratio` | float | `1.0` | Fraction of users included in the test split. Must be in (0, 1]. |
-| `split.seed` | int | `42` | Random seed for the split (passed to irspack as `random_state`). |
+| `split.seed` | int | `42` | Random seed for the split (passed to irspack as `random_state`). **Not sufficient on its own for a reproducible run** — see [Reproducibility](#reproducibility). |
+
+Hyperparameter ranges are irspack's, not the recipe's, and some are wide relative to a small catalogue — `TruncatedSVD` searches `n_components` over [4, 512], and any value at or above your item count is clamped to `n_items - 1`, which reconstructs the matrix almost exactly and generalises poorly. On a small catalogue a low `n_trials` may never sample a usable value; if an algorithm scores far below its peers, raise `n_trials` before concluding it is a poor fit.
 
 Split scheme semantics:
 
-- `random` — interactions are held out uniformly at random per user. `time_column` is unused.
+- `random` — interactions are held out uniformly at random per user. `time_column` is unused: if `schema.time_column` is set, the `random` scheme ignores it.
 - `time_user` — for each user, the most recent `heldout_ratio` of that user's interactions (ranked by `time_column`) are held out. Cutoff is computed per user.
 - `time_global` — a single global cutoff at the `1 - heldout_ratio` quantile of `time_column` over the whole dataset; every interaction at or after the cutoff is held out, regardless of user. Users with no post-cutoff interactions become train-only.
 
 `time_user` and `time_global` require `schema.time_column`. Missing `time_column` with these schemes is a recipe validation error and exits with code 2.
 
+> **Behaviour change.** Earlier releases forwarded `schema.time_column` to the splitter under every scheme, so a recipe combining `split.scheme: random` with a `schema.time_column` silently got a `time_user` (per-user recency) holdout instead of a random one. `random` now ignores `time_column`, as documented above. If your recipe sets both, the next `recotem train` produces a different split and therefore different `best_score` / `best_params` values. Existing artifacts are unaffected until you retrain. To keep the previous behaviour, set `split.scheme: time_user` explicitly.
+
 If a search produces no completed trials, training exits with code 4 and `"code": "no_completed_trials"`. If every completed trial scores exactly 0.0, exit 4 with `"code": "zero_score"` (typically caused by too short a `per_trial_timeout_seconds` or a too-small validation set).
+
+### Reproducibility
+
+`split.seed` alone does **not** make a training run reproducible. Two `recotem train` invocations with the same recipe, the same data, and the same `split.seed` can still produce different `best_score` and different `best_params`.
+
+The cause is upstream, in irspack: its splitter derives the user and item ordering of the interaction matrix from a Python `set` of the id strings (`irspack/split/userwise.py`). Python randomises string hashing per process, so the `set` iteration order — and with it the row/column ordering of the matrix — changes on every run. That shifts which interactions land in the held-out set and how ranking ties are broken, regardless of `split.seed`. Recotem cannot fix this from its own side.
+
+To get a reproducible run, set `PYTHONHASHSEED=0` **before the interpreter starts** — it cannot be set from inside the process:
+
+```bash
+PYTHONHASHSEED=0 recotem train recipe.yaml
+```
+
+Measured across all six supported algorithms, adding `PYTHONHASHSEED=0` makes repeated runs agree exactly on `best_class`, `best_params`, and the tuning metadata; `best_score` agrees to within 1 ULP (the residual difference comes from floating-point accumulation order in irspack's multi-threaded evaluator). Without it, `best_score` has been observed to move by ~3% between runs, and `best_params` can select a different configuration entirely.
+
+If you need reproducible training inside a container, pass the variable in at run time (`docker run -e PYTHONHASHSEED=0 …`, or a `PYTHONHASHSEED` entry in the Pod spec's `env:`) rather than relying on the image default.
+
+Note that reproducibility of the *search* is a separate axis from the artifact bytes: the artifact header records `trained_at`, so two runs never produce byte-identical files even when the model is identical.
 
 ---
 

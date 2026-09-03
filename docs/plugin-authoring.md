@@ -14,7 +14,7 @@ below.
 from __future__ import annotations
 
 import random
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -31,13 +31,18 @@ class EchoSource:
 
     # 2. Config: pydantic BaseModel describing the recipe sub-fields for this
     #    source.  All fields appear under `source:` in the YAML alongside the
-    #    `type:` discriminator.  The loader passes the entire `source:` mapping
-    #    (including `type`) to `Config.model_validate(...)`, so either declare
-    #    `type` as a field on Config (the builtin convention — see below) or
-    #    rely on pydantic's default `extra="ignore"` to drop it.  Combining
-    #    `extra="forbid"` with no `type` field will fail recipe load with an
-    #    "unexpected key" error.
+    #    `type:` discriminator.  Config MUST declare `type` as a Literal field
+    #    whose single value equals type_name — recotem builds a pydantic
+    #    discriminated union keyed on `type` across every registered plugin,
+    #    and the training pipeline reads the field back to resolve the source
+    #    class.  Omitting it is not an option: pydantic's default
+    #    `extra="ignore"` would silently drop the YAML `type:` key and training
+    #    would fail with "Recipe source has no discriminator 'type' field."
+    #    `validate_plugin_contract` rejects a Config that omits it, types it as
+    #    anything other than `Literal`, or whose Literal disagrees with
+    #    type_name.
     class Config(BaseModel):
+        type: Literal["echo"] = "echo"
         n_users: int = Field(default=10, ge=1)
         n_items: int = Field(default=20, ge=1)
         n_rows: int = Field(default=100, ge=1)
@@ -111,6 +116,10 @@ class EchoSource:
 1. **`type_name`** is the discriminator value. It appears as `source.type: echo` in the recipe. The registry validates that it is a non-empty string and unique across all loaded plugins; duplicate `type_name` values cause both `recotem train` and `recotem serve` to fail at startup with a `DataSourceError` (exit code 3) listing the conflicting fully-qualified class names.
 
 2. **`Config`** is a pydantic `BaseModel`. Fields are validated at recipe load. Use pydantic validators for constraints. Required fields without defaults cause a `RecipeError` when missing from the recipe.
+
+   `Config` **must** declare the discriminator field `type: Literal["<type_name>"] = "<type_name>"`, matching the class's `type_name` exactly. Recotem assembles every registered `Config` into a pydantic discriminated union keyed on `type` (`build_source_config_union`), and `recotem.training.pipeline` reads the field back to resolve the source class. `validate_plugin_contract` raises `DataSourceError` at plugin-discovery time (exit code 3) when the field is missing, is not a `typing.Literal`, or carries a value that disagrees with `type_name`.
+
+   Do **not** rely on pydantic's default `extra="ignore"` to absorb the YAML `type:` key instead. That combination loads the recipe successfully but drops the discriminator, and training then fails with `Recipe source has no discriminator 'type' field.` (exit code 2).
 
 3. **`extras_required`** is **purely documentation**. The registry only validates that it is a `list[str]`; recotem never auto-installs or auto-checks these extras. Surface a helpful message yourself in `__init__` (see [Deferred imports](#deferred-imports)) — the value of the attribute is what you cite there.
 

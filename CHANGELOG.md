@@ -107,6 +107,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unbounded. Over-length or empty keys now get a `422`; an over-length key
   reports only its length, never its (possibly huge) text.
 
+### Fixed
+
+- **The published Docker image could not start.** `docker run ghcr.io/codelibs/recotem:2.0.0 --help`
+  failed with `exec /opt/venv/bin/recotem: no such file or directory`, on every
+  tag and both architectures. Two defects compounded: `uv sync` ran before
+  `COPY src/` and left an *editable* stub in the venv (dist-info pointing at
+  `/build`, no package directory), while the `uv pip install --no-deps .` that
+  was meant to install the real package was redirected to the builder stage's
+  `/usr/local` by `UV_SYSTEM_PYTHON=1` and never reached the runtime stage; and
+  the venv was built at `/build/.venv` then copied to `/opt/venv`, leaving
+  console-script shebangs pointing at a path that does not exist at runtime.
+  The venv is now built directly at `/opt/venv` and every install names its
+  interpreter explicitly.
+- **`docker.yml` now runs the image it builds.** A `smoke` job starts the built
+  image before anything is pushed (`build` gains `needs: smoke`) and asserts
+  that `--help` exits 0, that `recotem` and `irspack` import, that `/v1/health`
+  returns 200, that bare `/health` returns 404, and that the image's own
+  HEALTHCHECK reaches `healthy`. The previous workflow only built, pushed and
+  scanned — it never executed the artifact, which is how the broken image above
+  shipped with a green build.
+- **Health probes pointed at `/health`, which is a 404.** The API router is
+  mounted under `/v1`, so the correct path is `/v1/health`. The Dockerfile
+  HEALTHCHECK, the Compose healthcheck, all three Helm probes (startup,
+  readiness, liveness), the `examples/k8s` probes, and the deployment docs all
+  used the bare path. The Helm chart in particular could never pass its
+  startupProbe and would enter CrashLoopBackOff.
+- **Compose training silently did nothing.** `compose.yaml` mounts the
+  artifacts volume at `/workspace/artifacts`, a path the image did not
+  pre-create, so Docker created it as `root:root` and `appuser` could not write
+  there. The image now creates and owns it.
+- `docs/deployment/docker.md` showed a health response in the
+  `/v1/health/details` shape rather than the `{status,total,loaded}` that
+  `/v1/health` actually returns, and described the metrics endpoint as
+  `/metrics` without noting that it is `/v1/metrics` and requires an API key.
+- **Cleared the seven HIGH CVEs the container image was carrying.** The trivy
+  gate had been failing since 2026-08-01 on every branch that triggers it.
+  Three findings were real dependencies pulled in by the bigquery/gcs/s3
+  extras and are fixed by relocking -- `aiohttp` 3.13.5 to 3.14.3
+  (CVE-2026-69244), `cryptography` 49.0.0 to 50.0.1 (CVE-2026-69247), and
+  `pyasn1` 0.6.3 to 0.6.4 (CVE-2026-59884/59885/59886). The other two were
+  inside pip's vendor tree (`pip/_vendor/msgpack` 1.1.2 and
+  `pip/_vendor/pkg_resources` from setuptools 70.3.0), which no pip release
+  fixes -- 26.2.1 is the latest and still vendors both.
+- **pip is no longer shipped in the Docker image.** uv performs every install,
+  pip was never invoked, and it had become a standing source of HIGH findings
+  that upgrading could no longer clear. **`python -m pip` no longer works
+  inside the image**; rebuild to change dependencies, or run
+  `python -m ensurepip` if pip is genuinely needed.
+
+- **A scheduled `train` could exit 0 having trained nothing.** `lock.py` treated
+  `EACCES`/`EPERM` on the lock path as "lock not acquireable -- same semantics
+  as contention", so an unwritable lock directory made the command skip
+  silently and report success. Contention is transient and skipping is right;
+  a permission error is a deployment mistake no retry will fix. Permission
+  failures now raise `LockPermissionError` (a `ConfigError`, so exit **8** --
+  not 6, which schedulers read as "retry later"), regardless of
+  `--fail-on-busy`, and name the path, the uid/gid and `RECOTEM_LOCK_DIR` in
+  the message. On Windows only `EPERM` converts, because `EACCES` there also
+  covers a genuine sharing violation; that case stays contention but now logs
+  a warning instead of being silent.
+- **`serve` returned exit 3 instead of 8 when it could not bind.** uvicorn
+  catches the bind `OSError` itself and raises
+  `SystemExit(uvicorn.config.STARTUP_FAILURE)` (== 3), which bypasses
+  `except OSError` because `SystemExit` is a `BaseException`. Exit 3 is
+  `_EXIT_DATASOURCE`, so a port clash was indistinguishable from a data-source
+  failure to supervisor and CronJob retry logic. Bind and other uvicorn startup
+  failures now map to `_EXIT_CONFIG` (8) as documented. The unit test that
+  covered this mocked an `OSError` real uvicorn never raises; it is replaced,
+  and integration tests now exercise real bind collisions in a subprocess.
+
+- **`examples/csv-local` failed when followed as written.** The recipe asked
+  for `cutoff: 20` against bundled data holding only 15 distinct items, so
+  irspack raised `ValueError: cutoff must not exeeed the number of items.` and
+  training exited 1. The cutoff is now 10, and both the recipe and the README
+  state the constraint. (Not a regression: the same reproduction fails on
+  irspack 0.4.2, 0.5.0 and 0.5.2 alike.)
+- **`examples/plugins/echo-source` could not be used from a recipe.** Its
+  `Config` declared no `type` field, so `train` exited 2 with "Recipe source
+  has no discriminator 'type' field". `docs/plugin-authoring.md` was the root
+  cause: it offered "let `extra="ignore"` discard it" as an option, which
+  cannot work, because pydantic refuses to discriminate on anything but a
+  `Literal`. The guide now states the requirement,
+  `validate_plugin_contract()` enforces it, and an integration test drives the
+  full recipe-YAML-to-train path that the previous class-only unit tests never
+  exercised.
+
+- **`split.scheme: random` was not random when the recipe declared a time
+  column.** The pipeline forwards `schema.time_column` to the splitter for any
+  recipe that declares one, and irspack switches to a per-user *recency*
+  holdout the moment it receives one -- so `random` silently behaved as
+  `time_user`, contradicting the documented "`time_column` is unused". Measured
+  on 30 users, the holdout matched each user's most recent interactions 30/30
+  times. Since the split defines the validation set the Optuna search scores
+  against, the search was optimising for a different task than the recipe
+  asked for. `split_interactions` now ignores `time_column` under `random`.
+  **Behaviour change:** such a recipe will split differently on its next train
+  and its reported metric may move; existing artifacts are unaffected until
+  retrained, and `scheme: time_user` restores the old behaviour explicitly.
+
 ### Changed
 
 - **A numerical `features:` column with a tiny-but-nonzero training std is
@@ -137,12 +236,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changed hash on this upgrade even though nothing about the recipe's
   behavior changed.
 
-- **irspack upgraded from 0.4.2 to 0.5.0.** irspack 0.5.0 adds feature-aware
+- **irspack upgraded from 0.4.2 to 0.5.2.** irspack 0.5.0 adds feature-aware
   iALS, cache/Eigen performance work, and a reworked tuning API. Recotem drives
   Optuna itself and does not call `BaseRecommender.tune`, so none of irspack's
   documented breaking changes (`tune_with_study` removal, `fixed_params` →
   keyword arguments, `random_seed` → `tuning_random_seed`) affect Recotem.
   **IALS and BPRFM models trained on 0.4.x must be retrained** — see below.
+  The subsequent 0.5.1 (parallelised feature-aware iALS) and 0.5.2 (graceful
+  handling of a feature-ridge Cholesky failure during tuning) releases touch
+  code paths Recotem does not reach, and were verified not to change the
+  serialised model at all: for all six algorithms Recotem can build, an
+  identically-trained recommender pickles to a byte-identical payload under
+  0.5.0 and 0.5.2 (SHA-256 compared), `IALSModelConfig.__setstate__` keeps its
+  10-element arity, and artifacts interchange in both directions with
+  bit-exact recommendation scores. **No retrain is needed for a 0.5.x → 0.5.2
+  upgrade.**
 - **scikit-learn is now a direct, range-pinned dependency** (`>=1.8,<1.10`).
   It was already reachable transitively via irspack, which asks only for
   `>=0.21.0`. `TruncatedSVDRecommender` pickles an sklearn estimator into the

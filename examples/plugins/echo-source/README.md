@@ -10,6 +10,11 @@ as a starting scaffold for real plugins — never for production training.
 - **Class-level contract:** `type_name`, `Config` (a pydantic model),
   `extras_required` — the three attributes Recotem inspects to register a
   plugin.
+- **The `type` discriminator on `Config`:** `type: Literal["echo"] = "echo"`,
+  matching `type_name`. Recotem keys a pydantic discriminated union on this
+  field, so omitting it makes `recotem train` fail with `Recipe source has no
+  discriminator 'type' field.` — `validate_plugin_contract` now rejects such a
+  plugin at discovery time.
 - **Instance methods:** `__init__(config)` that performs deferred imports
   of optional dependencies, `fetch(ctx) -> pandas.DataFrame`, and an
   optional `probe()` for `recotem validate` connectivity checks.

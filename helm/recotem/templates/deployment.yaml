@@ -115,7 +115,7 @@ spec:
           # failureThreshold * periodSeconds = 12 * 10s = 120s max startup window.
           startupProbe:
             httpGet:
-              path: /health
+              path: /v1/health
               port: http
               httpHeaders:
                 - name: Host
@@ -126,7 +126,7 @@ spec:
 
           readinessProbe:
             httpGet:
-              path: /health
+              path: /v1/health
               port: http
               httpHeaders:
                 - name: Host
@@ -138,7 +138,7 @@ spec:
 
           livenessProbe:
             httpGet:
-              path: /health
+              path: /v1/health
               port: http
               httpHeaders:
                 - name: Host

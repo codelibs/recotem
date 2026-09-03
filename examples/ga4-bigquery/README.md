@@ -7,8 +7,9 @@ and writing artifacts to GCS.
 ## Files
 
 - `recipe.yaml` — selects `select_content` events from the GA4 export tables,
-  joins with a per-user activity threshold, and trains IALS / CosineKNN /
-  TopPop on the result. Output goes to `gs://my-ml-bucket/...`.
+  joins with a per-user activity threshold over the same window, and trains
+  IALS / CosineKNN / TopPop on the result. Output goes to
+  `gs://my-ml-bucket/...`.
 
 ## Prerequisites
 
@@ -51,7 +52,12 @@ instead.
 ## Adapting to your project
 
 1. Replace `analytics_123` with your GA4 export dataset name.
-2. Tune `lookback_days` / `min_events` for your traffic volume.
+2. Tune `lookback_days` / `min_events` for your traffic volume. `lookback_days`
+   bounds both the training window and the bytes each run scans, so keep it as
+   small as the model tolerates. If you add another `events_*` reference to the
+   query, give it its own `_TABLE_SUFFIX` predicate — BigQuery prunes wildcard
+   tables per statement, and one unpruned reference makes the whole query scan
+   every table in the export.
 3. Replace the GCS bucket in `output.path` with one your training principal
    can write to.
 4. Keep `RECOTEM_SIGNING_KEYS` in your scheduler's secret store — the

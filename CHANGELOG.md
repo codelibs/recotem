@@ -343,6 +343,44 @@ exit 8.
 
 ### Fixed
 
+- **The GA4 BigQuery example scanned the entire export on every run, and
+  `lookback_days` did nothing about it.** The per-user activity subquery in
+  `examples/ga4-bigquery/recipe.yaml` referenced `analytics_123.events_*`
+  without a `_TABLE_SUFFIX` predicate of its own. BigQuery prunes wildcard
+  tables per *statement*, so that one unpruned reference dropped pruning for
+  the whole query and demoted the outer `BETWEEN` to a plain row filter.
+  Measured against `bigquery-public-data.ga4_obfuscated_sample_ecommerce`
+  (92 days, 3.34 GiB) with dry runs, the shipped form scanned a constant
+  **1,029,558,211 bytes** for a 1-day, 7-day and 31-day window alike, while the
+  fixed form scans 6,010,287 / 62,536,522 / 277,526,167 bytes respectively.
+  The overrun grows with how much history the export holds, not with
+  `lookback_days`: roughly 3.7x at 92 days, 12x at a year, 24x at two years —
+  charged on every run of a recipe the repository ships with a daily training
+  CronJob and explicitly invites you to copy (`Replace analytics_123 with your
+  GA4 export dataset name`). The same omission also changed the meaning of
+  `min_events`, which counted lifetime events rather than events in the window,
+  admitting users who last engaged years ago. Nothing on the Recotem side
+  bounds a BigQuery scan — no `maximum_bytes_billed`, no row cap — so the
+  correctness of the shipped example is the only thing standing between a copy
+  and the bill. `tests/unit/test_example_bigquery_recipes.py` now checks every
+  shipped BigQuery example statically: each wildcard table reference must carry
+  a `_TABLE_SUFFIX` predicate in its own scope, and that predicate must be the
+  one the lookback parameter moves.
+- **`docs/data-sources/bigquery.md` offered a `REGEXP_EXTRACT` snippet that
+  cannot run.** It matched on a bare `page_location`, which is not a column in
+  the GA4 export — it lives inside the `event_params` array, as the complete
+  query a few lines above shows. Copied as printed the snippet fails with
+  `400 Unrecognized name: page_location`.
+- **The BigQuery error table split 403 and 404 in a way that misdiagnoses a
+  typo.** BigQuery does not disclose whether a resource exists to a caller who
+  cannot see it, so a mistyped *dataset* or *project* returns
+  `403 Access Denied: ... or perhaps it does not exist`, not 404. Only a
+  mistyped *table* inside a readable dataset returns 404. The table now says
+  so, instead of sending operators to fix IAM for a spelling mistake.
+- **The ADC failure message ran two sentences together with a doubled period**
+  (`... for more information.. Ensure Application Default Credentials ...`),
+  because the wrapped Google exception already ends in one.
+
 - **An artifact was never bound to the recipe serving it.** Every artifact
   header records the `recipe_name` it was trained for, but nothing on the serve
   side compared it with the recipe whose `output.path` the file was read from.

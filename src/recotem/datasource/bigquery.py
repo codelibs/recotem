@@ -391,7 +391,7 @@ class BigQuerySource:
             raise
         except Exception as exc:
             raise DataSourceError(
-                f"Failed to create BigQuery client: {exc}. "
+                f"Failed to create BigQuery client: {str(exc).rstrip('.')}. "
                 "Ensure Application Default Credentials (ADC) are configured."
             ) from exc
 

@@ -589,6 +589,49 @@ and every existing recipe, which stays valid as written. Every recipe's
   the authenticated path every production deployment uses went untested by the
   suite whose job is to prove the release works. All of these are now gated.
 
+- **BigQuery: a SQL mistake was reported as a permissions problem.**
+  `client.query()` returns before the query executes, so every execution error —
+  bad SQL, a missing table, table-level permission denied, quota — surfaced from
+  the download call and was caught by the Storage Read API handler. A recipe
+  naming a missing table reported `BigQuery Storage Read API failed with
+  NotFound`, and under `RECOTEM_BQ_REQUIRE_STORAGE_API=1` a plain SQL typo was
+  answered with `Grant bigquery.readSessions.create on the project to fix this`.
+  The framing was unconditional: it applied on the pure-REST path too. Execution
+  and download are now separate phases with separate messages, and only a genuine
+  download failure carries the Storage framing and the `readSessions` advice.
+  A side effect is also gone: ordinary SQL errors no longer increment
+  `recotem_bigquery_storage_fallback_total{reason="non_iam_error_no_fallback"}`.
+- **`RECOTEM_BQ_REQUIRE_STORAGE_API=1` did not enforce when the extra was
+  missing.** `google-cloud-bigquery` does not raise `ImportError` from
+  `to_dataframe()` when `google-cloud-bigquery-storage` is absent — it warns and
+  falls back to REST — so the strict-mode branch that waited for that exception
+  was unreachable and the fetch quietly succeeded over REST. The dependency is
+  now probed explicitly, and strict mode refuses **before the query is
+  submitted**, so no scan is billed. The non-strict path is unchanged.
+- **The IAM "REST fallback" was not a REST fallback.** Both
+  `QueryJob.to_dataframe()` and `RowIterator.to_dataframe()` default
+  `create_bqstorage_client=True`, so the retry after a `PermissionDenied`
+  re-created the Storage client and hit the same denial. It now passes
+  `create_bqstorage_client=False` and re-obtains a fresh `RowIterator`, because a
+  row iterator is single-use. This was invisible to the previous tests, whose
+  mocks inspected `create_bqstorage_client` on a call that never passed it.
+- **A zero-row result is now a data-source error.** An empty BigQuery or SQL
+  result reached the splitter and failed with `irspack split failed: division by
+  zero` (exit 4), naming nothing useful; a zero-row fetch now raises
+  `DataSourceError` (exit 3) naming the source and the recipe, before the
+  schema-column check so an empty result is not misreported as a missing column.
+  The CSV source already behaved this way.
+- **`recotem_bigquery_storage_fallback_total` is a train-side, log-only signal.**
+  It is incremented by the data source, which runs in `recotem train`, while
+  `/v1/metrics` is served by `recotem serve`, which never fetches — so the series
+  was permanently absent from every scrape. It is removed from the serving metric
+  inventory and from the alert table; monitor the log event instead.
+- **`docs/data-sources/bigquery.md` was wrong in three places a reader would act
+  on**: a missing schema column was documented as exit 2 / `RecipeError` when it
+  is exit 3 / `DataSourceError`; the strict-mode section described enforcement
+  that did not happen; and the quoted type-mismatch message was not what BigQuery
+  returns. The same incorrect exit-2 row was corrected in `sql.md`.
+
 ### Migrating to irspack 0.5.0
 
 irspack 0.5.0 changed `IALSModelConfig`'s pickled state from a 7-tuple to a

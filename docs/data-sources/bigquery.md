@@ -41,7 +41,7 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
 
 Required IAM role on the BigQuery dataset: `roles/bigquery.dataViewer` + `roles/bigquery.jobUser` on the project.
 
-For the Storage Read API (used for large result sets): `roles/bigquery.readSessionUser`. This role is **optional** — the fetch path tries `create_bqstorage_client=True` first. Storage Read API failures map to fallback **only for IAM-shape failures** (PermissionDenied / Forbidden / 403); quota errors, 5xx backend failures, and other non-permission errors raise `DataSourceError` so REST fallback does not double-bill. Set `RECOTEM_BQ_REQUIRE_STORAGE_API=1` to disable the IAM-fallback path entirely (requires `bigquery.readSessions.create` permission).
+For the Storage Read API (used for large result sets): `roles/bigquery.readSessionUser`. This role is **optional** — the download path tries `create_bqstorage_client=True` first. Storage Read API failures map to fallback **only for IAM-shape failures** (PermissionDenied / Forbidden / 403); quota errors, 5xx backend failures, and other non-permission errors raise `DataSourceError` so REST fallback does not double-bill. Set `RECOTEM_BQ_REQUIRE_STORAGE_API=1` to require the fast path (needs both the `google-cloud-bigquery-storage` package and the `bigquery.readSessions.create` permission). See [Storage Read API fallback policy](#storage-read-api-fallback-policy).
 
 Recommended minimum set for a service account used by Recotem:
 
@@ -92,7 +92,7 @@ Parameter types are inferred from the Python type of the value:
 
 `bool` is checked before `int` (so YAML `true` does not become `INT64 1`). Lists, dicts, `null`, dates, and timestamps are **not** supported and raise `DataSourceError` whenever the parameter dispatcher runs — that means both at `recotem validate` (via `probe()`) and at fetch time. Encode dates as `STRING` (e.g. `"2026-04-01"`) and parse them in SQL with `PARSE_DATE`, or compute date ranges in SQL via `CURRENT_DATE()` / `DATE_SUB()` (see the GA4 example below).
 
-YAML quoting matters: `lookback_days: 30` is `INT64`, `lookback_days: "30"` is `STRING`. Mismatching the SQL parameter type fails the dry-run with a `Query parameter '@lookback_days' has type STRING which differs from declared type INT64`-style message.
+YAML quoting matters: `lookback_days: 30` is `INT64`, `lookback_days: "30"` is `STRING`. Mismatching the SQL parameter type fails the dry-run. The message depends on where the mismatch bites; the common shape — a quoted number compared against an integer column — is rejected by the type checker, e.g. `No matching signature for operator >= for argument types: INT64, STRING`.
 
 ## GA4 events_* pattern
 
@@ -233,32 +233,52 @@ curl -X POST http://localhost:8080/v1/recipes/{name}:recommend \
 
 | Error | Exit | Message pattern |
 |-------|------|----------------|
-| ADC credentials not found | 3 | `DataSourceError: Could not obtain credentials. Run 'gcloud auth application-default login' or set GOOGLE_APPLICATION_CREDENTIALS.` |
-| Permission denied on dataset | 3 | `DataSourceError: Access Denied: Dataset my-project:analytics_123456789` |
-| Query syntax error | 3 | `DataSourceError: Syntax error: ...` |
-| Column missing after query | 2 | `RecipeError: column 'item_id' not found in query result` |
+| ADC credentials not found | 3 | `DataSourceError: Failed to create BigQuery client: ... Ensure Application Default Credentials (ADC) are configured.` |
+| Permission denied on dataset | 3 | `DataSourceError: BigQuery query execution failed: 403 Access Denied: Table my-project:analytics_123456789.events ...` |
+| Query syntax error | 3 | `DataSourceError: BigQuery query execution failed: 400 Syntax error: ...` |
+| Table not found | 3 | `DataSourceError: BigQuery query execution failed: 404 Table my-project:dataset.tbl was not found in location US` |
+| Query returned no rows | 3 | `DataSourceError: source 'bigquery' returned no rows for recipe '<name>'; the query or file matched no data. ...` |
+| Column missing after query | 3 | `DataSourceError: schema column(s) ['ts'] not found in the fetched data for recipe '<name>'; available columns: [...]` |
+| Storage Read API download failure (non-IAM) | 3 | `DataSourceError: BigQuery Storage Read API failed with ResourceExhausted: ... The query itself completed — this is a result-download failure. REST fallback skipped ...` |
 | Extra not installed | 3 | `DataSourceError: google-cloud-bigquery is required for BigQuerySource` (or `db-dtypes ...`) |
 
-All BigQuery exceptions are wrapped in `DataSourceError` and produce exit 3. The full BigQuery error message is included in the stderr JSON line.
+All BigQuery failures are wrapped in `DataSourceError` and produce exit 3 — including a missing `schema:` column, which is a data-source problem (the query did not produce what the recipe names), not a recipe-schema problem. The full BigQuery error message is included in the stderr JSON line.
+
+**Query execution and result download are reported separately.** `client.query()` returns as soon as the job is submitted, so the query has not run yet at that point. Recotem waits for the job explicitly, which keeps the two failure domains apart:
+
+- Anything wrong with the query — bad SQL, a missing table, a permission denial on the *table*, a query quota — is reported as `BigQuery query execution failed: ...`.
+- Only a failure while downloading the finished result rows gets the Storage Read API framing and the `bigquery.readSessions.create` advice.
 
 ## Storage Read API fallback policy
 
-Recotem tries the BigQuery Storage Read API (`create_bqstorage_client=True`) first for efficiency with large result sets. The fallback to the standard REST API is **selective**, not unconditional:
+Recotem tries the BigQuery Storage Read API (`create_bqstorage_client=True`) first for efficiency with large result sets. This applies to the **result download only** — a query that fails to execute never reaches this stage.
 
-- **IAM-shape failures** (PermissionDenied / Forbidden / HTTP 403): the Storage Read API is silently skipped and the REST path is used instead. This covers the common case where `roles/bigquery.readSessionUser` is not granted.
-- **All other failures** (quota exceeded, 5xx backend errors, network timeouts, etc.): `DataSourceError` is raised immediately without attempting the REST fallback. This prevents a quota-exceeded Storage Read API call from silently double-billing by retrying over REST.
+Two things can make the fast path unavailable:
 
-To enforce Storage Read API usage and disable the IAM-fallback path entirely, set:
+1. **`google-cloud-bigquery-storage` is not installed.** Recotem checks for the dependency itself rather than waiting for an error, because `google-cloud-bigquery` does not raise one: it emits a `UserWarning` and downloads over REST. Without strict mode this is a silent, logged fallback (`bigquery_storage_fallback`, reason: not installed).
+2. **The download itself fails.** The fallback to REST is then **selective**, not unconditional:
+   - **IAM-shape failures** (PermissionDenied / Forbidden / HTTP 403): the Storage Read API is skipped and the REST path is used instead. This covers the common case where `roles/bigquery.readSessionUser` is not granted.
+   - **All other failures** (quota exceeded, 5xx backend errors, network timeouts, etc.): `DataSourceError` is raised immediately without attempting the REST fallback. This prevents a quota-exceeded Storage Read API call from silently double-billing by retrying over REST.
+
+To require the Storage Read API and disable both silent paths, set:
 
 ```bash
 export RECOTEM_BQ_REQUIRE_STORAGE_API=1
 ```
 
-When this variable is truthy (`1`, `true`, `yes`, `on`), any Storage Read API failure raises `DataSourceError` instead of falling back to REST. Use this setting when the service account is expected to hold `bigquery.readSessions.create` and you want hard enforcement.
+When this variable is truthy (`1`, `true`, `yes`, `on`):
+
+- A missing `google-cloud-bigquery-storage` raises `DataSourceError` naming the extra to install. This is checked **before the query is submitted**, so a misconfigured strict-mode run costs nothing.
+- A Storage Read API download failure raises `DataSourceError` instead of falling back to REST.
+
+Strict mode governs the **download transport only**. It never changes how a query-execution failure is reported: a SQL typo under `RECOTEM_BQ_REQUIRE_STORAGE_API=1` is still `BigQuery query execution failed: 400 Syntax error: ...`, not IAM advice.
+
+Use this setting when the service account is expected to hold `bigquery.readSessions.create` and you want hard enforcement.
 
 ## Notes
 
 - `recotem validate recipes/my_recipe.yaml` probes ADC authentication and submits the query as a BigQuery dry-run job (`use_query_cache=False`) before any training starts. Dry-run jobs are not billed and do not execute the query. The dry-run also validates `query_parameters` types — invalid types surface here rather than at fetch.
 - The dry-run does **not** expose its `total_bytes_processed` estimate to the user. Recotem also does not set `maximum_bytes_billed`, so a runaway query is bounded only by your project's BigQuery quotas. Add `--maximum-bytes-billed`-style guard rails at the GCP project level if cost runaway is a concern.
+- **Nothing on the Recotem side bounds a BigQuery result, in bytes billed or in rows returned.** `RECOTEM_MAX_SQL_ROWS` applies to the `sql` source only and has no effect here; `RECOTEM_MAX_DOWNLOAD_BYTES` applies to path-shaped sources (`csv` / `parquet` / item metadata) only. The entire result is materialised as a DataFrame in the `recotem train` process, so a mistyped query can both bill a large scan and exhaust memory. Bound it at the GCP project level (custom quotas, `maximum_bytes_billed` on the reservation) and by writing the query with explicit `WHERE` predicates and, where appropriate, `LIMIT`.
 - Query results are streamed via the Storage Read API when available. Very large result sets (> 10 M rows) should be pre-aggregated in your data warehouse before handing off to Recotem.
 - `GOOGLE_*` and `GCP_*` env vars are blacklisted from recipe `${...}` expansion (case-insensitive). Cloud credentials must come from ADC, not from the recipe file. `source.query` and `source.query_parameters` are unconditionally exempt from `${...}` expansion regardless of variable name.

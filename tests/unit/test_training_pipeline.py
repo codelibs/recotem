@@ -3014,3 +3014,188 @@ def test_run_training_missing_item_column_maps_to_exit_3(
         "missing schema column must exit 3 (DataSourceError); got "
         f"{_map_exception_to_exit(exc_info.value)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# MEDIUM-5 — a zero-row fetch is a data-source failure (exit 3), not a
+# training failure (exit 4).
+#
+# Observed live: an empty BigQuery result reached irspack's splitter and came
+# back as exit 4 ``irspack split failed: division by zero`` with
+# n_rows=0/n_users=0/n_items=0.  An empty SQL result did the same.  The CSV
+# source, by contrast, already gave a clean exit 3.
+#
+# The check lives in ``_fetch_data`` rather than in each source: the sources
+# legitimately return empty frames (``SQLSource`` returning zero rows for a
+# bound predicate that matches nothing is pinned by
+# tests/unit/test_datasource_sql.py::test_fetch_parameters_bind_safely), and
+# third-party plugins cannot be reached from this repo at all.
+# ---------------------------------------------------------------------------
+
+
+def _make_bigquery_recipe(tmp_path: Path):
+    from recotem.datasource.bigquery import BigQueryConfig
+    from recotem.recipe.models import (
+        CleansingConfig,
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+
+    return Recipe(
+        name="bq_empty_test",
+        source=BigQueryConfig(
+            type="bigquery", query="SELECT user_id, item_id FROM t WHERE FALSE"
+        ),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        cleansing=CleansingConfig(),
+        training=TrainingConfig(
+            algorithms=["TopPop"],
+            n_trials=1,
+            split=SplitConfig(scheme="random", heldout_ratio=0.1, seed=42),
+        ),
+        output=OutputConfig(path=str(tmp_path / "bq_empty_test.recotem")),
+    )
+
+
+def test_empty_bigquery_result_raises_datasource_error(tmp_path: Path) -> None:
+    """A zero-row BigQuery result must raise DataSourceError naming the source."""
+    from recotem.datasource.base import DataSourceError
+    from recotem.training.pipeline import _fetch_data
+
+    recipe = _make_bigquery_recipe(tmp_path)
+
+    # BigQuery returns the query's schema even when no rows match, so the
+    # empty frame arrives with columns.
+    mock_source = MagicMock()
+    mock_source.fetch.return_value = pd.DataFrame(
+        {"user_id": pd.Series(dtype=object), "item_id": pd.Series(dtype=object)}
+    )
+    mock_source_cls = MagicMock(return_value=mock_source)
+
+    with patch(
+        "recotem.datasource.registry.get_source_class",
+        return_value=mock_source_cls,
+    ):
+        with pytest.raises(DataSourceError) as exc_info:
+            _fetch_data(recipe, run_id="empty-bq")
+
+    msg = str(exc_info.value)
+    assert "'bigquery'" in msg, f"The error must name the source; got: {msg!r}"
+    assert "no rows" in msg, f"The error must say the query returned nothing: {msg!r}"
+    assert "bq_empty_test" in msg, f"The error must name the recipe; got: {msg!r}"
+    assert _map_exception_to_exit(exc_info.value) == 3, (
+        "An empty result must exit 3 (DataSourceError), not 4 (TrainingError)"
+    )
+
+
+def test_empty_result_reported_as_no_rows_not_missing_columns(
+    tmp_path: Path,
+) -> None:
+    """An empty frame with no columns must be reported as 'no rows'.
+
+    Some drivers report no description for an empty result, which yields a
+    ``DataFrame`` with neither rows nor columns.  Running the schema-column
+    check first would blame the recipe's ``schema:`` block for a query that
+    simply matched nothing.
+    """
+    from recotem.datasource.base import DataSourceError
+    from recotem.training.pipeline import _fetch_data
+
+    recipe = _make_recipe(tmp_path)
+
+    mock_source = MagicMock()
+    mock_source.fetch.return_value = pd.DataFrame()
+    mock_source_cls = MagicMock(return_value=mock_source)
+
+    with patch(
+        "recotem.datasource.registry.get_source_class",
+        return_value=mock_source_cls,
+    ):
+        with pytest.raises(DataSourceError) as exc_info:
+            _fetch_data(recipe, run_id="empty-nocols")
+
+    msg = str(exc_info.value)
+    assert "no rows" in msg, msg
+    assert "not found in the fetched data" not in msg, (
+        f"An empty result must not be blamed on the schema block; got: {msg!r}"
+    )
+
+
+def test_empty_sql_result_raises_datasource_error(monkeypatch, tmp_path) -> None:
+    """End-to-end with the real SQL source: an empty result exits 3, not 4."""
+    import sqlite3
+
+    from recotem.datasource.base import DataSourceError
+    from recotem.datasource.sql import SQLConfig
+    from recotem.recipe.models import (
+        CleansingConfig,
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+    from recotem.training.pipeline import _fetch_data
+
+    db = tmp_path / "empty.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE events (user_id TEXT, item_id TEXT);
+        INSERT INTO events VALUES ('u1','i1');
+        """
+    )
+    con.commit()
+    con.close()
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+
+    recipe = Recipe(
+        name="sql_empty_test",
+        source=SQLConfig(
+            type="sql",
+            dsn_env="RECOTEM_RECIPE_DB_DSN",
+            # Matches no rows.
+            query="SELECT user_id, item_id FROM events WHERE user_id = 'nobody'",
+        ),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        cleansing=CleansingConfig(),
+        training=TrainingConfig(
+            algorithms=["TopPop"],
+            n_trials=1,
+            split=SplitConfig(scheme="random", heldout_ratio=0.1, seed=42),
+        ),
+        output=OutputConfig(path=str(tmp_path / "sql_empty_test.recotem")),
+    )
+
+    with pytest.raises(DataSourceError) as exc_info:
+        _fetch_data(recipe, run_id="empty-sql")
+
+    msg = str(exc_info.value)
+    assert "'sql'" in msg, f"The error must name the source; got: {msg!r}"
+    assert "no rows" in msg, msg
+    assert _map_exception_to_exit(exc_info.value) == 3
+
+
+def test_non_empty_fetch_is_unaffected(tmp_path: Path) -> None:
+    """The zero-row guard must not disturb a normal fetch."""
+    from recotem.training.pipeline import _fetch_data
+
+    recipe = _make_recipe(tmp_path)
+
+    mock_source = MagicMock()
+    mock_source.fetch.return_value = pd.DataFrame(
+        {"user_id": ["u1", "u2"], "item_id": ["i1", "i2"]}
+    )
+    mock_source_cls = MagicMock(return_value=mock_source)
+
+    with patch(
+        "recotem.datasource.registry.get_source_class",
+        return_value=mock_source_cls,
+    ):
+        df = _fetch_data(recipe, run_id="non-empty")
+
+    assert len(df) == 2

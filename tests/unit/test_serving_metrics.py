@@ -118,14 +118,15 @@ def test_bigquery_fallback_counter_exposed_via_metrics_endpoint(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    """With RECOTEM_METRICS_ENABLED=1, the /metrics endpoint must include
-    ``recotem_bigquery_storage_fallback_total`` in the Prometheus exposition
-    format output.
+    """The counter reaches the exposition output *if something increments it*.
 
-    The counter lives in ``recotem._metrics_bigquery`` and registers itself
-    in the default prometheus_client registry — the same registry that
-    ``recotem.serving.metrics.generate_latest()`` queries via
-    ``prometheus_client.generate_latest()``.
+    This pins the shared-registry mechanism only.  It deliberately does NOT
+    claim the counter is observable in production: the increment below is done
+    by the test, and nothing in a real ``recotem serve`` process ever does it —
+    the counter is written exclusively by the BigQuery data source, which runs
+    in ``recotem train``, a batch process with no ``/v1/metrics`` endpoint.
+    See ``test_no_serving_code_increments_the_bigquery_fallback_counter`` and
+    the note in docs/operations.md.
     """
 
     monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "1")
@@ -376,3 +377,39 @@ def test_feature_counters_are_noop_when_metrics_disabled(
 
     assert m._V1_FEATURE_UNKNOWN_VALUE is None
     assert m._V1_COLD_START_REQUESTS is None
+
+
+# ---------------------------------------------------------------------------
+# MEDIUM-3 — the BQ storage fallback counter is a train-side signal only
+# ---------------------------------------------------------------------------
+
+
+def test_no_serving_code_increments_the_bigquery_fallback_counter() -> None:
+    """Nothing under ``recotem/serving/`` writes the BQ storage fallback counter.
+
+    ``recotem_bigquery_storage_fallback_total`` is incremented only by the
+    BigQuery data source, which runs inside ``recotem train``.  ``/v1/metrics``
+    is served by ``recotem serve``, which never fetches data, so a scrape can
+    never see a non-zero value.  docs/operations.md documents the
+    ``bigquery_storage_fallback`` log event as the operable signal and
+    deliberately omits the counter from the serving inventory and the alert
+    table.
+
+    If this test ever fails, someone has wired the counter into the serving
+    path and those docs need revisiting.
+    """
+    from pathlib import Path
+
+    import recotem.serving as serving_pkg
+
+    serving_dir = Path(serving_pkg.__file__).parent
+    offenders = [
+        str(path)
+        for path in sorted(serving_dir.rglob("*.py"))
+        if "inc_bigquery_storage_fallback(" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], (
+        "The BigQuery storage-fallback counter is documented as a train-only, "
+        "log-observable signal, but serving code now increments it: "
+        f"{offenders}"
+    )

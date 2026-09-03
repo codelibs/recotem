@@ -685,6 +685,34 @@ def _compute_recipe_hash(recipe: Recipe) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _assert_rows_present(df: pd.DataFrame, recipe: Recipe, type_name: str) -> None:
+    """Raise :class:`DataSourceError` if the source returned zero rows.
+
+    A query that matches nothing is a data-source problem (exit 3), not a
+    training problem.  Left unchecked, an empty frame travels all the way into
+    irspack's splitter and comes back as ``irspack split failed: division by
+    zero`` at exit 4 with ``n_rows=0 / n_users=0 / n_items=0`` — a message that
+    points the operator at the trainer instead of at their query.
+    ``cleansing.min_rows`` recovers a clear message, but it is optional and the
+    default recipe does not set it.
+
+    Checked *before* :func:`_assert_schema_columns_present` deliberately: an
+    empty result can arrive with no columns at all (``pandas.read_sql`` on a
+    driver that reports no description), and reporting that as "schema
+    column(s) [...] not found" would name the wrong cause.
+    """
+    from recotem.datasource.base import DataSourceError  # noqa: PLC0415
+
+    if len(df) > 0:
+        return
+    raise DataSourceError(
+        f"source {type_name!r} returned no rows for recipe {recipe.name!r}; "
+        "the query or file matched no data. Check the query predicates "
+        "(date range, filters, table name) or the source path before "
+        "re-running."
+    )
+
+
 def _assert_schema_columns_present(df: pd.DataFrame, recipe: Recipe) -> None:
     """Raise :class:`DataSourceError` if a ``schema:`` column is absent from *df*.
 
@@ -750,6 +778,12 @@ def _fetch_data(recipe: Recipe, run_id: str) -> pd.DataFrame:
             },
         )
         df = source_instance.fetch(ctx)
+        # An empty result is a data-source outcome, not a training failure.
+        # Enforced here rather than per source so every source — the two
+        # query-shaped builtins (bigquery / sql), the file-shaped ones, and
+        # third-party plugins that cannot be reached from this repo — gets the
+        # same exit-3 answer without each having to re-implement the check.
+        _assert_rows_present(df, recipe, str(type_name))
         # Query-shaped sources (bigquery / sql) and third-party plugins build
         # their own column set and cannot honour ``ctx.extra``, so repeat the
         # check here.  Without it a schema/query mismatch still reaches

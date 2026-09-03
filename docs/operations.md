@@ -591,10 +591,17 @@ Available metrics:
 | `recotem_metadata_index_build_errors_total` | Counter | `recipe` | per-row errors during `build_metadata_index` at artifact-load time (load-time) |
 | `recotem_metadata_serialization_errors_total` | Counter | `recipe`, `verb` | per-item metadata serialization failures during response building (request-time) |
 | `recotem_recipe_rescan_errors_total` | Counter | `recipe` | recipe rescan failures |
-| `recotem_bigquery_storage_fallback_total` | Counter | `reason` | BQ Storage Read API fell back to REST |
 | `recotem_recipes_dir_scan_failures_total` | Counter | `error_class` | recipes-dir scan failures |
 | `recotem_recommender_layout_unexpected_total` | Counter | `recipe` | `AttributeError` on `recommender._mapper.user_id_to_index` (user axis) or `recommender._mapper.item_id_to_index` (item axis) — indicates irspack API incompatibility. Both axes increment the same counter and it carries no axis label, so it cannot tell you which one fired; the accompanying `recommender_layout_unexpected` log event names the `verb` |
 | `recotem_watcher_state_divergence_total` | Counter | — | watcher tried to mark an error on a non-existent registry entry (ordering bug) |
+
+> **Not listed: `recotem_bigquery_storage_fallback_total`.** The BigQuery
+> Storage Read API fallback counter is incremented only by the data source,
+> which runs inside `recotem train` — a batch process with no HTTP server.
+> `/v1/metrics` is served by `recotem serve`, which never fetches data, so the
+> series is never populated in a scrapeable process. Alert on the
+> `bigquery_storage_fallback` **log event** instead; see
+> [BigQuery Storage Read API fallback](#bigquery-storage-read-api-fallback).
 
 ---
 
@@ -724,7 +731,6 @@ The high-signal metrics for production alerting:
 | Recommend latency | `histogram_quantile(0.99, sum by (le, recipe, verb) (rate(recotem_v1_request_latency_seconds_bucket[5m])))` | per-recipe, per-verb SLO |
 | Batch fan-out | `histogram_quantile(0.95, sum by (le, recipe, verb) (rate(recotem_v1_batch_size_bucket[5m])))` | watch for clients approaching the 256-element cap |
 | Active recipes | `recotem_active_recipes` drop > 0 since last scrape | warn (recipe removed or all stub) |
-| BigQuery Storage API fallback | `rate(recotem_bigquery_storage_fallback_total{reason="api_error"}[5m]) > 0` | warn — grant `bigquery.readSessions.create` to restore fast path |
 | Recipes-dir scan failures | `rate(recotem_recipes_dir_scan_failures_total[5m]) > 0` | warn — broken recipe YAML or artifact path; check `error_class` label for `RecipeError` (schema), `OSError` (permissions), or `sidecar_stale` (artifact read failed after sidecar change) |
 
 Pair these with the structured log events `artifact_load_failed`,
@@ -855,7 +861,9 @@ recotem train recipe.yaml 2>&1 | grep '"event":"train_error"' | jq .
 
 #### BigQuery Storage Read API fallback
 
-When the service account lacks `bigquery.readSessions.create`, the BigQuery source logs a `bigquery_storage_fallback` warning and falls back to the slower REST API. Monitor for this event in your log aggregator — sustained fallbacks indicate a missing IAM permission.
+When the service account lacks `bigquery.readSessions.create`, the BigQuery source logs a `bigquery_storage_fallback` warning and falls back to the slower REST API. The same event is logged (with a different `reason`) when `google-cloud-bigquery-storage` is not installed at all. Monitor for this event in your log aggregator — sustained fallbacks indicate a missing IAM permission or a missing extra.
+
+This is a **log-only** signal. `recotem_bigquery_storage_fallback_total` exists in the code but is incremented only in the `recotem train` process, which serves no `/v1/metrics` endpoint, so it is not scrapeable; do not build an alert rule on it.
 
 To grant the permission:
 

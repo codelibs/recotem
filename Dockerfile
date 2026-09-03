@@ -23,12 +23,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip to fix CVE-2025-8869 (>=25.3), CVE-2026-1703 (>=26.0), and
-# CVE-2026-6357 (>=26.1).  We do not invoke pip at runtime (uv handles all
-# package management) but the bundled python:3.12-slim base ships an older
-# pip that trivy flags.  Upgrading is cheaper than uninstalling and avoids
-# breaking any operator workflow that relies on `python -m pip`.
-RUN python -m pip install --no-cache-dir --upgrade 'pip>=26.1'
+# Remove the pip that python:3.12-slim bundles.  uv performs every install in
+# this image, so pip is never invoked -- and it has become a standing source of
+# trivy HIGH findings that upgrading can no longer clear.
+#
+# We previously upgraded it instead (CVE-2025-8869 >=25.3, CVE-2026-1703
+# >=26.0, CVE-2026-6357 >=26.1), on the reasoning that upgrading was cheaper
+# than uninstalling and preserved `python -m pip` for operators.  That stopped
+# working: the findings are now against the packages pip *vendors* --
+# pip/_vendor/msgpack 1.1.2 (GHSA-6v7p-g79w-8964) and pip/_vendor/pkg_resources
+# from setuptools 70.3.0 (CVE-2025-47273).  pip 26.2.1 is the latest release and
+# still vendors both, so there is no version to upgrade to.
+#
+# The vendored code is unreachable from the application -- recotem runs out of
+# /opt/venv, whose pyvenv.cfg sets include-system-site-packages = false -- but
+# it is real code shipped in the image, so deleting it is a truer answer than
+# adding a .trivyignore entry that would also mask a future genuine pip CVE.
+#
+# OPERATOR NOTE: `python -m pip` no longer works inside this image.  Change
+# dependencies by rebuilding rather than mutating a running container; if pip is
+# genuinely needed, `python -m ensurepip` restores it.
+RUN rm -rf /usr/local/lib/python3.12/site-packages/pip \
+           /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
+           /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12
 
 # Create a non-root user.  UID/GID 1000 matches the spec requirement.
 RUN groupadd --gid 1000 appuser \

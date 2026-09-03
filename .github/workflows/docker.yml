@@ -5,10 +5,11 @@ name: recotem / docker
 # Dockerfile: Dockerfile
 #
 # Job graph:
-#   smoke (amd64, arm64) ──┬──> trivy ──> build (push)
-#                          └───────────────^
-# Nothing is pushed until BOTH the runtime smoke test and the vulnerability
-# scan have passed.  `build` is the only job that logs in to GHCR.
+#   guard ──> smoke (amd64, arm64) ──┬──> trivy ──> build (push)
+#                                    └───────────────^
+# Nothing is pushed until the release-tag guard, the runtime smoke test and the
+# vulnerability scan have all passed.  `build` is the only job that logs in to
+# GHCR.
 #
 # Security note: no untrusted user input (PR titles, commit messages, etc.) is
 # interpolated into any run: command. All github.event.* data is used only
@@ -39,6 +40,33 @@ env:
   IMAGE_NAME: codelibs/recotem
 
 jobs:
+  # Gate: the tag itself, on tag-triggered runs.
+  #
+  # `tags:` above is a GitHub filter pattern, not a regex — a trailing `*`
+  # matches zero or more of ANY character, so `v[0-9]+.[0-9]+.[0-9]*` also
+  # fires on `v2.1.0.dev0` and `v2.1.0-rc1`.  Without this job a stray
+  # non-final tag pushes an image to GHCR, which publish.yml's identical guard
+  # does not prevent: it protects the PyPI path only.
+  #
+  # Reuses that same script rather than restating the rules, so the container
+  # and PyPI paths cannot drift apart.  Branch pushes and pull requests carry
+  # no tag ref: both steps are skipped, the job succeeds, and everything
+  # downstream runs as before.
+  guard:
+    name: release tag guard
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        if: startsWith(github.ref, 'refs/tags/')
+
+      # Also runnable locally before tagging:
+      #   bash .github/scripts/check-release-tag.sh v2.1.0
+      - name: Tag is a final release and matches pyproject.toml + version.py
+        if: startsWith(github.ref, 'refs/tags/')
+        run: bash .github/scripts/check-release-tag.sh
+
   # Gate: prove the built image actually runs before anything is published.
   # A multi-stage venv copy can silently produce an image whose entrypoint
   # cannot exec or whose `recotem` package never made it into the venv — a
@@ -51,6 +79,7 @@ jobs:
   smoke:
     name: image smoke test (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    needs: guard
     strategy:
       fail-fast: false
       matrix:

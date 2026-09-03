@@ -3199,3 +3199,82 @@ def test_non_empty_fetch_is_unaffected(tmp_path: Path) -> None:
         df = _fetch_data(recipe, run_id="non-empty")
 
     assert len(df) == 2
+
+
+# ---------------------------------------------------------------------------
+# Duplicate entries in training.algorithms
+#
+# Alias resolution is case-insensitive, so `[toppop, TopPOP]` is a recipe a
+# user can write -- and the unknown-algorithm error's own suggestion list
+# offers both `CosineKNN` and `CosinekNN`, so a copy/paste produces one.
+# Before the collapse in run_search the trial budget was split over the
+# positional list while being stored per class name, so half the requested
+# trials were spent being pruned instead of searched.
+# ---------------------------------------------------------------------------
+
+
+def _run_and_capture_header(recipe):
+    """Run the pipeline against a mocked writer and return the header dict."""
+    from recotem.training.pipeline import run_training
+
+    headers: list[dict] = []
+
+    def _mock_write(payload_obj, header_dict, key_ring, fs_path, *, versioning):
+        headers.append(header_dict)
+        return fs_path
+
+    run_training(
+        recipe,
+        key_ring=_make_key_ring(),
+        signing_key="active",
+        write_artifact_fn=_mock_write,
+        no_lock=True,
+        quiet=True,
+    )
+    assert len(headers) == 1
+    return headers[0]
+
+
+def test_duplicate_algorithm_aliases_spend_the_whole_trial_budget(
+    tmp_path: Path,
+) -> None:
+    """`[toppop, TopPOP]` with n_trials=10 must complete 10 trials, and the
+    artifact header must list the class once."""
+    from recotem.datasource.csv import CSVConfig
+    from recotem.recipe.models import (
+        OutputConfig,
+        Recipe,
+        SchemaConfig,
+        SplitConfig,
+        TrainingConfig,
+    )
+
+    csv_file = _make_clustered_synthetic_csv(tmp_path)
+    recipe = Recipe(
+        name="dupe_alias_test",
+        source=CSVConfig(type="csv", path=str(csv_file)),
+        schema=SchemaConfig(user_column="user_id", item_column="item_id"),
+        training=TrainingConfig(
+            algorithms=["toppop", "TopPOP"],
+            n_trials=10,
+            cutoff=5,  # must be < n_items to avoid irspack ValueError
+            parallelism=1,
+            split=SplitConfig(scheme="random", heldout_ratio=0.2, seed=0),
+        ),
+        output=OutputConfig(
+            path=str(tmp_path / "dupe_alias_test.recotem"),
+            versioning="always_overwrite",
+        ),
+    )
+
+    header = _run_and_capture_header(recipe)
+
+    assert header["tuning"]["n_completed"] == 10, (
+        f"asked for 10 trials, completed {header['tuning']['n_completed']}: "
+        "the duplicate halved the per-class budget and the leftover slots were "
+        "pruned against Optuna's global n_trials"
+    )
+    assert header["tuning"]["tried_algorithms"] == ["TopPopRecommender"], (
+        f"the header must not advertise the same algorithm twice, got "
+        f"{header['tuning']['tried_algorithms']}"
+    )

@@ -5203,3 +5203,234 @@ def test_hot_swap_version_skewed_artifact_keeps_serving_old_model(
     assert "retrain" in entry.last_load_error.lower(), (
         f"the remedy must survive into last_load_error: {entry.last_load_error!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Malformed recipe file must be skipped, not take the server out of rotation
+# ---------------------------------------------------------------------------
+
+
+def _write_broken_yaml(recipes_dir: Path, stem: str = "broken") -> Path:
+    """Write a recipe file with a YAML syntax error."""
+    path = recipes_dir / f"{stem}.yaml"
+    path.write_text("name: broken\nsource:\n  type: csv\n   path: [unclosed\n")
+    return path
+
+
+def _make_app_client(recipes_dir: Path):
+    """Build a TestClient over the real create_app startup path."""
+    from fastapi.testclient import TestClient
+
+    from recotem.config import ServeConfig
+    from recotem.serving.app import create_app
+
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = f"active:{ACTIVE_KEY_HEX}"
+    cfg.recipes_dir = str(recipes_dir)
+    cfg.insecure_no_auth = True
+    cfg.env = "test"
+    cfg.watch_interval = WATCH_INTERVAL
+    return TestClient(create_app(cfg), base_url="http://127.0.0.1")
+
+
+def test_malformed_recipe_leaves_valid_recipe_serving_and_health_ok(
+    tmp_path: Path,
+) -> None:
+    """A YAML syntax error in one file must not take the whole server down.
+
+    docs/operations.md (``recipe_load_error_skipped``) documents the file as
+    "skipped".  The valid recipe alongside it must load and serve, and
+    /v1/health must report ``ok`` (HTTP 200) because every *loadable* recipe
+    is loaded — the unparseable file is reported under ``skipped`` instead of
+    being counted in ``total``.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "good.recotem"
+    _write_valid_artifact(artifact_path)
+    _write_recipe_yaml(recipes_dir, "good", artifact_path)
+    _write_broken_yaml(recipes_dir)
+
+    with _make_app_client(recipes_dir) as client:
+        # Let several watcher ticks run so the rescan path is exercised too.
+        time.sleep(WATCH_INTERVAL * 8)
+
+        resp = client.get("/v1/health")
+        body = resp.json()
+        assert resp.status_code == 200, (
+            f"one malformed recipe file must not fail readiness for the whole "
+            f"server; /v1/health returned {resp.status_code} {body!r}"
+        )
+        assert body["status"] == "ok", f"expected status ok; got {body!r}"
+        assert body["loaded"] == 1 and body["total"] == 1, (
+            f"the valid recipe must be the only one counted; got {body!r}"
+        )
+        assert body["skipped"] == 1, (
+            f"the malformed file must still be reported as skipped; got {body!r}"
+        )
+
+        details = client.get("/v1/health/details").json()
+        assert details["recipes"]["good"]["loaded"] is True, (
+            f"the valid recipe must still be serving; got {details!r}"
+        )
+        assert details["recipes"]["broken"]["skipped"] is True, (
+            f"the malformed file must be flagged skipped; got {details!r}"
+        )
+
+
+def test_malformed_recipe_does_not_create_phantom_second_entry(
+    tmp_path: Path,
+) -> None:
+    """One malformed file must produce exactly ONE registry entry.
+
+    Regression: app.py registered the startup stub in the registry but not in
+    the watcher's ``_states``.  ``_scan_recipes_dir`` derives ``current_names``
+    from ``_states``, so the first rescan treated the file as brand-new and
+    ``_register_yaml_failure_stub`` minted a de-duplicated second entry
+    (``broken`` → ``broken_1``) whose ``artifact_path`` was the empty string.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "good.recotem"
+    _write_valid_artifact(artifact_path)
+    _write_recipe_yaml(recipes_dir, "good", artifact_path)
+    _write_broken_yaml(recipes_dir)
+
+    with _make_app_client(recipes_dir) as client:
+        time.sleep(WATCH_INTERVAL * 8)
+        names = sorted(client.get("/v1/health/details").json()["recipes"])
+
+    assert names == ["broken", "good"], (
+        f"one malformed file must yield exactly one entry; got {names!r} "
+        f"(a name like 'broken_1' is the phantom second entry)"
+    )
+
+
+def test_malformed_recipe_error_names_the_offending_file(tmp_path: Path) -> None:
+    """The failure must be traceable back to the FILE that caused it.
+
+    The registry key is a fabricated file stem, so the filename is the only
+    identifier that leads an operator to the actual cause.  It must appear in
+    the log and in the /v1/health/details error string — and, just as
+    importantly, no line an operator is paged on may point somewhere else:
+    the empty-artifact_path stub used to resolve to the process working
+    directory and report ``Is a directory: '<cwd>'``, naming a path that has
+    nothing to do with the typo.
+    """
+    import os
+
+    import structlog.testing
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "good.recotem"
+    _write_valid_artifact(artifact_path)
+    _write_recipe_yaml(recipes_dir, "good", artifact_path)
+    _write_broken_yaml(recipes_dir, stem="typo_here")
+
+    with structlog.testing.capture_logs() as cap:
+        with _make_app_client(recipes_dir) as client:
+            time.sleep(WATCH_INTERVAL * 8)
+            details = client.get("/v1/health/details").json()
+
+    naming = [
+        e
+        for e in cap
+        if e.get("file") == "typo_here.yaml" and "parse" in str(e.get("error", ""))
+    ]
+    assert naming, (
+        "a log line must name the offending file and carry the parse error; "
+        f"got events {sorted({e.get('event') for e in cap})!r}"
+    )
+
+    # No warning-or-worse line may point the operator at an unrelated path.
+    cwd = os.getcwd()
+    misdirecting = [
+        e for e in cap if e.get("log_level") in ("warning", "error") and cwd in repr(e)
+    ]
+    assert not misdirecting, (
+        f"no logged failure may name the process working directory {cwd!r} — "
+        f"it is unrelated to the malformed file; got {misdirecting!r}"
+    )
+
+    error = details["recipes"]["typo_here"].get("error") or ""
+    assert "typo_here.yaml" in error, (
+        f"/v1/health/details error must name the offending file; got {error!r}"
+    )
+
+
+def test_malformed_recipe_does_not_reemit_error_every_tick(tmp_path: Path) -> None:
+    """A steady-state parse failure must not re-log on every watcher tick.
+
+    At the default 5s interval an unfixed file would otherwise emit ~17k
+    lines a day.  The condition is already visible in /v1/health/details, so
+    it is logged once on transition and demoted to DEBUG afterwards.  The
+    empty-artifact_path stub must also stop producing ``artifact_read_failed``
+    entirely — that path resolved to the process working directory and named
+    an unrelated directory in the log.
+    """
+    import structlog.testing
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "good.recotem"
+    _write_valid_artifact(artifact_path)
+    _write_recipe_yaml(recipes_dir, "good", artifact_path)
+    _write_broken_yaml(recipes_dir)
+
+    with structlog.testing.capture_logs() as cap:
+        with _make_app_client(recipes_dir):
+            # Many ticks: enough that a per-tick emitter is unmistakable.
+            time.sleep(WATCH_INTERVAL * 20)
+
+    warn_or_worse = [
+        e
+        for e in cap
+        if e.get("log_level") in ("warning", "error")
+        and e.get("event")
+        in ("recipe_rescan_load_error", "artifact_read_failed", "artifact_load_failed")
+    ]
+    assert len(warn_or_worse) <= 2, (
+        f"a persistent parse failure must be logged on transition, not on "
+        f"every tick; got {len(warn_or_worse)} lines: "
+        f"{[(e.get('event'), e.get('log_level')) for e in warn_or_worse]!r}"
+    )
+
+    read_failures = [e for e in cap if e.get("event") == "artifact_read_failed"]
+    assert not read_failures, (
+        "a YAML-parse-failure stub has no artifact path and must never be "
+        f"read; got {read_failures!r}"
+    )
+
+
+def test_malformed_recipe_stub_evicted_when_file_deleted(tmp_path: Path) -> None:
+    """Deleting the offending file must clear the stub from the registry.
+
+    Regression: the startup stub lived only in the registry, never in the
+    watcher's ``_states``, so ``_scan_recipes_dir``'s ``gone`` eviction could
+    never reach it.  The entry — and the degraded health it caused — survived
+    even after the operator removed the file, recoverable only by restart.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "good.recotem"
+    _write_valid_artifact(artifact_path)
+    _write_recipe_yaml(recipes_dir, "good", artifact_path)
+    broken = _write_broken_yaml(recipes_dir)
+
+    with _make_app_client(recipes_dir) as client:
+        time.sleep(WATCH_INTERVAL * 6)
+        assert "broken" in client.get("/v1/health/details").json()["recipes"]
+
+        broken.unlink()
+        time.sleep(WATCH_INTERVAL * 10)
+
+        body = client.get("/v1/health").json()
+        names = sorted(client.get("/v1/health/details").json()["recipes"])
+
+    assert names == ["good"], (
+        f"the stub must be evicted once the offending file is gone; got {names!r}"
+    )
+    assert "skipped" not in body, (
+        f"no skipped files remain, so /v1/health must not report any; got {body!r}"
+    )

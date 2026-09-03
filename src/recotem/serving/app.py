@@ -364,6 +364,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
                     last_load_error=f"YAML parse failed: {exc}",
                     artifact_path="",
                     loaded=False,
+                    skipped=True,
                 )
             )
         else:

@@ -584,6 +584,9 @@ def test_broken_yaml_does_not_abort_serve_other_recipes_still_serve(
     - The broken-YAML recipe appears in /health with loaded=false and error.
     - The good recipe (missing artifact at startup) also appears as a stub.
     - Both stubs must be visible; serve must not raise at create_app() time.
+    - The broken YAML is *skipped*: it is excluded from the readiness `total`
+      and reported under `skipped` instead.  Here /v1/health is still 503,
+      but only because good_recipe's artifact is deliberately missing.
     """
 
     from fastapi.testclient import TestClient
@@ -620,7 +623,10 @@ def test_broken_yaml_does_not_abort_serve_other_recipes_still_serve(
     body = health_resp.json()
     assert body["status"] == "degraded"
     assert body["loaded"] == 0
-    assert body["total"] == 2
+    # Only good_recipe counts toward readiness; the unparseable file is
+    # reported separately so it cannot hold the probe down on its own.
+    assert body["total"] == 1
+    assert body["skipped"] == 1
 
     # Per-recipe detail moved to /v1/health/details (auth-gated path).
     # In this test, insecure_no_auth=True, so /v1/health/details is reachable

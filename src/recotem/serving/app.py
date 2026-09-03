@@ -867,20 +867,17 @@ def _emit_dev_unsigned_banner(serve_config: ServeConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
-_URI_RE = re.compile(r"\b(s3|gs|az|abfs|abfss|https?)://\S+")
-
-
-def _sanitize_error(reason: str) -> str:
-    truncated = reason[:200]
-    return _URI_RE.sub("<redacted-uri>", truncated)
-
-
 def _failed_entry(recipe: Any, reason: str) -> ModelEntry:
     """Stub ModelEntry inserted at startup when an artifact failed to load.
 
     Carries enough context for ``/health`` to show ``loaded=false`` plus the
     reason string.  The route handlers must check ``entry.loaded`` before
     dereferencing ``entry.recommender`` (which is ``None`` here).
+
+    *reason* is passed through raw: truncation and URI redaction are enforced
+    by ``ModelEntry.__setattr__``.  This function used to sanitize it here,
+    which made the guarantee hold on the startup path only — see
+    ``recotem.serving.registry.sanitize_load_error``.
     """
     return ModelEntry(
         name=recipe.name,
@@ -888,7 +885,7 @@ def _failed_entry(recipe: Any, reason: str) -> ModelEntry:
         header={},
         kid="",
         metadata_df=None,
-        last_load_error=_sanitize_error(reason),
+        last_load_error=reason,
         artifact_path=recipe.output.path,
         loaded=False,
     )

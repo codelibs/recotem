@@ -201,11 +201,12 @@ def test_skew_message_is_honest_about_why_it_refused() -> None:
 def test_skew_message_survives_health_truncation(name: str) -> None:
     """/health/details truncates to 200 chars; the essentials must precede it.
 
-    Measured against the real ``_sanitize_error`` rather than eyeballed, at the
-    longest recipe name the schema permits (``^[A-Za-z0-9_-]{1,64}$``) paired
-    with the longest known class name on a transition that is actually refused.
+    Measured against the sanitizer serve actually applies to every write of
+    ``last_load_error`` rather than eyeballed, at the longest recipe name the
+    schema permits (``^[A-Za-z0-9_-]{1,64}$``) paired with the longest known
+    class name on a transition that is actually refused.
     """
-    from recotem.serving.app import _sanitize_error
+    from recotem.serving.registry import sanitize_load_error
 
     with pytest.raises(ArtifactError) as excinfo:
         check_artifact_irspack_version(
@@ -214,7 +215,7 @@ def test_skew_message_survives_health_truncation(name: str) -> None:
             running="0.6.0",
         )
 
-    surfaced = _sanitize_error(str(excinfo.value))
+    surfaced = sanitize_load_error(str(excinfo.value))
     assert len(surfaced) <= 200
     assert surfaced.lower().startswith(SKEW_MSG_PREFIX.lower())
     assert "retrain" in surfaced.lower()
@@ -232,7 +233,7 @@ def test_overlong_best_class_cannot_push_versions_out_of_budget() -> None:
     guarantee should hold on message shape alone and not on trusting the
     header to be well-formed.
     """
-    from recotem.serving.app import _sanitize_error
+    from recotem.serving.registry import sanitize_load_error
 
     with pytest.raises(ArtifactError) as excinfo:
         check_artifact_irspack_version(
@@ -241,7 +242,7 @@ def test_overlong_best_class_cannot_push_versions_out_of_budget() -> None:
             running="0.5.0",
         )
 
-    surfaced = _sanitize_error(str(excinfo.value))
+    surfaced = sanitize_load_error(str(excinfo.value))
     assert len(surfaced) <= 200
     assert "retrain" in surfaced.lower()
     assert "0.4.2" in surfaced

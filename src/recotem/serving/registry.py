@@ -19,10 +19,43 @@ entries.
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+
+# ---------------------------------------------------------------------------
+# last_load_error sanitization
+# ---------------------------------------------------------------------------
+
+#: Object-store and HTTP URIs are replaced wholesale rather than trimmed: the
+#: bucket, container and key names are the parts worth keeping out of a log
+#: aggregator, and nothing downstream needs them to diagnose the failure.
+_URI_RE = re.compile(r"\b(s3|gs|az|abfs|abfss|https?)://\S+")
+
+#: Error strings are operator-facing summaries, not transcripts.  200 chars is
+#: also a published contract: ``docs/operations.md`` tells operators the value
+#: reaching ``/v1/health/details`` is bounded, and ``_irspack_compat.py``
+#: deliberately front-loads its remedy so the useful half survives the cut.
+_MAX_LOAD_ERROR_CHARS = 200
+
+
+def sanitize_load_error(reason: str) -> str:
+    """Bound and redact a load-failure string before it is stored or served.
+
+    Redaction runs *before* truncation, which matters in both directions.
+    ``<redacted-uri>`` is 14 characters and the URIs it replaces can be
+    shorter (``gs://a`` is 6), so substituting into an already-truncated
+    string can push it back over the budget — truncating first, a message of
+    40 short URIs surfaced at 408 characters against a documented cap of 200.
+    Redacting first also catches a URI that the cut would otherwise have left
+    straddling the boundary.  The regex scan is therefore linear in the raw
+    message rather than in the budget; that cost is paid only on a load
+    failure, never on the request path.
+    """
+    return _URI_RE.sub("<redacted-uri>", reason)[:_MAX_LOAD_ERROR_CHARS]
+
 
 # ---------------------------------------------------------------------------
 # ModelEntry
@@ -102,6 +135,31 @@ class ModelEntry:
     # Optional artifact-derived metadata used by /v1/recipes/{name}.
     config_digest: str = ""
     algorithms: list[str] = field(default_factory=list)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Sanitize ``last_load_error`` at the write barrier, not at call sites.
+
+        Truncation and URI redaction used to be the caller's job, and only the
+        startup loader in ``serving/app.py`` did it.  Every other writer — the
+        watcher's ``set_load_error`` on a failed hot-swap, and both
+        YAML-parse-failure stubs — stored the raw exception text, so the first
+        rescan after startup silently replaced a sanitized string with an
+        unbounded one carrying whatever object URI the failure mentioned.
+
+        Enforcing it here makes the guarantee a property of the field rather
+        than a discipline each new call site has to remember: construction and
+        later mutation both funnel through ``__setattr__``, so the only way to
+        regress is to remove this method.  Non-``str`` values (notably ``None``,
+        which clears the error) pass through untouched.
+
+        One consequence to preserve: the watcher recognises its own
+        ``_WATCHER_UNHEALTHY_SENTINEL`` by string equality when it clears the
+        error on recovery.  Any such sentinel must therefore survive
+        sanitization unchanged — short and free of URIs.
+        """
+        if name == "last_load_error" and isinstance(value, str):
+            value = sanitize_load_error(value)
+        super().__setattr__(name, value)
 
     # --- v1 API additions ---
     @property

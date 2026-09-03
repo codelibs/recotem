@@ -111,7 +111,8 @@ def test_skew_remedy_survives_health_error_truncation(
 ) -> None:
     """The remedy must fit in the 200-char `last_load_error` budget.
 
-    `_sanitize_error` truncates to 200 chars, which is what `/health` exposes.
+    Every write to `last_load_error` truncates to 200 chars, which is what
+    `/health` exposes.
     A message that buries "retrain" past that point is useless exactly where an
     operator reads it, so the guard front-loads the remedy and both versions.
     """

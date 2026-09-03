@@ -917,18 +917,18 @@ def test_model_entry_loaded_at_is_utc_datetime():
 
 
 def test_last_load_error_redacts_uri_paths() -> None:
-    from recotem.serving.app import _sanitize_error
+    from recotem.serving.registry import sanitize_load_error
 
     reason = "read failed: s3://my-bucket/secret-models/foo.bin not accessible"
-    sanitized = _sanitize_error(reason)
+    sanitized = sanitize_load_error(reason)
     assert "<redacted-uri>" in sanitized
     assert "my-bucket" not in sanitized
     assert "secret-models" not in sanitized
 
 
 def test_last_load_error_truncated_to_200_chars() -> None:
-    from recotem.serving.app import _sanitize_error
+    from recotem.serving.registry import sanitize_load_error
 
     long_reason = "x" * 500
-    sanitized = _sanitize_error(long_reason)
+    sanitized = sanitize_load_error(long_reason)
     assert len(sanitized) <= 200

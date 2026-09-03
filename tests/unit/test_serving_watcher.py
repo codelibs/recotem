@@ -2653,6 +2653,191 @@ def test_scan_recipes_dir_yaml_corrupt_on_rescan_keeps_loaded_entry(
 
 
 # ---------------------------------------------------------------------------
+# Repairing a broken YAML clears the rescan-parse error it set
+# ---------------------------------------------------------------------------
+
+
+def _build_loaded_watcher(
+    tmp_path: Path, name: str
+) -> tuple[ArtifactWatcher, ModelRegistry, Path, Path]:
+    """Return a watcher for one already-loaded recipe plus its paths.
+
+    Mirrors the post-startup state: the registry holds a loaded entry with no
+    error, ``_states`` and ``_yaml_path_to_name`` are populated, and the YAML
+    on disk parses.  Returns ``(watcher, registry, yaml_path, artifact_path)``.
+    """
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path)
+    yaml_path = _write_recipe_yaml(recipes_dir, name, artifact_path)
+
+    registry = ModelRegistry()
+    entry = _make_entry(name)
+    entry.artifact_path = str(artifact_path)
+    entry.last_load_error = None
+    registry.replace(name, entry)
+
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(yaml_path)
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=_make_serve_config(),
+        key_ring=KeyRing(f"active:{ACTIVE_KEY_HEX}"),
+        initial_states=build_initial_states([recipe], {name: entry}),
+    )
+    watcher._yaml_path_to_name[yaml_path] = name
+    return watcher, registry, yaml_path, artifact_path
+
+
+def test_scan_recipes_dir_repaired_yaml_clears_rescan_parse_error(
+    tmp_path: Path,
+) -> None:
+    """Repairing an already-loaded recipe's YAML must clear its parse error.
+
+    Breaking the YAML of a recipe that is already serving sets
+    ``last_load_error`` (M-2 keeps the model loaded).  When the file is fixed
+    the error must be retracted, otherwise ``/v1/health/details`` reports
+    ``degraded`` (503) for the life of the process even though nothing is
+    wrong.  The corrected recipe body must be adopted and ``last_marker``
+    reset so the next ``_poll_artifacts`` tick reloads.
+    """
+    watcher, registry, yaml_path, artifact_path = _build_loaded_watcher(
+        tmp_path, "repaired"
+    )
+
+    # ── Break the YAML ───────────────────────────────────────────────────────
+    yaml_path.write_text("name: repaired\nsource:\n  type: csv\n  path: [unclosed\n")
+    watcher._scan_recipes_dir()
+
+    broken_entry = registry.get("repaired")
+    assert broken_entry is not None, "a parse error must not evict the entry (M-2)"
+    assert broken_entry.last_load_error is not None, (
+        "breaking the YAML of a loaded recipe must set last_load_error"
+    )
+    assert watcher._states["repaired"].yaml_rescan_error is True, (
+        "the rescan-parse path must record that it owns the outstanding error"
+    )
+
+    # ── Repair it ────────────────────────────────────────────────────────────
+    _write_recipe_yaml(yaml_path.parent, "repaired", artifact_path)
+    watcher._scan_recipes_dir()
+    watcher._executor.shutdown(wait=False)
+
+    repaired_entry = registry.get("repaired")
+    assert repaired_entry is not None, "the entry must survive the repair"
+    assert repaired_entry.last_load_error is None, (
+        "a successful reparse must clear the rescan-parse error so "
+        "/v1/health/details returns to ok; got "
+        f"{repaired_entry.last_load_error!r}"
+    )
+    state = watcher._states["repaired"]
+    assert state.yaml_rescan_error is False, (
+        "the ownership flag must be cleared once the error is retracted"
+    )
+    assert state.recipe is not None and state.recipe.name == "repaired", (
+        "the corrected recipe body must be adopted so the repair takes effect"
+    )
+    assert state.last_marker is None, (
+        "last_marker must be reset so the next poll tick reloads the artifact"
+    )
+
+
+def test_scan_recipes_dir_repaired_yaml_keeps_artifact_load_error(
+    tmp_path: Path,
+) -> None:
+    """A successful YAML reparse must NOT clear an artifact load error.
+
+    ``last_load_error`` is shared with the artifact-load paths
+    (``_record_load_failure``).  A YAML that happens to parse says nothing
+    about a corrupt or unreadable artifact, so clearing the field
+    indiscriminately would hide a genuine failure from ``/v1/health/details``.
+    Only the error the rescan-parse path wrote is eligible for retraction.
+    """
+    watcher, registry, yaml_path, _artifact_path = _build_loaded_watcher(
+        tmp_path, "artifact_broken"
+    )
+
+    # An artifact-side failure, recorded exactly as the load path records it.
+    watcher._record_load_failure(
+        "artifact_broken", "HMAC verification failed", reason="verify"
+    )
+    entry = registry.get("artifact_broken")
+    assert entry is not None and entry.last_load_error == "HMAC verification failed"
+    assert watcher._states["artifact_broken"].yaml_rescan_error is False, (
+        "an artifact load failure must never claim ownership of the error"
+    )
+
+    # The YAML is untouched and parses cleanly on every subsequent scan.
+    assert yaml_path.exists()
+    watcher._scan_recipes_dir()
+    watcher._scan_recipes_dir()
+    watcher._executor.shutdown(wait=False)
+
+    entry_after = registry.get("artifact_broken")
+    assert entry_after is not None
+    assert entry_after.last_load_error == "HMAC verification failed", (
+        "a successful YAML reparse must leave an artifact load error in place; "
+        f"got {entry_after.last_load_error!r}"
+    )
+
+
+def test_scan_recipes_dir_new_broken_yaml_still_registers_stub(
+    tmp_path: Path,
+) -> None:
+    """A brand-new unparseable YAML still gets a skipped stub, then recovers.
+
+    Guards the I-9 stub path against the recovery branch added for
+    already-loaded recipes: a file that has never parsed has no model to keep
+    serving, so it is registered as a ``skipped`` stub with the parse error,
+    and once repaired the stub picks up the real ``output.path`` and is
+    re-marked for loading.
+    """
+    watcher, registry, _yaml_path, artifact_path = _build_loaded_watcher(
+        tmp_path, "healthy"
+    )
+    recipes_dir = artifact_path.parent / "recipes"
+
+    # ── A brand-new file that has never parsed ───────────────────────────────
+    new_yaml = recipes_dir / "newcomer.yaml"
+    new_yaml.write_text("name: newcomer\nsource:\n  type: csv\n  path: [unclosed\n")
+    watcher._scan_recipes_dir()
+
+    stub = registry.get("newcomer")
+    assert stub is not None, "a brand-new broken YAML must be surfaced as a stub"
+    assert stub.loaded is False
+    assert stub.skipped is True, (
+        "the stub declares no recipe, so it must not degrade /v1/health/details"
+    )
+    assert stub.last_load_error is not None and "newcomer.yaml" in (
+        stub.last_load_error
+    ), f"the stub error must name the offending file; got {stub.last_load_error!r}"
+    assert watcher._states["newcomer"].artifact_path == "", (
+        "no output path is known while the YAML has never parsed"
+    )
+
+    # ── Repair it ────────────────────────────────────────────────────────────
+    newcomer_artifact = artifact_path.parent / "newcomer.recotem"
+    _write_valid_artifact(newcomer_artifact)
+    _write_recipe_yaml(recipes_dir, "newcomer", newcomer_artifact)
+    watcher._scan_recipes_dir()
+    watcher._executor.shutdown(wait=False)
+
+    state = watcher._states["newcomer"]
+    assert state.artifact_path == str(newcomer_artifact), (
+        "the repaired stub must adopt the real output path"
+    )
+    assert state.last_marker is None, (
+        "last_marker must be reset so the next poll tick loads the artifact"
+    )
+    assert registry.get("healthy") is not None, (
+        "the unrelated loaded recipe must be untouched by the newcomer's repair"
+    )
+
+
+# ---------------------------------------------------------------------------
 # N-10: OBS-1 — repeated stat errors with same error_class demoted to DEBUG
 # ---------------------------------------------------------------------------
 

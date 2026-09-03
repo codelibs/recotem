@@ -212,6 +212,14 @@ class _RecipeWatchState:
     #: 3 consecutive non-ENOENT OSErrors the watcher skips sidecar checks until
     #: the next mtime change to avoid triggering full reloads indefinitely (m7).
     sidecar_io_error_count: int = 0
+    #: True while the outstanding ``last_load_error`` on this recipe's registry
+    #: entry is the one the rescan-parse path wrote.  Set where that path calls
+    #: ``set_load_error``; cleared once the YAML parses again.  The flag exists
+    #: so recovery clears *only* the rescan-parse error: ``last_load_error`` is
+    #: shared with the artifact-load paths (``_record_load_failure``), and a
+    #: successful YAML reparse says nothing about a broken artifact, so blanket
+    #: clearing would hide a genuine load failure from ``/v1/health/details``.
+    yaml_rescan_error: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +602,12 @@ class ArtifactWatcher(threading.Thread):
                         f"recipe YAML parse error on rescan "
                         f"in '{yaml_file.name}': {exc}",
                     )
+                    # Remember that *we* own the outstanding error so a later
+                    # successful reparse can clear it without also clearing an
+                    # artifact-load failure it knows nothing about.
+                    existing_watch_state = self._states.get(existing_name)
+                    if existing_watch_state is not None:
+                        existing_watch_state.yaml_rescan_error = True
                     _metrics.inc_recipe_rescan_error(existing_name)
                     # An unfixed file fails identically on every tick and is
                     # already visible in /v1/health/details; log the transition
@@ -683,6 +697,32 @@ class ArtifactWatcher(threading.Thread):
                     existing_state.recipe = recipe
                     # Reset last_marker so the next tick triggers a fresh load.
                     existing_state.last_marker = None
+                elif existing_state.yaml_rescan_error:
+                    # An *already-loaded* recipe whose YAML broke and has now
+                    # been repaired.  The stub branch above never fires for it
+                    # (artifact_path was never cleared — the M-2 contract keeps
+                    # the model serving through a parse error), so without this
+                    # branch the rescan-parse error written on every broken tick
+                    # is never retracted and /v1/health/details reports 503 for
+                    # the life of the process.
+                    logger.info(
+                        "recipe_yaml_failure_recovered",
+                        name=recipe.name,
+                    )
+                    # Safe because yaml_rescan_error says the outstanding error
+                    # is the one *this* path wrote; an artifact-load failure
+                    # never sets the flag and so is never cleared here.
+                    self._registry.set_load_error(recipe.name, None)
+                    # Adopt the corrected recipe body (and the output path it
+                    # derives) so the repair actually takes effect.
+                    existing_state.recipe = recipe
+                    existing_state.artifact_path = recipe.output.path
+                    # Reset last_marker so the next tick reloads.  As in the
+                    # discovery branch above, the load itself stays on the
+                    # _poll_artifacts thread pool rather than blocking the
+                    # scan (M-1).
+                    existing_state.last_marker = None
+                existing_state.yaml_rescan_error = False
 
         for gone in current_names - found_names:
             logger.info("recipe_removed", name=gone)

@@ -98,7 +98,7 @@ floors at ``lambda >= 1.0`` rather than going lower; see the range comment in
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from decimal import Decimal
 from typing import Any
 
@@ -123,6 +123,32 @@ FEATURE_STATE_VERSION: int = 1
 # update the classifier too, or the failure silently relabels to "parse"
 # (the message contains the word "version").
 FEATURE_VERSION_MSG_PREFIX = "feature version check failed:"
+
+# Same contract as FEATURE_VERSION_MSG_PREFIX above, for the header/payload
+# reconciliation gate (`check_artifact_feature_state`). It needs its own prefix
+# -- and its own `reason` label -- because it reports a different condition: not
+# "this build cannot read that shape" (retrain / upgrade serving) but "this
+# artifact contradicts itself" (a tampered or mis-built artifact).
+FEATURE_STATE_MSG_PREFIX = "feature state check failed:"
+
+# The complete key set of the header's `features` descriptor. Validated as an
+# exact allow-list so an unrecognised key is refused rather than silently
+# ignored: a reader that ignores what it does not understand cannot tell a
+# future descriptor field from a fabricated one.
+_FEATURE_HEADER_KEYS: frozenset[str] = frozenset({"version", "active", "item", "user"})
+
+# The complete key set of one side's descriptor, as `state_descriptor` writes it.
+_FEATURE_SIDE_KEYS: frozenset[str] = frozenset({"n_features", "columns"})
+
+# Bounds on the column names quoted back in a reconciliation refusal. The
+# message becomes `ModelEntry.last_load_error`, which `/v1/health` echoes, and
+# on the refusing side it comes from a header this build has decided not to
+# trust -- so neither the count nor each name's length may be taken on faith.
+# Same reasoning as `training/features.py`'s `_ID_SAMPLE_SIZE`; the values are
+# column NAMES, which `feature_table_loaded` already logs, so this is a size
+# bound rather than a disclosure bound.
+_COLUMN_SAMPLE_SIZE = 8
+_COLUMN_SAMPLE_MAX_CHARS = 64
 
 # A numerical column need not be EXACTLY constant (std == 0.0) to behave like
 # one. Floating-point rounding noise -- e.g. values that are "the same
@@ -897,3 +923,199 @@ def check_artifact_feature_version(header_dict: dict, *, name: str) -> None:
             f"return silently incorrect recommendations. Retrain with this "
             f"recotem version, or upgrade serving."
         )
+
+
+def _column_sample(columns: Any) -> str:
+    """Render a column list for an error message, bounded in count and length.
+
+    See ``_COLUMN_SAMPLE_SIZE``: one side of every comparison below comes from a
+    header this build has just decided not to trust, so its column list cannot
+    be quoted back verbatim into a string that ends up in ``/v1/health``.
+    """
+    if not isinstance(columns, list):
+        return repr(columns)
+    shown = []
+    for value in columns[:_COLUMN_SAMPLE_SIZE]:
+        text = value if isinstance(value, str) else repr(value)
+        if len(text) > _COLUMN_SAMPLE_MAX_CHARS:
+            text = f"{text[:_COLUMN_SAMPLE_MAX_CHARS]}..."
+        shown.append(text)
+    rendered = ", ".join(repr(s) for s in shown)
+    if len(columns) > _COLUMN_SAMPLE_SIZE:
+        rendered += f", ...(+{len(columns) - _COLUMN_SAMPLE_SIZE} more)"
+    return f"[{rendered}]"
+
+
+def _check_state_side(
+    desc: Any,
+    state: Any,
+    *,
+    side: str,
+    fail: Callable[[str], Exception],
+) -> None:
+    """Reconcile one side's header descriptor with its deserialized state."""
+    if desc is None and state is None:
+        return
+    if desc is None:
+        raise fail(
+            f"declares no {side} features, but its payload carries {side} "
+            f"feature encoder state. The header is what `recotem inspect` and "
+            f"the version gate read, so a state the header does not declare is "
+            f"a state nothing checks"
+        )
+    if state is None:
+        raise fail(
+            f"declares {side} features, but its payload carries no {side} "
+            f"feature encoder state, so every {side} cold-start request would "
+            f"be refused by a model the header says can serve it"
+        )
+    if not isinstance(desc, dict):
+        raise fail(
+            f"has a malformed {side} feature descriptor (expected an object, "
+            f"got {type(desc).__name__})"
+        )
+    if not isinstance(state, dict):
+        raise fail(
+            f"carries {side} feature encoder state of an unexpected type "
+            f"({type(state).__name__})"
+        )
+
+    side_keys = set(desc)
+    if side_keys != _FEATURE_SIDE_KEYS:
+        raise fail(
+            f"has a {side} feature descriptor with keys {sorted(side_keys)}; "
+            f"this build writes exactly {sorted(_FEATURE_SIDE_KEYS)}"
+        )
+
+    # The payload state's own `version`, written by `build_encoder_state` and
+    # until now never read back. It is the payload-side anchor of the version
+    # gate: without it, `features.version` in the header describes only itself.
+    state_version = state.get("version")
+    if state_version != FEATURE_STATE_VERSION:
+        raise fail(
+            f"carries {side} feature encoder state at version "
+            f"{state_version!r}, but this build implements version "
+            f"{FEATURE_STATE_VERSION}. Encoding a request against it could "
+            f"produce the wrong vector space"
+        )
+
+    # Summarise through `state_descriptor` itself -- the very function that
+    # produced the header at train time -- so the two sides can never disagree
+    # on what "the descriptor of this state" means.
+    try:
+        expected = state_descriptor(state)
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise fail(
+            f"carries {side} feature encoder state this build cannot summarise "
+            f"({type(exc).__name__}: {exc})"
+        ) from exc
+
+    if desc["n_features"] != expected["n_features"]:
+        raise fail(
+            f"declares {desc['n_features']!r} {side} feature dimensions, but "
+            f"its payload's encoder state has {expected['n_features']}"
+        )
+    if desc["columns"] != expected["columns"]:
+        raise fail(
+            f"declares {side} feature columns "
+            f"{_column_sample(desc['columns'])}, but its payload's encoder "
+            f"state has {_column_sample(expected['columns'])}"
+        )
+
+
+def check_artifact_feature_state(
+    header_dict: dict, recommender: Any, *, name: str
+) -> None:
+    """Refuse an artifact whose ``features`` header contradicts its payload.
+
+    Runs AFTER deserialization (``check_artifact_feature_version`` runs before,
+    on the header alone) because it is the first point at which both halves are
+    known. It reconciles three things the artifact format otherwise never
+    checks against each other:
+
+    - presence: a payload state no header declares, or a header side no payload
+      backs. The first is what makes the version gate deletable -- drop the
+      ``features`` key and the state loads unchecked;
+    - shape: ``n_features`` and ``columns``, per side, against the deserialized
+      state (via ``state_descriptor``, the same function that wrote them);
+    - capability: ``features.active`` against the winning recommender's actual
+      ability to consume the state.
+
+    Absent ``features`` with no payload state passes untouched: that is every
+    artifact recotem produced before feature-aware iALS existed, and every
+    features-less recipe since.
+
+    Reaching any refusal here requires a validly-signed artifact, i.e. the HMAC
+    signing key -- which already permits substituting the model wholesale. This
+    is defence in depth against a mis-built or partially-tampered artifact, not
+    a security boundary; the point is that an internally inconsistent artifact
+    fails loudly at load instead of serving silently wrong recommendations.
+    """
+    # Deferred import for the same reason as check_artifact_feature_version's.
+    from recotem.artifact.format import ArtifactError  # noqa: PLC0415
+
+    def fail(detail: str) -> ArtifactError:
+        return ArtifactError(
+            f"{FEATURE_STATE_MSG_PREFIX} artifact for recipe {name!r} "
+            f"{detail}; refusing to load"
+        )
+
+    # getattr, not attribute access: the payload is whatever the (allow-listed)
+    # unpickler produced, and older artifacts predate these attributes -- the
+    # class-level defaults in recotem._idmap cover the normal case, this covers
+    # a payload that is not an IDMappedRecommender at all.
+    states = {
+        "item": getattr(recommender, "item_feature_state", None),
+        "user": getattr(recommender, "user_feature_state", None),
+    }
+
+    raw = header_dict.get("features")
+    if raw is None:
+        carried = sorted(s for s, st in states.items() if st is not None)
+        if carried:
+            raise fail(
+                f"has no 'features' header, but its payload carries "
+                f"{', '.join(carried)} feature encoder state. Deleting the "
+                f"descriptor would otherwise delete the version gate along "
+                f"with it"
+            )
+        return
+
+    if not isinstance(raw, dict):
+        # Unreachable through the serve loaders (check_artifact_feature_version
+        # refuses this first); handled so the function is correct standalone.
+        raise fail(
+            f"has a malformed 'features' header (expected an object, got "
+            f"{type(raw).__name__})"
+        )
+
+    unknown = sorted(set(raw) - _FEATURE_HEADER_KEYS)
+    if unknown:
+        raise fail(
+            f"has a 'features' header with unrecognised key(s) "
+            f"{', '.join(repr(k) for k in unknown)}; this build understands "
+            f"only {sorted(_FEATURE_HEADER_KEYS)}"
+        )
+
+    active = raw.get("active")
+    if active is not None and not isinstance(active, bool):
+        raise fail(f"has a non-boolean 'features.active' ({active!r})")
+
+    for side in ("item", "user"):
+        _check_state_side(raw.get(side), states[side], side=side, fail=fail)
+
+    # `active` is optional: artifacts written before the flag existed carry a
+    # descriptor without it, and must keep loading. When it IS present it is a
+    # claim about the payload, so it gets reconciled like every other one.
+    # `_is_feature_capable` is looked up rather than called directly because the
+    # payload need not be an IDMappedRecommender at all (see `states` above).
+    capable = getattr(recommender, "_is_feature_capable", None)
+    if active is not None and callable(capable):
+        actual = bool(capable())
+        if actual != active:
+            inner = type(getattr(recommender, "recommender", None)).__name__
+            raise fail(
+                f"declares features.active={active}, but its payload's "
+                f"recommender ({inner}) "
+                f"{'can' if actual else 'cannot'} consume feature state"
+            )

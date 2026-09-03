@@ -43,7 +43,7 @@ Metric inventory (matches docs/operations.md):
 Artifact-load reason taxonomy (``recotem_artifact_load_failures_total``):
 ``read``, ``parse``, ``hmac``, ``header_json``, ``deserialize``, ``metadata``,
 ``yaml``, ``unexpected``, ``dir_scan``, ``timeout``, ``version_skew``,
-``feature_version``.
+``feature_version``, ``feature_state``.
 """
 
 from __future__ import annotations
@@ -112,7 +112,8 @@ def _ensure_initialized() -> None:
         "recotem_artifact_load_failures_total",
         "Total artifact load failures (initial load and watcher reloads). "
         "reason ∈ {read, parse, hmac, header_json, deserialize, metadata, "
-        "yaml, unexpected, dir_scan, timeout, version_skew, feature_version}.",
+        "yaml, unexpected, dir_scan, timeout, version_skew, feature_version, "
+        "feature_state}.",
         ["recipe", "reason"],
     )
     _ACTIVE_RECIPES = Gauge(
@@ -202,6 +203,12 @@ _LOAD_FAILURE_REASONS: frozenset[str] = frozenset(
         # (irspack pickle compatibility) and from "deserialize" (the payload
         # is never touched here -- the header alone is enough to refuse).
         "feature_version",
+        # Artifact's "features" header contradicts the encoder state its
+        # payload carries (presence, shape, or the winner's capability).
+        # Distinct from "feature_version" (a shape this build cannot read at
+        # all, remedied by a retrain) because it means the artifact is
+        # internally inconsistent -- a mis-built or partially-tampered file.
+        "feature_state",
     }
 )
 
@@ -211,8 +218,8 @@ def inc_artifact_load_failure(recipe: str, reason: str = "unexpected") -> None:
 
     *reason* must be one of the values in ``_LOAD_FAILURE_REASONS``
     (``read | parse | hmac | header_json | deserialize | metadata | yaml |
-    unexpected | dir_scan | timeout | version_skew | feature_version``); any
-    other value is silently coerced
+    unexpected | dir_scan | timeout | version_skew | feature_version |
+    feature_state``); any other value is silently coerced
     to ``"unexpected"`` so callers cannot accidentally explode the cardinality
     of the label.
     """

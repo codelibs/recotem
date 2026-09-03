@@ -2090,6 +2090,74 @@ def test_feature_aware_training_writes_state_and_header(
     # 64 KiB-capped header.
     assert "item_features" not in parsed["best_params"]
     assert "lambda_item_feature" in parsed["best_params"]
+    # A feature-capable winner (IALS is the only algorithm here) actually
+    # consumes the state, so the header says so.
+    assert parsed["features"]["active"] is True
+
+
+def test_feature_header_marks_inactive_for_incapable_winner(
+    tmp_path: Path, feature_recipe, key_ring, monkeypatch
+) -> None:
+    """A non-feature-capable search winner must NOT be advertised as feature-aware.
+
+    ``algorithms: [IALS, TopPop]`` is valid (``Recipe._validate_features_
+    algorithms`` requires only that ONE be feature-capable) and TopPop can win.
+    The payload still carries the encoder state -- ``_train_final`` persists it
+    unconditionally for header/payload parity -- but the winner cannot read it,
+    so ``recotem inspect`` must not read as "this model does feature cold
+    start". The whole point of ``training/features.py``'s zero-overlap and
+    whole-block-dead guards is to refuse artifacts "advertising features for
+    what is really plain iALS"; this is the same claim, made honestly rather
+    than refused, because a non-capable winner is a legitimate outcome.
+
+    The winner is forced rather than raced for: Optuna decides which algorithm
+    wins on the data, and a test that depends on that choice would be a
+    coin-flip. Everything downstream of the search -- the final refit, the
+    ``is_feature_capable`` gate on the refit's feature kwargs, the header
+    assembly, and the payload -- runs for real.
+    """
+    import json
+
+    from recotem.artifact.io import read_artifact
+    from recotem.artifact.signing import unpickle_payload
+    from recotem.training import pipeline as pipeline_mod
+    from recotem.training.pipeline import run_training
+
+    real_run_search = pipeline_mod.run_search
+
+    def _toppop_wins(**kwargs):
+        result = real_run_search(**kwargs)
+        result.best_class_name = "TopPopRecommender"
+        result.best_params = {}
+        return result
+
+    monkeypatch.setattr(pipeline_mod, "run_search", _toppop_wins)
+
+    result = run_training(
+        feature_recipe,
+        key_ring=key_ring,
+        signing_key="active",
+        no_lock=True,
+        quiet=True,
+    )
+    assert result is not None
+
+    header, payload = read_artifact(result.artifact_path, key_ring)
+    parsed = json.loads(header.header_data)
+
+    assert parsed["best_class"] == "TopPopRecommender"
+    assert parsed["features"]["active"] is False
+    # The descriptor is KEPT, not omitted: the payload still carries the state
+    # (so an omitted descriptor would leave it with no version gate at all),
+    # and an existing reader of `inspect` output keeps every field it reads.
+    assert parsed["features"]["item"]["columns"] == ["genre", "year"]
+
+    model = unpickle_payload(payload)
+    assert model.item_feature_state is not None
+    assert (
+        model.item_feature_state["n_features"]
+        == (parsed["features"]["item"]["n_features"])
+    )
 
 
 def test_no_features_recipe_omits_header_key(
@@ -2113,6 +2181,78 @@ def test_no_features_recipe_omits_header_key(
 
     header, _ = read_artifact(result.artifact_path, key_ring)
     assert "features" not in json.loads(header.header_data)
+
+
+def test_feature_aware_training_under_parallel_search(
+    tmp_path: Path, feature_recipe, key_ring
+) -> None:
+    """Feature-aware training must hold its invariants with ``parallelism > 1``.
+
+    Optuna runs trials on worker THREADS at ``n_jobs > 1``, all sharing the one
+    ``FeatureTables`` and the one encoded feature matrix built before the
+    search. A per-trial mutation of that shared state -- or a missing copy --
+    would corrupt whichever trials happened to interleave, and nothing else in
+    the suite exercises the feature path with more than one worker.
+
+    Only the DETERMINISTIC invariants are asserted. ``best_score`` deliberately
+    is not: Optuna's trial ordering under ``n_jobs > 1`` is nondeterministic
+    even with ``PYTHONHASHSEED=0`` (measured: three runs at parallelism=1 give
+    one identical score; at parallelism=4 they span ~4%), so an equality
+    assertion on it would be a flake, not a guard. What must hold regardless of
+    scheduling is that the run completes, that BOTH encode phases -- the search
+    phase and the final refit, which use different item orderings -- cover the
+    whole item axis, and that the encoder dimension is a property of the
+    feature table rather than of the worker count.
+    """
+    import json
+
+    import structlog.testing
+
+    from recotem.artifact.io import read_artifact
+    from recotem.training.pipeline import run_training
+
+    def _run(parallelism: int, out_name: str) -> tuple[dict, list[dict]]:
+        recipe = feature_recipe.model_copy(deep=True)
+        recipe.training.parallelism = parallelism
+        recipe.training.n_trials = 4
+        recipe.output.path = str(tmp_path / out_name)
+        with structlog.testing.capture_logs() as cap:
+            result = run_training(
+                recipe,
+                key_ring=key_ring,
+                signing_key="active",
+                no_lock=True,
+                quiet=True,
+            )
+        # run_training returning a TrainResult is the in-process equivalent of
+        # the CLI's exit 0; every failure path raises instead.
+        assert result is not None
+        header, _ = read_artifact(result.artifact_path, key_ring)
+        coverage = [e for e in cap if e.get("event") == "feature_axis_coverage"]
+        return json.loads(header.header_data), coverage
+
+    parallel_header, coverage = _run(4, "parallel.recotem")
+    sequential_header, _ = _run(1, "sequential.recotem")
+
+    # Two encode phases per configured side: once for the search matrices,
+    # once for the final refit against df_to_sparse's own ordering. Both must
+    # cover every item -- a partial or empty cover is how a misaligned axis
+    # shows up before it silently becomes a wrong model.
+    assert len(coverage) == 2, f"expected search + refit coverage; got {coverage!r}"
+    for event in coverage:
+        assert event["side"] == "item"
+        assert event["matched"] == event["total"], (
+            f"feature table must cover the whole item axis; got {event!r}"
+        )
+
+    assert (
+        parallel_header["features"]["item"]["n_features"]
+        == sequential_header["features"]["item"]["n_features"]
+    ), "encoder dimension must not depend on the worker count"
+    assert (
+        parallel_header["features"]["item"]["columns"]
+        == sequential_header["features"]["item"]["columns"]
+    )
 
 
 def test_train_final_reencodes_features_for_its_own_axis_not_search_phase() -> None:

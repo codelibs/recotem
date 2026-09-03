@@ -38,7 +38,9 @@ import fsspec
 import structlog
 
 from recotem._features import (
+    FEATURE_STATE_MSG_PREFIX,
     FEATURE_VERSION_MSG_PREFIX,
+    check_artifact_feature_state,
     check_artifact_feature_version,
 )
 from recotem._irspack_compat import (
@@ -1094,6 +1096,11 @@ class ArtifactWatcher(threading.Thread):
 
         recommender = unpickle_payload(payload_bytes)
 
+        # Reconcile the header's feature descriptor with the state the payload
+        # actually carries -- only possible once the payload is decoded, so it
+        # cannot fold into the header-only gate above.
+        check_artifact_feature_state(header_dict, recommender, name=name)
+
         metadata_df = None
         metadata_index = None
         if recipe.item_metadata is not None:
@@ -1236,6 +1243,10 @@ def _classify_artifact_error(err_msg: str) -> str:
     # the catch-all below or it silently collapses into "parse".
     if lower.startswith(FEATURE_VERSION_MSG_PREFIX.lower()):
         return "feature_version"
+    # Same ordering constraint again: a header/payload disagreement about the
+    # encoder state's version also puts "version" in the message.
+    if lower.startswith(FEATURE_STATE_MSG_PREFIX.lower()):
+        return "feature_state"
     if lower.startswith("deserialization failed:"):
         return "deserialize"
     if lower.startswith("metadata load failed:"):

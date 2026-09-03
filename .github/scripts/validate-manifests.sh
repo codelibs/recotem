@@ -12,10 +12,11 @@
 #     the python:3.12-slim image — the job died with a syntax error.
 #
 # Neither is a schema violation, so schema validation alone would have missed
-# both.  This script therefore runs five distinct checks:
+# both.  This script therefore runs six distinct checks:
 #
 #   1. helm lint over a set of values permutations
 #   2. helm template + kubeconform -strict on every rendered resource
+#   2b. helm template must REJECT a set of deliberately invalid permutations
 #   3. kubeconform -strict over examples/k8s/
 #   4. every rendered `/bin/sh -c` script parsed by a real POSIX shell (dash)
 #   5. docker compose config -q
@@ -322,9 +323,13 @@ for values in "${VALUES_DIR}"/*.yaml; do
     echo
     echo "--- permutation: ${name} ---"
 
+    # No `continue` on a lint failure: `helm lint --strict` exits 0 on values
+    # that make `helm template` exit 1 — it logs the chart's own `fail`
+    # directives as `funcMap fail` INFO and still reports success.  Skipping
+    # the render on a lint failure would therefore put the *blinder* check in
+    # front of the one that can actually see those guards.
     if ! helm lint "${CHART}" --values "${values}" --strict; then
         note_failure "helm lint failed for permutation '${name}'"
-        continue
     fi
 
     rendered="${WORK}/${name}.yaml"
@@ -346,6 +351,77 @@ for values in "${VALUES_DIR}"/*.yaml; do
     yq eval-all --output-format=json '[.]' "${rendered}" > "${WORK}/${name}.json"
     check_service_accounts "helm/${name}" "${WORK}/${name}.json" || true
     check_sh_commands "helm/${name}" "${WORK}/${name}.json" "${name}" || true
+done
+
+# ---------------------------------------------------------------------------
+# 2b. Values the chart must REFUSE to render
+#
+# Each case below trips a `fail` directive in the templates.  None of them was
+# covered: `helm lint --strict` exits 0 on all four (it logs the failure as a
+# `funcMap fail` INFO line and reports "0 chart(s) failed"), and the loop above
+# only ever renders permutations that are meant to succeed.  So nothing proved
+# that a bad permutation is rejected at all.
+#
+# Each case asserts a non-zero `helm template` exit *and* matches the guard's
+# own message, so a render that dies for an unrelated reason — a typo in the
+# values file, say — is not mistaken for the guard firing.
+# ---------------------------------------------------------------------------
+INVALID_DIR="${WORK}/invalid"
+mkdir -p "${INVALID_DIR}"
+
+cat > "${INVALID_DIR}/unknown-recipes-source.yaml" <<'YAML'
+recipes:
+  source: s3
+YAML
+cat > "${INVALID_DIR}/unknown-recipes-source.expect" <<'EOF'
+recipes.source must be one of configMap|pvc|objectStore
+EOF
+
+cat > "${INVALID_DIR}/objectstore-without-init.yaml" <<'YAML'
+recipes:
+  source: objectStore
+YAML
+cat > "${INVALID_DIR}/objectstore-without-init.expect" <<'EOF'
+recipes.source=objectStore requires recipes.objectStore.initContainer to be set
+EOF
+
+# Legacy string form that names no files: must fail the render rather than
+# emit a CronJob that silently trains nothing.
+cat > "${INVALID_DIR}/train-recipefiles-no-names.yaml" <<'YAML'
+train:
+  enabled: true
+  recipeFiles: " , "
+YAML
+cat > "${INVALID_DIR}/train-recipefiles-no-names.expect" <<'EOF'
+contains no recipe file names
+EOF
+
+cat > "${INVALID_DIR}/pdb-both-fields.yaml" <<'YAML'
+pdb:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: 1
+YAML
+cat > "${INVALID_DIR}/pdb-both-fields.expect" <<'EOF'
+mutually exclusive
+EOF
+
+echo
+echo "=== helm chart: values the chart must refuse to render ==="
+for values in "${INVALID_DIR}"/*.yaml; do
+    name="$(basename "${values}" .yaml)"
+    expected="$(cat "${values%.yaml}.expect")"
+    echo
+    echo "--- must-fail permutation: ${name} ---"
+    if output="$(helm template recotem "${CHART}" --values "${values}" \
+            --namespace recotem 2>&1)"; then
+        note_failure "helm template accepted invalid permutation '${name}' — the chart's \`fail\` guard did not fire"
+    elif ! grep -qF -- "${expected}" <<< "${output}"; then
+        note_failure "helm template rejected '${name}', but not with the expected guard message (wanted: ${expected})"
+        sed 's/^/    /' <<< "${output}"
+    else
+        echo "refused as expected: ${expected}"
+    fi
 done
 
 # ---------------------------------------------------------------------------

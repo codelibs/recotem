@@ -69,4 +69,13 @@ spec:
     - ports:
         - port: 8080
           protocol: TCP
+    {{- with .Values.networkPolicy.extraEgress }}
+    # Operator-supplied rules (networkPolicy.extraEgress).  The built-in rules
+    # above are serve-shaped — DNS plus HTTPS for object storage — but this
+    # policy's podSelector matches on name+instance only, so it also selects
+    # the train CronJob's pods.  A recipe with `source.type: sql` (5432 / 3306
+    # / 1433) or a plain-`http://` `source.path` (80) is otherwise dropped with
+    # no NetworkPolicy-shaped error, only a connection timeout inside the job.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 {{- end }}

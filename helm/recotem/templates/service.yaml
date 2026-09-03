@@ -12,6 +12,22 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+  {{- /* This selector carries no component label, so it also matches the train
+         CronJob's pods.  What keeps them out of Endpoints is `targetPort: http`
+         above: the endpoints controller resolves a NAMED target port against
+         each pod's own container ports, and the train container declares none,
+         so those pods are skipped.  That safety is a side effect, not a
+         statement of intent — give the train container a port named `http` and
+         user traffic starts load-balancing onto training pods.
+
+         Narrowing this selector to recotem.serveSelectorLabels is deliberately
+         NOT done: a Service selector takes effect the moment it is applied,
+         while the matching pod label only arrives with the rollout it triggers.
+         The upgrade that introduced it would therefore leave the Service with
+         zero endpoints until the first relabelled pod passes its startupProbe —
+         up to 120 s of dropped traffic to fix a defect that is not live.  The
+         PodDisruptionBudget is scoped instead: its transient is a budget that
+         selects nothing, which drops no requests. */}}
   selector:
     {{- include "recotem.selectorLabels" . | nindent 4 }}
 

@@ -10,9 +10,13 @@ metadata:
   labels:
     {{- include "recotem.labels" . | nindent 4 }}
 spec:
+  # Scoped to the serve pods.  The budget is computed over the pods this
+  # selector matches, so an unscoped selector would count a running train
+  # CronJob pod as healthy and hand out a disruption the serve replicas
+  # cannot afford — see recotem.serveSelectorLabels in _helpers.tpl.
   selector:
     matchLabels:
-      {{- include "recotem.selectorLabels" . | nindent 6 }}
+      {{- include "recotem.serveSelectorLabels" . | nindent 6 }}
   {{- if .Values.pdb.minAvailable }}
   minAvailable: {{ .Values.pdb.minAvailable }}
   {{- end }}

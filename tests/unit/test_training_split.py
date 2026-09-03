@@ -258,6 +258,173 @@ def test_split_producing_empty_test_set_raises_TrainingError() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Empty-holdout diagnosis: the message must name the per-user flooring rule
+# ---------------------------------------------------------------------------
+#
+# irspack holds out floor(n_interactions * heldout_ratio) interactions PER
+# USER, so a user below 1/heldout_ratio interactions contributes nothing to
+# the held-out set no matter how many such users there are.  The message these
+# tests pin replaced advice to "increase the dataset size", which does not
+# work: only per-user depth, heldout_ratio, or test_user_ratio move the
+# outcome.
+
+
+def _shallow_df(n_users: int, depth: int) -> pd.DataFrame:
+    """``n_users`` users with ``depth`` distinct items each, stable ordering."""
+    rows = [
+        {
+            "user_id": f"u{u:04d}",
+            "item_id": f"i{(u * 7 + k) % 60:03d}",
+            "ts": u * 100 + k,
+        }
+        for u in range(n_users)
+        for k in range(depth)
+    ]
+    df = pd.DataFrame(rows)
+    df["user_id"] = df["user_id"].astype(object)
+    df["item_id"] = df["item_id"].astype(object)
+    return df
+
+
+def _empty_holdout_message(df: pd.DataFrame, config: SplitConfig) -> str:
+    from recotem.training.errors import SplitError
+
+    with pytest.raises(SplitError) as exc_info:
+        split_interactions(
+            df,
+            user_column="user_id",
+            item_column="item_id",
+            time_column="ts",
+            split_config=config,
+        )
+    return str(exc_info.value)
+
+
+@pytest.mark.parametrize("scheme", ["random", "time_user"])
+def test_empty_holdout_message_names_the_per_user_floor(scheme: str) -> None:
+    """The diagnosis must give the real lever and the observed numbers."""
+    config = SplitConfig(scheme=scheme, heldout_ratio=0.1, test_user_ratio=1.0, seed=42)
+    message = _empty_holdout_message(_shallow_df(40, 9), config)
+
+    # The rule, the implied minimum depth, and the observed counts.
+    assert "floor(n_interactions * heldout_ratio)" in message
+    assert "PER USER" in message
+    assert "at least 10 distinct items" in message
+    assert "none of the 40 users reach that (the deepest has 9)" in message
+    # The lever that does NOT work must be ruled out explicitly.
+    assert "Adding more users does not help" in message
+    assert "increasing the dataset size" not in message
+    # A ratio that would actually hold one interaction out of a 9-item user.
+    assert "0.12" in message
+
+
+def test_empty_holdout_more_users_at_same_depth_still_fails() -> None:
+    """The claim the message makes must hold: user count is not the lever.
+
+    Ten times the users at the same per-user depth produces the same abort,
+    which is why the previous "increase the dataset size" advice was wrong.
+    """
+    config = SplitConfig(
+        scheme="random", heldout_ratio=0.1, test_user_ratio=1.0, seed=42
+    )
+    small = _empty_holdout_message(_shallow_df(40, 9), config)
+    large = _empty_holdout_message(_shallow_df(400, 9), config)
+
+    assert "none of the 40 users reach that" in small
+    assert "none of the 400 users reach that" in large
+
+
+def test_deeper_users_at_the_threshold_produce_a_holdout() -> None:
+    """One more interaction per user — the lever the message names — works."""
+    config = SplitConfig(
+        scheme="random", heldout_ratio=0.1, test_user_ratio=1.0, seed=42
+    )
+    result = split_interactions(
+        _shallow_df(40, 10),
+        user_column="user_id",
+        item_column="item_id",
+        time_column=None,
+        split_config=config,
+    )
+    assert result.X_val_test.nnz > 0
+
+
+def test_empty_holdout_message_blames_test_user_ratio_when_deep_users_exist() -> None:
+    """When qualifying users exist, the message must point at the draw instead.
+
+    ``test_user_ratio`` selects ``int(n_users * ratio)`` validation users; a
+    value that rounds down to zero holds nothing out however deep the users
+    are, so the per-user-depth advice would be misleading here.
+    """
+    df = pd.concat(
+        [
+            _shallow_df(400, 9),
+            _shallow_df(2, 20).assign(user_id=["d0"] * 20 + ["d1"] * 20),
+        ]
+    )
+    config = SplitConfig(
+        scheme="random", heldout_ratio=0.1, test_user_ratio=0.002, seed=42
+    )
+    message = _empty_holdout_message(df, config)
+
+    assert "2 of 402 users reach it" in message
+    assert "= 0 validation users" in message
+    assert "training.split.test_user_ratio" in message
+    assert "Adding more users does not help" not in message
+
+
+def test_empty_holdout_message_reports_qualifying_users_not_drawn() -> None:
+    """Deep users that exist but were not drawn get their own diagnosis.
+
+    Here the draw is non-empty, so the message must say the qualifying users
+    missed it rather than repeat the ``= 0 validation users`` case.
+    """
+    df = pd.concat(
+        [
+            _shallow_df(400, 9),
+            _shallow_df(2, 20).assign(user_id=["d0"] * 20 + ["d1"] * 20),
+        ]
+    )
+    config = SplitConfig(
+        scheme="random", heldout_ratio=0.1, test_user_ratio=0.05, seed=42
+    )
+    message = _empty_holdout_message(df, config)
+
+    assert "2 of 402 users reach it (the deepest has 20)" in message
+    assert "none of them were among the 20 validation users" in message
+    assert "training.split.test_user_ratio" in message
+    assert "Adding more users does not help" not in message
+
+
+def test_empty_holdout_message_for_time_global_is_scheme_specific() -> None:
+    """``time_global`` has no per-user floor, so it must not claim one."""
+    config = SplitConfig(
+        scheme="time_global", heldout_ratio=0.1, test_user_ratio=0.01, seed=42
+    )
+    message = _empty_holdout_message(_shallow_df(400, 9), config)
+
+    assert "'time_global'" in message
+    assert "PER USER" not in message
+    assert "quantile of the time column" in message
+    assert "training.split.test_user_ratio" in message
+
+
+@pytest.mark.parametrize(
+    ("ratio", "expected"),
+    [(0.1, 10), (0.2, 5), (0.5, 2), (0.15, 7), (0.01, 100), (0.99, 2)],
+)
+def test_min_interactions_for_holdout(ratio: float, expected: int) -> None:
+    """The advertised minimum must match irspack's own floor arithmetic."""
+    import math
+
+    from recotem.training.split import _min_interactions_for_holdout
+
+    assert _min_interactions_for_holdout(ratio) == expected
+    assert math.floor(expected * ratio) >= 1
+    assert math.floor((expected - 1) * ratio) < 1
+
+
+# ---------------------------------------------------------------------------
 # I-14: MemoryError from irspack split propagates unwrapped
 # ---------------------------------------------------------------------------
 

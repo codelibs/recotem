@@ -509,8 +509,8 @@ training:
 | `parallelism` | int | `1` | Optuna `n_jobs` (Python threads, not processes). Algorithms whose hot loop is GIL-bound see little speed-up; native-code learners (IALS, RP3beta) benefit most. |
 | `storage_path` | string | `""` | Empty = in-memory (no resume). A bare path becomes a SQLite URL (`sqlite:///<path>`); explicit `sqlite://`, `postgresql://`, `postgres://`, and `mysql://` URLs are also accepted. Study name is `recotem_<recipe_name>_<run_id>` and `load_if_exists=True`, so a fresh `run_id` per train invocation always starts a new study (resume requires reusing the same `run_id` — pass `recotem train --run-id <stable>`). **SQLite over NFS corrupts** — keep SQLite databases on a local filesystem. **URLs must not embed credentials** (`postgresql://user:pass@host/db` is rejected with `SearchError` so userinfo cannot leak through SQLAlchemy tracebacks). Provide credentials via `PGPASSFILE` / `~/.pgpass` / SQLAlchemy env vars instead. |
 | `split.scheme` | string | `random` | `random`, `time_global`, or `time_user`. See semantics below. |
-| `split.heldout_ratio` | float | `0.1` | Fraction of interactions held out. Must be in (0, 1). |
-| `split.test_user_ratio` | float | `1.0` | Fraction of users included in the test split. Must be in (0, 1]. |
+| `split.heldout_ratio` | float | `0.1` | Fraction of interactions held out. Must be in (0, 1). Applied **per user and floored**: a user with fewer than `1 / heldout_ratio` distinct items contributes nothing to the held-out set, so the default `0.1` needs at least 10 per user. See [Per-user holdout depth](#per-user-holdout-depth). |
+| `split.test_user_ratio` | float | `1.0` | Fraction of users included in the test split. Must be in (0, 1]. `int(n_users * test_user_ratio)` users are drawn as validation users; only their interactions are eligible for the holdout. |
 | `split.seed` | int | `42` | Random seed for the split (passed to irspack as `random_state`). **Not sufficient on its own for a reproducible run** — see [Reproducibility](#reproducibility). |
 
 Hyperparameter ranges are irspack's, not the recipe's, and some are wide relative to a small catalogue — `TruncatedSVD` searches `n_components` over [4, 512], and any value at or above your item count is clamped to `n_items - 1`, which reconstructs the matrix almost exactly and generalises poorly. On a small catalogue a low `n_trials` may never sample a usable value; if an algorithm scores far below its peers, raise `n_trials` before concluding it is a poor fit.
@@ -522,6 +522,29 @@ Split scheme semantics:
 - `time_global` — a single global cutoff at the `1 - heldout_ratio` quantile of `time_column` over the whole dataset; every interaction at or after the cutoff is held out, regardless of user. Users with no post-cutoff interactions become train-only.
 
 `time_user` and `time_global` require `schema.time_column`. Missing `time_column` with these schemes is a recipe validation error and exits with code 2.
+
+#### Per-user holdout depth
+
+Under `random` and `time_user` the holdout is computed **per user and rounded down**: a user with `n` distinct items contributes `floor(n * heldout_ratio)` interactions to the held-out set. A user below `1 / heldout_ratio` items therefore contributes **nothing**, whatever the size of the dataset:
+
+| `heldout_ratio` | Minimum distinct items per user to contribute |
+|---|---|
+| `0.05` | 20 |
+| `0.1` (default) | 10 |
+| `0.2` | 5 |
+| `0.5` | 2 |
+
+Duplicate `(user, item)` pairs are collapsed before the split, so what counts is a user's **distinct item count**, not their row count.
+
+When no user clears the bar the split produces an empty held-out set and training exits 4 with `"code": "split_error"`. **Adding more users does not fix this** — 4,000 users with 8 interactions each fails exactly like 400 users with 8 interactions each. The levers that do work:
+
+- raise `split.heldout_ratio` until `floor(depth * ratio) >= 1` for your deepest users (the error message names the smallest value that would work for the data it saw);
+- filter sparse users out of `source.query` / the source data, and collect longer per-user histories;
+- raise `split.test_user_ratio` if deep users exist but were not drawn as validation users (the error message distinguishes these two cases).
+
+`cleansing` has `min_rows` / `min_users` / `min_items` but **no per-user minimum**, so a sparse-user filter has to live in the query or the upstream data, not in the recipe.
+
+`time_global` has no per-user floor — its cutoff is a single global quantile — but its held-out set is still restricted to the users drawn as validation users.
 
 > **Behaviour change.** Earlier releases forwarded `schema.time_column` to the splitter under every scheme, so a recipe combining `split.scheme: random` with a `schema.time_column` silently got a `time_user` (per-user recency) holdout instead of a random one. `random` now ignores `time_column`, as documented above. If your recipe sets both, the next `recotem train` produces a different split and therefore different `best_score` / `best_params` values. Existing artifacts are unaffected until you retrain. To keep the previous behaviour, set `split.scheme: time_user` explicitly.
 
@@ -540,6 +563,8 @@ PYTHONHASHSEED=0 recotem train recipe.yaml
 ```
 
 Measured across all six supported algorithms **at `training.parallelism: 1`** (the default), adding `PYTHONHASHSEED=0` makes repeated runs agree exactly on `best_class`, `best_params`, and the tuning metadata; `best_score` agrees to within 1 ULP (the residual difference comes from floating-point accumulation order in irspack's multi-threaded evaluator). Without it, `best_score` has been observed to move by ~3% between runs, and `best_params` can select a different configuration entirely.
+
+**On a marginal dataset this flips the run between success and a hard failure, not just the score.** When the held-out set is small enough that a single interaction decides the metric, hash-dependent tie-breaking can drive every trial to a score of exactly 0.0, which aborts with exit 4 and `"code": "zero_score"`. Measured on 400 users (399 with 9 interactions, one with 10 — one held-out interaction in total), ten consecutive `recotem train` runs of the same recipe, the same file, and the same `split.seed: 42` exited `4 4 4 4 4 4 0 0 4 4`; five runs under `PYTHONHASHSEED=0` were stable. To a nightly CronJob this looks like an unexplained flaky training failure. Note that pinning the hash seed makes the outcome *deterministic*, not necessarily *successful* — a marginal held-out set stays marginal. The real fix is a held-out set with room in it: raise `split.heldout_ratio`, or deepen per-user histories (see [Per-user holdout depth](#per-user-holdout-depth)). The empty-held-out-set abort itself is **not** affected by hashing — whether a user clears the per-user floor is a deterministic function of their depth, `heldout_ratio`, `test_user_ratio`, and `split.seed`.
 
 **`PYTHONHASHSEED=0` does not make a run reproducible at `parallelism > 1`.** The guarantee above holds only at `parallelism: 1`. Optuna schedules concurrent trials nondeterministically, so each worker samples against a different set of already-completed trials from one run to the next; the search therefore explores a different sequence of parameters even with hashing pinned. Measured on one recipe and one dataset, three runs at `parallelism: 1` returned an identical `best_score` of `0.7030818922098252`, while three runs at `parallelism: 4` returned `0.7078874343824728`, `0.7358500937767157`, and `0.7215396993183327` — a spread of about 4%. This is a property of concurrent scheduling, not of any particular algorithm. It is the same mechanism that makes per-algorithm trial budgets approximate above `parallelism: 1` (see [`per_algorithm_trials`](#training)). If you need a reproducible search, keep `parallelism` at its default of `1`; if you need throughput more than reproducibility, raise it and treat `best_score` as a sample rather than a fixed value.
 

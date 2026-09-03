@@ -43,11 +43,15 @@ deleting the tag changes nothing on PyPI.
 2. Recommend yanking it (`pypi yank`, or the PyPI web UI) so resolvers skip it.
 3. Release the next patch version with the fix.
 
-## `publish.yml` succeeded but `docker.yml` emitted no version tag
+## `publish.yml` succeeded but GHCR has no image for the version
 
-The image is on GHCR only as `sha-<commit>`; no `X.Y.Z` tag exists. Almost
-always the pre-release trap — the tag was not valid SemVer (see SKILL.md). The
-`docker build` job is **green**, so run colour will not tell you.
+Not the pre-release trap. Both workflows run the same
+`.github/scripts/check-release-tag.sh` guard, so a tag `docker.yml` refuses is a
+tag `publish.yml` refuses too — neither registry receives anything, and the runs
+are red. What is still reachable is `docker.yml` going red *after*
+`publish-pypi` succeeded, almost always at `trivy`: the scan gates the push
+(`build` is `needs: [smoke, trivy]`), so a CVE finding leaves the version on
+PyPI with nothing on GHCR.
 
 Do **not** delete and re-push the tag: PyPI already has the version, so the tag
 name is spent. Confirm what GHCR actually has, then decide with the user:
@@ -59,8 +63,11 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   https://ghcr.io/v2/codelibs/recotem/tags/list | python3 -m json.tool
 ```
 
-The usual outcome: PyPI and GHCR are out of sync for that version, and the fix
-is a new final release with a SemVer-valid tag.
+The usual outcome: PyPI and GHCR are out of sync for that version. Re-run the
+failed `docker.yml` jobs if Debian has since published the CVE fix (the
+Dockerfile runs `apt-get upgrade`, so no repo change is needed); if the fix
+needs a repo change it has to be in the *tagged* tree, which means a patch
+release. SKILL.md Phase 3, step 6 has the full decision.
 
 ## `docker.yml` succeeded but `publish.yml` failed
 

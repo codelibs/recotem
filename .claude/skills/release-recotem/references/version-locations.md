@@ -47,6 +47,12 @@ catches a stale lockfile at the tag.
 These pin a *published* Docker image, so they only ever move to a real released
 version. During Phase 5 (dev bump) leave them on the last released tag.
 
+Only the first row is machine-checked: `check-release-tag.sh` reads
+`Chart.yaml`'s `version:` and `appVersion:` and refuses a tag they disagree
+with, so a chart left behind — or bumped early, to an image tag that was never
+built — cannot reach the tag. The rest of the table is verified by step 3 of the
+block below and by nothing else, which is why that step must be run.
+
 | File | What to change |
 |------|----------------|
 | `helm/recotem/Chart.yaml` | `version:` and `appVersion:` |
@@ -123,12 +129,14 @@ Do **not** run the pin check during Phase 5: the dev bump deliberately leaves th
 manifests on the last released version, and this block would flag them.
 
 ```bash
-# 1. all three package-version locations agree.
-#    check-release-tag.sh is authoritative for the first two: it is the same
-#    script publish.yml's `guard` job runs at the tag, it fails closed, and it
-#    checks both declarations against the tag *together* — so it catches a
-#    partial bump (pyproject.toml moved, version.py not) that three greps read
-#    by eye do not. uv.lock is not in its scope; `uv lock --check` covers that.
+# 1. every package-version location agrees.
+#    check-release-tag.sh is authoritative for pyproject.toml, version.py and
+#    helm/recotem/Chart.yaml: it is the same script the `guard` job of both
+#    publish.yml and docker.yml runs at the tag, it fails closed, and it checks
+#    all four declarations against the tag *together* — so it catches a partial
+#    bump (pyproject.toml moved, version.py not; or the package moved and the
+#    chart did not) that greps read by eye do not. uv.lock is not in its scope;
+#    `uv lock --check` covers that.
 bash .github/scripts/check-release-tag.sh "v$NEW"   # MUST print "OK: ..."
 uv lock --check                                     # MUST exit 0
 

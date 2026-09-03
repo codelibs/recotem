@@ -127,7 +127,16 @@ jobs:
           name: dist
           path: dist/
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      # Pinned to a commit, not to `release/v1`.  That is a mutable *branch*:
+      # whatever it points at is what runs in the one job in this repository
+      # holding `id-token: write`, and a PyPI filename can never be reused, so
+      # a bad publish from a moved branch tip is permanent.  Every other action
+      # here sits on a version tag that Dependabot's github-actions updater
+      # already watches; it cannot track a branch ref at all, so this reference
+      # was the only one under nothing's supervision.  The pin resolves to the
+      # same commit `release/v1` currently points at (v1.14.2) — Dependabot
+      # bumps the SHA and this comment together from here on.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/
           # Input name is `attestations`, not `generate-attestations`: the

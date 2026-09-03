@@ -221,10 +221,10 @@ and every existing recipe, which stays valid as written. Every recipe's
   `item_metadata` already has when absent. Nothing in Recotem compares or
   gates on `recipe_hash` today; it is carried through to the artifact header
   (`recotem inspect`) and the `GET /v1/recipes/{name}` response purely for
-  operators' own SIEM/audit rules. It is **not** readable from the
-  `train_done` log event: `log_redaction` rewrites every 64-hex string to
-  `[REDACTED-HEX64]`, so that field logs a constant regardless of the
-  recipe. The inference verbs do not echo it: `:recommend` returns
+  operators' own SIEM/audit rules. It is readable from the `train_done` log
+  event, which now carries the real digest (see **Fixed** — earlier 2.1.0
+  builds logged a constant `[REDACTED-HEX64]` there). The inference verbs do
+  not echo it: `:recommend` returns
   `request_id` / `recipe` / `model_version` / `items` only. If you pin or
   diff `recipe_hash` in external tooling, expect every recipe to show a
   changed hash on this upgrade even though nothing about the recipe's
@@ -273,6 +273,53 @@ and every existing recipe, which stays valid as written. Every recipe's
 
 ### Fixed
 
+- **Python warnings bypassed structured logging entirely.** Nothing in the
+  source tree called `logging.captureWarnings`, so `warnings.warn` output went
+  through the default `warnings.showwarning` straight to `sys.stderr`. Under
+  `RECOTEM_LOG_FORMAT=json` that produced non-JSON lines interleaved with the
+  log stream (a single `InconsistentVersionWarning` from serving an artifact
+  trained against a different scikit-learn emits three of them), and — the
+  reason this is a security fix rather than a cosmetic one — the text never
+  reached the redaction processor. Any credential a third-party library
+  interpolated into a warning message was logged verbatim. `configure_logging`
+  now calls `logging.captureWarnings(True)` and pins the `py.warnings` logger
+  to WARNING, so warnings are emitted as ordinary structured records through
+  the same `foreign_pre_chain` — redaction first. This does not change how
+  warnings are *filtered*; only where they are written. (Progress-bar output
+  written directly to stderr by irspack's `fastprogress` dependency is
+  unaffected and still interleaves with a JSON train log.)
+- **`recipe_hash` was unreadable in `train_done`.** The value-side hex64 rule,
+  which exists to catch a raw signing key, also matched the recipe hash and
+  logged `[REDACTED-HEX64]` for every recipe. The hash is SHA-256 of the
+  canonical recipe YAML, computed from config alone before any data is
+  fetched, and recotem publishes it in the clear everywhere else — `recotem
+  inspect` prints it in full and it is carried in the artifact header — so
+  redacting it in the log removed the one field tying a running artifact back
+  to the config that produced it, without protecting anything. `recipe_hash`
+  and `model_version` are now exempt from value-side scrubbing, but only when
+  the field name matches exactly and the value is nothing but the digest in
+  the lowercase form `hexdigest()` emits (optionally `sha256:`-prefixed);
+  anything else in a field of that name is still scrubbed.
+- **One hyphen or one capital destroyed a whole log value.** The exemption
+  that keeps long `snake_case` identifiers out of the base64url scrubber
+  required the entire run to be lowercase and underscore-separated, so any
+  `-` or uppercase character anywhere replaced the whole run with
+  `[REDACTED-B64URL43]`. Measured on a 52-character export name: the plain
+  `snake_case` form survived, while a `rt-` prefix, a trailing `-v2`, a single
+  capital, or the kebab-case equivalent were all erased. Two real cases were
+  observed: `recotem validate` logging a recipe path as
+  `/.../[REDACTED-B64URL43].yaml`, and the remedy anchor in the feature-axis
+  error message (`docs/operations.md#recotem-train-exits-4-with-feature_axis_error`)
+  reduced to `#[REDACTED-B64URL43]` — losing the pointer to the fix from
+  exactly the logs CI and Kubernetes capture. The exemption now covers
+  kebab-case, mixed separators, embedded capitals and `UPPER_SNAKE_CASE`,
+  while still requiring two or more non-empty separator-delimited segments,
+  per-segment case consistency, and an essentially single-case run (at most
+  two case outliers). The last condition is what keeps a
+  `Title-Case-Hyphenated` secret redacted. The probability that a
+  `keygen`-issued 43-character key satisfies all three conditions is about
+  1.1e-9, against 2.6e-10 for the previous rule. See
+  `docs/security.md#log-redaction`.
 - **The published Docker image could not start.** `docker run ghcr.io/codelibs/recotem:2.0.0 --help`
   failed with `exec /opt/venv/bin/recotem: no such file or directory`, on every
   tag and both architectures. Two defects compounded: `uv sync` ran before

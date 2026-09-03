@@ -47,7 +47,8 @@ def configure_logging(log_format: str = "auto") -> None:
     Calling this multiple times is safe — structlog replaces the previous
     configuration.  The stdlib ``logging`` root logger is configured to
     propagate into structlog so that third-party libraries that use
-    ``logging.getLogger()`` are also captured.
+    ``logging.getLogger()`` are also captured, and ``warnings.warn`` output is
+    routed into the same tree (see ``logging.captureWarnings`` below).
     """
     resolved = log_format if log_format in ("json", "console") else _auto_format()
 
@@ -90,3 +91,18 @@ def configure_logging(log_format: str = "auto") -> None:
     root_logger.handlers.clear()
     root_logger.addHandler(handler)
     root_logger.setLevel(logging.INFO)
+
+    # ``warnings.warn`` does not go through the logging tree: the default
+    # ``warnings.showwarning`` writes straight to ``sys.stderr``.  Anything a
+    # third-party library interpolates into a warning message would therefore
+    # bypass ``redact_sensitive_keys`` entirely and land in the log unredacted
+    # (and, under RECOTEM_LOG_FORMAT=json, as non-JSON lines that break log
+    # shipping).  ``captureWarnings`` swaps in a ``showwarning`` that emits on
+    # the ``py.warnings`` logger, which propagates to the root handler
+    # installed above and so runs the full ``foreign_pre_chain`` — redaction
+    # first.
+    logging.captureWarnings(True)
+    # ``py.warnings`` inherits NOTSET, so its effective level would follow the
+    # root logger.  Pinning it to WARNING keeps warnings visible even if the
+    # root level is later raised above INFO.
+    logging.getLogger("py.warnings").setLevel(logging.WARNING)

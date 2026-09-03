@@ -61,6 +61,25 @@ def _allow_loopback_http_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_warning_capture():
+    """Keep ``logging.captureWarnings`` state from leaking between tests.
+
+    ``recotem.logging.configure_logging`` calls ``logging.captureWarnings(True)``
+    so that ``warnings.warn`` output reaches the redaction processor.  That call
+    is a no-op when ``logging._warnings_showwarning`` is already set, and pytest
+    wraps each test in ``warnings.catch_warnings()``, which restores
+    ``warnings.showwarning`` at test end without clearing that module global.
+    Without an explicit reset the *second* test to call ``configure_logging``
+    would silently fail to capture warnings.
+    """
+    import logging as stdlib_logging
+
+    stdlib_logging.captureWarnings(False)
+    yield
+    stdlib_logging.captureWarnings(False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_structlog_state(monkeypatch: pytest.MonkeyPatch):
     """Prevent CLI-invocation tests from polluting structlog global state.
 

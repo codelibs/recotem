@@ -1278,3 +1278,375 @@ def test_scrub_redacts_key_material_adjacent_to_an_identifier() -> None:
     out = _scrub_string_value(text)
     assert "sql_statement_timeout_unsupported_on_sqlite" in out
     assert _FAKE_API_KEY_B64URL not in out
+
+
+# ---------------------------------------------------------------------------
+# (e) Identifier-shaped runs survive the base64url pass.
+#
+# The previous exemption required the whole run to fullmatch
+# ``[a-z0-9]+(?:_[a-z0-9]+)+``, so a single hyphen or a single capital
+# anywhere turned the entire run into ``[REDACTED-B64URL43]``.  Filenames,
+# object keys, doc anchors and business IDs routinely have both.
+# ---------------------------------------------------------------------------
+
+_STEM = "interactions_export_from_warehouse_20260903_v2_final"  # 52
+
+_IDENTIFIER_SHAPES = [
+    pytest.param(_STEM, id="snake_case"),
+    pytest.param("rt-" + _STEM, id="kebab_prefix"),
+    pytest.param(_STEM + "-v2", id="kebab_suffix"),
+    pytest.param("I" + _STEM[1:], id="one_capital"),
+    pytest.param(_STEM.replace("_", "-"), id="kebab_case"),
+    pytest.param("rt-" + _STEM.replace("_", "-") + "-v2", id="mixed_separators"),
+    # The remedy anchor in the feature-axis error message.  Losing this to
+    # redaction removes the pointer to the fix from exactly the logs that CI
+    # and Kubernetes capture.
+    pytest.param("recotem-train-exits-4-with-feature_axis_error", id="docs_anchor"),
+    pytest.param("EXPORT_FROM_WAREHOUSE_20260903_V2_FINAL_RUN", id="upper_snake"),
+    pytest.param("Interactions-Export-2026" + "-batch" * 6, id="two_capitals"),
+]
+
+
+@pytest.mark.parametrize("run", _IDENTIFIER_SHAPES)
+def test_scrub_preserves_identifier_shaped_runs(run: str) -> None:
+    from recotem.log_redaction import _scrub_string_value
+
+    assert len(run) >= 43, "test data must exceed the base64url threshold"
+    assert _scrub_string_value(run) == run, f"{run!r} was destroyed"
+
+
+@pytest.mark.parametrize("run", _IDENTIFIER_SHAPES)
+def test_rendered_identifier_shaped_run_survives(rendered, run: str) -> None:
+    """Through the real chain: an identifier in a value must stay readable."""
+    line = rendered.emit("recipe_loaded", path=f"/etc/recotem/{run}.yaml")
+    assert line["path"] == f"/etc/recotem/{run}.yaml", (
+        f"identifier destroyed by value-side scrubbing; rendered {rendered.raw!r}"
+    )
+
+
+def test_rendered_dotted_identifier_survives(rendered) -> None:
+    """A dotted name is split below the threshold by the run pattern itself.
+
+    ``.`` is outside the base64url alphabet, so ``_B64URL43_RE`` never spans
+    one.  Pinned so a future widening of that character class cannot silently
+    start eating module / dataset names.
+    """
+    dotted = "warehouse_exports.interactions_daily.20260903_v2_final_run"
+    assert len(dotted) >= 43
+    line = rendered.emit("table_resolved", table=dotted)
+    assert line["table"] == dotted, f"dotted name destroyed; {rendered.raw!r}"
+
+
+# ---------------------------------------------------------------------------
+# (f) ...and real credential material is still redacted.
+# ---------------------------------------------------------------------------
+
+
+def _random_api_keys(n: int) -> list[str]:
+    """Deterministic stand-ins for ``recotem keygen --type api`` output.
+
+    ``keygen`` emits ``urlsafe_b64encode(os.urandom(32))`` stripped of padding
+    -- 43 characters over the full 64-char base64url alphabet.  A seeded RNG
+    over the same alphabet gives the same shape with a reproducible corpus.
+    """
+    import random
+    import string
+
+    alphabet = string.ascii_letters + string.digits + "-_"
+    rng = random.Random(20260903)
+    return ["".join(rng.choice(alphabet) for _ in range(43)) for _ in range(n)]
+
+
+def test_scrub_redacts_a_corpus_of_random_api_key_material() -> None:
+    """The widened exemption must not admit realistic key material.
+
+    2000 keygen-shaped tokens; the measured probability that one satisfies the
+    identifier shape test is ~1.1e-9 per token.
+    """
+    from recotem.log_redaction import _scrub_string_value
+
+    survivors = [k for k in _random_api_keys(2000) if k in _scrub_string_value(k)]
+    assert not survivors, f"{len(survivors)} random keys survived: {survivors[:3]}"
+
+
+@pytest.mark.parametrize("field", ["note", "detail", "path", "recipe"])
+def test_rendered_random_api_key_under_benign_name_still_redacted(
+    rendered, field: str
+) -> None:
+    """The value pass is the only guard when the field name is harmless."""
+    for key in _random_api_keys(25):
+        rendered.emit("evt", **{field: f"loaded {key} ok"})
+        assert key not in rendered.raw, f"key leaked under {field!r}: {rendered.raw!r}"
+
+
+def test_rendered_random_api_key_in_the_event_text_still_redacted(rendered) -> None:
+    """``event`` carries interpolated stdlib messages -- it keeps scrubbing."""
+    for key in _random_api_keys(25):
+        rendered.emit(f"loaded {key} ok")
+        assert key not in rendered.raw, f"key leaked via event: {rendered.raw!r}"
+
+
+@pytest.mark.parametrize(
+    ("value", "why"),
+    [
+        # Case-consistent per segment, but an uppercase letter in every word:
+        # the global case-outlier cap is what keeps this redacted.
+        ("Correct-Horse-Battery-Staple-Passphrase-Val", "title_case"),
+        ("Fake-Api-Key-Material-For-Tests-Only-Not-Real", "title_case_long"),
+        # camelCase segments are not internally case-consistent.
+        ("rt-loadedCredentialForProdWarehouseAccount-20260903", "camel_case"),
+        # Random base64url that happens to contain separators.
+        ("xK3-mQ7p_vB2nR9sT4wY6zA1cD8eF5gH0jL2kM4nP6q", "random_with_separators"),
+        # Pre-existing shapes: no separator, or degenerate separator placement.
+        ("A" * 43, "no_separator_upper"),
+        ("a" * 43, "no_separator_lower"),
+        ("_" + "a" * 43, "leading_separator"),
+        ("a" * 43 + "_", "trailing_separator"),
+        ("ab__" + "c" * 42, "empty_segment"),
+        ("abc_def" + "G" * 40, "mixed_case_segment"),
+    ],
+)
+def test_scrub_still_redacts_non_identifier_shapes(value: str, why: str) -> None:
+    from recotem.log_redaction import _scrub_string_value
+
+    assert value not in _scrub_string_value(value), f"{why}: {value!r} survived"
+
+
+_CREDENTIAL_FIELDS = [
+    pytest.param({"x-api-key": _FAKE_API_KEY_B64URL}, _FAKE_API_KEY_B64URL, id="api"),
+    pytest.param(
+        {"authorization": "Bearer " + _FAKE_API_KEY_B64URL},
+        _FAKE_API_KEY_B64URL,
+        id="authorization",
+    ),
+    pytest.param(
+        {"recotem_signing_keys": "kid:" + _FAKE_SIGNING_KEY_HEX},
+        _FAKE_SIGNING_KEY_HEX,
+        id="signing",
+    ),
+    pytest.param(
+        {"aws_secret_access_key": _FAKE_AWS_SECRET}, _FAKE_AWS_SECRET, id="aws"
+    ),
+    pytest.param(
+        {"google_application_credentials": _FAKE_API_KEY_B64URL},
+        _FAKE_API_KEY_B64URL,
+        id="gcp",
+    ),
+    pytest.param(
+        {"azure_storage_account_key": _FAKE_AWS_SECRET}, _FAKE_AWS_SECRET, id="azure"
+    ),
+    pytest.param(
+        {"dsn": "postgresql+psycopg://svc:hunter2@db.internal:5432/prod"},
+        "hunter2",
+        id="dsn_password",
+    ),
+]
+
+
+@pytest.mark.parametrize(("payload", "material"), _CREDENTIAL_FIELDS)
+def test_rendered_credentials_still_redacted(
+    rendered, payload: dict, material: str
+) -> None:
+    rendered.emit("boot", **payload)
+    assert material not in rendered.raw, f"credential leaked: {rendered.raw!r}"
+
+
+@pytest.mark.parametrize(("payload", "material"), _CREDENTIAL_FIELDS)
+def test_foreign_stdlib_message_credentials_still_redacted(
+    rendered, payload: dict, material: str
+) -> None:
+    """Secrets interpolated by a stdlib logger go through ``foreign_pre_chain``.
+
+    Third-party libraries (uvicorn, SQLAlchemy, urllib3) never touch structlog;
+    their records are formatted by ``ProcessorFormatter``, which runs the same
+    redaction processor.  Only the value-side passes apply there, because the
+    whole message lands in ``event``.
+    """
+    import logging as stdlib_logging
+
+    rendered.clear()
+    stdlib_logging.getLogger("sqlalchemy.engine").warning(
+        "connecting with %s", next(iter(payload.values()))
+    )
+    assert rendered.raw, "nothing was rendered"
+    assert material not in rendered.raw, (
+        f"credential leaked via a stdlib logger: {rendered.raw!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (g) Published digests survive; near-misses do not.
+# ---------------------------------------------------------------------------
+
+_FAKE_DIGEST = "3f" * 32  # 64 lowercase hex chars
+
+
+def test_rendered_recipe_hash_survives(rendered) -> None:
+    """``recipe_hash`` is the handle tying a running artifact to its config."""
+    line = rendered.emit("train_done", name="news", recipe_hash=_FAKE_DIGEST)
+    assert line["recipe_hash"] == _FAKE_DIGEST, (
+        f"recipe_hash destroyed by the hex64 pass; rendered {rendered.raw!r}"
+    )
+
+
+def test_rendered_model_version_survives(rendered) -> None:
+    """``model_version`` is already public in the body and response header."""
+    value = f"sha256:{_FAKE_DIGEST}"
+    line = rendered.emit("model_loaded", model_version=value)
+    assert line["model_version"] == value, (
+        f"model_version destroyed; rendered {rendered.raw!r}"
+    )
+
+
+def test_rendered_nested_recipe_hash_survives(rendered) -> None:
+    line = rendered.emit("train_done", stats={"recipe_hash": _FAKE_DIGEST})
+    assert line["stats"]["recipe_hash"] == _FAKE_DIGEST, (
+        f"nested recipe_hash destroyed; rendered {rendered.raw!r}"
+    )
+
+
+def test_recipe_hash_from_the_real_producer_survives(rendered, tmp_recipe_yaml) -> None:
+    """Pin the exemption to the shape ``_compute_recipe_hash`` actually emits.
+
+    A change to the hash encoding (uppercase hex, a prefix, truncation) would
+    fail here rather than silently reinstating redaction of the field.
+    """
+    from recotem.recipe.loader import load_recipe
+    from recotem.training.pipeline import _compute_recipe_hash
+
+    digest = _compute_recipe_hash(load_recipe(tmp_recipe_yaml(name="news")))
+
+    line = rendered.emit("train_done", name="news", recipe_hash=digest)
+    assert line["recipe_hash"] == digest, (
+        f"real recipe_hash destroyed; rendered {rendered.raw!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        # Same field name, but not a bare digest -> normal scrubbing applies.
+        ("recipe_hash", _FAKE_SIGNING_KEY_HEX.upper()),
+        ("recipe_hash", f"{_FAKE_DIGEST} kid=active"),
+        ("recipe_hash", f"key:{_FAKE_DIGEST}"),
+        # A different field name never inherits the exemption.
+        ("artifact_hash", _FAKE_DIGEST),
+        ("hash", _FAKE_DIGEST),
+        ("model_versions", f"sha256:{_FAKE_DIGEST}"),
+    ],
+)
+def test_digest_exemption_is_exact(rendered, key: str, value: str) -> None:
+    """Only the two exact field names, and only a bare digest value."""
+    rendered.emit("evt", **{key: value})
+    assert "[REDACTED-HEX64]" in rendered.raw, (
+        f"{key}={value!r} bypassed the hex64 pass: {rendered.raw!r}"
+    )
+
+
+def test_signing_key_under_the_exempt_field_name_still_redacted(rendered) -> None:
+    """A signing key is 64 lowercase hex too -- the shape alone cannot tell.
+
+    The exemption is therefore worth only what the field name is worth: it
+    must stay pinned to fields that no code path fills from a credential.
+    This test documents that a *plural*/near-miss name does not inherit it,
+    and that key-name redaction still fires ahead of the exemption.
+    """
+    rendered.emit("boot", recotem_signing_keys=f"active:{_FAKE_SIGNING_KEY_HEX}")
+    assert _FAKE_SIGNING_KEY_HEX not in rendered.raw, (
+        f"signing key leaked: {rendered.raw!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (h) Python warnings reach the chain (and therefore the redaction processor).
+# ---------------------------------------------------------------------------
+
+
+def test_warning_is_rendered_as_a_structured_record(rendered) -> None:
+    """``warnings.warn`` must not bypass structlog.
+
+    Before ``configure_logging`` called ``logging.captureWarnings(True)``, the
+    default ``warnings.showwarning`` wrote straight to stderr: the text was
+    unstructured (breaking JSON log shipping) and, more importantly, never
+    passed through ``redact_sensitive_keys``.
+    """
+    import json
+    import warnings
+
+    rendered.clear()
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.warn(
+            "artifact was trained on another sklearn",
+            UserWarning,
+            stacklevel=1,
+        )
+
+    assert rendered.raw, "the warning never reached the logging handler"
+    for raw_line in rendered.raw.splitlines():
+        json.loads(raw_line)  # every emitted line must be valid JSON
+
+    line = next(x for x in rendered.lines() if x.get("logger") == "py.warnings")
+    assert line["level"] == "warning"
+    assert "artifact was trained on another sklearn" in line["event"]
+
+
+def test_warning_text_is_redacted(rendered) -> None:
+    """A credential a library interpolates into a warning must not survive."""
+    import warnings
+
+    rendered.clear()
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.warn(
+            f"reusing cached session key {_FAKE_SIGNING_KEY_HEX} "
+            f"and token {_FAKE_API_KEY_B64URL}",
+            UserWarning,
+            stacklevel=1,
+        )
+
+    assert rendered.raw, "the warning never reached the logging handler"
+    assert _FAKE_SIGNING_KEY_HEX not in rendered.raw, (
+        f"signing key leaked through a warning: {rendered.raw!r}"
+    )
+    assert _FAKE_API_KEY_B64URL not in rendered.raw, (
+        f"api key leaked through a warning: {rendered.raw!r}"
+    )
+
+
+def test_warning_dsn_password_is_redacted(rendered) -> None:
+    import warnings
+
+    rendered.clear()
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.warn(
+            "falling back to postgresql://svc:hunter2@db.internal/prod",
+            UserWarning,
+            stacklevel=1,
+        )
+
+    assert rendered.raw, "the warning never reached the logging handler"
+    assert "hunter2" not in rendered.raw, (
+        f"DSN password leaked through a warning: {rendered.raw!r}"
+    )
+
+
+def test_py_warnings_logger_emits_above_the_root_level(rendered) -> None:
+    """``py.warnings`` is pinned to WARNING, not left to inherit the root.
+
+    Without the explicit level a later ``root.setLevel(ERROR)`` would drop
+    warnings entirely instead of merely quieting info events.
+    """
+    import logging as stdlib_logging
+    import warnings
+
+    stdlib_logging.getLogger().setLevel(stdlib_logging.ERROR)
+    rendered.clear()
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.warn("still visible", UserWarning, stacklevel=1)
+
+    assert "still visible" in rendered.raw, (
+        f"warning suppressed by the root level; rendered {rendered.raw!r}"
+    )

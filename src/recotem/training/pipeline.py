@@ -436,7 +436,23 @@ def _run_training_locked(
     X_train_full = split_result.X_train_full
     X_val_test = split_result.X_val_test
     val_offset = split_result.val_offset
-    bound_logger.info("split_done", val_offset=val_offset)
+
+    # The search metric is computed over exactly these interactions, so their
+    # count is what decides whether the winning algorithm was chosen on signal
+    # or on noise.  It is recorded rather than thresholded: the shipped
+    # examples hold out 12, 60 and 803 interactions, so any cutoff that flags a
+    # genuinely unreliable search also flags the tutorials.  See
+    # docs/operations.md#choosing-a-model-on-a-small-dataset for how to read it.
+    n_heldout_interactions = int(X_val_test.nnz)
+    n_heldout_users = int(X_val_test.shape[0])
+    data_stats["n_heldout_interactions"] = n_heldout_interactions
+    data_stats["n_heldout_users"] = n_heldout_users
+    bound_logger.info(
+        "split_done",
+        val_offset=val_offset,
+        n_heldout_interactions=n_heldout_interactions,
+        n_heldout_users=n_heldout_users,
+    )
 
     # Encode features onto the SEARCH phase's own axis labels. This matrix
     # must never be reused by the final refit: the final refit builds its

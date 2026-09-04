@@ -1002,6 +1002,65 @@ ndcg@10 **0.058**. With each reader given a stable preference, `RP3beta` won at
 **0.317** — 10.9× TopPop's 0.029 on the same split. The recipe, the algorithms
 and the budget were identical; only the persistence of preference differed.
 
+### Choosing a model on a small dataset
+
+Also not an error, and harder to spot than the TopPop case above, because the
+model that ships is not obviously degenerate — it is personalised, it returns
+varied items, and its `best_score` looks like a normal number.
+
+The search picks a winner by scoring each trial on the held-out validation
+interactions. **`data_stats.n_heldout_interactions` in the artifact header is
+how many that was.** When the number is small, the ranking it produces is
+mostly noise, and the algorithm that wins the search is not reliably the
+algorithm that serves your users best.
+
+Measured on a 25-user, 118-item tenant (3 departments, `heldout_ratio: 0.2`,
+`algorithms: [IALS, CosineKNN, RP3beta, TopPop]`, `n_trials: 20`), scored
+against a holdout the search never saw:
+
+| model | search score (ndcg@10) | true recall@10 |
+|---|---|---|
+| what the search shipped | 0.2618 | **0.0600** |
+| IALS alone | 0.2778 | 0.2867 |
+| CosineKNN alone | 0.2459 | 0.3600 |
+| RP3beta alone — **the search ranked it last** | 0.2278 | **0.3600** |
+| popularity baseline | — | 0.0867 |
+| deterministic random | — | 0.0933 |
+
+The shipped model scored **below the popularity baseline** on real held-out
+data, and the algorithm the search ranked last was the best one. The run exited
+0, `/v1/health` reported `ok`, and `:recommend` returned 200.
+
+Two things combined, each documented on its own:
+
+- The validation set held **50 interactions**. That is not enough to separate
+  four algorithms.
+- `n_trials` is a global budget [split evenly across
+  algorithms](recipe-reference.md#training), so four algorithms at
+  `n_trials: 20` get five trials each. The same recipe with `algorithms:
+  [IALS]` and the full 20 trials reached 0.2867 rather than 0.0600.
+
+What to do:
+
+1. **Read `n_heldout_interactions` before you trust `best_score`.** For scale,
+   the shipped examples hold out 12 (`csv-local`), 60 (`quickstart`) and 803
+   (`tutorial-purchase-log`) interactions. The first two are fine for learning
+   the tool and are not a basis for choosing between algorithms.
+2. **Compare against a popularity baseline yourself.** Recotem does not do this
+   for you, and it is the check that would have caught the case above. Hold out
+   a slice the training never sees, score the served model and a
+   most-popular-items list on it, and require the model to win.
+3. **Narrow `algorithms` when the budget is small**, or raise `n_trials` so
+   each algorithm still gets a meaningful number of trials.
+4. **Prefer one model over many tiny ones.** A per-tenant recipe for every
+   small customer is the pattern that produces this failure; pooling small
+   tenants into one model, where that is acceptable, gives the search something
+   to work with.
+
+Recotem does not warn about this on its own. Any threshold that flagged the
+tenant above would also flag the shipped tutorials, so the number is reported
+rather than judged — the judgement is yours.
+
 ### `recotem train` exits 4 with `feature_axis_error`
 
 A [`features:`](recipe-reference.md#features) side's feature table has **zero** id overlap with the interaction data — not one id matched. This aborts a run that previously succeeded if the id column's type changed at the source, so it is worth recognising on sight. The message samples ids from both sides, which usually names the cause by itself:

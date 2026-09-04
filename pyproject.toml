@@ -85,7 +85,23 @@ metrics = ["prometheus-client>=0.20,<1"]
 postgres = ["sqlalchemy>=2,<3", "psycopg[binary]>=3.1,<4"]
 mysql = ["sqlalchemy>=2,<3", "pymysql>=1.1,<2"]
 sqlite = ["sqlalchemy>=2,<3"]
-all = ["recotem[bigquery,postgres,mysql,sqlite,s3,gcs,azure,metrics]"]
+# BPRFM (irspack's LightFM wrapper).  irspack imports `lightfm` unconditionally
+# in irspack/recommenders/bpr.py and drops BPRFMRecommender from its exports
+# when that import fails, so this extra is what makes the algorithm exist.
+#
+# The dependency is `lightfm-next`, not `lightfm`: upstream lyst/lightfm has
+# shipped no release since 1.17 and does not build on Python 3.12 (Cython 3
+# incompatibility -- lyst/lightfm#709).  `lightfm-next` is a maintained fork
+# that installs the same top-level `lightfm` module, so irspack's import works
+# unchanged.  Pinned exactly, matching the `irspack==0.5.2` policy: the payload
+# format of a BPRFM artifact is this package's pickle format.
+#
+# Not a core dependency: `lightfm-next` publishes no linux/aarch64 wheel, so
+# adding it to `dependencies` would make `pip install recotem` fail on arm64
+# hosts without a C toolchain -- including for users who never train BPRFM.
+# See docs/recipe-reference.md#algorithms.
+bprfm = ["lightfm-next==1.19.0"]
+all = ["recotem[bigquery,postgres,mysql,sqlite,s3,gcs,azure,metrics,bprfm]"]
 
 [project.scripts]
 recotem = "recotem.cli:app"

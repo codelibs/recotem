@@ -130,6 +130,34 @@ exit 8.
 
 ### Added
 
+- **`BPRFM` is trainable again, via the new `bprfm` extra.** irspack drops
+  `BPRFMRecommender` from its exports when `lightfm` cannot be imported, and
+  upstream `lightfm` has shipped no release since 1.17 and does not build on
+  Python 3.12 ([lyst/lightfm#709](https://github.com/lyst/lightfm/issues/709)).
+  `recotem[bprfm]` installs
+  [`lightfm-next`](https://pypi.org/project/lightfm-next/) instead — a
+  maintained fork that provides the same top-level `lightfm` module, so
+  irspack's import works unchanged. The published Docker image includes it;
+  `pip install recotem` alone does not.
+
+  It is an extra rather than a core dependency because `lightfm-next` publishes
+  no linux/aarch64 wheel: adding it to `dependencies` would have made `pip
+  install recotem` fail on arm64 hosts without a C toolchain, including for
+  users who never train BPRFM. On arm64, `pip install recotem[bprfm]` builds it
+  from source and needs `build-essential`. On macOS the extension is built
+  without OpenMP, so BPRFM training there is single-threaded.
+
+  **The image does not ship the published wheel even on x86_64.** Upstream's
+  `setup.py` compiles with `-march=native`, and their release CI does not
+  disable it, so the manylinux wheel carries whatever ISA the build runner had
+  — AVX2 and FMA when measured. A distributed image may not have that property:
+  it would `SIGILL` on any host older than the builder. The Dockerfile builds
+  lightfm from source on both architectures with `LIGHTFM_NO_CFLAGS=1`, which
+  drops both `-march=native` and `-ffast-math`; the resulting extension
+  disassembles to zero AVX2 and zero FMA instructions. OpenMP is still enabled,
+  so training stays multi-threaded. The compiler lives in the builder stage
+  only and is not in the shipped image.
+
 - **irspack version-skew guard.** `serve` now checks an artifact header's
   `irspack_version` against the running irspack *before* deserializing, and
   refuses an unverified combination with an `ArtifactError` naming the
@@ -364,11 +392,16 @@ exit 8.
   CI gate can go red on an upgrade** where it was previously green and the
   scheduled `train` was already failing.
 
-- **`BPRFM` is no longer offered as a choice.** It is gated behind `lightfm`,
-  which has no Python 3.12 release, so irspack never exports it and no recipe
-  could ever have trained with it. It is gone from the suggestion list the
-  unknown-algorithm error prints, and naming it explicitly is refused with the
-  same exit 4 as any other unavailable algorithm rather than failing mid-train.
+- **`BPRFM` is offered only when it can actually be trained.** It is gated
+  behind `lightfm`, which irspack imports unconditionally and which is absent
+  from a default install. Availability is now decided by asking irspack rather
+  than by a hard-coded name: without the `bprfm` extra, `BPRFM` is gone from
+  the suggestion list the unknown-algorithm error prints, and naming it
+  explicitly is refused with the same exit 4 as any other unavailable algorithm
+  rather than failing mid-train; with the extra installed it is a normal
+  choice. (Earlier in this release BPRFM was withdrawn outright, on the
+  assessment that no Python 3.12 build of lightfm existed. That was true of
+  upstream lightfm and remains so — see the `bprfm` extra under **Added**.)
 
 - **`training.parallelism` and the Optuna budget see a de-duplicated algorithm
   list.** Because alias resolution is case-insensitive, `algorithms: [toppop,
@@ -426,6 +459,47 @@ exit 8.
   changed is that the documented escape hatch works.
 
 ### Fixed
+
+- **A BPRFM artifact trained successfully and then could not be served.** The
+  FQCN allow-list named `BPRFMRecommender` but neither `BPRFMTrainer` nor
+  `lightfm.lightfm.LightFM`. irspack's early-stopping base keeps the fitted
+  trainer as an attribute — `get_score` reads `self.trainer.fm` — so both are
+  in every BPRFM payload, along with the five `numpy.random` RNG-state helpers
+  reached through LightFM's `RandomState`. `recotem train` therefore exited 0
+  and wrote a signed artifact that `recotem serve` refused with `class not
+  allowed: irspack.recommenders.bpr.BPRFMTrainer`, one deploy and one process
+  later. Anyone who installed lightfm themselves — the natural response to
+  lyst/lightfm#709 — hit this.
+
+  The five RNG-state helpers sit under the `numpy.random` deny-prefix. Rather
+  than letting exact allow-list entries beat the deny-list generally, which
+  would have given all ~40 entries and every future one the power to re-open a
+  denied subtree such as `numpy.lib`'s file-IO constructors, they are declared
+  in a separate `_DENY_PREFIX_EXEMPTIONS` set that is the single mechanism
+  outranking the deny-list. Its exact contents are pinned by a test, so it
+  cannot grow without a failure naming the addition, and everything else under
+  `numpy.random` — including `__generator_ctor`, in the same module as two
+  exempted entries — stays denied.
+
+  The gap survived because the test that was supposed to catch it,
+  `test_bprfm_class_is_explicitly_allowed`, asserted only the top-level class,
+  and the end-to-end roundtrip test that would have caught it was skipped for
+  want of lightfm. Both are fixed: the roundtrip now runs for all seven
+  algorithms, and the unit test names all three classes.
+
+- **`docs/security.md`'s FQCN list is now checked against the code.** It is the
+  reader's map of what an artifact may deserialize, so a stale entry is a false
+  security claim; it had drifted before with nothing comparing the two. A test
+  parses the documented list and asserts set equality with `_ALLOWED_CLASSES`.
+
+- **LightFM's no-OpenMP warning no longer fires on every recotem invocation.**
+  macOS builds of lightfm ship without OpenMP and warn at import time, and
+  irspack imports lightfm from `recommenders/bpr.py`, so with the `bprfm` extra
+  installed the warning reached `recotem serve`, `recotem inspect`, and even a
+  TopPop `recotem train` — logged through the `py.warnings` bridge, making
+  every run look like it had a problem. It is filtered by message at the same
+  layer that installs the IPython stub; every other `UserWarning` still
+  reaches the operator.
 
 - **Following the `RECOTEM_ALLOWED_HOSTS` guidance in `docs/deployment/k8s.md`
   put serve into CrashLoopBackOff.** All three probes send `Host: localhost`,

@@ -46,6 +46,13 @@ from recotem._ipython_stub import install as _install_ipython_stub
 
 _install_ipython_stub()
 
+# LightFM (optional, via the `bprfm` extra) warns at import time when its
+# extension was built without OpenMP, and irspack imports lightfm from
+# recommenders/bpr.py.  Silence that one message before irspack loads.
+from recotem._lightfm_compat import install as _install_lightfm_filter  # noqa: E402
+
+_install_lightfm_filter()
+
 from irspack.utils.id_mapping import IDMapper  # noqa: E402
 
 logger = structlog.get_logger(__name__)

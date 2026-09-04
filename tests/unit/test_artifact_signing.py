@@ -582,12 +582,75 @@ def test_supported_algorithms_match_unpickler_allow_list() -> None:
     )
 
 
-def test_bprfm_class_is_explicitly_allowed() -> None:
-    """Regression: BPRFM was registered in SUPPORTED_CLASS_NAMES but missing
-    from the allow-list, breaking every BPRFM artifact at deserialize time."""
+def test_bprfm_pickle_graph_classes_are_allowed() -> None:
+    """Regression: allow-listing only ``BPRFMRecommender`` was not enough.
+
+    The recommender keeps its fitted trainer as an attribute (``get_score``
+    reads ``self.trainer.fm``), so a BPRFM payload embeds ``BPRFMTrainer`` and
+    the LightFM model too.  With only the top-level class listed, `recotem
+    train` exited 0 and signed an artifact that `recotem serve` then refused --
+    the failure surfaced one deploy later, in a different process.
+
+    The end-to-end proof is
+    ``test_serve_predict_e2e.test_every_algorithm_artifact_serve_roundtrip[BPRFM]``;
+    this test names the three classes so a deletion from the allow-list fails
+    here too, with a message that says which one.
+    """
     from recotem.artifact.signing import _is_allowed
 
     assert _is_allowed("irspack.recommenders.bpr", "BPRFMRecommender") is True
+    assert _is_allowed("irspack.recommenders.bpr", "BPRFMTrainer") is True
+    assert _is_allowed("lightfm.lightfm", "LightFM") is True
+
+
+def test_deny_prefix_exemptions_are_exactly_the_bprfm_rng_helpers() -> None:
+    """Pin the one set that outranks the deny-list.
+
+    ``_DENY_PREFIX_EXEMPTIONS`` is the single mechanism by which a class under
+    a denied module prefix can still be constructed, so it must stay tiny and
+    every addition must be a deliberate, reviewed act rather than a drive-by
+    edit.  Pinning the exact contents makes any growth show up as a failing
+    test that names the new entry.
+    """
+    from recotem.artifact.signing import _DENY_PREFIX_EXEMPTIONS
+
+    assert (
+        frozenset(
+            {
+                ("numpy.random._pickle", "__randomstate_ctor"),
+                ("numpy.random._pickle", "__bit_generator_ctor"),
+                ("numpy.random._mt19937", "MT19937"),
+                ("numpy.random.bit_generator", "__pyx_unpickle_SeedSequence"),
+                ("numpy.random.bit_generator", "SeedSequence"),
+            }
+        )
+        == _DENY_PREFIX_EXEMPTIONS
+    )
+
+
+def test_every_deny_prefix_exemption_is_actually_deny_covered() -> None:
+    """An exemption that is not denied anyway belongs in ``_ALLOWED_CLASSES``.
+
+    Entries here bypass the deny-list, so an entry whose module is *not* under
+    a denied prefix gets that bypass for nothing while reading, to a reviewer,
+    as though it needed one.  Such an entry is either a mistake or a sign the
+    deny-list changed underneath it; either way it should move.
+    """
+    from recotem.artifact.signing import (
+        _DENIED_MODULE_PREFIXES,
+        _DENY_PREFIX_EXEMPTIONS,
+        _module_matches,
+    )
+
+    misplaced = [
+        (module, name)
+        for module, name in _DENY_PREFIX_EXEMPTIONS
+        if not _module_matches(module, _DENIED_MODULE_PREFIXES)
+    ]
+    assert not misplaced, (
+        f"these exemptions are not under any denied prefix and so need no "
+        f"bypass; move them to _ALLOWED_CLASSES: {sorted(misplaced)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -859,25 +922,32 @@ def test_safe_unpickler_rejects_topmodule_gadgets(module: str, name: str) -> Non
 
 
 def test_safe_unpickler_rejects_numpy_random() -> None:
-    """numpy.random is no longer accepted via prefix; bit-generators expose
-    a rich state-restoration API that does not need to be unpicklable in
-    Recotem artifacts.
+    """numpy.random is not accepted via prefix; bit-generators expose a rich
+    state-restoration API that does not need to be unpicklable in Recotem
+    artifacts.
+
+    The five RNG-state helpers a BPRFM artifact genuinely needs are exempted
+    by exact FQCN (``_DENY_PREFIX_EXEMPTIONS``); everything else in the subtree
+    stays denied.  ``__generator_ctor`` below is the neighbouring ctor that
+    BPRFM does *not* need, so it is the sharpest available check that the
+    exemption is per-class rather than per-module.
     """
     from recotem.artifact.signing import _is_allowed
 
     assert _is_allowed("numpy.random", "PCG64") is False
-    assert _is_allowed("numpy.random._pickle", "__bit_generator_ctor") is False
+    assert _is_allowed("numpy.random._pickle", "__generator_ctor") is False
+    assert _is_allowed("numpy.random._philox", "Philox") is False
 
 
 def test_numpy_random_module_rejected() -> None:
     """numpy.random.* is in _DENIED_MODULE_PREFIXES; SafeUnpickler must refuse
     any class from that subtree via find_class.
 
-    numpy.random is denied defensively: bit-generator state (PCG64, MT19937,
-    Generator, RandomState) is never needed in Recotem artifacts.  Rejecting
-    the entire subtree prevents a future numpy release from smuggling a
-    side-effect-carrying reduce-callable through the broad numpy._core.*
-    prefix allow-list.
+    numpy.random is denied defensively: bit-generator state (PCG64, Generator,
+    RandomState) is never needed in Recotem artifacts except through the five
+    exact FQCNs a BPRFM payload embeds.  Denying the rest of the subtree
+    prevents a future numpy release from smuggling a side-effect-carrying
+    reduce-callable through the broad numpy._core.* prefix allow-list.
     """
     import io
 
@@ -886,7 +956,6 @@ def test_numpy_random_module_rejected() -> None:
     # _is_allowed helper must deny these via the deny-list
     assert _is_allowed("numpy.random", "RandomState") is False
     assert _is_allowed("numpy.random", "Generator") is False
-    assert _is_allowed("numpy.random._pickle", "__bit_generator_ctor") is False
     assert _is_allowed("numpy.random._pickle", "__generator_ctor") is False
 
     # SafeUnpickler.find_class (the real hook fired for every GLOBAL opcode)
@@ -895,8 +964,11 @@ def test_numpy_random_module_rejected() -> None:
     with pytest.raises(ArtifactError, match="not allowed"):
         unpickler.find_class("numpy.random", "RandomState")
 
+    # A sibling of an exempted ctor in the very same module: the exemption is
+    # per-class, so __generator_ctor must still be refused even though
+    # __bit_generator_ctor beside it is allowed.
     with pytest.raises(ArtifactError, match="not allowed"):
-        unpickler.find_class("numpy.random._pickle", "__bit_generator_ctor")
+        unpickler.find_class("numpy.random._pickle", "__generator_ctor")
 
 
 def test_numpy_core_exceptions_module_rejected() -> None:
@@ -1544,3 +1616,53 @@ def test_numpy_pickles_do_not_reference_numpy_dtypes_fqcns() -> None:
                 names.add(arg)
 
     assert [n for n in names if n.startswith("numpy.dtypes")] == []
+
+
+# ---------------------------------------------------------------------------
+# docs/security.md must agree with the code it documents
+# ---------------------------------------------------------------------------
+
+
+def _documented_allow_list_fqcns() -> set[str]:
+    """Parse the FQCN code block out of ``docs/security.md``.
+
+    Anchored on the sentence that introduces the block rather than on a line
+    number, so the parse survives the document growing around it.
+    """
+    from pathlib import Path
+
+    doc = Path(__file__).resolve().parents[2] / "docs" / "security.md"
+    text = doc.read_text(encoding="utf-8")
+
+    anchor = "The FQCN allow-list permits only these classes"
+    start = text.index(anchor)
+    fence_open = text.index("```", start)
+    body_start = text.index("\n", fence_open) + 1
+    fence_close = text.index("```", body_start)
+
+    return {
+        line.strip()
+        for line in text[body_start:fence_close].splitlines()
+        if line.strip()
+    }
+
+
+def test_security_doc_fqcn_list_matches_the_allow_list() -> None:
+    """The documented FQCN list must be exactly ``_ALLOWED_CLASSES``.
+
+    That list is the reader's map of what a Recotem artifact may deserialize,
+    so a stale entry is a false security claim rather than a cosmetic typo.
+    It has drifted before -- "docs(security): correct two allow-list claims
+    that the code does not make" was a whole change -- because nothing compared
+    the two, leaving drift invisible until someone happened to read both.
+    """
+    from recotem.artifact.signing import _ALLOWED_CLASSES
+
+    actual = {f"{module}.{name}" for module, name in _ALLOWED_CLASSES}
+    documented = _documented_allow_list_fqcns()
+
+    assert documented == actual, (
+        f"docs/security.md is out of sync with _ALLOWED_CLASSES.\n"
+        f"  documented but not allowed: {sorted(documented - actual)}\n"
+        f"  allowed but not documented: {sorted(actual - documented)}"
+    )

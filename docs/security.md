@@ -398,6 +398,8 @@ irspack.recommenders.rp3.RP3betaRecommender
 irspack.recommenders.dense_slim.DenseSLIMRecommender
 irspack.recommenders.truncsvd.TruncatedSVDRecommender
 irspack.recommenders.bpr.BPRFMRecommender
+irspack.recommenders.bpr.BPRFMTrainer
+lightfm.lightfm.LightFM
 irspack.recommenders.ials.IALSTrainer
 irspack.recommenders.ials.IALSConfigScaling
 irspack.recommenders._ials_core.IALSTrainer
@@ -479,13 +481,46 @@ the prefix allow-list:
   `numpy.lib`, `numpy.compat`, `numpy.random`, `numpy._core._exceptions`
 - `scipy.sparse.linalg`, `scipy.sparse.tests`, `scipy.sparse.csgraph`
 
-`numpy.random` is denied defensively: RNG state objects are not needed in
-Recotem artifacts, and a future numpy release could introduce a
-reduce-callable in that module with side-effects. Any legitimate RNG class
-required by a future irspack version should be added by exact FQCN to the
-hand-enumerated allow-list rather than widening the deny-list.
+`numpy.random` is denied defensively: RNG state objects are generally not
+needed in Recotem artifacts, and a future numpy release could introduce a
+reduce-callable in that module with side-effects.
 `numpy._core._exceptions` is denied to shrink the internal attack surface
 exposed through the broad `numpy._core.*` prefix allow-list.
+
+### The deny-list exemption set
+
+Exactly one mechanism outranks the deny-list: a small, separately declared set
+of exact FQCNs (`_DENY_PREFIX_EXEMPTIONS` in `artifact/signing.py`). It exists
+because BPRFM needs it — LightFM seeds itself with a numpy `RandomState` and
+keeps it as an attribute, so every BPRFM payload embeds the RNG-state pickle
+graph:
+
+```
+numpy.random._pickle.__randomstate_ctor
+numpy.random._pickle.__bit_generator_ctor
+numpy.random._mt19937.MT19937
+numpy.random.bit_generator.__pyx_unpickle_SeedSequence
+numpy.random.bit_generator.SeedSequence
+```
+
+These five were enumerated by loading a real BPRFM artifact and recording each
+rejected `find_class`, not inferred from numpy's source. All five reconstruct
+RNG *state* — the two `_pickle` ctors take a bit-generator name looked up in a
+module-level dict, `MT19937` is the Mersenne Twister itself, and the
+`SeedSequence` pair carries the entropy tuple. None accepts a caller-supplied
+callable, so none is a gadget. Everything else under `numpy.random` — including
+`__generator_ctor`, sitting in the same module as two exempted entries — stays
+denied.
+
+The set is kept **separate from the hand-enumerated allow-list** rather than
+letting exact allow-list entries beat the deny-list generally. If exact entries
+simply won, then all ~40 of them, and every one added later, would silently
+gain the power to re-open a denied subtree such as `numpy.lib`'s file-IO
+constructors, and the deny-list would stop being a floor. Routing the
+exceptions through their own set means a reviewer sees "this bypasses the
+deny-list" in the diff. `tests/unit/test_artifact_signing.py` pins the set's
+exact contents, so it cannot grow without a test failure naming the addition,
+and asserts that every member is genuinely under a denied prefix.
 
 Submodules not on any prefix (e.g. `numpy.linalg`,
 `numpy.fft`, `numpy.polynomial`) are blocked implicitly — they are neither

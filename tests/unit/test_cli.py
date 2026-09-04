@@ -3408,14 +3408,30 @@ def test_validate_matches_train_on_an_unknown_algorithm(tmp_path: Path) -> None:
 
 
 def test_validate_exits_4_on_an_algorithm_irspack_does_not_export(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``BPRFM`` resolves but cannot be constructed, and train says so at 4.
+    """A name that resolves but cannot be constructed must fail validate at 4.
 
-    irspack gates ``BPRFMRecommender`` behind ``lightfm``, which has no Python
-    3.12 release, so the class is never exported.  Resolution alone would let
-    such a recipe through validate and fail it mid-train.
+    Resolution alone would let such a recipe through validate and fail it
+    mid-train, after the data fetch has already been paid for.
+
+    irspack drops a recommender from its exports when an optional dependency is
+    missing, so which names are affected depends on what is installed.  This
+    test used to name ``BPRFM`` directly, which made it silently vacuous the
+    moment the ``bprfm`` extra became installable -- it would have gone on
+    passing while testing nothing.  Simulating the gap instead keeps the
+    behaviour under test regardless of the environment.
     """
+    import recotem.training.algorithms as algorithms
+
+    def _reject_bprfm(class_name: str):
+        if class_name == "BPRFMRecommender":
+            raise ImportError("simulated: irspack did not export this class")
+        return _real_get(class_name)
+
+    _real_get = algorithms.get_recommender_class
+    monkeypatch.setattr(algorithms, "get_recommender_class", _reject_bprfm)
+
     yaml_path = _recipe_with_algorithms(tmp_path, "[BPRFM]")
     result = runner.invoke(app, ["validate", str(yaml_path)])
     out = result.stdout + result.stderr

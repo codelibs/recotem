@@ -1313,6 +1313,28 @@ wheels = [
 ]
 
 [[package]]
+name = "lightfm-next"
+version = "1.19.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "requests" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d2/2e/964b86556b19d8bef7866f69730514e7a538fa7e196ddbd8df9bc358de02/lightfm_next-1.19.0.tar.gz", hash = "sha256:2f02e0b1bc1338373d3086773e258b2bbee98352818bbba189a15ce7111f3781", size = 426162, upload-time = "2025-11-20T22:30:32.092Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/45/008eb39c8b2b8ce26fa5d87646798b39827320793e7794bfb8e4dc81dc0c/lightfm_next-1.19.0-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:eef6d3894515ecfba44ce72f1a346d9d0f995e2ea2352b06fb55bc9e06e7af76", size = 544738, upload-time = "2025-11-20T22:30:19.795Z" },
+    { url = "https://files.pythonhosted.org/packages/0d/89/f8a0f26ba22753b627d82b19fcee53a5fb6c992796b63482b52654c0eaea/lightfm_next-1.19.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:262264c53274d78557bcf7c9e47c3b46baa7033612ab88ee56510506074cd68a", size = 542758, upload-time = "2025-11-20T22:30:21.317Z" },
+    { url = "https://files.pythonhosted.org/packages/84/bd/18c6bc6c16e91028d1725a8e185f6465afb379b53effde485cc3bca28a42/lightfm_next-1.19.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:84d81163ef06b21a90d28596417e81422460a16925cd2bd6143b34da9146c12f", size = 1790620, upload-time = "2025-11-20T22:30:22.768Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/68/e2555d87f85a79eba0ab6f164e3f2a91c8659fdf048ce54bead527880834/lightfm_next-1.19.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:2ca2b3e4b3d931426ac343232797c8c6c56bee6fce499019c4b637827ac8af9d", size = 1907741, upload-time = "2025-11-20T22:30:24.112Z" },
+    { url = "https://files.pythonhosted.org/packages/72/85/c6d8fc714f75d509bbce3ba10e44a78ec41fa7a00b9b02944b9247c504d8/lightfm_next-1.19.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:c05e8a8ed2504dc03150d0965ab918b1e7d4360c02ed72fafcb84d64d117e910", size = 543772, upload-time = "2025-11-20T22:30:25.602Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/3a/488c528e11b3b4216b0e7b8ba935c3b928cb4c8b42658384f06c6444c2ab/lightfm_next-1.19.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:c74d6741df62b9ece1212bb856a5964387eccec00bc2eb55681fd94f291510b3", size = 541765, upload-time = "2025-11-20T22:30:27.34Z" },
+    { url = "https://files.pythonhosted.org/packages/15/64/55cb91edadd4e14f00c001b0b439e755081c0ba6f693e149866e8583f84d/lightfm_next-1.19.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:a78fe727d8aa28992fb6735f44d67c95841c06008221cb203e80430657504cde", size = 1783902, upload-time = "2025-11-20T22:30:28.657Z" },
+    { url = "https://files.pythonhosted.org/packages/87/ee/6709aaa2aa4f65b5bc640f4394532d4ec873b0db401bdbe8fbe1c96e9e17/lightfm_next-1.19.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:a5623db43e40c16782110a371d2b22e150dbf59feb0d6df2df8ce72b6e58389b", size = 1904499, upload-time = "2025-11-20T22:30:30.582Z" },
+]
+
+[[package]]
 name = "mako"
 version = "1.3.12"
 source = { registry = "https://pypi.org/simple" }
@@ -2222,6 +2244,7 @@ all = [
     { name = "gcsfs" },
     { name = "google-cloud-bigquery" },
     { name = "google-cloud-bigquery-storage" },
+    { name = "lightfm-next" },
     { name = "prometheus-client" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pymysql" },
@@ -2235,6 +2258,9 @@ bigquery = [
     { name = "db-dtypes" },
     { name = "google-cloud-bigquery" },
     { name = "google-cloud-bigquery-storage" },
+]
+bprfm = [
+    { name = "lightfm-next" },
 ]
 gcs = [
     { name = "gcsfs" },
@@ -2280,6 +2306,7 @@ requires-dist = [
     { name = "google-cloud-bigquery", marker = "extra == 'bigquery'", specifier = ">=3.25,<4" },
     { name = "google-cloud-bigquery-storage", marker = "extra == 'bigquery'", specifier = ">=2.38.0,<3" },
     { name = "irspack", specifier = "==0.5.2" },
+    { name = "lightfm-next", marker = "extra == 'bprfm'", specifier = "==1.19.0" },
     { name = "numpy", specifier = ">=2.1,<3" },
     { name = "optuna", specifier = ">=4.1,<5" },
     { name = "pandas", specifier = ">=3.0.3,<4" },
@@ -2289,7 +2316,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pymysql", marker = "extra == 'mysql'", specifier = ">=1.1,<2" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
-    { name = "recotem", extras = ["bigquery", "postgres", "mysql", "sqlite", "s3", "gcs", "azure", "metrics"], marker = "extra == 'all'" },
+    { name = "recotem", extras = ["bigquery", "postgres", "mysql", "sqlite", "s3", "gcs", "azure", "metrics", "bprfm"], marker = "extra == 'all'" },
     { name = "rich", specifier = ">=13,<16" },
     { name = "s3fs", marker = "extra == 's3'", specifier = ">=2024.6,<2026" },
     { name = "scikit-learn", specifier = ">=1.8,<1.10" },
@@ -2303,7 +2330,7 @@ requires-dist = [
     { name = "urllib3", specifier = ">=2.7.0,<3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<0.52" },
 ]
-provides-extras = ["bigquery", "s3", "gcs", "azure", "metrics", "postgres", "mysql", "sqlite", "all"]
+provides-extras = ["bigquery", "s3", "gcs", "azure", "metrics", "postgres", "mysql", "sqlite", "bprfm", "all"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -20,7 +20,7 @@ pair is accepted only if ``_VERIFIED_COMPATIBLE`` below records that we
 empirically verified it. Anything absent is refused.
 
 The distinction matters. A deny-list ("refuse IALS across 0.4/0.5") would
-silently green-light BPRFM, for which we have no evidence at all, and every
+silently green-light BPRFM, for which we still have no evidence, and every
 future untested transition — the failure mode would be an artifact that loads
 and serves subtly wrong scores. Refusing the unproven keeps the safety default
 of the older blanket rule while letting the five verified-compatible classes
@@ -75,13 +75,18 @@ SKEW_MSG_PREFIX = "irspack version skew:"
 #   IALSRecommender  — FAILS across 0.4/0.5 in both directions.
 #                      ``IALSModelConfig.__setstate__`` arity went 7 -> 10 at
 #                      0.5.0 (feature-aware iALS added three fields).
-#   BPRFMRecommender — UNVERIFIABLE. irspack gates it behind the separately
-#                      installed ``lightfm`` package (not an irspack extra --
-#                      irspack declares none), and lightfm has no
-#                      py3.12-compatible release, so irspack does not export
-#                      the class here. No evidence either way, so the
-#                      allow-list refuses it. Absence from this table means
-#                      "unproven", not "known broken".
+#   BPRFMRecommender — UNVERIFIED (was: unverifiable). recotem now ships the
+#                      dependency as the ``bprfm`` extra, so the experiment
+#                      this table demands -- train under one irspack
+#                      major.minor, load under the other, compare scores
+#                      bit-exact -- has become possible where it previously
+#                      was not. It has not been run: doing so needs an irspack
+#                      0.4.x environment, and lightfm's own pickle format is a
+#                      second version axis this table does not model (a BPRFM
+#                      payload embeds a LightFM object, so an interchange claim
+#                      would have to hold lightfm constant as well). Until
+#                      someone runs it, absence keeps meaning "unproven", not
+#                      "known broken", and the allow-list refuses it.
 #
 # Rows are keyed at major.minor because irspack 0.4.x was verified internally
 # stable (0.4.0 -> 0.4.2 interchange, IALS included), so patch drift within a

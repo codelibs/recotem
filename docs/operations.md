@@ -897,7 +897,7 @@ Refused across 0.4 ↔ 0.5:
 | `best_class` | Why |
 |--------------|-----|
 | `IALSRecommender` | **Known break**, both directions. 0.5.0 added feature-aware iALS, growing `IALSModelConfig`'s pickled state from a 7-tuple to a 10-tuple; `__setstate__` is a strict-arity binding. |
-| `BPRFMRecommender` | **Unverifiable** — irspack gates it behind the separately installed `lightfm` package, which has no Python 3.12-compatible release, so irspack does not export the class and recotem cannot train it. Absence from the table means *unproven*, not known-broken. |
+| `BPRFMRecommender` | **Unverified** — trainable since the `bprfm` extra shipped, so the interchange experiment is now possible, but it has not been run (it needs an irspack 0.4.x environment, and a BPRFM payload embeds a LightFM object, adding a second version axis this table does not model). Absence from the table means *unproven*, not known-broken. |
 | missing / non-string `best_class` | Fails **closed**: a header that cannot name its algorithm cannot match the table. |
 
 On a refusal the recipe is marked `loaded: false` with reason `version_skew` and this error (recipe `news`, an IALS artifact trained on 0.4.2, served by 0.5.0):

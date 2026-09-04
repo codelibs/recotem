@@ -31,6 +31,14 @@ from recotem._ipython_stub import install as _install_ipython_stub
 
 _install_ipython_stub()
 
+# LightFM (optional, via the `bprfm` extra) warns at import time when its
+# extension was built without OpenMP, and irspack imports lightfm from
+# recommenders/bpr.py.  Installed here as well as in `recotem._idmap` so the
+# filter is in place no matter which module reaches irspack first.
+from recotem._lightfm_compat import install as _install_lightfm_filter  # noqa: E402
+
+_install_lightfm_filter()
+
 # IDMappedRecommender is now defined in recotem._idmap (neutral location).
 # Import it here for internal training-package callers that use this path.
 from recotem._idmap import IDMappedRecommender  # noqa: E402, F401

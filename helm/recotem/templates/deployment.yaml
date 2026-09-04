@@ -103,21 +103,31 @@ spec:
                    - else derive from ingress.hosts[*].host when ingress is enabled,
                      so TrustedHostMiddleware does not 400 every external request,
                    - else omit and let the app default ("127.0.0.1,localhost") apply. */}}
-            {{- $allowed := index .Values.env "RECOTEM_ALLOWED_HOSTS" }}
-            {{- if not $allowed }}
-            {{- if and .Values.ingress.enabled .Values.ingress.hosts }}
             {{- $hosts := list }}
+            {{- $allowed := index .Values.env "RECOTEM_ALLOWED_HOSTS" }}
+            {{- if $allowed }}
+            {{- range splitList "," $allowed }}
+            {{- $trimmed := trim . }}
+            {{- if $trimmed }}{{ $hosts = append $hosts $trimmed }}{{ end }}
+            {{- end }}
+            {{- else if and .Values.ingress.enabled .Values.ingress.hosts }}
             {{- range .Values.ingress.hosts }}
             {{- if .host }}{{ $hosts = append $hosts .host }}{{ end }}
             {{- end }}
-            {{- /* localhost is always prepended so that kubelet probe requests
-                   (which hard-code "Host: localhost") are accepted by
-                   TrustedHostMiddleware even when ingress hostnames are set.
-                   Without it every readiness/liveness probe returns 400 and
-                   pods cycle unready indefinitely. */}}
-            {{- $hosts = prepend $hosts "localhost" }}
-            {{- $allowed = join "," $hosts }}
             {{- end }}
+            {{- /* localhost is prepended to every non-empty list -- the
+                   operator override as much as the ingress-derived one.  The
+                   three probes hard-code "Host: localhost", so a list without
+                   it makes TrustedHostMiddleware 400 every readiness and
+                   liveness request and the Deployment never becomes ready.
+                   An operator setting RECOTEM_ALLOWED_HOSTS is naming the
+                   hostnames clients use; they cannot be expected to also
+                   know the kubelet's. */}}
+            {{- if $hosts }}
+            {{- if not (has "localhost" $hosts) }}
+            {{- $hosts = prepend $hosts "localhost" }}
+            {{- end }}
+            {{- $allowed = join "," $hosts }}
             {{- end }}
             {{- if $allowed }}
             - name: RECOTEM_ALLOWED_HOSTS

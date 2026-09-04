@@ -341,6 +341,79 @@ exit 8.
   move an exit code, but `validate`'s exit codes **do** change in 2.1.0 — see
   the schema-column entry above.
 
+- **`recotem validate` now rejects an algorithm name that does not resolve.**
+  A recipe naming a nonexistent algorithm passed `validate` at exit 0 and then
+  failed `train` at exit 4 with `code=unknown_algorithm` — after the whole
+  dataset had been fetched, cleansed and split. `validate` now resolves
+  `training.algorithms` against the same table `train` uses and exits 4 with
+  the same message. Alias resolution is unchanged and still case-insensitive,
+  so `toppop`, `TopPOP`, `ials` and `TopPopRecommender` all keep passing; what
+  changes is that a typo, or a plausible-looking name Recotem does not ship
+  (`SLIM`, `ALS`, `ItemKNN`), is now caught before any I/O. **A `validate`-only
+  CI gate can go red on an upgrade** where it was previously green and the
+  scheduled `train` was already failing.
+
+- **`BPRFM` is no longer offered as a choice.** It is gated behind `lightfm`,
+  which has no Python 3.12 release, so irspack never exports it and no recipe
+  could ever have trained with it. It is gone from the suggestion list the
+  unknown-algorithm error prints, and naming it explicitly is refused with the
+  same exit 4 as any other unavailable algorithm rather than failing mid-train.
+
+- **`training.parallelism` and the Optuna budget see a de-duplicated algorithm
+  list.** Because alias resolution is case-insensitive, `algorithms: [toppop,
+  TopPOP]` was writable — and the suggestion list printed by the
+  unknown-algorithm error offered both `CosineKNN` and `CosinekNN`, so it could
+  be arrived at by copying. `_compute_budgets` divided by `len(class_names)`
+  while keying a dict by class name, so the duplicate silently consumed a share
+  of the budget that no trial then used. Measured on one dataset with
+  `parallelism: 1` and `n_trials: 10`: `[TopPop]` completed 10 trials,
+  `[toppop, TopPOP]` completed **5**. Duplicates are now collapsed before
+  budgeting, with a `duplicate_algorithms_collapsed` warning. **The number of
+  completed trials, `tuning.tried_algorithms` in the artifact header, and hence
+  the selected model can all differ from 2.1.0-dev for a recipe that had
+  duplicates** — in the direction of getting the trials you asked for.
+
+- **The GHCR image is now gated on the test suite.** `docker.yml` gained a
+  `test` job (ruff plus `pytest tests/unit tests/integration tests/fuzz` on
+  3.12, the version the image is built from) and `build` — the only job that
+  pushes — now needs it alongside `smoke` and `trivy`. Previously nothing
+  connected the container push to `test.yml`: on the registry today `latest`,
+  `main` and `sha-afa9bec` all resolve to one digest, so **an untested `main`
+  tip moving `:latest` was observed behaviour, not a hypothetical**. From
+  2.1.0, `ghcr.io/codelibs/recotem:latest` — which `compose.yaml` and
+  `docs/getting-started.md` both point users at — carries that guarantee.
+  Registry permissions were narrowed in the same change: `packages: write` now
+  sits on `build` alone rather than at workflow top level, where `smoke` and
+  `trivy` inherited a write scope neither used.
+
+- **Chart upgrade semantics change when `hpa.enabled: true`.** The Deployment
+  no longer renders `spec.replicas` in that case, so a `helm upgrade` stops
+  resetting the replica count the autoscaler had chosen. Under 2.0.0's chart,
+  an HPA that had scaled to 8 was knocked back to `replicaCount` on every
+  upgrade and had to climb again. If you were relying on an upgrade to reset
+  scale, use `kubectl scale` or a `minReplicas` change instead.
+
+- **The PodDisruptionBudget's selector is narrowed to the serve component.**
+  Both the PDB and the serve pod template gained
+  `app.kubernetes.io/component: serve`; the PDB previously selected on
+  name+instance alone and so also counted train CronJob pods as healthy
+  members of the budget. With `pdb.enabled: true` and one serve replica, a
+  running train pod raised allowed disruptions from 0 to 1 and a node drain
+  could evict the only pod serving traffic. **On the first `helm upgrade` the
+  budget selects nothing until the rollout has replaced every serve pod with
+  one carrying the new label** — a window in which serve is unprotected but no
+  request is dropped. Overriding an `app.kubernetes.io/` label via `podLabels`
+  produces a duplicate key that Kubernetes resolves last-wins, which would
+  detach the PDB permanently; do not.
+
+- **`networkPolicy.extraEgress` is a new values key and now takes effect.** It
+  was documented but discarded during rendering. The default policy still
+  allows only 53/UDP, 53/TCP, 443/TCP and 8080/TCP, and still selects train
+  CronJob pods, so a `source.type: sql` or plain-`http://` source inside the
+  cluster still times out silently on a default install — that part is
+  deliberate, and `values.yaml` and `docs/deployment/k8s.md` say so. What
+  changed is that the documented escape hatch works.
+
 ### Fixed
 
 - **The GA4 BigQuery example scanned the entire export on every run, and
@@ -414,6 +487,18 @@ exit 8.
   values.yaml that omits it (a vacuous check being worse than a missing one),
   and its success message names the four files it actually checked instead of
   overclaiming.
+
+- **A recipe-load failure could spend its whole 200-character budget on the
+  recipe path and report no reason.** The string was composed as `recipe load
+  failed: Recipe '<absolute path>' failed validation: - <field>: <message>`,
+  naming the recipe twice — once as a basename, once as a full path — before
+  reaching the part an operator needs. On a deep directory with a 64-character
+  recipe name (the schema maximum) the message reached 284 characters and the
+  cut landed inside the path, so `/v1/health/details` showed which file failed
+  and nothing about why. The reason is now composed to fit: the same case
+  surfaces at **183 characters, untruncated**, with the offending field and its
+  validation message intact. The irspack version-skew message keeps both
+  version numbers and its verdict inside the budget under the same conditions.
 
 - **An artifact was never bound to the recipe serving it.** Every artifact
   header records the `recipe_name` it was trained for, but nothing on the serve
@@ -966,6 +1051,19 @@ exit 8.
   guard stays errno-scoped, so ENOSPC and friends still propagate. Also, the
   contention message raised under `--fail-on-busy` no longer recommends passing
   `--fail-on-busy`, which the reader has by definition already done.
+
+### Security
+
+- **A load failure could put an object-store URI, path segments included, into
+  an API response.** `_sanitize_error` was called from exactly one place — the
+  startup load path — so `/v1/health/details` was only redacted until the first
+  watcher rescan. Every other writer (the watcher's `set_load_error`, the
+  recipes-directory scan failure, and both YAML-parse stub paths) stored the
+  raw exception string. A metadata fetch refused by the SSRF guard surfaced its
+  URI verbatim: measured on one recipe and one endpoint, `/v1/health/details`
+  reported a sanitized 200-character error at T0 and a raw **327-character**
+  one at T+40s. Redaction and the length bound now sit on the write barrier, so
+  every path that can set `last_load_error` gets both.
 
 ### Migrating to irspack 0.5.0
 

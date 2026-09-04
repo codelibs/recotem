@@ -16,7 +16,9 @@ Covered:
 - `.dev`, `a`/`b`/`rc`, a tag with no leading `v`, and a malformed tag are all
   refused before any version is read;
 - the chart's `version:` and `appVersion:` are checked, and a chart missing
-  either key is refused rather than skipped.
+  either key is refused rather than skipped;
+- `values.yaml`'s `image.tag` is checked, because that -- not `appVersion` --
+  is the image a chart install actually pulls.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ def _make_tree(
     version_py: str | None = "2.1.0",
     chart_version: str | None = "2.1.0",
     chart_app_version: str | None = "2.1.0",
+    values_image_tag: str | None = "2.1.0",
 ) -> Path:
     """Build a minimal tree the script can read, and return its script path.
 
@@ -74,6 +77,15 @@ def _make_tree(
     if chart_app_version is not None:
         chart += f'appVersion: "{chart_app_version}"\n'
     (root / "helm" / "recotem" / "Chart.yaml").write_text(chart, encoding="utf-8")
+
+    # A decoy `tag:` under a different top-level key guards the extractor
+    # against matching the name anywhere in the file.
+    values = 'nameOverride: ""\ntrain:\n  image:\n    tag: "decoy"\nimage:\n'
+    values += "  repository: ghcr.io/codelibs/recotem\n"
+    if values_image_tag is not None:
+        values += f'  tag: "{values_image_tag}"\n'
+    values += "  pullPolicy: IfNotPresent\n"
+    (root / "helm" / "recotem" / "values.yaml").write_text(values, encoding="utf-8")
 
     return script
 
@@ -117,6 +129,10 @@ def test_clean_full_bump_passes(tmp_path: Path) -> None:
         (
             {"chart_app_version": "2.0.0"},
             "helm/recotem/Chart.yaml appVersion: (2.0.0)",
+        ),
+        (
+            {"values_image_tag": "2.0.0"},
+            "helm/recotem/values.yaml image.tag: (2.0.0)",
         ),
     ],
 )
@@ -285,3 +301,90 @@ def test_real_chart_declares_both_keys(tmp_path: Path) -> None:
     lines = chart.splitlines()
     assert any(line.startswith("version: ") for line in lines)
     assert any(line.startswith("appVersion: ") for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# values.yaml image.tag
+#
+# `recotem.image` renders `.Values.image.tag | default .Chart.AppVersion`, so
+# appVersion is a fallback that never fires while values.yaml pins a tag.
+# Checking appVersion alone let a release tagged vX.Y.Z ship a chart whose
+# manifests pull the previous image, with the script reporting OK.
+# ---------------------------------------------------------------------------
+
+
+def test_stale_values_image_tag_is_refused(tmp_path: Path) -> None:
+    """The regression: everything else bumped, values.yaml left behind."""
+    script = _make_tree(tmp_path, values_image_tag="2.0.0")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "helm/recotem/values.yaml image.tag: (2.0.0)" in proc.stdout
+
+
+def test_values_without_image_tag_is_refused(tmp_path: Path) -> None:
+    """An absent image.tag would silently fall back to appVersion.
+
+    Refused rather than skipped: a vacuous check is worse than a missing one,
+    because the success message would then vouch for a pin nobody set.
+    """
+    script = _make_tree(tmp_path, values_image_tag=None)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1
+    assert "no 'image.tag' value" in proc.stdout
+
+
+def test_missing_values_file_is_refused(tmp_path: Path) -> None:
+    script = _make_tree(tmp_path)
+    (tmp_path / "helm" / "recotem" / "values.yaml").unlink()
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1
+    assert "Cannot read helm/recotem/values.yaml" in proc.stdout
+
+
+def test_a_tag_under_another_key_is_not_mistaken_for_image_tag(
+    tmp_path: Path,
+) -> None:
+    """`train.image.tag` sits above `image:` in the fixture and must be ignored.
+
+    The extractor tracks which top-level block it is in; a plain search for
+    `tag:` would read the decoy and pass a stale release.
+    """
+    script = _make_tree(tmp_path)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "helm values.yaml image.tag   = 2.1.0" in proc.stdout
+
+
+def test_success_message_does_not_overclaim(tmp_path: Path) -> None:
+    """The script checks four files, not "every version declaration".
+
+    The release procedure bumps twelve pins across seven files; the rest are
+    covered only by step 3 of its verification block.  Claiming otherwise let
+    an operator reading this line believe step 3 was already done.
+    """
+    script = _make_tree(tmp_path)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "every version declaration" not in proc.stdout
+    assert "helm/recotem/values.yaml" in proc.stdout
+    assert "version-locations.md" in proc.stdout
+
+
+def test_real_values_declares_an_image_tag(tmp_path: Path) -> None:
+    """The shipped chart keeps the shape the extractor parses.
+
+    Asserts the key exists and is readable, not its value: the repository's
+    pins deliberately sit on the last *released* version during a dev cycle.
+    """
+    values = (REPO_ROOT / "helm" / "recotem" / "values.yaml").read_text(
+        encoding="utf-8"
+    )
+    in_image = False
+    found = None
+    for line in values.splitlines():
+        if line[:1] not in ("", " ", "#"):
+            in_image = line.rstrip() == "image:"
+        elif in_image and line.strip().startswith("tag:"):
+            found = line.split(":", 1)[1].strip().strip('"')
+            break
+    assert found, "helm/recotem/values.yaml must pin image.tag explicitly"

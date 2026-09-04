@@ -10,10 +10,24 @@
 # It enforces two things:
 #   1. The tag is a clean PEP 440 *final release* — vMAJOR.MINOR.PATCH with no
 #      .dev / a / b / rc / .post / +local suffix.
-#   2. The tag agrees with EVERY in-tree version declaration:
+#   2. The tag agrees with the version declarations that decide what a user
+#      actually receives:
 #        - pyproject.toml            [project] version
 #        - src/recotem/version.py    __version__
 #        - helm/recotem/Chart.yaml   version: and appVersion:
+#        - helm/recotem/values.yaml  image.tag
+#
+# values.yaml is here because it, not appVersion, is what the chart deploys:
+# `recotem.image` renders `.Values.image.tag | default .Chart.AppVersion`, and
+# values.yaml sets image.tag, so appVersion is only a fallback that never
+# fires.  Checking appVersion alone let a release tagged vX.Y.Z ship a chart
+# whose manifests pull the *previous* image, with this script reporting OK.
+#
+# It does NOT check the remaining pins the release procedure bumps (the
+# examples/k8s manifests and the docs excerpts).  Those are illustrative rather
+# than load-bearing; step 3 of the verification block in
+# .claude/skills/release-recotem/references/version-locations.md covers them,
+# and the success message below says so rather than claiming otherwise.
 #
 # Usage (CI):    bash .github/scripts/check-release-tag.sh          # reads GITHUB_REF
 # Usage (local): bash .github/scripts/check-release-tag.sh v2.1.0   # before tagging
@@ -24,6 +38,7 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYPROJECT="${REPO_ROOT}/pyproject.toml"
 VERSION_PY="${REPO_ROOT}/src/recotem/version.py"
 CHART="${REPO_ROOT}/helm/recotem/Chart.yaml"
+VALUES="${REPO_ROOT}/helm/recotem/values.yaml"
 
 fail() {
     echo "::error::$1"
@@ -113,10 +128,10 @@ else:
 PYEOF
 )"
 
-# The Helm chart's two version keys are deployment pins rather than package
+# The Helm chart's version keys are deployment pins rather than package
 # metadata, but they must track the release for the same reason the wheel must:
 # the chart published for X.Y.Z deploys `ghcr.io/codelibs/recotem:X.Y.Z`, and
-# the release procedure lists both keys among the things a release bumps.
+# the release procedure lists them among the things a release bumps.
 # Checking them here is what makes that fail closed.  Left behind, the chart
 # ships a release whose manifests pull the *previous* image; bumped early during
 # a dev cycle, it pins a tag that was never built — and neither is visible from
@@ -142,13 +157,35 @@ CHART_APP_VERSION="$(chart_key appVersion)"
          "one cannot be checked, so this is refused rather than skipped."
 [ -n "${CHART_APP_VERSION}" ] || \
     fail "helm/recotem/Chart.yaml has no top-level 'appVersion:' key." \
-         "appVersion is the image tag the chart deploys by default and must equal the" \
-         "release tag; a chart that does not declare one cannot be checked."
+         "appVersion is the fallback image tag for a chart whose values.yaml leaves" \
+         "image.tag empty, and must equal the release tag; a chart that does not" \
+         "declare one cannot be checked."
+
+# image.tag is the value that actually reaches a cluster.  Read the same way as
+# the chart keys and for the same reason -- no YAML library on the runner -- but
+# it is nested, so track which top-level block we are inside rather than
+# matching `tag:` anywhere in the file.
+[ -f "${VALUES}" ] || fail "Cannot read helm/recotem/values.yaml." \
+     "image.tag in that file is the image every chart install pulls; it is part of" \
+     "the release and must match the tag."
+
+VALUES_IMAGE_TAG="$(
+    awk '
+        /^[^[:space:]#]/ { in_image = ($0 ~ /^image:[[:space:]]*$/) }
+        in_image && $1 == "tag:" { value = $2; gsub(/"/, "", value); print value; exit }
+    ' "${VALUES}"
+)"
+
+[ -n "${VALUES_IMAGE_TAG}" ] || \
+    fail "helm/recotem/values.yaml has no 'image.tag' value." \
+         "An empty image.tag falls back to Chart.yaml appVersion, which would make this" \
+         "check vacuous.  Set it explicitly so the deployed image is pinned and checked."
 
 echo "pyproject.toml       version = ${PYPROJECT_VERSION}"
 echo "src/recotem/version.py       = ${VERSION_PY_VERSION}"
 echo "helm Chart.yaml version      = ${CHART_VERSION}"
 echo "helm Chart.yaml appVersion   = ${CHART_APP_VERSION}"
+echo "helm values.yaml image.tag   = ${VALUES_IMAGE_TAG}"
 echo "expected (from tag)          = ${EXPECTED}"
 
 # Every declaration is compared before reporting, so one run names every file
@@ -168,21 +205,28 @@ add_mismatch() {
     add_mismatch "helm/recotem/Chart.yaml version: (${CHART_VERSION})"
 [ "${CHART_APP_VERSION}" = "${EXPECTED}" ] || \
     add_mismatch "helm/recotem/Chart.yaml appVersion: (${CHART_APP_VERSION})"
+[ "${VALUES_IMAGE_TAG}" = "${EXPECTED}" ] || \
+    add_mismatch "helm/recotem/values.yaml image.tag: (${VALUES_IMAGE_TAG})"
 
 if [ -n "${MISMATCH}" ]; then
     fail "Tag '${TAG}' does not match the project version: ${MISMATCH}." \
-         "The tag, pyproject.toml, src/recotem/version.py and helm/recotem/Chart.yaml" \
-         "must all agree.  A mismatch in the first two uploads a wheel carrying a" \
-         "version nobody tagged; a mismatch in the chart ships a release whose" \
-         "manifests deploy some other image tag." \
+         "The tag, pyproject.toml, src/recotem/version.py, helm/recotem/Chart.yaml" \
+         "and helm/recotem/values.yaml must all agree.  A mismatch in the first two" \
+         "uploads a wheel carrying a version nobody tagged; a mismatch in values.yaml" \
+         "ships a chart whose manifests deploy some other image tag." \
          "" \
          "To fix:" \
          "  1. delete the bad tag:  git tag -d ${TAG} && git push origin :refs/tags/${TAG}" \
          "  2. set version = \"${EXPECTED}\" in pyproject.toml," \
-         "     __version__ = \"${EXPECTED}\" in src/recotem/version.py, and" \
+         "     __version__ = \"${EXPECTED}\" in src/recotem/version.py," \
          "     version: ${EXPECTED} / appVersion: \"${EXPECTED}\" in" \
-         "     helm/recotem/Chart.yaml (or pick another number)" \
+         "     helm/recotem/Chart.yaml, and tag: \"${EXPECTED}\" under image: in" \
+         "     helm/recotem/values.yaml (or pick another number)" \
          "  3. commit, merge, and re-tag the merge commit"
 fi
 
-echo "OK: ${TAG} is a final release and matches every version declaration."
+echo "OK: ${TAG} is a final release and matches pyproject.toml,"
+echo "    src/recotem/version.py, helm/recotem/Chart.yaml and helm/recotem/values.yaml."
+echo "    The remaining release pins (examples/k8s manifests, docs excerpts) are not"
+echo "    machine-checked here — run step 3 of the verification block in"
+echo "    .claude/skills/release-recotem/references/version-locations.md."

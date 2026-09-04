@@ -219,6 +219,11 @@ Commit, push, and open the PR with `gh pr create --base main`.
    git status --porcelain                                  # MUST be empty
    bash .github/scripts/check-release-tag.sh vX.Y.Z        # MUST print "OK: ..."
    uv lock --check                                         # MUST exit 0
+
+   # The script covers pyproject, version.py, Chart.yaml and values.yaml.
+   # The remaining deployment pins are covered by nothing else, and Phase 2
+   # may be days and several dependabot merges behind this point, so re-run
+   # step 3 of the verification block in references/version-locations.md here.
    ```
    (Brace the variable: `"$SHA:src/..."` triggers zsh's `:s` history modifier
    and mangles the path; `"${SHA}:src/..."` is safe in both bash and zsh.)

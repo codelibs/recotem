@@ -47,11 +47,17 @@ catches a stale lockfile at the tag.
 These pin a *published* Docker image, so they only ever move to a real released
 version. During Phase 5 (dev bump) leave them on the last released tag.
 
-Only the first row is machine-checked: `check-release-tag.sh` reads
-`Chart.yaml`'s `version:` and `appVersion:` and refuses a tag they disagree
-with, so a chart left behind — or bumped early, to an image tag that was never
-built — cannot reach the tag. The rest of the table is verified by step 3 of the
-block below and by nothing else, which is why that step must be run.
+Only the first two rows are machine-checked: `check-release-tag.sh` reads
+`Chart.yaml`'s `version:` and `appVersion:` **and `values.yaml`'s `image.tag`**,
+and refuses a tag any of them disagree with, so a chart left behind — or bumped
+early, to an image tag that was never built — cannot reach the tag. `image.tag`
+is the row that decides what a cluster actually pulls (`recotem.image` renders
+`.Values.image.tag | default .Chart.AppVersion`, and values.yaml always sets
+it, so `appVersion` is a fallback that never fires); it was added to the guard
+after a tagged release was shown to pass with it left on the previous version.
+The rest of the table is verified by step 3 of the block below and by nothing
+else, which is why that step must be run — and why the script's success message
+now names the four files it checked instead of claiming to cover every pin.
 
 | File | What to change |
 |------|----------------|

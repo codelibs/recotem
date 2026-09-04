@@ -397,6 +397,23 @@ exit 8.
   release. The pattern now requires one non-delimiter character after `://`, so
   a scheme with no bucket or key behind it is left alone and real URIs are
   redacted exactly as before.
+- **The release guard claimed to check "every version declaration" while
+  missing the one that decides which image ships.** `check-release-tag.sh`
+  compared `Chart.yaml`'s `version:` and `appVersion:` but not
+  `values.yaml`'s `image.tag` — and `appVersion` is only a fallback:
+  `recotem.image` renders `.Values.image.tag | default .Chart.AppVersion`, and
+  values.yaml always pins a tag, so the key being checked never reaches a
+  cluster and the key that does was unchecked. Bumping everything except
+  values.yaml and running the guard printed `OK: v2.1.0 is a final release and
+  matches every version declaration.` with rc 0, while `helm template` rendered
+  `image: ghcr.io/codelibs/recotem:2.0.0`. Both `guard` jobs
+  (`publish.yml`, `docker.yml`) run only this script, and the release
+  procedure's final pre-tag gate does not run the pin sweep that would have
+  caught it, so a chart tagged for a new release could ship pulling the
+  previous image with nothing red. The guard now reads `image.tag`, refuses a
+  values.yaml that omits it (a vacuous check being worse than a missing one),
+  and its success message names the four files it actually checked instead of
+  overclaiming.
 
 - **An artifact was never bound to the recipe serving it.** Every artifact
   header records the `recipe_name` it was trained for, but nothing on the serve

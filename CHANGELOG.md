@@ -37,6 +37,17 @@ having chosen IALS explicitly. The winning algorithm is a search outcome, not a
 recipe setting — check each artifact with `recotem inspect` rather than reading
 it off the recipe.
 
+**If you are on the 2.0.0 *container image*, you are not running it.** The
+published `ghcr.io/codelibs/recotem:2.0.0` cannot start on either architecture:
+its console script carries the build stage's shebang, `#!/build/.venv/bin/python`,
+a path that does not exist in the final image, so the entrypoint fails with
+`exec /opt/venv/bin/recotem: no such file or directory`. Verified by digest on
+both `linux/amd64` and `linux/arm64`. The Dockerfile has since built the venv at
+its final path and the image published for this release starts normally —
+`docker.yml` now runs the entrypoint, imports the package, and trains a recipe
+on both architectures before anything is pushed. The chart, `examples/k8s/` and
+`docs/deployment/k8s.md` pin the image tag and move to this release with it.
+
 **What you will see.** `serve` starts normally — it does not crash. The IALS
 recipe is registered with `"loaded": false` and an error naming the recipe, both
 irspack versions, and the remedy. Requests to that recipe return `503`
@@ -460,6 +471,19 @@ exit 8.
   Python 3.12 release. The comments now list what can be constructed, and a
   test checks every shipped `# Choices:` line against
   `constructible_class_names()` so the two cannot drift again.
+
+- **`data_stats` records the size of the held-out set.**
+  `n_heldout_interactions` and `n_heldout_users` now appear in the artifact
+  header and in the `split_done` log line. The search metric is computed over
+  exactly those interactions, so the count is what decides whether the winning
+  algorithm was chosen on signal or on noise — and nothing reported it. On a
+  25-user tenant with 50 held-out interactions the search shipped a model whose
+  true recall@10 (0.0600) fell below a popularity baseline (0.0867), while the
+  algorithm it ranked last scored 0.3600; the run exited 0 and served 200s.
+  `docs/operations.md` gains **Choosing a model on a small dataset** with that
+  measurement, the held-out sizes of the shipped examples for scale, and the
+  baseline comparison that catches it. The number is reported rather than
+  thresholded: any cutoff that flagged that tenant also flags the tutorials.
 
 - **The PostgreSQL data source could not run a single query.** `fetch` opened
   the connection with `stream_results=True` and only then issued its two

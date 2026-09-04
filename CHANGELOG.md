@@ -472,6 +472,18 @@ exit 8.
   test checks every shipped `# Choices:` line against
   `constructible_class_names()` so the two cannot drift again.
 
+- **Four documentation statements contradicted the product.**
+  `docs/data-sources/sql.md` said `query_parameters` is subject to
+  `${RECOTEM_RECIPE_*}` expansion; both `query` and `query_parameters` are on
+  the loader's no-expand list, deliberately, because expansion into a SQL
+  string is an injection path — a `${...}` there reaches the database as those
+  literal characters. `docs/operations.md` filed both `--dev-allow-unsigned`
+  misuses under exit 2 while the code exits 8 and says in its own docstring
+  that it does, and scoped `RECOTEM_ENV` to `serve` although `train` gates the
+  same flag on it. `docs/deployment/docker.md` showed `start_period: 15s`
+  against the shipped `compose.yaml`'s `60s`. All four verified by running
+  them.
+
 - **The concurrent-body memory estimate under-counted by 2.2x.**
   `docs/operations.md` gave `peak ≈ idle + N × body × 1.1` and concluded that
   roughly 28 maximal requests fit in the chart's default `4Gi`. Its own first

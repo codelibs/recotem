@@ -372,7 +372,7 @@ Each model replica holds every loaded model in RAM. Plan accordingly.
 |--------|--------|
 | `RECOTEM_MAX_ARTIFACT_BYTES` | Hard cap per artifact file (default 2 GiB, clamped [1 MiB, 16 GiB]). Reduce this if you have many small models. |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | Cap on the deserialised payload per artifact (default 512 MiB, post-HMAC-verify). Must be ≤ `RECOTEM_MAX_ARTIFACT_BYTES`; if not, `recotem serve` fails at startup with `ConfigError` (exit 8). Reduces the memory spike from deserialization relative to the raw file size. |
-| `RECOTEM_MAX_BODY_BYTES` | Hard cap on each HTTP **request** body (default 128 MiB, clamped [1 MiB, 2 GiB]). A `413 PAYLOAD_TOO_LARGE` is returned before Starlette buffers/parses the body, so a single authenticated client cannot make the process allocate a multi-GB request. The default clears the largest single-verb request — `:recommend-related` tops out near 52 MiB with maximal cold-start feature mappings — with headroom. It deliberately does **not** clear the largest schema-valid *batch* body: once `user_features` / `item_features` are filled to their per-field caps, `:batch-recommend` tops out near 196 MiB and `:batch-recommend-related` near 13 GiB, the latter beyond even the 2 GiB clamp. Such bodies are refused with `413`; raise the cap if you genuinely send batches that large. Reduce it if your legitimate batch sizes are small and you want a tighter bound; the cap applies both to a declared `Content-Length` and to chunked bodies with no length header. |
+| `RECOTEM_MAX_BODY_BYTES` | Hard cap on each HTTP **request** body (default 128 MiB, clamped [1 MiB, 2 GiB]). A `413 PAYLOAD_TOO_LARGE` is returned before Starlette buffers/parses the body, so **no single request** can make the process allocate more than the cap. It bounds one request, not the process: nothing limits how many such requests are in flight at once, so one authenticated client sending them concurrently can still reach multiple GB — see [Concurrent request bodies are unbounded](#concurrent-request-bodies-are-unbounded) below. The default clears the largest single-verb request — `:recommend-related` tops out near 52 MiB with maximal cold-start feature mappings — with headroom. It deliberately does **not** clear the largest schema-valid *batch* body: once `user_features` / `item_features` are filled to their per-field caps, `:batch-recommend` tops out near 196 MiB and `:batch-recommend-related` near 13 GiB, the latter beyond even the 2 GiB clamp. Such bodies are refused with `413`; raise the cap if you genuinely send batches that large. Reduce it if your legitimate batch sizes are small and you want a tighter bound; the cap applies both to a declared `Content-Length` and to chunked bodies with no length header. |
 | Number of recipes | Each recipe loads one model. 10 recipes × 500 MiB = 5 GiB baseline. |
 | Number of replicas | Each replica is independent. 2 replicas = 2× memory. |
 | Item metadata | DataFrame in-memory per recipe. Size ≈ rows × columns × 8 bytes. |
@@ -469,6 +469,40 @@ dense Gram matrix independently. At `parallelism=4, dim=10k` that is roughly
 4 × 771 MB ≈ 3 GB of Gram matrices alone, on top of everything else the
 search holds in memory. Size training hosts (or set `parallelism` and
 `RECOTEM_MAX_FEATURE_DIM`) with this multiplication in mind.
+
+### Concurrent request bodies are unbounded
+
+`RECOTEM_MAX_BODY_BYTES` caps **one** request. There is no in-flight byte
+budget and no concurrency limit, so resident memory grows linearly with how
+many large bodies arrive together — and every one of them is accepted.
+
+Measured on a 1M-interaction model (250 MB idle) at the default 128 MiB cap:
+
+| concurrent requests | body each | RSS before → peak | per request | HTTP |
+|---|---|---|---|---|
+| 1 | 63.5 MiB | 250 → 462 MB | 213 MB (3.35× the body) | 200 |
+| 4 | 63.5 MiB | 620 → 866 MB | 61 MB | all 200 |
+| 8 | 63.5 MiB | 866 → 1,413 MB | 68 MB | all 200 |
+| 4 | 127 MiB | 1,413 → 1,928 MB | **129 MB** | all 200 |
+
+Nothing was refused and nothing queued. A workable estimate for a replica's
+peak is:
+
+```
+peak RSS ≈ idle + (concurrent large bodies) × (body size) × 1.1
+```
+
+Against the chart's default `limits.memory: 4Gi` and the default 128 MiB body
+cap, roughly **28 concurrent maximal requests** reach the limit. If your
+clients can send large batch bodies, either lower `RECOTEM_MAX_BODY_BYTES` to
+what your legitimate batches actually need, or bound concurrency in front of
+the pod (an ingress or sidecar limit), or raise the memory limit to match.
+
+The allocation is arena reuse rather than a leak — repeating one 63.5 MiB body
+settles at a 620 MB high-water mark, and ordinary traffic afterwards returns
+memory to the OS (1,928 MB fell to 1,039 MB over 33k small requests, flat from
+40 s onward). But it does not return to the 250 MB idle figure, so **size
+container limits on the high-water mark, not the steady state**.
 
 ### Payload and serve-side RSS grow with catalog size, not just dimension
 

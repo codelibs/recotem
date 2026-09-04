@@ -37,6 +37,11 @@ _log = structlog.get_logger(__name__)
 # ``verify-full``) is treated as TLS-configured.
 _PG_PLAINTEXT_SSLMODES: frozenset[str] = frozenset({"disable", "allow", "prefer"})
 
+# Bound on the ``__cause__`` walk in ``_dbapi_error``.  pandas -> SQLAlchemy ->
+# driver is two links; the bound only stops a pathological self-referential
+# chain from spinning.
+_MAX_CAUSE_DEPTH = 6
+
 
 def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
     """Emit a structured warning when the DSN does not configure TLS.
@@ -84,17 +89,45 @@ def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
             )
 
 
+def _dbapi_error(exc: BaseException) -> BaseException | None:
+    """Return the driver (DBAPI) exception under a wrapper, if there is one.
+
+    SQLAlchemy exposes it directly as ``orig``.  ``pandas.read_sql`` re-wraps
+    the SQLAlchemy error in ``pandas.errors.DatabaseError``, which carries no
+    ``orig`` of its own -- the one that does is a link further down the
+    ``__cause__`` chain.  Walking the chain is what lets the query path name
+    the driver class, not just the outermost wrapper.
+    """
+    cur: BaseException | None = exc
+    for _ in range(_MAX_CAUSE_DEPTH):
+        if cur is None:
+            break
+        orig = getattr(cur, "orig", None)
+        if orig is not None:
+            return orig
+        cur = cur.__cause__
+    return None
+
+
 def _error_label(exc: Exception) -> str:
     """Name *exc* and, when present, the DBAPI error underneath it.
 
-    Only class names are used.  Driver exception ``__str__`` can embed DSN
-    userinfo and hostnames; a class name cannot, so this stays safe to put in
-    an operator-visible message.
+    Only class names and the SQLSTATE are used.  Driver exception ``__str__``
+    can embed DSN userinfo and hostnames; a class name cannot, and SQLSTATE is
+    a fixed five-character code from the SQL standard (``42P01`` undefined
+    table, ``42501`` insufficient privilege, ...), so both stay safe to put in
+    an operator-visible message.  The code is length- and charset-checked
+    before use so a driver that puts something else in that attribute cannot
+    smuggle free text into the message.
     """
-    orig = getattr(exc, "orig", None)
+    orig = _dbapi_error(exc)
     if orig is None:
         return type(exc).__name__
-    return f"{type(exc).__name__} ({type(orig).__module__}.{type(orig).__name__})"
+    label = f"{type(exc).__name__} ({type(orig).__module__}.{type(orig).__name__})"
+    sqlstate = getattr(orig, "sqlstate", None)
+    if isinstance(sqlstate, str) and len(sqlstate) == 5 and sqlstate.isalnum():
+        label = f"{label} [SQLSTATE {sqlstate}]"
+    return label
 
 
 class SQLConfig(BaseModel):
@@ -435,7 +468,7 @@ class SQLSource:
             raise
         except Exception as exc:
             raise DataSourceError(
-                f"probe failed for dialect {self._dialect!r}: {type(exc).__name__}"
+                f"probe failed for dialect {self._dialect!r}: {_error_label(exc)}"
             ) from exc
         finally:
             if engine is not None:
@@ -501,7 +534,7 @@ class SQLSource:
             raise
         except Exception as exc:
             raise DataSourceError(
-                f"query failed on dialect {self._dialect!r}: {type(exc).__name__}"
+                f"query failed on dialect {self._dialect!r}: {_error_label(exc)}"
             ) from exc
         finally:
             if engine is not None:

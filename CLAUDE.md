@@ -135,7 +135,13 @@ See `docs/recipe-reference.md` for the full schema. Highlights:
 
 Binary container `magic | version | reserved | kid | hmac | header_json | payload`.
 
-- HMAC scope: `kid_bytes || header_json || payload`. Tampering anywhere fails verify.
+- HMAC scope: `kid_bytes || header_json || payload`. Tampering inside those
+  bytes fails verify. The 4-byte `header_len` field is **not** covered — it
+  only says where the header stops and the payload starts, and both halves
+  are authenticated as one run of bytes. Moving that boundary therefore
+  still passes `verify_hmac` (`recotem inspect` prints `HMAC: OK`) and is
+  caught one layer later by the header JSON parse or the deserializer,
+  reported as exit 5. It shifts a split point; it cannot inject a byte.
 - Header JSON carries `recipe_name`, `recipe_hash`, `best_class`, `best_params`,
   `best_score`, `metric`, `cutoff`, `tuning`, `data_stats`, `recotem_version`,
   `irspack_version`, `trained_at`. Inspectable without deserialisation via

@@ -814,3 +814,54 @@ def test_read_artifact_default_max_bytes_is_512_mib(tmp_path: Path) -> None:
         f"read_artifact passed cap {observed_caps[0]} to parse_header_from_bytes; "
         f"expected {DEFAULT_MAX_PAYLOAD_BYTES} (512 MiB)"
     )
+
+
+def test_header_len_is_outside_the_hmac_scope_and_caught_one_layer_later(
+    tmp_path: Path,
+) -> None:
+    """``header_len`` is unauthenticated; the split it moves is caught later.
+
+    The HMAC covers ``kid_bytes || header_json || payload``, and those two
+    halves are concatenated, so the digest does not depend on where the
+    boundary between them sits.  Moving ``header_len`` therefore passes
+    ``verify_hmac`` -- ``recotem inspect`` prints ``HMAC: OK`` -- and is caught
+    by the header JSON parse (or the deserializer) one layer later.
+
+    Pinned deliberately: the boundary can only be shifted, never used to inject
+    a byte, so closing it would cost an artifact-format version bump for no
+    reachable gain.  CLAUDE.md and docs/security.md describe it this way; this
+    test fails if the behaviour drifts from the description.
+    """
+    import struct
+
+    from recotem.artifact.format import parse_header_from_bytes
+    from tests.conftest import build_raw_artifact
+
+    kr = _make_keyring()
+    raw = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={
+            "recipe_name": "header_len_scope",
+            "trained_at": "2026-01-01T00:00:00Z",
+            "best_class": "TopPopRecommender",
+            "best_score": 0.42,
+        },
+    )
+    hdr = parse_header_from_bytes(raw, max_payload_bytes=10 * 1024 * 1024)
+    header_len_offset = hdr.payload_offset - len(hdr.header_data) - 4
+    assert struct.unpack_from("<I", raw, header_len_offset)[0] == len(hdr.header_data)
+
+    shrunk = bytearray(raw)
+    struct.pack_into("<I", shrunk, header_len_offset, 1)
+    path = tmp_path / "shrunk.recotem"
+    path.write_bytes(bytes(shrunk))
+
+    # HMAC still verifies: read_artifact returns rather than raising.
+    header, payload = read_artifact(str(path), kr)
+    assert header.header_data == b"{"
+    assert len(payload) == len(raw) - hdr.payload_offset + len(hdr.header_data) - 1
+
+    # The corruption surfaces at the next layer, not at verify.
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(header.header_data)

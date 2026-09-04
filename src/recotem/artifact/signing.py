@@ -180,7 +180,14 @@ _ALLOWED_CLASSES: frozenset[tuple[str, str]] = frozenset(
 _ALLOWED_MODULE_PREFIXES: tuple[str, ...] = (
     "numpy._core.",
     "numpy.core.",
-    "numpy.dtypes.",
+    # NOTE: "numpy.dtypes." is deliberately absent.  A trailing dot only
+    # matches sub-modules, and ``numpy.dtypes`` has none, so the entry that
+    # used to sit here matched nothing.  numpy does not reference
+    # ``numpy.dtypes.*`` FQCNs from its own pickles either -- arrays and
+    # dtypes round-trip through ``numpy.dtype`` plus ``_frombuffer`` -- so
+    # nothing needs it today.  If a future numpy does emit them, add the
+    # individual classes to _ALLOWED_CLASSES rather than widening the prefix
+    # list to the whole module (which also carries two non-class callables).
     "scipy.sparse._csr.",
     "scipy.sparse._csc.",
     "scipy.sparse._coo.",

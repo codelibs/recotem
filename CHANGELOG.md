@@ -416,6 +416,32 @@ exit 8.
 
 ### Fixed
 
+- **Following the `RECOTEM_ALLOWED_HOSTS` guidance in `docs/deployment/k8s.md`
+  put serve into CrashLoopBackOff.** All three probes send `Host: localhost`,
+  and `TrustedHostMiddleware` 400s anything not on the list. The chart's
+  ingress-derived branch knew this and prepended `localhost`; the explicit
+  `env.RECOTEM_ALLOWED_HOSTS` override branch rendered the operator's value
+  verbatim — and the override is the branch the document tells operators to
+  use, with an example that lists only external hostnames. Every readiness and
+  liveness check then failed with nothing in the application log but ordinary
+  rejected requests. `localhost` is now prepended to whichever list the chart
+  renders, deduplicated, and the document says who owns it when you write the
+  env var outside the chart.
+
+- **`kubectl apply -f examples/k8s/` never reached 2/2 on a ReadWriteOnce
+  volume.** `serve-deployment.yaml` shipped `replicas: 2` with a
+  `kubernetes.io/hostname` spread at `whenUnsatisfiable: DoNotSchedule`, while
+  `examples/k8s/README.md` offered `ReadWriteOnce` for a single-node cluster.
+  RWO binds every mounting pod to one node and the hard spread demands two, so
+  the second replica stayed Pending indefinitely. The constraint is now
+  `ScheduleAnyway`, and both the README and the manifest say what that costs
+  (two replicas, no node-failure tolerance) and how to harden it with RWM.
+
+- **Every shipped pod spec was refused by the `restricted` Pod Security
+  Standard.** Neither the chart nor `examples/k8s/` set `seccompProfile`,
+  which that profile requires — although both were otherwise
+  restricted-clean. All five pod specs now set `RuntimeDefault`.
+
 - **The regression guard for the GA4 pruning fix was blind to half of it.**
   `tests/unit/test_example_bigquery_recipes.py` attributed `--` line comments
   to their enclosing paren block, and the same change that added the guard

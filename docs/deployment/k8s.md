@@ -251,10 +251,14 @@ spec:
       # Default RECOTEM_DRAIN_SECONDS=30, so 35 is the minimum recommended value.
       terminationGracePeriodSeconds: 35
       # Spread replicas across nodes for availability.
+      # ScheduleAnyway, not DoNotSchedule: a hard hostname spread and a
+      # ReadWriteOnce artifacts PVC are mutually exclusive and would leave the
+      # second replica Pending forever.  Use ReadWriteMany and DoNotSchedule
+      # when you need the spread to be a guarantee.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: DoNotSchedule
+          whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: recotem
@@ -266,6 +270,9 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        # Required by the Pod Security Standards "restricted" profile.
+        seccompProfile:
+          type: RuntimeDefault
         # fsGroup ensures mounted PVC files are owned by GID 1000 (appuser),
         # matching the Dockerfile USER.  Without this, PVC data may be
         # inaccessible when the volume's on-disk owner differs from runAsUser.
@@ -474,14 +481,19 @@ Expose externally via an Ingress or a LoadBalancer. Do not expose the pod port d
 >
 > The bundled Helm chart (`helm/recotem/templates/deployment.yaml`)
 > auto-derives `RECOTEM_ALLOWED_HOSTS` from `ingress.hosts[*].host` when
-> `ingress.enabled=true`. If you bypass the chart, expose the service
-> under additional hostnames (internal Service DNS, custom LoadBalancer),
-> or run `helm template` and inject the env yourself, set the env var
-> explicitly:
+> `ingress.enabled=true`, and prepends `localhost` to whatever list it
+> renders — including an explicit `env.RECOTEM_ALLOWED_HOSTS` override.
+>
+> **If you write the env var yourself, outside the chart, `localhost` is
+> yours to include.** The three probes send `Host: localhost`, so a list
+> without it makes every readiness and liveness check return 400 and the
+> Deployment never becomes ready — it CrashLoops with no clue in the
+> application log, because a 400 from `TrustedHostMiddleware` looks like a
+> normal rejected request:
 >
 > ```yaml
 > - name: RECOTEM_ALLOWED_HOSTS
->   value: "api.example.com,api-internal.svc.cluster.local"
+>   value: "localhost,api.example.com,api-internal.svc.cluster.local"
 > ```
 
 ## Recipe delivery patterns

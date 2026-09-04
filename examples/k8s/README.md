@@ -32,8 +32,17 @@ uses, so the workloads never race ahead of it.
 - A namespace called `recotem` (or edit `metadata.namespace` in each file).
 - A `PersistentVolumeClaim` named `recotem-artifacts` accessible from both
   the train and serve pods. With `ReadWriteMany` access mode if they will
-  run on different nodes; otherwise `ReadWriteOnce` works as long as both
-  schedule on the same node.
+  run on different nodes; otherwise `ReadWriteOnce` works as long as every
+  pod that mounts it schedules on the same node.
+
+  `serve-deployment.yaml` ships `replicas: 2` with a
+  `kubernetes.io/hostname` spread constraint. That constraint is
+  `ScheduleAnyway` precisely so the two can share a node under
+  `ReadWriteOnce` — a hard `DoNotSchedule` spread and an RWO volume are
+  mutually exclusive, and the pair leaves the second replica Pending
+  indefinitely. **`ReadWriteOnce` therefore gives you two replicas but not
+  node-failure tolerance.** For real availability use `ReadWriteMany` and
+  change the constraint to `DoNotSchedule`.
 - A `ConfigMap` named `recotem-recipes` supplying recipe YAML files at
   `/recipes/`. Both `serve-deployment.yaml` and `cronjob.yaml` mount this
   ConfigMap, so it must exist before applying the manifests. Create it with:

@@ -47,6 +47,9 @@ spec:
             runAsNonRoot: true
             runAsUser: 1000
             runAsGroup: 1000
+            # Required by the Pod Security Standards "restricted" profile.
+            seccompProfile:
+              type: RuntimeDefault
             # fsGroup ensures mounted PVC files are owned by GID 1000 (appuser),
             # matching the Dockerfile USER.  Without this, PVC data may be
             # inaccessible when the volume's on-disk owner differs from runAsUser.

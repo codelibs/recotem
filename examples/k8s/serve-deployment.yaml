@@ -42,10 +42,21 @@ spec:
       # Default RECOTEM_DRAIN_SECONDS=30, so 35 is the minimum recommended value.
       terminationGracePeriodSeconds: 35
       # Spread replicas across nodes for availability.
+      #
+      # whenUnsatisfiable is ScheduleAnyway, not DoNotSchedule, because these
+      # manifests must apply cleanly on a ReadWriteOnce artifacts PVC -- the
+      # access mode the README offers for a single-node cluster.  RWO binds
+      # every mounting pod to one node, and a hard hostname spread demands
+      # they sit on different ones; the two together leave the second replica
+      # Pending forever with the Deployment stuck at 1/2 and no error beyond
+      # an unschedulable event.
+      #
+      # With a ReadWriteMany PVC, change this to DoNotSchedule to make the
+      # spread a guarantee rather than a preference.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: DoNotSchedule
+          whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: recotem
@@ -57,6 +68,9 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        # Required by the Pod Security Standards "restricted" profile.
+        seccompProfile:
+          type: RuntimeDefault
         # fsGroup ensures mounted PVC files are owned by GID 1000 (appuser),
         # matching the Dockerfile USER.  Without this, PVC data may be
         # inaccessible when the volume's on-disk owner differs from runAsUser.

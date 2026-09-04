@@ -552,3 +552,142 @@ def test_deployment_doc_excerpts_match_their_manifests() -> None:
         actual = _load_all_strict((K8S_EXAMPLES / name).read_text(encoding="utf-8"))
         assert len(actual) == 1, f"{name}: manifest must hold exactly one document"
         _assert_subset(docs[0], actual[0], f"k8s.md::{name}")
+
+
+# ---------------------------------------------------------------------------
+# Probes, Pod Security Standards, and the RWO / spread interaction
+# ---------------------------------------------------------------------------
+
+
+def _pod_specs_in(docs: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+    """Every pod spec in *docs*, labelled by the owning object's kind/name."""
+    out: list[tuple[str, dict[str, Any]]] = []
+    for doc in docs:
+        kind = doc.get("kind")
+        name = doc.get("metadata", {}).get("name", "?")
+        if kind in {"Deployment", "Job"}:
+            out.append((f"{kind}/{name}", doc["spec"]["template"]["spec"]))
+        elif kind == "CronJob":
+            out.append(
+                (
+                    f"{kind}/{name}",
+                    doc["spec"]["jobTemplate"]["spec"]["template"]["spec"],
+                )
+            )
+    return out
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "set_args,label",
+    [
+        (("env.RECOTEM_ALLOWED_HOSTS=api.example.com",), "operator override"),
+        (
+            (
+                "env.RECOTEM_ALLOWED_HOSTS=api.example.com\\,api-internal.svc",
+                "ingress.enabled=true",
+                "ingress.hosts[0].host=api.example.com",
+            ),
+            "override alongside ingress",
+        ),
+        (
+            ("ingress.enabled=true", "ingress.hosts[0].host=api.example.com"),
+            "ingress-derived",
+        ),
+    ],
+)
+def test_allowed_hosts_always_admits_the_probe_host(
+    set_args: tuple[str, ...], label: str
+) -> None:
+    """Whenever the chart renders the var at all, `localhost` is in it.
+
+    The three probes hard-code `Host: localhost`. A list without it makes
+    `TrustedHostMiddleware` return 400 for every readiness and liveness
+    request, and the Deployment never becomes ready — while the application
+    log shows only ordinary rejected requests.
+
+    The ingress-derived branch always prepended `localhost`; the operator
+    override branch did not, and `docs/deployment/k8s.md` tells operators to
+    use exactly that branch.
+    """
+    docs = _load_all_strict(_helm_template(*set_args))
+    values = [
+        env["value"]
+        for _, spec in _pod_specs_in(docs)
+        for container in spec.get("containers", [])
+        for env in container.get("env", [])
+        if env.get("name") == "RECOTEM_ALLOWED_HOSTS"
+    ]
+    assert values, f"{label}: expected the chart to render RECOTEM_ALLOWED_HOSTS"
+    for value in values:
+        hosts = [h.strip() for h in value.split(",")]
+        assert "localhost" in hosts, (
+            f"{label}: rendered {value!r}, which excludes the probe host; "
+            "every probe would return 400"
+        )
+        assert hosts.count("localhost") == 1, (
+            f"{label}: duplicated localhost in {value!r}"
+        )
+
+
+@requires_helm
+def test_chart_pod_specs_satisfy_pod_security_standards_restricted() -> None:
+    """`seccompProfile` is the one restricted-profile field that was missing.
+
+    A namespace labelled `pod-security.kubernetes.io/enforce=restricted`
+    rejects a pod that does not set it, whatever else the pod gets right.
+    """
+    docs = _load_all_strict(_helm_template("train.enabled=true"))
+    specs = _pod_specs_in(docs)
+    assert specs, "expected the chart to render at least one pod spec"
+    for label, spec in specs:
+        profile = spec.get("securityContext", {}).get("seccompProfile", {})
+        assert profile.get("type") in {"RuntimeDefault", "Localhost"}, (
+            f"{label}: pod securityContext has no seccompProfile; the "
+            "restricted Pod Security Standard refuses it"
+        )
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    ["serve-deployment.yaml", "cronjob.yaml", "bootstrap-job.yaml"],
+)
+def test_example_pod_specs_satisfy_pod_security_standards_restricted(
+    manifest: str,
+) -> None:
+    docs = _load_all_strict((K8S_EXAMPLES / manifest).read_text())
+    specs = _pod_specs_in(docs)
+    assert specs, f"{manifest}: expected a pod spec"
+    for label, spec in specs:
+        profile = spec.get("securityContext", {}).get("seccompProfile", {})
+        assert profile.get("type") in {"RuntimeDefault", "Localhost"}, (
+            f"{manifest} {label}: no seccompProfile; the restricted Pod "
+            "Security Standard refuses it"
+        )
+
+
+def test_example_spread_constraint_does_not_deadlock_a_read_write_once_volume() -> None:
+    """A hard hostname spread and an RWO PVC cannot both be satisfied.
+
+    `examples/k8s/README.md` offers `ReadWriteOnce` for a single-node cluster.
+    RWO binds every mounting pod to one node; `whenUnsatisfiable:
+    DoNotSchedule` on `kubernetes.io/hostname` demands the opposite. Shipped
+    together they leave `replicas: 2` permanently at 1/2 ready.
+    """
+    docs = _load_all_strict((K8S_EXAMPLES / "serve-deployment.yaml").read_text())
+    deployments = [d for d in docs if d.get("kind") == "Deployment"]
+    assert len(deployments) == 1
+
+    spec = deployments[0]["spec"]["template"]["spec"]
+    mounts_a_claim = any(
+        "persistentVolumeClaim" in volume for volume in spec.get("volumes", [])
+    )
+    constraints = spec.get("topologySpreadConstraints", [])
+
+    if mounts_a_claim and deployments[0]["spec"].get("replicas", 1) > 1:
+        for constraint in constraints:
+            if constraint.get("topologyKey") == "kubernetes.io/hostname":
+                assert constraint.get("whenUnsatisfiable") == "ScheduleAnyway", (
+                    "a hard hostname spread on a Deployment that mounts a PVC "
+                    "strands the second replica whenever the volume is RWO"
+                )

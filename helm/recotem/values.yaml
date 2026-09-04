@@ -64,6 +64,11 @@ podSecurityContext:
   runAsUser: 1000
   runAsGroup: 1000
   fsGroup: 1000
+  # Required by the Pod Security Standards "restricted" profile.  Without it
+  # a namespace labelled pod-security.kubernetes.io/enforce=restricted refuses
+  # the pod outright -- every other field here is already restricted-clean.
+  seccompProfile:
+    type: RuntimeDefault
 
 # SecurityContext applied to every container in the pod.
 securityContext:

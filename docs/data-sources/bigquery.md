@@ -153,13 +153,20 @@ can extract just that ID for a tighter, slug-independent item space. Match on a
 delimiter so unrelated digits in the URL (e.g. the `2026` in a `/2026/04/12/`
 date path) are not picked up:
 
+`page_location` lives inside the `event_params` array, not as a top-level
+column, so wrap it the way the full query above does — the bare name does not
+resolve (`400 Unrecognized name: page_location`):
+
 ```sql
+-- page_url is shorthand for the subquery used in the full example above:
+--   (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location')
+
 -- .../articles/12345-some-title       -> "12345"  (numeric ID after a path segment)
-REGEXP_EXTRACT(page_location, r'/articles/(\d+)')
+REGEXP_EXTRACT(page_url, r'/articles/(\d+)')
 
 -- .../some-title-(A12B)/              -> "A12B"   (4-char alphanumeric ID in parentheses;
 --                                                  also matches full-width （ ）)
-REGEXP_EXTRACT(page_location, r'[（(]([0-9A-Z]{4})[）)]')
+REGEXP_EXTRACT(page_url, r'[（(]([0-9A-Z]{4})[）)]')
 ```
 
 Adapt the pattern to your own URL scheme. RE2 (BigQuery's engine) supports
@@ -243,6 +250,8 @@ curl -X POST http://localhost:8080/v1/recipes/{name}:recommend \
 | Extra not installed | 3 | `DataSourceError: google-cloud-bigquery is required for BigQuerySource` (or `db-dtypes ...`) |
 
 All BigQuery failures are wrapped in `DataSourceError` and produce exit 3 — including a missing `schema:` column, which is a data-source problem (the query did not produce what the recipe names), not a recipe-schema problem. The full BigQuery error message is included in the stderr JSON line.
+
+**A 403 does not always mean an IAM problem.** BigQuery does not disclose whether a resource exists to a caller who cannot see it, so a mistyped *dataset* or *project* name comes back as `403 Access Denied: Table <ref>: User does not have permission to query table ..., or perhaps it does not exist` rather than 404. Only a mistyped *table* within a dataset you can already read returns 404. Check the spelling of every part of the reference before reaching for IAM.
 
 **Query execution and result download are reported separately.** `client.query()` returns as soon as the job is submitted, so the query has not run yet at that point. Recotem waits for the job explicitly, which keeps the two failure domains apart:
 

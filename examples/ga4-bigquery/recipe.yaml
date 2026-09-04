@@ -48,11 +48,21 @@ source:
         FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL @lookback_days DAY))
         AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
       AND event_name = 'select_content'
-      -- Require at least @min_events interactions per user for signal quality.
+      -- Require at least @min_events interactions per user, counted over the
+      -- same window as the outer query.  The _TABLE_SUFFIX predicate below is
+      -- not optional: BigQuery prunes wildcard tables per statement, so a
+      -- single unpruned `events_*` reference anywhere in the statement drops
+      -- pruning for the whole query and the outer BETWEEN degrades to a plain
+      -- row filter.  Without it this recipe scans the entire export every run,
+      -- @lookback_days has no effect on bytes scanned, and the threshold counts
+      -- lifetime events instead of events in the window.
       AND user_pseudo_id IN (
         SELECT user_pseudo_id
         FROM   `analytics_123.events_*`
-        WHERE  event_name = 'select_content'
+        WHERE  _TABLE_SUFFIX BETWEEN
+                 FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL @lookback_days DAY))
+                 AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+          AND  event_name = 'select_content'
         GROUP  BY 1
         HAVING COUNT(*) >= @min_events
       )

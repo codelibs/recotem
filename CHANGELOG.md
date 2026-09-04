@@ -472,6 +472,36 @@ exit 8.
   test checks every shipped `# Choices:` line against
   `constructible_class_names()` so the two cannot drift again.
 
+- **The concurrent-body memory estimate under-counted by 2.2x.**
+  `docs/operations.md` gave `peak ≈ idle + N × body × 1.1` and concluded that
+  roughly 28 maximal requests fit in the chart's default `4Gi`. Its own first
+  table row already said 3.35x. The coefficient came from rows 2-4, each of
+  which starts from an `RSS before` the row above had already inflated, so
+  their apparent per-request cost is arena that was going to be reused anyway.
+  Re-measured with the server restarted before each run: 3.1-3.3x, matching
+  that first row — 207 MB per 63.5 MiB request, 418 MB per 127 MiB request. The
+  formula now uses 3.3 and the 4Gi figure is **8**, not 28. Under-estimating
+  this shows up in production as an OOMKill.
+
+- **`dim² × 8` is a floor for feature-aware memory, not an estimate.** The page
+  said it "closely tracks" the measured column; against peak-RSS increases of
+  287 MB / 960 MB / 3.5 GB at 5,000 / 10,000 / 20,000 dimensions it runs 10-43%
+  low, worst at the default cap.
+
+- **`training.parallelism` guidance was right about IALS and wrong about
+  everything else.** "Raising it is as likely to cost time as to save it" held
+  for IALS, which already saturates the box; the other learners have short
+  trials with room to spare. Median wall time at `parallelism: 1` vs `8` on the
+  same 100k-row fixture: `CosineKNN` 3.66 s → 1.99 s (1.84x), `RP3beta` 4.07 s
+  → 2.15 s (1.89x), `DenseSLIM` 1.42x, `TruncatedSVD` 1.31x, `TopPop`
+  unchanged. Peak RSS rises with it, so the gain is bought with memory. The
+  advice is now per-algorithm rather than blanket.
+
+- **The `RECOTEM_MAX_FEATURE_DIM` error still said the cost was cubic**, which
+  the same round's documentation correction had already replaced with the
+  measured `dim^2.4`. That message is what an operator reads at the moment they
+  decide whether to raise the cap. A test now ties the two together.
+
 - **`data_stats` records the size of the held-out set.**
   `n_heldout_interactions` and `n_heldout_users` now appear in the artifact
   header and in the `split_done` log line. The search metric is computed over

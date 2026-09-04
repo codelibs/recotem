@@ -440,11 +440,13 @@ dimension — measured at roughly `dim^2.4` on this project's fixtures (a
 doubling costs 5.1–5.8×, not the 8× a pure cubic would), because forming the
 Gram matrix and the memory traffic around it dilute the cubic decomposition —
 while **memory** grows **quadratically** —
-the Gram matrix is `dim² × 8` bytes at float64, which closely tracks the
-Memory column below (the formula gives 200 MB / 800 MB / 3.2 GB against the
-measured 200 MB / 771 MB / 3 GB — the Gram dominates but is not the only
-allocation). irspack never errors from either — it only
-degrades. Measured per trial:
+the Gram matrix is `dim² × 8` bytes at float64. Treat that as a **floor, not an
+estimate**: it gives 200 MB / 800 MB / 3.2 GB where the measured peak-RSS
+increase over the same run without features is **287 MB / 960 MB / 3.5 GB**,
+i.e. the formula runs 10-43% low and is furthest off at the default cap of
+5,000. The Gram matrix dominates but the encoder state, the feature matrix
+itself and the solver's working set are also live. irspack never errors from
+either — it only degrades. Measured per trial:
 
 | Encoded dimension | Time | Memory |
 |---|---|---|
@@ -485,18 +487,33 @@ Measured on a 1M-interaction model (250 MB idle) at the default 128 MiB cap:
 | 8 | 63.5 MiB | 866 → 1,413 MB | 68 MB | all 200 |
 | 4 | 127 MiB | 1,413 → 1,928 MB | **129 MB** | all 200 |
 
-Nothing was refused and nothing queued. A workable estimate for a replica's
-peak is:
+Nothing was refused and nothing queued.
+
+**Read the first row, not the later ones.** Rows 2-4 start from an `RSS before`
+that the row above already inflated (620, 866, 1,413 MB), so their apparent
+per-request cost is depressed by allocator arena that was going to be reused
+anyway. Only the first row starts from a clean server, and it is the one to
+size against: **213 MB for a 63.5 MiB body, 3.35× the body**. Re-measured on
+servers restarted before each run, four concurrent maximal bodies cost 3.1-3.3×
+each — 207 MB per 63.5 MiB request on a small model, 418 MB per 127 MiB request
+on a 1M-interaction model. A workable estimate for a replica's peak is
+therefore:
 
 ```
-peak RSS ≈ idle + (concurrent large bodies) × (body size) × 1.1
+peak RSS ≈ idle + (concurrent large bodies) × (body size) × 3.3
 ```
+
+The multiplier is not 1.1. An earlier revision of this page said it was, which
+under-estimated the peak by a factor of about 2.2 — a direction that shows up
+in production as an OOMKill rather than as a slow response.
 
 Against the chart's default `limits.memory: 4Gi` and the default 128 MiB body
-cap, roughly **28 concurrent maximal requests** reach the limit. If your
-clients can send large batch bodies, either lower `RECOTEM_MAX_BODY_BYTES` to
-what your legitimate batches actually need, or bound concurrency in front of
-the pod (an ingress or sidecar limit), or raise the memory limit to match.
+cap, roughly **8 concurrent maximal requests** reach the limit
+(`(4096 − 250) / (128 × 3.3) ≈ 9`, and less once the model itself is larger
+than the 250 MB idle assumed here). If your clients can send large batch
+bodies, either lower `RECOTEM_MAX_BODY_BYTES` to what your legitimate batches
+actually need, or bound concurrency in front of the pod (an ingress or sidecar
+limit), or raise the memory limit to match.
 
 The allocation is arena reuse rather than a leak — repeating one 63.5 MiB body
 settles at a 620 MB high-water mark, and ordinary traffic afterwards returns

@@ -654,7 +654,8 @@ def build_encoder_state(
             f"the whole feature table, so dimension scales with catalog "
             f"size, not interaction count. Raise min_frequency on "
             f"high-cardinality columns, drop a column, or raise the cap -- "
-            f"but note the per-trial Cholesky cost is cubic in this number."
+            f"but note the per-trial cost grows super-linearly in this number "
+            f"(measured at roughly dim^2.4) and the memory quadratically."
         )
 
     _logger.info(

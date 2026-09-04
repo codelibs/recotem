@@ -51,7 +51,12 @@ Seed-item → items.
 | `user_features` | object \| null | no | null | Raw feature values, keyed by the recipe's `features.user` column names. Adds a profile prior to the seed-history solve. See [Feature-aware cold start](#feature-aware-cold-start). ≤64 keys. |
 | `item_features` | object[string, object] \| null | no | null | Raw feature values for seed items absent from training, keyed by seed item id. ≤100 keys; each value ≤64 keys. See [Feature-aware cold start](#feature-aware-cold-start). |
 
-**Status codes:** 200, 400 (`FEATURES_NOT_SUPPORTED` | `FEATURE_VALUE_UNUSABLE`), 401, 404 (`UNKNOWN_SEED_ITEMS` | `NO_CANDIDATES` | `RECIPE_NOT_FOUND`), 413 (`PAYLOAD_TOO_LARGE`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
+**Status codes:** 200, 400 (`FEATURES_NOT_SUPPORTED` | `FEATURE_VALUE_UNUSABLE`), 401, 404 (`UNKNOWN_SEED_ITEMS` | `NO_CANDIDATES` | `RECIPE_NOT_FOUND`), 413 (`PAYLOAD_TOO_LARGE`), 422 (`VALIDATION_ERROR`), 501 (`RELATED_NOT_SUPPORTED`), 503 (`RECIPE_UNAVAILABLE`).
+
+`RELATED_NOT_SUPPORTED` means the recipe's trained algorithm cannot score
+a synthetic user at all, so this verb can never succeed for it. BPRFM is
+the one supported algorithm in that state; the remedy is to retrain the
+recipe with a different algorithm.
 
 `UNKNOWN_SEED_ITEMS` means none of the supplied `seed_items` were known
 to the model id-map (typically a client-side data issue).

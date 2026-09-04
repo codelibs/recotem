@@ -213,6 +213,21 @@ class _NoCandidates(Exception):
     survivors after its own filtering/score-thresholding."""
 
 
+class _RelatedUnsupported(Exception):
+    """The trained algorithm cannot score a synthetic (cold) user at all.
+
+    ``:recommend-related`` builds an interaction row out of ``seed_items`` and
+    asks the recommender to score it, which irspack routes through
+    ``get_score_cold_user``.  ``BaseRecommender`` raises ``NotImplementedError``
+    for any subclass that does not override it, and ``BPRFMRecommender`` --
+    trainable since the ``bprfm`` extra shipped -- is the one supported
+    algorithm that does not.  Left uncaught it surfaced as an unhandled 500
+    ``INTERNAL_ERROR`` on every ``:recommend-related`` call and every
+    ``:batch-recommend-related`` element, which reads as a server fault rather
+    than a property of the model the operator chose to train.
+    """
+
+
 def _resolve_recommend(
     entry: ModelEntry, name: str, verb: str, body: RecommendRequest
 ) -> list[tuple[str, float]]:
@@ -297,6 +312,18 @@ def _resolve_recommend(
             user_id_hash=hashlib.sha256(body.user_id.encode()).hexdigest()[:8],
         )
         raise
+
+
+def _related_unsupported_message(entry: ModelEntry) -> str:
+    """Human-readable reason a recipe cannot answer the `related` verbs."""
+    best_class = entry.header.get("best_class")
+    algo = best_class if isinstance(best_class, str) and best_class else "this model"
+    return (
+        f"{algo} cannot score a synthetic user built from seed_items, so this "
+        "recipe supports :recommend and :batch-recommend only. Retrain the "
+        "recipe with an algorithm that does (every supported algorithm except "
+        "BPRFM) if the related verbs are required."
+    )
 
 
 def _resolve_recommend_related(
@@ -398,6 +425,8 @@ def _resolve_recommend_related(
                     user_features=body.user_features,
                 )
             )
+        except NotImplementedError:
+            raise _RelatedUnsupported(_related_unsupported_message(entry)) from None
         except ColdStartNumericalError as exc:
             raise _ColdStartValueUnusable(str(exc)) from None
         except ValueError as exc:
@@ -423,6 +452,8 @@ def _resolve_recommend_related(
         raw_results = entry.recommender.get_recommendation_for_new_user(
             body.seed_items, body.limit
         )
+    except NotImplementedError:
+        raise _RelatedUnsupported(_related_unsupported_message(entry)) from None
     except KeyError:
         # Unexpected KeyError despite seed appearing known.
         logger.exception(
@@ -777,6 +808,22 @@ def make_router(
                                 f"cold-start scoring: {exc}"
                             ),
                             "code": "FEATURE_VALUE_UNUSABLE",
+                        },
+                    ) from None
+                except _RelatedUnsupported as exc:
+                    status_holder[0] = "related_not_supported"
+                    logger.warning(
+                        "related_verb_not_supported",
+                        recipe=name,
+                        verb=verb,
+                        best_class=entry.header.get("best_class"),
+                        request_id=request_id,
+                    )
+                    raise HTTPException(
+                        status_code=501,
+                        detail={
+                            "detail": str(exc),
+                            "code": "RELATED_NOT_SUPPORTED",
                         },
                     ) from None
                 except _NoCandidates:
@@ -1146,6 +1193,15 @@ def make_router(
                             )
                             _metrics.inc_batch_element_error(
                                 name, verb, "FEATURE_VALUE_UNUSABLE"
+                            )
+                        except _RelatedUnsupported as exc:
+                            results.append(
+                                _batch_error_entry(
+                                    idx, "RELATED_NOT_SUPPORTED", str(exc)
+                                )
+                            )
+                            _metrics.inc_batch_element_error(
+                                name, verb, "RELATED_NOT_SUPPORTED"
                             )
                         except _NoCandidates:
                             results.append(

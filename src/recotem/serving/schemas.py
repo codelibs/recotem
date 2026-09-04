@@ -53,6 +53,11 @@ ErrorCode = Literal[
     "FEATURES_NOT_SUPPORTED",
     "FEATURE_VALUE_UNUSABLE",
     "PAYLOAD_TOO_LARGE",
+    # The trained algorithm cannot score a synthetic user built from
+    # ``seed_items`` (irspack raises NotImplementedError from
+    # ``get_score_cold_user``), so the recipe can never answer the two
+    # ``related`` verbs.  BPRFM is the one supported algorithm in this state.
+    "RELATED_NOT_SUPPORTED",
 ]
 
 # ---------------------------------------------------------------------------

@@ -84,6 +84,19 @@ def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
             )
 
 
+def _error_label(exc: Exception) -> str:
+    """Name *exc* and, when present, the DBAPI error underneath it.
+
+    Only class names are used.  Driver exception ``__str__`` can embed DSN
+    userinfo and hostnames; a class name cannot, so this stays safe to put in
+    an operator-visible message.
+    """
+    orig = getattr(exc, "orig", None)
+    if orig is None:
+        return type(exc).__name__
+    return f"{type(exc).__name__} ({type(orig).__module__}.{type(orig).__name__})"
+
+
 class SQLConfig(BaseModel):
     type: Literal["sql"]
     dsn_env: str = Field(
@@ -459,9 +472,16 @@ class SQLSource:
             # True streaming (avoiding full materialisation) is therefore only
             # guaranteed on PostgreSQL with psycopg, and on MySQL/MariaDB when
             # SSCursor is active.
-            with engine.connect().execution_options(stream_results=True) as conn:
+            with engine.connect() as conn:
+                # Session setup MUST run before stream_results is enabled.
+                # With stream_results=True psycopg wraps every statement in
+                # ``DECLARE ... CURSOR FOR``, and PostgreSQL cannot declare a
+                # cursor over ``SET`` -- the session-setup statements would
+                # fail with ``syntax error at or near "SET"`` and take the
+                # whole fetch down before any row was read.
                 self._apply_read_only(conn)
                 self._apply_statement_timeout(conn)
+                conn = conn.execution_options(stream_results=True)
                 stmt = text(self._config.query)
                 if self._config.query_parameters:
                     stmt = stmt.bindparams(**self._config.query_parameters)
@@ -521,11 +541,15 @@ class SQLSource:
                 conn.execute(text("SET SESSION TRANSACTION READ ONLY"))
         except Exception as exc:
             # Do not interpolate ``str(exc)`` — driver exceptions can embed
-            # DSN userinfo / hostnames in their ``__str__``.  The class name
-            # plus the chained ``__cause__`` give operators enough context.
+            # DSN userinfo / hostnames in their ``__str__``.  Class names
+            # cannot, so name the DBAPI error too: SQLAlchemy's own wrapper
+            # collapses very different faults into ``ProgrammingError``, and
+            # the driver class (e.g. ``psycopg.errors.InsufficientPrivilege``
+            # vs ``psycopg.errors.SyntaxError``) is what tells an operator
+            # whether to look at grants or at the statement.
             raise DataSourceError(
                 f"failed to enforce READ ONLY transaction on {self._dialect!r}: "
-                f"{type(exc).__name__}; refusing to run the query"
+                f"{_error_label(exc)}; refusing to run the query"
             ) from exc
 
     def _apply_statement_timeout(self, conn) -> None:

@@ -408,9 +408,12 @@ dimension — and the full per-trial training cost below — for the other
 requests that may never arrive.
 
 `RECOTEM_MAX_FEATURE_DIM` (default 5000, clamped [16, 100000]) caps the
-encoded dimension per side (item and user are checked independently);
-exceeding it raises `TrainingError` (exit 4) at the point the encoder state is
-built. `min_frequency` (recipe-level, per column; see
+encoded dimension per side (item and user are checked independently). The
+encoded dimension is the sum of every column's width **plus one** for the
+implicit bias column, so a single `categorical` column with 5,000 distinct
+values encodes to 5,001 and is refused by one under the default — the largest
+cardinality that fits is 4,999. Exceeding the cap raises `TrainingError`
+(exit 4) at the point the encoder state is built. `min_frequency` (recipe-level, per column; see
 [recipe-reference.md](recipe-reference.md#features)) is the operator's
 **only** lever against this cap — raise it on high-cardinality `categorical` /
 `multi_label` columns to shrink the vocabulary. There is no way to restrict
@@ -428,12 +431,15 @@ column's vocabulary is built, so that transient is paid in full even on the
 run the cap then rejects. `min_frequency` protects the trials; it does not
 protect the encoder-state build.
 
-### Per-trial time is cubic, memory is quadratic, and both multiply with `training.parallelism`
+### Per-trial time grows faster than the dimension, memory quadratically, and both multiply with `training.parallelism`
 
 irspack forms a dense `Fᵀ F` Gram matrix per side and solves it by Cholesky
 decomposition. The two costs scale differently and are worth keeping apart
-when sizing a host: **time** grows **cubically** with the encoded dimension
-(the decomposition itself), while **memory** grows only **quadratically** —
+when sizing a host: **time** grows **super-linearly** with the encoded
+dimension — measured at roughly `dim^2.4` on this project's fixtures (a
+doubling costs 5.1–5.8×, not the 8× a pure cubic would), because forming the
+Gram matrix and the memory traffic around it dilute the cubic decomposition —
+while **memory** grows **quadratically** —
 the Gram matrix is `dim² × 8` bytes at float64, which closely tracks the
 Memory column below (the formula gives 200 MB / 800 MB / 3.2 GB against the
 measured 200 MB / 771 MB / 3 GB — the Gram dominates but is not the only
@@ -442,9 +448,20 @@ degrades. Measured per trial:
 
 | Encoded dimension | Time | Memory |
 |---|---|---|
-| 5,000 | ~0.6 s | ~200 MB |
-| 10,000 | ~4.2 s | ~771 MB |
-| 20,000 | ~43 s | ~3 GB |
+| 5,000 | 0.6–2.4 s | ~200 MB |
+| 10,000 | 4.2–12 s | ~800 MB |
+| 20,000 | 43–70 s | ~3.2 GB |
+
+The time column is a range because it depends on the interaction data the
+trial also has to fit, not on the dimension alone; the low figures come from a
+small fixture and the high ones from a 100k-row one. Memory is stable across
+both, as the Gram formula predicts. Size on the upper figure.
+
+At the **default** `RECOTEM_MAX_FEATURE_DIM` of 5,000, a features run on that
+100k-row fixture took 16.3 s against 4.3 s without features — a 3.8× increase
+in total training time and +211 MB of peak RSS. That is affordable, but it is
+not free: the default is a ceiling chosen to keep a mistake survivable, not a
+target to encode up to.
 
 `training.parallelism` is Optuna `n_jobs` — **in-process threads**, not
 processes — so each concurrently-running trial builds and solves its own
@@ -673,7 +690,14 @@ file is **skipped**:
 {"status": "ok", "total": 3, "loaded": 3, "skipped": 1}
 ```
 
-> **Alerting.** Do not page on the `skipped` count — it is a config-quality
+> **Alerting.** `recotem_model_loaded` is `0` for a skipped recipe as well as for one that
+failed to load, so an alert written as `recotem_model_loaded == 0` — the
+obvious formulation — pages on exactly the condition this section says not to
+page on. Distinguish them with the reason label:
+`recotem_artifact_load_failures_total{reason="yaml"}` accompanies a skip,
+other `reason` values accompany a real load failure.
+
+Do not page on the `skipped` count — it is a config-quality
 > signal, not an availability one. Alert on it as a warning
 > (`skipped > 0` for more than one deploy cycle) so a broken file is noticed
 > and fixed, while readiness stays keyed to `status`.
@@ -897,8 +921,52 @@ Lower `cleansing.min_rows` in the recipe or investigate why fewer rows arrived f
 
 All Optuna trials scored 0.0. Common causes:
 
-- The split produced an empty test set (too few users or interactions). Try `split.scheme: random` or lower `split.heldout_ratio`.
+- The split produced an empty test set (too few users or interactions). **Raise** `split.heldout_ratio` — do not lower it. The holdout is `floor(distinct_items × ratio)` *per user*, so a smaller ratio demands *more* history per user before anything can be held out (`0.2` needs 5 distinct items, `0.1` needs 10). The error message names the smallest value that would have worked for the data it saw. See [Per-user holdout depth](recipe-reference.md#per-user-holdout-depth).
 - The data after cleansing has too few items for the cutoff. Lower `training.cutoff`.
+
+### `recotem train` succeeds and picks `TopPopRecommender`
+
+Not an error, and the most likely thing to be mistaken for one. Every other
+entry in this section is a non-zero exit; this one exits 0, serves 200s, and
+returns the same popular items to everybody.
+
+Optuna picked TopPop because TopPop scored highest on **your held-out split**.
+That is a statement about the data and the split, not about Recotem — and it
+is usually recoverable. Check, in this order:
+
+1. **Is the metric near zero for everything?** `recotem inspect` reports
+   `best_score`; the structured log reports each trial. If the personalised
+   algorithms scored ~0 as well, the split is the suspect, not the data — see
+   the `zero_score` entry below and [Per-user holdout
+   depth](recipe-reference.md#per-user-holdout-depth).
+
+2. **Are preferences stable over the axis you split on?** `time_user` holds
+   out each user's *most recent* interactions, so it asks "can the past
+   predict this user's future?". For a catalog people browse by mood, session,
+   or news cycle, the honest answer can be no — and then a popularity model
+   genuinely does win. Re-run with `split.scheme: random` and compare: if
+   personalised algorithms beat TopPop under `random` but not under
+   `time_user`, the signal exists but is not persistent per user, and a
+   recommender trained on stable long-run preferences is the wrong tool for
+   that surface.
+
+3. **Is there enough per-user history?** Collaborative filtering needs
+   co-occurrence. Users with two or three interactions carry almost none, and
+   a catalog where most users are that shallow will favour TopPop no matter
+   which algorithm you list. `data_stats` in the artifact header gives
+   `n_rows / n_users`; below roughly 5 the odds are poor.
+
+4. **Is the catalog too uniform?** If every item is consumed about equally
+   often there is nothing for popularity to exploit *and* little for
+   collaborative signal to latch onto; if one item dominates, TopPop wins by
+   construction.
+
+A worked contrast, measured on two synthetic news-reading datasets of the same
+shape (800 readers, 400 articles, ~67k interactions, `time_user`, identical
+recipe): with each reader's topic preference resampled daily, TopPop won at
+ndcg@10 **0.058**. With each reader given a stable preference, `RP3beta` won at
+**0.317** — 10.9× TopPop's 0.029 on the same split. The recipe, the algorithms
+and the budget were identical; only the persistence of preference differed.
 
 ### `recotem train` exits 4 with `feature_axis_error`
 
@@ -921,6 +989,27 @@ Two causes account for essentially all occurrences:
 recotem deliberately does not coerce the id column for you. By the time the frame is fetched, pandas has already inferred `float64` and the original text is unrecoverable — a column reading `1.0` is indistinguishable from one whose ids are literally `"1.0"` — so reformatting integral floats back to ints would silently rewrite ids on a catalog that legitimately uses that form, trading a detectable failure for a quiet corruption. It would also not catch the wrong-`id_column` case at all.
 
 Only **zero** overlap aborts. Partial coverage is legitimate and expected: an id absent from the feature table encodes to bias-only and degrades to plain iALS for that one entity, which is the same mechanism that makes cold-start scoring possible. There is deliberately no low-coverage warning threshold — a dtype or `id_column` mistake is a property of the whole column and always lands at exactly 0%, so any threshold above zero would fire on correct configurations. Alert on the `feature_axis_coverage` event (`side`, `matched`, `total`) yourself if you want to track coverage.
+
+### `recotem train` exits 4 with `feature_table_error`
+
+Every declared feature column on one side encoded to nothing, so that side
+collapsed to the implicit bias column alone. Training refuses rather than sign
+an artifact that advertises features for what is really plain iALS.
+
+Three routes reach it, and the message names which:
+
+- **`min_frequency` pruned every token.** The usual cause after raising it to
+  fit under `RECOTEM_MAX_FEATURE_DIM`. Lower it, or declare a second column so
+  the side survives on that one (see
+  [`min_frequency`](recipe-reference.md#min_frequency-is-the-dimension-cap-lever)).
+- **A lone `numerical` column has zero variance.** Every row carries the same
+  value, so standardization leaves nothing to encode.
+- **The feature table's values are all null** for the declared columns.
+
+`recotem validate` does **not** predict this: the vocabulary is only known
+once the table has been read, so validation passes at exit 0 in all three
+cases. Its sibling `feature_axis_error` (zero id overlap) is a different
+failure — see the entry above.
 
 ### 401 on `/v1/recipes/{name}:recommend`
 

@@ -416,6 +416,25 @@ exit 8.
 
 ### Fixed
 
+- **The regression guard for the GA4 pruning fix was blind to half of it.**
+  `tests/unit/test_example_bigquery_recipes.py` attributed `--` line comments
+  to their enclosing paren block, and the same change that added the guard
+  added a comment explaining why the `_TABLE_SUFFIX` predicate is required —
+  naming both `_TABLE_SUFFIX` and `@lookback_days`. Prose about the rule
+  satisfied the check for the rule, so the outer predicate, which governs most
+  of the bytes scanned, could be deleted with the suite still green (the inner
+  one was caught). Line comments are now blanked before scope analysis, and a
+  test deletes each predicate in turn and asserts the guard fails on both.
+
+- **The shipped examples still offered `BPRFM`.** Four `# Choices:` comments
+  listed it, while the CHANGELOG said the choice had been withdrawn and
+  `docs/recipe-reference.md` said not to put it in a recipe. A reader copying
+  the comment — which is where the list is first met, before the reference —
+  got exit 4: irspack gates `BPRFMRecommender` behind `lightfm`, which has no
+  Python 3.12 release. The comments now list what can be constructed, and a
+  test checks every shipped `# Choices:` line against
+  `constructible_class_names()` so the two cannot drift again.
+
 - **The PostgreSQL data source could not run a single query.** `fetch` opened
   the connection with `stream_results=True` and only then issued its two
   session-setup statements. With that option psycopg runs every statement as

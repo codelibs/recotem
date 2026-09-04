@@ -39,7 +39,7 @@ cleansing:
   min_items: 10
 
 training:
-  # Choices: IALS, CosineKNN, TopPop, RP3beta, DenseSLIM, TruncatedSVD, BPRFM. Optuna picks the best combination.
+  # Choices: IALS, CosineKNN, TopPop, RP3beta, DenseSLIM, TruncatedSVD. Optuna picks the best combination.
   algorithms: [IALS, CosineKNN, TopPop]
   # Choices: ndcg, map, recall, hit.
   metric: ndcg

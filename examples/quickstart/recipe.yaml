@@ -20,7 +20,7 @@ schema:
   item_column: item_id
 
 training:
-  # Choices: IALS, CosineKNN, TopPop, RP3beta, DenseSLIM, TruncatedSVD, BPRFM. Optuna picks the best combination.
+  # Choices: IALS, CosineKNN, TopPop, RP3beta, DenseSLIM, TruncatedSVD. Optuna picks the best combination.
   algorithms: [TopPop]
 
 output:

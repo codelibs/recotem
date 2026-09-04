@@ -30,13 +30,49 @@ BIGQUERY_EXAMPLE_RECIPES = sorted(
 )
 
 
+def _strip_line_comments(query: str) -> str:
+    """Blank out `--` line comments, preserving offsets and newlines.
+
+    Comments are replaced space-for-space rather than removed so that every
+    other helper here can keep indexing into the original string.  A `--`
+    inside a string literal or a backtick-quoted identifier is left alone.
+    """
+    out = list(query)
+    quote: str | None = None
+    i = 0
+    while i < len(query):
+        ch = query[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"`":
+            quote = ch
+            i += 1
+            continue
+        if ch == "-" and query.startswith("--", i):
+            while i < len(query) and query[i] != "\n":
+                out[i] = " "
+                i += 1
+            continue
+        i += 1
+    return "".join(out)
+
+
 def _scope_of_each_char(query: str) -> list[int]:
     """Map every character to the id of its innermost enclosing paren block.
 
     Block 0 is the statement itself.  Each `(` opens a new block; the matching
-    `)` returns to the enclosing one.  Characters inside a string literal or a
-    line comment are attributed to the block they sit in, which is all this
-    needs -- neither can contain an unbalanced paren in these recipes.
+    `)` returns to the enclosing one.  Characters inside a string literal are
+    attributed to the block they sit in, which is all this needs -- they cannot
+    contain an unbalanced paren in these recipes.
+
+    Callers must strip line comments first (see `_strip_line_comments`).  Prose
+    is not a predicate: the GA4 example carries a comment explaining why the
+    `_TABLE_SUFFIX` predicate is required, and while that comment counted as
+    block content the guard accepted the outer predicate being deleted, because
+    the explanation of the rule satisfied the check for the rule.
     """
     scopes: list[int] = []
     stack = [0]
@@ -56,7 +92,12 @@ def _scope_of_each_char(query: str) -> list[int]:
 
 
 def _blocks(query: str) -> dict[int, str]:
-    """Text belonging directly to each paren block, keyed by block id."""
+    """Text belonging directly to each paren block, keyed by block id.
+
+    Line comments are blanked first so that prose about a predicate cannot be
+    mistaken for the predicate.
+    """
+    query = _strip_line_comments(query)
     out: dict[int, list[str]] = {}
     for ch, scope in zip(query, _scope_of_each_char(query), strict=True):
         out.setdefault(scope, []).append(ch)
@@ -162,6 +203,7 @@ def _table_suffix_predicates(query: str) -> dict[int, list[str]]:
     than the predicate itself, so the span has to follow the raw query rather
     than the text belonging directly to the scope.
     """
+    query = _strip_line_comments(query)
     scopes = _scope_of_each_char(query)
     spans = _block_spans(query)
     out: dict[int, list[str]] = {}
@@ -205,3 +247,54 @@ def test_lookback_parameter_bounds_every_reference(recipe_path: Path) -> None:
             f"guarding a wildcard table reference does not use {lookback}, so the "
             f"lookback window does not bound that reference. Predicate(s): {spans}"
         )
+
+
+def test_guard_catches_the_deletion_of_either_predicate() -> None:
+    """Deleting *either* `_TABLE_SUFFIX` predicate must fail the guard.
+
+    The guard used to be blind to the outer one. `_blocks` attributed line
+    comments to their enclosing block, and the GA4 recipe carries a comment
+    explaining why the predicate is required — mentioning both `_TABLE_SUFFIX`
+    and `@lookback_days`. Prose about the rule satisfied the check for the
+    rule, so the predicate that governs most of the bytes scanned could be
+    removed with the suite still green.
+
+    This asserts the guard against its own subject rather than trusting it.
+    """
+    import re
+
+    recipe = REPO_ROOT / "examples" / "ga4-bigquery" / "recipe.yaml"
+    query = yaml.safe_load(recipe.read_text())["source"]["query"]
+
+    occurrences = [m.start() for m in re.finditer(r"_TABLE_SUFFIX BETWEEN", query)]
+    assert len(occurrences) == 2, (
+        f"expected an outer and an inner predicate, found {len(occurrences)}"
+    )
+
+    for index, start in enumerate(occurrences):
+        end = query.index("CURRENT_DATE())", start) + len("CURRENT_DATE())")
+        mutated = query[:start] + "TRUE" + query[end:]
+
+        blocks = _blocks(mutated)
+        scopes = _wildcard_table_scopes(mutated)
+        predicates = _table_suffix_predicates(mutated)
+
+        unpruned = [s for s in scopes if "_TABLE_SUFFIX" not in blocks.get(s, "")]
+        parameterised = all(
+            any("@lookback_days" in p for p in predicates.get(s, [])) for s in scopes
+        )
+        assert unpruned or not parameterised, (
+            f"deleting predicate #{index} left the guard green; it is blind to "
+            "that half of the fix"
+        )
+
+
+def test_line_comments_are_not_mistaken_for_predicates() -> None:
+    """`_strip_line_comments` blanks comments and leaves literals alone."""
+    query = "SELECT 1 -- _TABLE_SUFFIX BETWEEN a AND b\nFROM `t_*` WHERE x = '-- not a comment'"
+    stripped = _strip_line_comments(query)
+
+    assert "_TABLE_SUFFIX" not in stripped
+    assert "-- not a comment" in stripped
+    assert len(stripped) == len(query), "offsets must be preserved"
+    assert stripped.count("\n") == query.count("\n")

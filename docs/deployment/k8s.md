@@ -311,9 +311,15 @@ spec:
             # External Service / Ingress traffic arrives with a different Host
             # header and will be rejected with HTTP 400. Set the hosts you
             # actually expose the API under (Service DNS, Ingress hostnames).
+            # RECOTEM_ALLOWED_HOSTS REPLACES the default, it does not extend
+            # it: `_split_csv_env` falls back to "127.0.0.1,localhost" only when
+            # the value strips to empty. The probes below send Host: localhost,
+            # so a list without `localhost` makes all three fail with HTTP 400 --
+            # a correct TrustedHostMiddleware rejection, which is why the pod
+            # logs nothing that points at the cause. Keep `localhost` first.
             # Example:
             #   - name: RECOTEM_ALLOWED_HOSTS
-            #     value: "recotem.example.com,recotem-serve.recotem.svc.cluster.local"
+            #     value: "localhost,recotem.example.com,recotem-serve.recotem.svc.cluster.local"
             # API keys and signing keys from Secret.
             # The Secret data keys match the env var names so what the app
             # reads, what kubectl shows, and what the Secret stores are all
@@ -334,12 +340,30 @@ spec:
               containerPort: 8080
               protocol: TCP
 
-          # Probes set Host: localhost so they pass TrustedHostMiddleware
-          # (default allowlist: 127.0.0.1,localhost) regardless of what
-          # RECOTEM_ALLOWED_HOSTS is configured to for external traffic.
-          readinessProbe:
+          # Probes send Host: localhost, which passes TrustedHostMiddleware on
+          # the DEFAULT allowlist (127.0.0.1,localhost) -- but not on a
+          # RECOTEM_ALLOWED_HOSTS that omits it, because that variable replaces
+          # the default rather than extending it. See the note on the env var
+          # above; the Helm chart prepends `localhost` for you, a hand-written
+          # env var does not.
+          # Startup keeps the strict, count-based gate: a NEW pod does not
+          # enter the Service until every recipe has an artifact.  Readiness
+          # and liveness below deliberately do not -- adding an untrained
+          # recipe to a running fleet must not take the loaded models offline,
+          # and a restart cannot fix a missing artifact anyway.
+          startupProbe:
             httpGet:
               path: /v1/health
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            periodSeconds: 5
+            failureThreshold: 60
+
+          readinessProbe:
+            httpGet:
+              path: /v1/health/ready
               port: http
               httpHeaders:
                 - name: Host
@@ -351,7 +375,7 @@ spec:
 
           livenessProbe:
             httpGet:
-              path: /v1/health
+              path: /v1/health/live
               port: http
               httpHeaders:
                 - name: Host

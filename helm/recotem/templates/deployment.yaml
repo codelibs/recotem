@@ -167,7 +167,7 @@ spec:
 
           readinessProbe:
             httpGet:
-              path: /v1/health
+              path: /v1/health/ready
               port: http
               httpHeaders:
                 - name: Host
@@ -179,7 +179,7 @@ spec:
 
           livenessProbe:
             httpGet:
-              path: /v1/health
+              path: /v1/health/live
               port: http
               httpHeaders:
                 - name: Host

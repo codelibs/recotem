@@ -116,6 +116,15 @@ _ALLOWED_CLASSES: frozenset[tuple[str, str]] = frozenset(
         # array attributes are already covered by the numpy.* prefix list; only
         # the estimator class itself needs an explicit FQCN entry.
         ("sklearn.decomposition._truncated_svd", "TruncatedSVD"),
+        # BPRFM — irspack's early-stopping base keeps the fitted trainer as an
+        # attribute (``get_score`` reads ``self.trainer.fm``), so the payload
+        # embeds BPRFMTrainer and, through it, the LightFM model object itself.
+        # Listing only BPRFMRecommender above made `recotem train` succeed and
+        # sign an artifact that `recotem serve` then refused to deserialize.
+        ("irspack.recommenders.bpr", "BPRFMTrainer"),
+        ("lightfm.lightfm", "LightFM"),
+        # (BPRFM also needs five numpy.random RNG-state helpers, which live
+        # under a deny-prefix — see _DENY_PREFIX_EXEMPTIONS below.)
         # numpy.  Both numpy 1.x (numpy.core.*) and numpy 2.x
         # (numpy._core.*) reconstruction helpers are pinned explicitly
         # — these are the FQCNs every artifact references via the
@@ -238,6 +247,41 @@ _DENIED_MODULE_PREFIXES: tuple[str, ...] = (
     "scipy.sparse.csgraph.",
 )
 
+# The only FQCNs that outrank _DENIED_MODULE_PREFIXES.
+#
+# Kept separate from _ALLOWED_CLASSES on purpose.  If exact entries in that set
+# simply beat the deny-list, then every one of its ~40 entries — and every one
+# added later — would silently gain the power to re-open a denied subtree, and
+# the deny-list would stop being a floor.  Routing the exceptions through their
+# own small set means a reviewer sees "this bypasses the deny-list" in the diff
+# instead of having to notice that a new tuple happens to fall under a denied
+# prefix.
+#
+# Every entry must state which artifact needs it and why the class is safe.
+# "Safe" here means: the class is a data constructor, it does not accept a
+# caller-supplied callable, and it was observed in a real payload — not
+# inferred from source.
+_DENY_PREFIX_EXEMPTIONS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # BPRFM.  LightFM seeds itself with a numpy RandomState and keeps it as
+        # an attribute, so the trainer embedded in every BPRFM artifact drags
+        # in the RNG-state pickle graph.  These five were enumerated by loading
+        # an actual BPRFM artifact and recording each rejected find_class.
+        #
+        # All five reconstruct RNG *state*: the two _pickle ctors take a
+        # bit-generator name (looked up in a module-level dict) and return a
+        # fresh RandomState / BitGenerator, MT19937 is the Mersenne Twister
+        # itself, and the SeedSequence pair carries the entropy tuple.  None
+        # takes a callable, so none is a gadget.  The deny-prefix continues to
+        # cover the rest of numpy.random.
+        ("numpy.random._pickle", "__randomstate_ctor"),
+        ("numpy.random._pickle", "__bit_generator_ctor"),
+        ("numpy.random._mt19937", "MT19937"),
+        ("numpy.random.bit_generator", "__pyx_unpickle_SeedSequence"),
+        ("numpy.random.bit_generator", "SeedSequence"),
+    }
+)
+
 
 def _module_matches(module: str, patterns: tuple[str, ...]) -> bool:
     for p in patterns:
@@ -258,6 +302,16 @@ def _is_allowed(module: str, name: str) -> bool:
     # closes the traversal without narrowing what genuine artifacts may load.
     if "." in name:
         return False
+    # The narrow exemption set is consulted before the deny-list -- and it is
+    # the ONLY thing that outranks it.  Keeping it separate from
+    # _ALLOWED_CLASSES is deliberate: the deny-list stays a hard floor for all
+    # 40-odd ordinary allow-list entries, so a careless future addition still
+    # cannot re-open numpy.lib's file-IO constructors or scipy.sparse.linalg's
+    # arbitrary-callable LinearOperator.  Only the handful of FQCNs written
+    # into _DENY_PREFIX_EXEMPTIONS, each with its own justification, get past
+    # it.  See test_is_allowed_deny_takes_precedence_over_exact_allow_list_entry.
+    if (module, name) in _DENY_PREFIX_EXEMPTIONS:
+        return True
     # Deny-list is checked next: a future allow-list addition must never
     # accidentally re-permit a denied submodule.  The HMAC verify is the
     # primary defence; this is the secondary RCE backstop.
@@ -460,11 +514,13 @@ def verify_hmac(
 
 
 class SafeUnpickler(pickle.Unpickler):
-    """Unpickler that restricts class construction to ``_ALLOWED_CLASSES``.
+    """Unpickler that restricts class construction to what ``_is_allowed`` permits.
 
-    Any (module, name) pair not in the allow-list raises ``ArtifactError``
-    before the class is instantiated, providing defence in depth independent
-    of HMAC verification.
+    That is ``_ALLOWED_CLASSES``, the narrow ``numpy`` / ``scipy.sparse``
+    module-prefix allow-list, and ``_DENY_PREFIX_EXEMPTIONS`` -- minus anything
+    matching ``_DENIED_MODULE_PREFIXES``.  Any other (module, name) pair raises
+    ``ArtifactError`` before the class is instantiated, providing defence in
+    depth independent of HMAC verification.
     """
 
     def find_class(self, module: str, name: str) -> Any:

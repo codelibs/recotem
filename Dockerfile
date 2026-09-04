@@ -93,14 +93,48 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 # and hatchling reads it during the build performed by `uv sync` / `uv pip install`.
 COPY pyproject.toml uv.lock LICENSE README.md ./
 
-# Install all runtime extras (bigquery, s3, gcs, metrics) but NOT az.
+# C toolchain for the `bprfm` extra.  lightfm-next ships no linux/aarch64
+# wheel, and we decline its x86_64 wheel (see LIGHTFM_NO_CFLAGS below), so both
+# architectures compile the extension here.  This lands in the builder stage
+# only — the runtime stage copies /opt/venv and nothing else — so the shipped
+# image gains neither the compiler nor its CVE surface.  libgomp1 (already in
+# `base`) is what the compiled OpenMP extension links against at runtime.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc \
+        libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install all runtime extras (bigquery, s3, gcs, metrics, bprfm) but NOT az.
 # Use --no-dev to exclude test/dev group.
-RUN uv sync \
+#
+# Two environment variables govern how lightfm-next is built:
+#
+#   UV_NO_BINARY_PACKAGE — refuse its published wheels and build from sdist.
+#     Not merely an aarch64 workaround: the published manylinux x86_64 wheel is
+#     compiled with `-march=native` on the upstream project's CI runner, so it
+#     carries whatever ISA that machine had (AVX2/FMA at the time of writing).
+#     Shipping it would make the image refuse to start with SIGILL on any host
+#     older than the builder, which is not a property a distributed image may
+#     have.  Building here puts the flags under our control.
+#
+#   LIGHTFM_NO_CFLAGS — the upstream setup.py's own escape hatch, which drops
+#     both `-march=native` and `-ffast-math`.  Without it our own build would
+#     reproduce the same defect, tuned to the CI builder instead.  Losing
+#     -ffast-math is a gain rather than a cost: it keeps float behaviour
+#     predictable across the two architectures we publish.
+#
+# OpenMP is still compiled in (setup.py enables it on every non-Darwin
+# platform), so BPRFM training remains multi-threaded in the image.
+RUN LIGHTFM_NO_CFLAGS=1 \
+    UV_NO_BINARY_PACKAGE=lightfm-next \
+    uv sync \
         --no-dev \
         --extra bigquery \
         --extra s3 \
         --extra gcs \
         --extra metrics \
+        --extra bprfm \
         --frozen
 
 # Copy source tree.

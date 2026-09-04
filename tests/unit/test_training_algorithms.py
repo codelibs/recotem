@@ -88,16 +88,29 @@ def test_is_feature_capable_unknown_name_is_false_not_raise() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_bprfm_is_supported_but_not_constructible() -> None:
-    """recotem keeps ``BPRFMRecommender`` in the frozen supported set...
+def test_bprfm_constructibility_tracks_the_lightfm_extra() -> None:
+    """``BPRFMRecommender`` is available exactly when lightfm is installed.
 
-    ...so that an artifact trained elsewhere still passes the FQCN allow-list,
-    but irspack gates the class behind ``lightfm``, which has no Python 3.12
-    release.  recotem requires 3.12+, so the class is never exported here and
-    a recipe naming it cannot be trained.
+    BPRFM is the one algorithm gated behind an optional dependency: irspack
+    imports ``lightfm`` from ``recommenders/bpr.py`` and drops the class from
+    its exports when that import fails.  recotem ships the dependency as the
+    ``bprfm`` extra (``lightfm-next``, since upstream lightfm does not build on
+    Python 3.12), so whether BPRFM can be trained is an install-time property,
+    not a code-level one.
+
+    It stays in the frozen ``SUPPORTED_CLASS_NAMES`` either way, so an artifact
+    trained on a host that has the extra still passes the FQCN allow-list on
+    one that does not -- the load then fails for a reason the operator can act
+    on rather than as an unknown class.
     """
+    import importlib.util
+
+    # find_spec rather than import: importing lightfm is what emits its
+    # no-OpenMP UserWarning, and this suite runs warnings-as-error.
+    lightfm_installed = importlib.util.find_spec("lightfm") is not None
+
     assert "BPRFMRecommender" in SUPPORTED_CLASS_NAMES
-    assert "BPRFMRecommender" not in constructible_class_names()
+    assert ("BPRFMRecommender" in constructible_class_names()) is lightfm_installed
 
 
 def test_unknown_algorithm_error_suggests_only_constructible_names() -> None:

@@ -32,7 +32,16 @@ from typing import Any
 #: Object-store and HTTP URIs are replaced wholesale rather than trimmed: the
 #: bucket, container and key names are the parts worth keeping out of a log
 #: aggregator, and nothing downstream needs them to diagnose the failure.
-_URI_RE = re.compile(r"\b(s3|gs|az|abfs|abfss|https?)://\S+")
+#:
+#: The character class after ``://`` is what keeps this off *bare* schemes.
+#: Recotem's own path-scheme errors quote the offending scheme (``'http://'``)
+#: and then list the permitted ones (``abfs://, abfss://, az://, ...``); a
+#: pattern ending in ``\S+`` matched those too, so the message lost the very
+#: scheme the operator got wrong while the allow-list survived only where the
+#: regex happened not to reach. Requiring one non-delimiter character after
+#: ``://`` means a scheme with nothing behind it is left alone: there is no
+#: bucket or key in ``gs://,`` to protect, and redacting it only spent budget.
+_URI_RE = re.compile(r"\b(s3|gs|az|abfs|abfss|https?)://[^\s,;'\"]\S*")
 
 #: Error strings are operator-facing summaries, not transcripts.  200 chars is
 #: also a published contract: ``docs/operations.md`` tells operators the value

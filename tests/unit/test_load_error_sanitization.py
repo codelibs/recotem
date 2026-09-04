@@ -188,6 +188,75 @@ def test_short_uris_cannot_inflate_past_the_budget() -> None:
     assert "<redacted-uri>" in surfaced
 
 
+def test_the_rejected_scheme_survives_redaction() -> None:
+    """An operator must be able to read back the scheme they got wrong.
+
+    ``recipe/loader.py`` quotes the offending scheme and then lists the
+    permitted ones.  A pattern ending in ``\\S+`` swallowed both: the quoted
+    ``'http://'`` became ``<redacted-uri>`` (closing quote included), so the
+    message no longer said what was wrong, while ``ftp://`` -- absent from the
+    alternation -- was left intact.  Whether the mistake was legible depended
+    on which wrong scheme you picked.
+    """
+    message = (
+        "'output.path' uses scheme 'http://' which is not supported for "
+        "output paths. Allowed: (bare path), abfs://, abfss://, az://, "
+        "file://, gs://, s3://"
+    )
+
+    surfaced = sanitize_load_error(message)
+
+    assert surfaced == message, (
+        "a bare scheme carries no bucket or key to protect, so redacting it "
+        f"only costs budget; got {surfaced!r}"
+    )
+
+
+def test_redacting_a_bare_scheme_never_grows_the_message() -> None:
+    """Redaction is supposed to shrink an error, or leave it alone.
+
+    ``<redacted-uri>`` is 14 characters and ``gs://,`` is 6, so substituting
+    into an allow-list inflated the string: the input-path variant of the
+    scheme error grew from 163 to 201 characters and lost its tail to the
+    200-char cap that redaction had just pushed it over.
+    """
+    message = (
+        "'source.path' uses scheme 'ftp://' which is not supported. Allowed: "
+        "(bare path), abfs://, abfss://, az://, file://, gs://, http://, "
+        "https://, s3://"
+    )
+
+    surfaced = sanitize_load_error(message)
+
+    assert len(surfaced) <= len(message), (
+        f"redaction grew a {len(message)}-char message to {len(surfaced)}"
+    )
+    assert "Allowed: (bare path), abfs://, abfss://, az://" in surfaced, (
+        f"the allow-list must stay readable; got {surfaced!r}"
+    )
+
+
+def test_real_uris_are_still_redacted() -> None:
+    """The narrowing must not cost the redaction its actual job.
+
+    What is worth keeping out of a log aggregator is the bucket, container and
+    key -- everything after ``://``.  Those all still go, quoted or bare.
+    """
+    for message, secret in [
+        (
+            "failed to read s3://acme-private/tenant-42/items.csv: denied",
+            "acme-private",
+        ),
+        ("metadata path 'gs://acme-secret/keys.parquet' unreadable", "acme-secret"),
+        ("fetch https://internal.corp/models/x.recotem failed", "internal.corp"),
+        ("write refused for az://acct/container/model.recotem", "container"),
+        ("abfss://fs@acct.dfs.core.windows.net/p denied", "acct.dfs.core.windows.net"),
+    ]:
+        surfaced = sanitize_load_error(message)
+        assert "<redacted-uri>" in surfaced, f"not redacted: {surfaced!r}"
+        assert secret not in surfaced, f"leaked {secret!r} in {surfaced!r}"
+
+
 def test_watcher_unhealthy_sentinel_survives_sanitization() -> None:
     """The watcher clears its own error by string equality — see W-6.
 

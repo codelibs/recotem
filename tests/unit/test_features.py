@@ -1476,6 +1476,30 @@ def test_dimension_cap_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         build_encoder_state(d, [FeatureColumn(name="g", encoding="categorical")])
 
 
+def test_dimension_cap_message_matches_the_measured_scaling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The advice in the error must not contradict the sizing documentation.
+
+    `docs/operations.md` was corrected to say the per-trial cost grows at
+    roughly `dim^2.4` — a doubling costs 5.1-5.8x, not the 8x a pure cubic
+    would — while this message still told the operator the cost was cubic. The
+    message is where someone reads the advice at the moment they are deciding
+    whether to raise the cap, so it is the copy that matters most.
+    """
+    monkeypatch.setenv("RECOTEM_MAX_FEATURE_DIM", "16")
+    d = pd.DataFrame(
+        {"item_id": [f"i{i}" for i in range(40)], "g": [f"c{i}" for i in range(40)]}
+    ).set_index("item_id")
+    with pytest.raises(FeatureEncodeError) as excinfo:
+        build_encoder_state(d, [FeatureColumn(name="g", encoding="categorical")])
+
+    message = str(excinfo.value)
+    assert "cubic in this number" not in message
+    assert "dim^2.4" in message
+    assert "quadratic" in message
+
+
 def test_missing_source_column_raises(df: pd.DataFrame) -> None:
     with pytest.raises(FeatureEncodeError, match="not present"):
         build_encoder_state(df, [FeatureColumn(name="nope", encoding="categorical")])

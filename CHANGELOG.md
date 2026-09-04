@@ -1054,6 +1054,22 @@ exit 8.
 
 ### Security
 
+- **The FQCN allow-list could be walked out of with a dotted name, so a signed
+  payload reached arbitrary code.** `pickle.Unpickler.find_class` resolves
+  protocol-4 `STACK_GLOBAL` names with `_getattribute`, which walks dots, but
+  `_is_allowed` inspected only the *module* half of the pair. A payload naming
+  an allow-listed module and putting the gadget in the *name* half — e.g.
+  `("numpy._core._methods", "os.system")` — passed the check and then resolved
+  to the real `os.system`, giving code execution inside `unpickle_payload` and
+  therefore inside `serve`'s artifact load. The HMAC verify was never bypassed,
+  so this required a validly signed artifact; the allow-list is the layer
+  documented to hold when the signing key does not, which is exactly the case
+  it failed to cover. `_is_allowed` now rejects any dotted name. All six
+  algorithms (`IALS`, `CosineKNN`, `TopPop`, `RP3beta`, `DenseSLIM`,
+  `TruncatedSVD`) were retrained and reloaded under the fix: legitimate
+  artifacts never use a dotted name, so nothing that used to load stops
+  loading.
+
 - **A load failure could put an object-store URI, path segments included, into
   an API response.** `_sanitize_error` was called from exactly one place — the
   startup load path — so `/v1/health/details` was only redacted until the first

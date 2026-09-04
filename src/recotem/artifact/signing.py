@@ -242,7 +242,16 @@ def _module_matches(module: str, patterns: tuple[str, ...]) -> bool:
 
 
 def _is_allowed(module: str, name: str) -> bool:
-    # Deny-list is checked first: a future allow-list addition must never
+    # A dotted *name* is always a traversal attempt.  ``Unpickler.find_class``
+    # resolves protocol-4 ``STACK_GLOBAL`` names with ``_getattribute``, which
+    # walks dots, so ``(numpy._core._methods, "os.system")`` would name an
+    # allow-listed module and still resolve to the real ``os.system``.  Every
+    # legitimate entry is a plain identifier -- asserted by
+    # ``test_allowed_class_names_are_plain_identifiers`` -- so rejecting dots
+    # closes the traversal without narrowing what genuine artifacts may load.
+    if "." in name:
+        return False
+    # Deny-list is checked next: a future allow-list addition must never
     # accidentally re-permit a denied submodule.  The HMAC verify is the
     # primary defence; this is the secondary RCE backstop.
     if _module_matches(module, _DENIED_MODULE_PREFIXES):

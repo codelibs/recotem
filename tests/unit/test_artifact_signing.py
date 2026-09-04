@@ -1398,3 +1398,97 @@ def test_unpickle_payload_attribute_error_emits_safe_unpickle_internal_error_log
         "AttributeError must emit 'safe_unpickle_internal_error' log event"
     )
     assert error_events[0].get("error_class") == "AttributeError"
+
+
+# ---------------------------------------------------------------------------
+# Dotted-name traversal: the allow-list must gate the attribute path too
+#
+# ``pickle.Unpickler.find_class`` resolves protocol-4 ``STACK_GLOBAL`` names
+# with ``_getattribute``, which walks dots.  An allow-list that inspects only
+# *module* therefore lets ``(allowed.module, "os.system")`` through and the
+# unpickler resolves it to the real ``os.system``.  Every allow-list decision
+# must reject a dotted name.
+# ---------------------------------------------------------------------------
+
+_DOTTED_TRAVERSALS = [
+    ("numpy._core._methods", "os.system"),
+    ("numpy._core._methods", "os.popen"),
+    ("numpy._core.multiarray", "sys.modules"),
+    ("numpy.core.multiarray", "os.system"),
+    ("scipy.sparse._csr", "np.core.multiarray._reconstruct"),
+]
+
+
+@pytest.mark.parametrize("module,name", _DOTTED_TRAVERSALS)
+def test_dotted_name_under_allowed_prefix_is_rejected(module: str, name: str) -> None:
+    """A dotted *name* must not be resolvable, even under an allowed prefix."""
+    import io
+
+    from recotem.artifact.signing import _is_allowed
+
+    assert _is_allowed(module, name) is False
+    unpickler = SafeUnpickler(io.BytesIO(b""))
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickler.find_class(module, name)
+
+
+def test_stack_global_dotted_traversal_does_not_reach_os_system() -> None:
+    """A hand-built STACK_GLOBAL stream must not resolve to ``os.system``.
+
+    This is the concrete bypass: the opcode carries ``module`` and ``name`` as
+    two separate strings, so a payload can name an allow-listed module and put
+    the gadget path in ``name``.
+    """
+    module = b"numpy._core._methods"
+    name = b"os.system"
+    payload = (
+        b"\x80\x04"
+        + b"\x8c"
+        + bytes([len(module)])
+        + module
+        + b"\x8c"
+        + bytes([len(name)])
+        + name
+        + b"\x93"  # STACK_GLOBAL
+        + b"."
+    )
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickle_payload(payload)
+
+
+def test_dotted_traversal_cannot_execute_through_reduce() -> None:
+    """The full gadget — STACK_GLOBAL + REDUCE — must not run a command."""
+    module = b"numpy._core._methods"
+    name = b"os.system"
+    arg = b"exit 0"
+    payload = (
+        b"\x80\x04"
+        + b"\x8c"
+        + bytes([len(module)])
+        + module
+        + b"\x8c"
+        + bytes([len(name)])
+        + name
+        + b"\x93"  # STACK_GLOBAL
+        + b"("  # MARK
+        + b"\x8c"
+        + bytes([len(arg)])
+        + arg
+        + b"t"  # TUPLE
+        + b"R"  # REDUCE
+        + b"."
+    )
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickle_payload(payload)
+
+
+def test_allowed_class_names_are_plain_identifiers() -> None:
+    """No legitimate entry needs a dotted name, so rejecting dots is safe.
+
+    Guards the fix against a future allow-list entry that would silently
+    re-open the traversal path.
+    """
+    from recotem.artifact.signing import _ALLOWED_CLASSES
+
+    dotted = sorted(f"{m}.{n}" for m, n in _ALLOWED_CLASSES if "." in n)
+    assert dotted == []

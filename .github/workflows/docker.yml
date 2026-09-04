@@ -106,9 +106,29 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
+          # uv's cache key covers pyproject.toml / uv.lock, not the build
+          # environment -- so the wheel built before UV_NO_BINARY_PACKAGE and
+          # LIGHTFM_NO_CFLAGS were set below is restored and reused, and the
+          # variables never take effect.  Observed exactly that: a run with both
+          # set still died with SIGILL in a cached
+          # `_lightfm_fast_openmp.cpython-314-*.so`.  Bumping this suffix retires
+          # those entries.  Bump it again if the lightfm build flags change.
+          cache-suffix: lightfm-portable-1
 
       - name: Install dependencies (all extras)
-        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite
+        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite --extra bprfm
+        env:
+          # lightfm-next publishes a linux x86_64 wheel for cp312 only, and it is
+          # compiled `-march=native` on the upstream project's runner -- so on
+          # 3.12 we would install that machine's ISA, and on 3.13/3.14 uv builds
+          # from sdist and bakes in *this* runner's ISA instead.  Either way the
+          # result is machine-specific, and `enable-cache: true` then restores it
+          # onto whichever runner comes next: importing `lightfm._lightfm_fast`
+          # dies with `Fatal Python error: Illegal instruction` (exit 132) when
+          # that runner is older than the one that built it.  Same reasoning, and
+          # the same two variables, as the Dockerfile's lightfm-next build.
+          UV_NO_BINARY_PACKAGE: lightfm-next
+          LIGHTFM_NO_CFLAGS: "1"
 
       - name: ruff check
         run: uv run ruff check src/ tests/

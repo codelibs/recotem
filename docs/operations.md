@@ -372,7 +372,7 @@ Each model replica holds every loaded model in RAM. Plan accordingly.
 |--------|--------|
 | `RECOTEM_MAX_ARTIFACT_BYTES` | Hard cap per artifact file (default 2 GiB, clamped [1 MiB, 16 GiB]). Reduce this if you have many small models. |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | Cap on the deserialised payload per artifact (default 512 MiB, post-HMAC-verify). Must be ≤ `RECOTEM_MAX_ARTIFACT_BYTES`; if not, `recotem serve` fails at startup with `ConfigError` (exit 8). Reduces the memory spike from deserialization relative to the raw file size. |
-| `RECOTEM_MAX_BODY_BYTES` | Hard cap on each HTTP **request** body (default 128 MiB, clamped [1 MiB, 2 GiB]). A `413 PAYLOAD_TOO_LARGE` is returned before Starlette buffers/parses the body, so a single authenticated client cannot make the process allocate a multi-GB request. The default clears the largest single-verb request — `:recommend-related` tops out near 52 MiB with maximal cold-start feature mappings — with headroom. It deliberately does **not** clear the largest schema-valid *batch* body: once `user_features` / `item_features` are filled to their per-field caps, `:batch-recommend` tops out near 196 MiB and `:batch-recommend-related` near 13 GiB, the latter beyond even the 2 GiB clamp. Such bodies are refused with `413`; raise the cap if you genuinely send batches that large. Reduce it if your legitimate batch sizes are small and you want a tighter bound; the cap applies both to a declared `Content-Length` and to chunked bodies with no length header. |
+| `RECOTEM_MAX_BODY_BYTES` | Hard cap on each HTTP **request** body (default 128 MiB, clamped [1 MiB, 2 GiB]). A `413 PAYLOAD_TOO_LARGE` is returned before Starlette buffers/parses the body, so **no single request** can make the process allocate more than the cap. It bounds one request, not the process: nothing limits how many such requests are in flight at once, so one authenticated client sending them concurrently can still reach multiple GB — see [Concurrent request bodies are unbounded](#concurrent-request-bodies-are-unbounded) below. The default clears the largest single-verb request — `:recommend-related` tops out near 52 MiB with maximal cold-start feature mappings — with headroom. It deliberately does **not** clear the largest schema-valid *batch* body: once `user_features` / `item_features` are filled to their per-field caps, `:batch-recommend` tops out near 196 MiB and `:batch-recommend-related` near 13 GiB, the latter beyond even the 2 GiB clamp. Such bodies are refused with `413`; raise the cap if you genuinely send batches that large. Reduce it if your legitimate batch sizes are small and you want a tighter bound; the cap applies both to a declared `Content-Length` and to chunked bodies with no length header. |
 | Number of recipes | Each recipe loads one model. 10 recipes × 500 MiB = 5 GiB baseline. |
 | Number of replicas | Each replica is independent. 2 replicas = 2× memory. |
 | Item metadata | DataFrame in-memory per recipe. Size ≈ rows × columns × 8 bytes. |
@@ -408,9 +408,12 @@ dimension — and the full per-trial training cost below — for the other
 requests that may never arrive.
 
 `RECOTEM_MAX_FEATURE_DIM` (default 5000, clamped [16, 100000]) caps the
-encoded dimension per side (item and user are checked independently);
-exceeding it raises `TrainingError` (exit 4) at the point the encoder state is
-built. `min_frequency` (recipe-level, per column; see
+encoded dimension per side (item and user are checked independently). The
+encoded dimension is the sum of every column's width **plus one** for the
+implicit bias column, so a single `categorical` column with 5,000 distinct
+values encodes to 5,001 and is refused by one under the default — the largest
+cardinality that fits is 4,999. Exceeding the cap raises `TrainingError`
+(exit 4) at the point the encoder state is built. `min_frequency` (recipe-level, per column; see
 [recipe-reference.md](recipe-reference.md#features)) is the operator's
 **only** lever against this cap — raise it on high-cardinality `categorical` /
 `multi_label` columns to shrink the vocabulary. There is no way to restrict
@@ -428,12 +431,15 @@ column's vocabulary is built, so that transient is paid in full even on the
 run the cap then rejects. `min_frequency` protects the trials; it does not
 protect the encoder-state build.
 
-### Per-trial time is cubic, memory is quadratic, and both multiply with `training.parallelism`
+### Per-trial time grows faster than the dimension, memory quadratically, and both multiply with `training.parallelism`
 
 irspack forms a dense `Fᵀ F` Gram matrix per side and solves it by Cholesky
 decomposition. The two costs scale differently and are worth keeping apart
-when sizing a host: **time** grows **cubically** with the encoded dimension
-(the decomposition itself), while **memory** grows only **quadratically** —
+when sizing a host: **time** grows **super-linearly** with the encoded
+dimension — measured at roughly `dim^2.4` on this project's fixtures (a
+doubling costs 5.1–5.8×, not the 8× a pure cubic would), because forming the
+Gram matrix and the memory traffic around it dilute the cubic decomposition —
+while **memory** grows **quadratically** —
 the Gram matrix is `dim² × 8` bytes at float64, which closely tracks the
 Memory column below (the formula gives 200 MB / 800 MB / 3.2 GB against the
 measured 200 MB / 771 MB / 3 GB — the Gram dominates but is not the only
@@ -442,9 +448,20 @@ degrades. Measured per trial:
 
 | Encoded dimension | Time | Memory |
 |---|---|---|
-| 5,000 | ~0.6 s | ~200 MB |
-| 10,000 | ~4.2 s | ~771 MB |
-| 20,000 | ~43 s | ~3 GB |
+| 5,000 | 0.6–2.4 s | ~200 MB |
+| 10,000 | 4.2–12 s | ~800 MB |
+| 20,000 | 43–70 s | ~3.2 GB |
+
+The time column is a range because it depends on the interaction data the
+trial also has to fit, not on the dimension alone; the low figures come from a
+small fixture and the high ones from a 100k-row one. Memory is stable across
+both, as the Gram formula predicts. Size on the upper figure.
+
+At the **default** `RECOTEM_MAX_FEATURE_DIM` of 5,000, a features run on that
+100k-row fixture took 16.3 s against 4.3 s without features — a 3.8× increase
+in total training time and +211 MB of peak RSS. That is affordable, but it is
+not free: the default is a ceiling chosen to keep a mistake survivable, not a
+target to encode up to.
 
 `training.parallelism` is Optuna `n_jobs` — **in-process threads**, not
 processes — so each concurrently-running trial builds and solves its own
@@ -452,6 +469,40 @@ dense Gram matrix independently. At `parallelism=4, dim=10k` that is roughly
 4 × 771 MB ≈ 3 GB of Gram matrices alone, on top of everything else the
 search holds in memory. Size training hosts (or set `parallelism` and
 `RECOTEM_MAX_FEATURE_DIM`) with this multiplication in mind.
+
+### Concurrent request bodies are unbounded
+
+`RECOTEM_MAX_BODY_BYTES` caps **one** request. There is no in-flight byte
+budget and no concurrency limit, so resident memory grows linearly with how
+many large bodies arrive together — and every one of them is accepted.
+
+Measured on a 1M-interaction model (250 MB idle) at the default 128 MiB cap:
+
+| concurrent requests | body each | RSS before → peak | per request | HTTP |
+|---|---|---|---|---|
+| 1 | 63.5 MiB | 250 → 462 MB | 213 MB (3.35× the body) | 200 |
+| 4 | 63.5 MiB | 620 → 866 MB | 61 MB | all 200 |
+| 8 | 63.5 MiB | 866 → 1,413 MB | 68 MB | all 200 |
+| 4 | 127 MiB | 1,413 → 1,928 MB | **129 MB** | all 200 |
+
+Nothing was refused and nothing queued. A workable estimate for a replica's
+peak is:
+
+```
+peak RSS ≈ idle + (concurrent large bodies) × (body size) × 1.1
+```
+
+Against the chart's default `limits.memory: 4Gi` and the default 128 MiB body
+cap, roughly **28 concurrent maximal requests** reach the limit. If your
+clients can send large batch bodies, either lower `RECOTEM_MAX_BODY_BYTES` to
+what your legitimate batches actually need, or bound concurrency in front of
+the pod (an ingress or sidecar limit), or raise the memory limit to match.
+
+The allocation is arena reuse rather than a leak — repeating one 63.5 MiB body
+settles at a 620 MB high-water mark, and ordinary traffic afterwards returns
+memory to the OS (1,928 MB fell to 1,039 MB over 33k small requests, flat from
+40 s onward). But it does not return to the 250 MB idle figure, so **size
+container limits on the high-water mark, not the steady state**.
 
 ### Payload and serve-side RSS grow with catalog size, not just dimension
 
@@ -673,7 +724,14 @@ file is **skipped**:
 {"status": "ok", "total": 3, "loaded": 3, "skipped": 1}
 ```
 
-> **Alerting.** Do not page on the `skipped` count — it is a config-quality
+> **Alerting.** `recotem_model_loaded` is `0` for a skipped recipe as well as for one that
+failed to load, so an alert written as `recotem_model_loaded == 0` — the
+obvious formulation — pages on exactly the condition this section says not to
+page on. Distinguish them with the reason label:
+`recotem_artifact_load_failures_total{reason="yaml"}` accompanies a skip,
+other `reason` values accompany a real load failure.
+
+Do not page on the `skipped` count — it is a config-quality
 > signal, not an availability one. Alert on it as a warning
 > (`skipped > 0` for more than one deploy cycle) so a broken file is noticed
 > and fixed, while readiness stays keyed to `status`.
@@ -897,8 +955,52 @@ Lower `cleansing.min_rows` in the recipe or investigate why fewer rows arrived f
 
 All Optuna trials scored 0.0. Common causes:
 
-- The split produced an empty test set (too few users or interactions). Try `split.scheme: random` or lower `split.heldout_ratio`.
+- The split produced an empty test set (too few users or interactions). **Raise** `split.heldout_ratio` — do not lower it. The holdout is `floor(distinct_items × ratio)` *per user*, so a smaller ratio demands *more* history per user before anything can be held out (`0.2` needs 5 distinct items, `0.1` needs 10). The error message names the smallest value that would have worked for the data it saw. See [Per-user holdout depth](recipe-reference.md#per-user-holdout-depth).
 - The data after cleansing has too few items for the cutoff. Lower `training.cutoff`.
+
+### `recotem train` succeeds and picks `TopPopRecommender`
+
+Not an error, and the most likely thing to be mistaken for one. Every other
+entry in this section is a non-zero exit; this one exits 0, serves 200s, and
+returns the same popular items to everybody.
+
+Optuna picked TopPop because TopPop scored highest on **your held-out split**.
+That is a statement about the data and the split, not about Recotem — and it
+is usually recoverable. Check, in this order:
+
+1. **Is the metric near zero for everything?** `recotem inspect` reports
+   `best_score`; the structured log reports each trial. If the personalised
+   algorithms scored ~0 as well, the split is the suspect, not the data — see
+   the `zero_score` entry below and [Per-user holdout
+   depth](recipe-reference.md#per-user-holdout-depth).
+
+2. **Are preferences stable over the axis you split on?** `time_user` holds
+   out each user's *most recent* interactions, so it asks "can the past
+   predict this user's future?". For a catalog people browse by mood, session,
+   or news cycle, the honest answer can be no — and then a popularity model
+   genuinely does win. Re-run with `split.scheme: random` and compare: if
+   personalised algorithms beat TopPop under `random` but not under
+   `time_user`, the signal exists but is not persistent per user, and a
+   recommender trained on stable long-run preferences is the wrong tool for
+   that surface.
+
+3. **Is there enough per-user history?** Collaborative filtering needs
+   co-occurrence. Users with two or three interactions carry almost none, and
+   a catalog where most users are that shallow will favour TopPop no matter
+   which algorithm you list. `data_stats` in the artifact header gives
+   `n_rows / n_users`; below roughly 5 the odds are poor.
+
+4. **Is the catalog too uniform?** If every item is consumed about equally
+   often there is nothing for popularity to exploit *and* little for
+   collaborative signal to latch onto; if one item dominates, TopPop wins by
+   construction.
+
+A worked contrast, measured on two synthetic news-reading datasets of the same
+shape (800 readers, 400 articles, ~67k interactions, `time_user`, identical
+recipe): with each reader's topic preference resampled daily, TopPop won at
+ndcg@10 **0.058**. With each reader given a stable preference, `RP3beta` won at
+**0.317** — 10.9× TopPop's 0.029 on the same split. The recipe, the algorithms
+and the budget were identical; only the persistence of preference differed.
 
 ### `recotem train` exits 4 with `feature_axis_error`
 
@@ -921,6 +1023,27 @@ Two causes account for essentially all occurrences:
 recotem deliberately does not coerce the id column for you. By the time the frame is fetched, pandas has already inferred `float64` and the original text is unrecoverable — a column reading `1.0` is indistinguishable from one whose ids are literally `"1.0"` — so reformatting integral floats back to ints would silently rewrite ids on a catalog that legitimately uses that form, trading a detectable failure for a quiet corruption. It would also not catch the wrong-`id_column` case at all.
 
 Only **zero** overlap aborts. Partial coverage is legitimate and expected: an id absent from the feature table encodes to bias-only and degrades to plain iALS for that one entity, which is the same mechanism that makes cold-start scoring possible. There is deliberately no low-coverage warning threshold — a dtype or `id_column` mistake is a property of the whole column and always lands at exactly 0%, so any threshold above zero would fire on correct configurations. Alert on the `feature_axis_coverage` event (`side`, `matched`, `total`) yourself if you want to track coverage.
+
+### `recotem train` exits 4 with `feature_table_error`
+
+Every declared feature column on one side encoded to nothing, so that side
+collapsed to the implicit bias column alone. Training refuses rather than sign
+an artifact that advertises features for what is really plain iALS.
+
+Three routes reach it, and the message names which:
+
+- **`min_frequency` pruned every token.** The usual cause after raising it to
+  fit under `RECOTEM_MAX_FEATURE_DIM`. Lower it, or declare a second column so
+  the side survives on that one (see
+  [`min_frequency`](recipe-reference.md#min_frequency-is-the-dimension-cap-lever)).
+- **A lone `numerical` column has zero variance.** Every row carries the same
+  value, so standardization leaves nothing to encode.
+- **The feature table's values are all null** for the declared columns.
+
+`recotem validate` does **not** predict this: the vocabulary is only known
+once the table has been read, so validation passes at exit 0 in all three
+cases. Its sibling `feature_axis_error` (zero id overlap) is a different
+failure — see the entry above.
 
 ### 401 on `/v1/recipes/{name}:recommend`
 

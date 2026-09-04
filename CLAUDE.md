@@ -237,7 +237,7 @@ server running with a limit you did not choose.
 | ⚠ `RECOTEM_API_KEYS` | (empty) | `kid:sha256:hex64,...` for serve auth. Empty forces 127.0.0.1 bind. A malformed or duplicate-kid entry is fatal. |
 | `RECOTEM_HOST` / ⚠ `RECOTEM_PORT` | 127.0.0.1 / 8080 | uvicorn bind. Must be `0.0.0.0` inside Docker; overridden to 127.0.0.1 when no API keys are set. A non-integer or out-of-range `RECOTEM_PORT` is fatal; `RECOTEM_HOST` is taken as-is. |
 | ⚠ `RECOTEM_WATCH_INTERVAL` | 5 | Watcher poll seconds (clamped 1–30). Unlike the other numeric variables a non-numeric value is fatal, not a warn-and-default. |
-| `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. Clamped [1 MiB, 16 GiB]. |
+| `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. Clamped [1 MiB, 16 GiB]. **Lowering it below the payload cap is fatal even if you never set the payload cap** — the cross-check compares the two resolved values, so `RECOTEM_MAX_ARTIFACT_BYTES=256MiB` alone exits 8 naming `RECOTEM_MAX_PAYLOAD_BYTES` (default 512 MiB), which the operator did not set. 512 MiB exactly is accepted. |
 | `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Raw I/O bytes cap on source-path reads (HTTP/HTTPS, local, and object-store). Clamped [1 MiB, 16 GiB]. Does NOT cap the decompressed DataFrame size — see `docs/security.md#decompressed-size-cap-not-enforced-medium-5`. |
 | `RECOTEM_HTTP_TIMEOUT_SECONDS` | 30 | Connect/read timeout for HTTP/HTTPS source fetch. Clamped [1, 600]. |
 | `RECOTEM_HTTP_ALLOW_PRIVATE` | (empty) | Truthy (`1`/`true`/`yes`/`on`) opts the HTTP fetcher into accepting private/loopback/link-local destinations. Default refuses RFC1918 / `127.0.0.0/8` / `169.254.0.0/16` to block SSRF on cloud-metadata services. |

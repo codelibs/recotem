@@ -177,6 +177,38 @@ item_metadata:
 
 Server-side field suppression is also available via `RECOTEM_METADATA_FIELD_DENY` (comma-separated column names), applied as a post-join column drop.
 
+### `csv` returns every field as a string; `parquet` preserves types
+
+`type:` is not only a question of where the file lives. The CSV loader reads
+with `dtype=str` and `keep_default_na=False`, so **every metadata value reaches
+the API as a JSON string**, and an empty cell arrives as `""` rather than
+`null`. Parquet carries its schema, so the same data comes back typed:
+
+| column (same source data) | `type: csv` | `type: parquet` |
+|---|---|---|
+| `price` | `"11.49"` | `11.49` |
+| `stock` | `"1"` | `1` |
+| `in_stock` | `"True"` / `"False"` | `true` / `false` |
+| missing `rating` | `""` | `null` |
+
+**The boolean case bites silently.** `"False"` is a non-empty string, which is
+truthy in JavaScript and in Python alike, so the ordinary client-side filter
+
+```js
+if (item.in_stock) show(item)          // shows every item, CSV metadata
+```
+
+lets out-of-stock items through — and shows nothing wrong in the response,
+the logs, or the model. Numeric comparisons fail the same way, ordering
+`"9"` after `"10"`. Switching `type: csv` to `type: parquet` on the same data
+changes the response contract without changing the recipe otherwise, the
+`model_version`, or anything visible in `/v1/recipes/{name}`.
+
+If your consumers need numbers and booleans, use `parquet`, or coerce in the
+client. The CSV behaviour is deliberate — inferred dtypes would make an
+id-like column such as `"0042"` arrive as `42` — but it is not what a reader
+of the table above would assume.
+
 ---
 
 ## `features`
@@ -281,7 +313,9 @@ Coverage is logged per side per phase as `feature_axis_coverage` (`side`,
 
 The `multi_label` distinction matters: `genres: "Action|Zzz"` with `Action`
 known yields `Action=1` and drops `Zzz` — it is not an all-zero segment.
-"Row missing" and "value unknown" coincide only for `categorical`.
+"Row missing" and "value unknown" **differ only for `multi_label`**: for
+`categorical` both give an all-zero segment, and for `numerical` both give
+`0.0` (the standardized mean).
 
 The same `str()`-matching caveat that applies to `id_column` above also
 applies to a `categorical` or `multi_label` **value** column — the vocabulary
@@ -354,18 +388,31 @@ the full training cost — see below) for the other 999k items. Raising
 [operations.md](operations.md#feature-aware-ials-sizing)); there is no
 recipe-level way to restrict the vocabulary to interaction-covered rows.
 
-Raising it too far fails **loudly but not fatally**. `min_frequency` has no
-upper bound and nothing cross-checks it against the catalog, so
-`min_frequency: 50` against a 3-row feature table validates happily and
-prunes every token. The column then encodes to `width=0` and contributes
-nothing — every row falls back to the implicit bias column — while the
-`feature_encoder_state_built` INFO event still lists the column as though it
-were active. Training logs a `feature_empty_vocabulary_column` **warning**
-(carrying the column name, its `encoding` and `min_frequency`, and the
-distinct/occurrence counts — never the token values) and continues. An
-all-null column reaches the same "contributes nothing" state by a different
-route and warns identically. Check the training logs after raising
-`min_frequency` aggressively.
+Raising it too far fails loudly. `min_frequency` has no upper bound and
+nothing cross-checks it against the catalog, so `min_frequency: 50` against a
+3-row feature table validates happily and prunes every token. The column then
+encodes to `width=0` and contributes nothing — every row falls back to the
+implicit bias column — while the `feature_encoder_state_built` INFO event
+still lists the column as though it were active.
+
+**How loudly depends on whether any column survives.** If at least one
+declared column still has a vocabulary, training logs a
+`feature_empty_vocabulary_column` **warning** (carrying the column name, its
+`encoding` and `min_frequency`, and the distinct/occurrence counts — never the
+token values) and continues. If *every* declared column on a side prunes to
+nothing, that side collapses to the bias column alone, and training **aborts
+with exit 4** and `code: feature_table_error` rather than signing an artifact
+that advertises features for what is really plain iALS. The same abort covers
+the routes that reach an empty side by other means: a single `numerical`
+column with zero variance, and a feature table whose values are all null.
+`recotem validate` cannot predict any of this — the vocabulary is only known
+once the table has been read — so it passes at exit 0 in every case.
+
+So on a features block with one declared column, `min_frequency` is not a
+knob you can turn past the end; it is a knob with a wall. Raise it in steps
+and read the training logs, or add a second column first. An all-null column
+reaches the same "contributes nothing" state by a different route and, when
+it is not the only one, warns identically.
 
 ### `lambda_item_feature` / `lambda_user_feature` — the one exception to "not user-tunable"
 
@@ -508,7 +555,7 @@ training:
 | `per_algorithm_trials` | map | `null` | Per-algorithm trial overrides. **Explicit `0` disables that algorithm** (it is dropped from the search entirely). Algorithms in `algorithms` that are *unspecified* in this map split whatever budget remains after honouring the explicit values. If the explicit values sum to more than `n_trials`, positive values are scaled down proportionally (each remains ≥ 1 *when at least n_trials slots exist*; otherwise the first `n_trials` non-zero classes get one trial each and the remainder are skipped — the total budget never exceeds `n_trials`). **Unknown algorithm keys are rejected at recipe-load time with a ValidationError** — each key must be a valid alias or class name present in `algorithms`. When `parallelism > 1`, the actual per-algorithm trial count may exceed the configured budget by up to `parallelism - 1` trials due to in-flight concurrent trials; a warning is logged on each run where this condition applies. |
 | `per_trial_timeout_seconds` | int | `null` | Soft per-trial wall-clock cap. Implemented by running the trial in a worker thread; if it overshoots, Optuna prunes the trial but the underlying thread is daemonised and may continue until it finishes naturally (CPU/memory still spent). The count of threads still running at the time the study finishes is reported as `n_orphaned` in the `train_done` structured log event. Operators can monitor this field to detect trials that consistently exceed the timeout and adjust `per_trial_timeout_seconds` or `timeout_seconds` accordingly. Must be `>= 1` when set; `0` and negatives are a schema error (exit 2) — omit the field to disable the cap. |
 | `timeout_seconds` | int | `null` | Overall tuning wall-clock cap. Must be `>= 1` when set; `0` and negatives are a schema error (exit 2) — omit the field to disable the cap. |
-| `parallelism` | int | `1` | Optuna `n_jobs` (Python threads, not processes). Algorithms whose hot loop is GIL-bound see little speed-up; native-code learners (IALS, RP3beta) benefit most. |
+| `parallelism` | int | `1` | Optuna `n_jobs` (Python threads, not processes). **Raising it is as likely to cost time as to save it, and for IALS it reliably costs.** irspack's native learners already parallelise internally — an IALS trial on this project's fixtures runs at ~8 cores of its own accord — so Optuna threads stack on top of that and oversubscribe the machine. Measured on a 100k-row fixture with `n_trials: 20`, alternating runs on a 16-core host: `parallelism: 1` averaged **10.15 s**, `parallelism: 4` averaged **14.99 s** — 1.48× *slower*, with CPU time rising too, so it is contention rather than a busy host. Algorithms whose hot loop is GIL-bound see little speed-up either. Leave it at `1` unless you have measured a gain on your own data and accepted the loss of reproducibility ([Reproducibility](#reproducibility)). |
 | `storage_path` | string | `""` | Empty = in-memory (no resume). A bare path becomes a SQLite URL (`sqlite:///<path>`); explicit `sqlite://`, `postgresql://`, `postgres://`, and `mysql://` URLs are also accepted. Study name is `recotem_<recipe_name>_<run_id>` and `load_if_exists=True`, so a fresh `run_id` per train invocation always starts a new study (resume requires reusing the same `run_id` — pass `recotem train --run-id <stable>`). **SQLite over NFS corrupts** — keep SQLite databases on a local filesystem. **URLs must not embed credentials** (`postgresql://user:pass@host/db` is rejected with `SearchError` so userinfo cannot leak through SQLAlchemy tracebacks). Provide credentials via `PGPASSFILE` / `~/.pgpass` / SQLAlchemy env vars instead. |
 | `split.scheme` | string | `random` | `random`, `time_global`, or `time_user`. See semantics below. |
 | `split.heldout_ratio` | float | `0.1` | Fraction of interactions held out. Must be in (0, 1). Applied **per user and floored**: a user with fewer than `1 / heldout_ratio` distinct items contributes nothing to the held-out set, so the default `0.1` needs at least 10 per user. See [Per-user holdout depth](#per-user-holdout-depth). |

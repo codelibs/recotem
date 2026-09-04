@@ -15,6 +15,16 @@ Single-user recommendation.
 **Path parameters:** `name` matches `^[A-Za-z0-9_-]{1,64}$` (same as the
 recipe-name constraint enforced by the recipe loader).
 
+> **Brace the variable in a shell.** In zsh, `$NAME:recommend` is read as the
+> `:r` history modifier — "strip the extension" — and silently becomes
+> `NAMEecommend`. Quoting does **not** help; `"$NAME:recommend"` is mangled
+> the same way. Only `"${NAME}:recommend"` is safe. The mangled path matches
+> `GET /v1/recipes/{name}`, so a `POST` to it returns **405 Method Not
+> Allowed**, which reads exactly like a missing route. If a verb 405s,
+> suspect the shell before the server: a 422 carrying Pydantic field errors
+> proves the POST route was reached. Literal recipe names in a URL are
+> unaffected, which is why every example on this page works as printed.
+
 **Request body:**
 
 | field | type | required | default | notes |
@@ -125,7 +135,13 @@ recipe.
 ### `GET /v1/recipes/{name}`
 Authenticated.  Returns `RecipeDetailResponse` or 404 (`RECIPE_NOT_FOUND`).
 
-**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 503 (`RECIPE_UNAVAILABLE`).
+**Status codes:** 200, 401, 404 (`RECIPE_NOT_FOUND`), 422 (`VALIDATION_ERROR`), 503 (`RECIPE_UNAVAILABLE`).
+
+The 422 is what a mistyped verb lands on: `GET /v1/recipes/demo:recommend`
+puts `demo:recommend` in the `{name}` slot, which fails the
+`^[A-Za-z0-9_-]{1,64}$` pattern. A `POST` to the same path routes to the verb
+and behaves normally — see the note on shell quoting under
+[`:recommend`](#post-v1recipesnamerecommend).
 
 ### `GET /v1/health`
 Unauthenticated.  Returns `{status, total, loaded}`.  Body status is
@@ -219,9 +235,22 @@ can actually use a cold seed's features.
 ### Cold-start `score` is uncalibrated — rank it, do not threshold it
 
 A cold-start `score` is an uncalibrated similarity. **Its magnitude is not
-comparable with a warm `:recommend` score from the same model, and it is not
-stable across training runs of the same recipe.** Rankings are unaffected —
-the ordering within one response is meaningful, the absolute numbers are not.
+comparable with a warm `:recommend` score from the same model, it is not
+stable across training runs of the same recipe, and it is not stable across
+requests.** Rankings are unaffected — the ordering within one response is
+meaningful, the absolute numbers are not.
+
+The last of those is the one that surprises people. Cold-start scoring is an
+iterative solve, and it does not reproduce bit-for-bit even for one loaded
+artifact answering an identical request twice: measured over ten identical
+`:recommend-related` calls with inline `item_features` against a single
+running server, nine returned a different score vector, with the top score
+varying by ~2e-4 relative. The item order was identical every time. This is
+not thread-related — it persists with `IRSPACK_NUM_THREADS_DEFAULT=1` and in
+single-process repetition — so **do not cache cold-start scores, diff them
+between deploys, or assert on them in tests.** Warm `:recommend` and
+`:recommend-related` from a known seed *are* bit-stable; only the cold paths
+move.
 
 The reason is the feature ridge `lambda_item_feature` /
 `lambda_user_feature`, which Optuna samples log-uniformly over `[1, 1e6]`
@@ -463,6 +492,19 @@ All v1 error responses share a flat envelope at the top of the body:
 
 There is no nested `{"detail": {"detail": ..., "code": ...}}` form —
 clients parse `body["detail"]` and `body["code"]` directly.
+
+**`code` is present on every error a `/v1` route returns, but not on the ones
+that never reach a route.** Three responses come from Starlette's default
+handlers before routing or after the middleware, and carry `detail` alone —
+or no JSON at all:
+
+| response | body |
+|---|---|
+| `GET /v1/metrics` when metrics are disabled | `{"detail": "Not Found"}` |
+| an unknown verb, e.g. `POST /v1/recipes/{name}:frobnicate` | `{"detail": "Method Not Allowed"}` |
+| a `Host:` header outside `RECOTEM_ALLOWED_HOSTS` | `Invalid host header` (plain text, 400) |
+
+Read `body.get("code")` rather than `body["code"]`.
 
 **422 validation errors** add a per-field breakdown from FastAPI /
 Pydantic and include the request ID so the body is correlatable with the

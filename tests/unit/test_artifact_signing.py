@@ -471,10 +471,20 @@ def test_module_prefix_rejects_scipy_sparse_bare_submodules(module: str) -> None
     ],
 )
 def test_module_prefix_allow_scipy_sparse_csr_csc_coo_children(module: str) -> None:
-    """Children of the narrow scipy.sparse._{csr,csc,coo}. prefixes pass."""
+    """Children of the narrow scipy.sparse._{csr,csc,coo}. prefixes pass ONLY
+    for a reconstruction-helper name.
+
+    A prefix match no longer admits an arbitrary attribute: the leaf name must
+    be in ``_ALLOWED_PREFIX_NAMES`` (the stable reconstruction-helper set the
+    prefix exists to carry).  An off-list name such as ``_internal_helper`` is
+    refused even under an allowed prefix -- this is what keeps a prefix from
+    laundering an arbitrary callable (e.g. a getattr-by-string or file-IO
+    gadget) past the allow-list.
+    """
     from recotem.artifact.signing import _is_allowed
 
-    assert _is_allowed(module, "_internal_helper") is True
+    assert _is_allowed(module, "csr_matrix") is True
+    assert _is_allowed(module, "_internal_helper") is False
 
 
 @pytest.mark.parametrize(
@@ -1665,4 +1675,102 @@ def test_security_doc_fqcn_list_matches_the_allow_list() -> None:
         f"docs/security.md is out of sync with _ALLOWED_CLASSES.\n"
         f"  documented but not allowed: {sorted(documented - actual)}\n"
         f"  allowed but not documented: {sorted(actual - documented)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prefix-name restriction: a matched prefix must not admit non-reconstruction
+# callables (RCE laundry / file-IO gadgets). Regression for the getattr-by-
+# string bypass reachable through numpy._core._multiarray_tests.
+# ---------------------------------------------------------------------------
+
+
+def test_prefix_does_not_admit_import_entry_point_gadget() -> None:
+    """``npy_import_entry_point`` is a getattr-by-string that returns any
+    ``module:attr`` (e.g. ``os.system``) as a value, walking an arbitrary
+    callable past the allow-list. It lives under the allowed ``numpy._core.``
+    prefix but its name is not a reconstruction helper, so it must be refused.
+    """
+    from recotem.artifact.signing import _is_allowed
+
+    assert (
+        _is_allowed("numpy._core._multiarray_tests", "npy_import_entry_point") is False
+    )
+
+
+def test_prefix_does_not_admit_memmap_or_file_io_gadgets() -> None:
+    """File create/truncate and file-read primitives reachable under the
+    ``numpy._core.`` prefix must be refused -- only reconstruction-helper
+    names pass the prefix branch.
+    """
+    from recotem.artifact.signing import _is_allowed
+
+    for module, name in [
+        ("numpy._core.memmap", "memmap"),
+        ("numpy._core.multiarray", "fromfile"),
+        ("numpy._core.multiarray", "frompyfunc"),
+        ("numpy._core._multiarray_umath", "_load_from_filelike"),
+        ("numpy._core.records", "fromfile"),
+        ("numpy._core._ufunc_config", "seterrcall"),
+    ]:
+        assert _is_allowed(module, name) is False, f"{module}.{name} leaked"
+
+
+def test_import_entry_point_reduce_chain_is_refused_end_to_end() -> None:
+    """The full laundry chain -- STACK_GLOBAL npy_import_entry_point, REDUCE to
+    get os.system as a value, REDUCE to call it -- must raise ArtifactError at
+    ``find_class`` and never execute the command.
+    """
+    import os
+
+    sentinel = "/tmp/recotem_r6p5_entry_point_regression_should_not_exist"
+    if os.path.exists(sentinel):
+        os.remove(sentinel)
+
+    def _su(s: str) -> bytes:
+        b = s.encode()
+        return b"\x8c" + bytes([len(b)]) + b
+
+    def _sg(m: str, n: str) -> bytes:
+        return _su(m) + _su(n) + b"\x93"
+
+    payload = (
+        b"\x80\x04"
+        + _sg("numpy._core._multiarray_tests", "npy_import_entry_point")
+        + b"("
+        + _su("os:system")
+        + b"t"
+        + b"R"
+        + b"("
+        + _su(f"touch {sentinel}")
+        + b"t"
+        + b"R"
+        + b"."
+    )
+    with pytest.raises(ArtifactError, match="not allowed"):
+        unpickle_payload(payload)
+    assert not os.path.exists(sentinel), "gadget executed despite ArtifactError"
+
+
+def test_prefix_name_set_is_only_reconstruction_helpers() -> None:
+    """Pin ``_ALLOWED_PREFIX_NAMES`` so a name cannot be added without review.
+
+    Every entry must be a data/reconstruction helper -- no getattr-by-string,
+    no callable-taking, no file-IO. Growing this set widens what any matched
+    prefix admits across every importable submodule under it.
+    """
+    from recotem.artifact.signing import _ALLOWED_PREFIX_NAMES
+
+    assert (
+        frozenset(
+            {
+                "_reconstruct",
+                "scalar",
+                "_frombuffer",
+                "csr_matrix",
+                "csc_matrix",
+                "coo_matrix",
+            }
+        )
+        == _ALLOWED_PREFIX_NAMES
     )

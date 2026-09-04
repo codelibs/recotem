@@ -1316,14 +1316,19 @@ correctly.
 
 - **Action required:** retrain and redeploy every recipe whose `best_class` is
   `IALSRecommender` (the known break). `BPRFMRecommender` is refused too, for a
-  different reason: irspack gates it behind the separately installed `lightfm`
-  package, which has no Python 3.12-compatible release, so irspack never
-  exports the class and we could not verify it either way. In practice no
-  recotem 2.x deployment can hold a BPRFM artifact — recotem requires Python
-  3.12+ — so this line is a completeness note rather than real migration work.
-  Its absence from the verified table means **unproven**, not
-  known-broken — but the guard refuses the unproven rather than risk loading a
-  model that serves subtly wrong scores.
+  different reason: it is **unproven**, not known-broken. Its absence from the
+  verified table is what the guard acts on — it refuses the unproven rather
+  than risk loading a model that serves subtly wrong scores. Verifying it needs
+  a second version axis the header does not record: a BPRFM payload embeds a
+  LightFM object, so `(best_class, irspack_mm, running_mm)` does not describe
+  the pair completely.
+
+  This is real migration work as of 2.1.0. Earlier releases could not hold a
+  BPRFM artifact at all, because irspack gates the class behind an import of
+  `lightfm` and upstream `lightfm` has shipped no Python 3.12-compatible
+  release. The `bprfm` extra added in this release supplies `lightfm-next`, a
+  maintained fork that does build on 3.12, so from 2.1.0 a deployment *can*
+  hold one — and a 2.0.0 → 2.1.0 upgrade cannot carry it across.
 - The break is **bidirectional**: 0.5.x-trained IALS artifacts also fail to load
   on 0.4.x. Upgrade `train` and `serve` together — the upgrade cannot be staged
   serve-first, and serve cannot be rolled back to 0.4.x once artifacts have been

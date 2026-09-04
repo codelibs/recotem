@@ -30,7 +30,15 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    # Keep in step with the pytest matrix in .github/workflows/test.yml --
+    # `tests/unit/test_packaging_metadata.py` fails if they diverge.  Trove
+    # classifiers are the only machine-readable statement of *which*
+    # interpreters a release supports (`requires-python` is an open-ended lower
+    # bound), and they are fixed at upload: PyPI never lets a filename be
+    # reused, so a wrong set stays wrong until the next release.
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",

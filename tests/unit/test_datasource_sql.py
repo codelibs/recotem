@@ -1199,6 +1199,13 @@ def test_fetch_stream_results_applied(monkeypatch, tmp_path) -> None:
             def __exit__(self, *a):
                 self._conn.__exit__(*a)
 
+            def __getattr__(self, attr):
+                # Delegate everything else (execute, get_execution_options, ...)
+                # so the stub does not encode where execution_options is called
+                # from.  Session setup runs on the connection itself now, which
+                # a stub that only wrapped execution_options could not serve.
+                return getattr(self._conn, attr)
+
         original_engine_connect = engine.connect
 
         def new_connect():
@@ -2065,3 +2072,118 @@ def test_init_rejects_idn_hostname_resolving_to_private_ip(monkeypatch) -> None:
             DataSourceError, match="(?i)private/loopback|RECOTEM_SQL_ALLOW_PRIVATE"
         ):
             SQLSource(_make_cfg())
+
+
+# ---------------------------------------------------------------------------
+# Session setup must precede stream_results (PostgreSQL cursor wrapping)
+# ---------------------------------------------------------------------------
+
+
+def test_session_setup_runs_before_stream_results_is_enabled(
+    monkeypatch, tmp_path
+) -> None:
+    """``SET`` cannot be wrapped in a server-side cursor.
+
+    With ``stream_results=True`` psycopg issues every statement as
+    ``DECLARE ... CURSOR FOR <stmt>``, and PostgreSQL rejects a cursor over
+    ``SET`` with ``syntax error at or near "SET"``. Both session-setup
+    statements are ``SET``, so enabling streaming before they run makes the
+    PostgreSQL source fail on every query.
+
+    No PostgreSQL is needed to catch the ordering: the assertion is that the
+    connection handed to the session-setup helpers does not yet carry
+    ``stream_results``, and that the query afterwards does. Ordering is
+    checked here because CI has no live PostgreSQL to fail against.
+    """
+    from recotem.datasource.sql import SQLSource
+
+    db = _seed_sqlite(tmp_path)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"sqlite:///{db}")
+
+    seen: dict[str, object] = {}
+
+    real_read_only = SQLSource._apply_read_only
+    real_timeout = SQLSource._apply_statement_timeout
+
+    def spy_read_only(self, conn):
+        seen["read_only"] = conn.get_execution_options().get("stream_results")
+        return real_read_only(self, conn)
+
+    def spy_timeout(self, conn):
+        seen["timeout"] = conn.get_execution_options().get("stream_results")
+        return real_timeout(self, conn)
+
+    monkeypatch.setattr(SQLSource, "_apply_read_only", spy_read_only)
+    monkeypatch.setattr(SQLSource, "_apply_statement_timeout", spy_timeout)
+
+    src = SQLSource(_make_cfg(query="SELECT user_id, item_id FROM events"))
+    df = src.fetch(_ctx())
+
+    assert len(df) == 3
+    assert seen["read_only"] is not True, (
+        "read-only was applied on a streaming connection; on PostgreSQL the "
+        'SET would be wrapped in DECLARE ... CURSOR FOR and fail with syntax error at or near "SET"'
+    )
+    assert seen["timeout"] is not True, (
+        "statement timeout was applied on a streaming connection; same failure"
+    )
+
+
+def test_error_label_names_the_dbapi_error_without_leaking_the_dsn() -> None:
+    """SQLAlchemy collapses unrelated faults into one wrapper class.
+
+    ``ProgrammingError`` alone cannot distinguish a missing grant from a
+    malformed statement, and the message deliberately withholds ``str(exc)``
+    because driver exceptions can embed DSN userinfo. The driver's exception
+    *class* carries the distinction and cannot carry a credential.
+    """
+    from recotem.datasource.sql import _error_label
+
+    class _DriverError(Exception):
+        def __str__(self) -> str:  # pragma: no cover - must never be called
+            return "postgresql://alice:s3cret@db.example/orders"
+
+    class _Wrapper(Exception):
+        def __init__(self) -> None:
+            self.orig = _DriverError()
+
+    label = _error_label(_Wrapper())
+    assert "_Wrapper" in label
+    assert "_DriverError" in label
+    assert "s3cret" not in label
+    assert "alice" not in label
+
+    assert _error_label(ValueError("boom")) == "ValueError"
+
+
+def test_read_only_failure_message_carries_the_driver_error_class(
+    monkeypatch,
+) -> None:
+    """The operator-visible message names both classes and no DSN."""
+    from unittest.mock import MagicMock
+
+    from recotem.datasource.base import DataSourceError
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg())
+    src._dialect = "postgresql"
+
+    class _Syntax(Exception):
+        def __str__(self) -> str:  # pragma: no cover - must never be called
+            return "postgresql://alice:s3cret@db.example/orders"
+
+    class _Programming(Exception):
+        def __init__(self) -> None:
+            self.orig = _Syntax()
+
+    conn = MagicMock()
+    conn.execute.side_effect = _Programming()
+
+    with pytest.raises(DataSourceError) as excinfo:
+        src._apply_read_only(conn)
+
+    message = str(excinfo.value)
+    assert "_Programming" in message
+    assert "_Syntax" in message
+    assert "s3cret" not in message

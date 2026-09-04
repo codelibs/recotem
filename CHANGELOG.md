@@ -416,6 +416,29 @@ exit 8.
 
 ### Fixed
 
+- **The PostgreSQL data source could not run a single query.** `fetch` opened
+  the connection with `stream_results=True` and only then issued its two
+  session-setup statements. With that option psycopg runs every statement as
+  `DECLARE ... CURSOR FOR <stmt>`, and PostgreSQL cannot declare a cursor over
+  `SET`, so `SET TRANSACTION READ ONLY` failed with `syntax error at or near
+  "SET"` and every `source.type: sql` recipe against PostgreSQL exited 3
+  before a row was read. Session setup now runs before streaming is enabled;
+  read-only enforcement and server-side cursors both still apply, verified
+  against a live PostgreSQL 17 (1,920 rows fetched, `stream_results` still
+  `True` on the query connection, `CREATE TEMP TABLE` still refused with
+  `ReadOnlySqlTransaction`). MySQL, MariaDB and SQLite were never affected —
+  measured, not assumed. The failure was invisible to CI, which has no live
+  PostgreSQL, so the regression test asserts the *ordering* instead: session
+  setup must not see a connection that already carries `stream_results`.
+
+- **A failed session-setup statement named only SQLAlchemy's wrapper class.**
+  The message deliberately withholds `str(exc)` because driver exceptions can
+  embed DSN userinfo, but `ProgrammingError` alone cannot distinguish a
+  missing grant from a malformed statement — an operator hitting the bug above
+  had no way to reach the cause. The DBAPI exception's class is now named too
+  (`ProgrammingError (psycopg.errors.SyntaxError)`); a class name cannot carry
+  a credential, and a test asserts the DSN stays out.
+
 - **The GA4 BigQuery example scanned the entire export on every run, and
   `lookback_days` did nothing about it.** The per-user activity subquery in
   `examples/ga4-bigquery/recipe.yaml` referenced `analytics_123.events_*`

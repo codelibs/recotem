@@ -1070,6 +1070,21 @@ exit 8.
   artifacts never use a dotted name, so nothing that used to load stops
   loading.
 
+- **Two security claims did not match the code, both fail-closed.** The
+  artifact HMAC covers `kid_bytes || header_json || payload` as one run of
+  bytes, so the 4-byte `header_len` that splits the last two is not
+  authenticated: moving it passes `verify_hmac` — `recotem inspect` prints
+  `HMAC: OK` — and is caught one layer later by the header JSON parse, exit 5.
+  It shifts a boundary and cannot inject a byte, so the format is unchanged and
+  the documentation now says this precisely. Separately, the prefix allow-list
+  carried `numpy.dtypes.`, which matched nothing (a trailing dot matches
+  sub-modules, and that module has none) while `docs/security.md` listed it as
+  permitted; the dead entry is removed and the document corrected. Nothing
+  needs it — numpy reaches dtypes through the hand-enumerated `numpy.dtype`
+  plus `_frombuffer`, asserted against real pickles. The test that appeared to
+  cover the entry passed `numpy.dtypes.Float64DType` as a *module* string,
+  which no pickle ever does, so a dead rule looked exercised for four rounds.
+
 - **A load failure could put an object-store URI, path segments included, into
   an API response.** `_sanitize_error` was called from exactly one place — the
   startup load path — so `/v1/health/details` was only redacted until the first

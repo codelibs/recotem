@@ -447,11 +447,20 @@ submodules):
 ```
 numpy._core.       numpy 2.x reconstruction helpers + scalar / dtype machinery
 numpy.core.        numpy 1.x equivalents (forward-compat with pre-2.x artifacts)
-numpy.dtypes.      numpy 2.x parametric dtype classes (Float64DType, BoolDType, …)
 scipy.sparse._csr. CSR matrix reconstructor + helpers
 scipy.sparse._csc. CSC equivalent
 scipy.sparse._coo. COO equivalent
 ```
+
+`numpy.dtypes` is **not** on this list. numpy 2.x parametric dtype classes
+(`Float64DType`, `BoolDType`, …) live directly in that module, and a prefix
+entry ending in a dot only matches sub-modules, so an entry for it would match
+nothing. Nothing needs it: numpy round-trips arrays and dtypes through the
+hand-enumerated `numpy.dtype` plus `numpy._core.multiarray._frombuffer`, and a
+pickle of a `float64` / `int64` / `bool` / `str` array or a bare dtype
+references no `numpy.dtypes.*` name. If a future numpy starts emitting those
+FQCNs, add the individual classes to the hand-enumerated list — widening the
+prefix list to the whole module would also admit its two non-class callables.
 
 The bare top-level modules (`numpy`, `scipy.sparse`) are intentionally
 **not** on the prefix list. The legitimate top-level FQCNs

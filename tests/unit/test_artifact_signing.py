@@ -370,19 +370,23 @@ def test_module_matches_helper_without_trailing_dot() -> None:
         # numpy.core.* — numpy 1.x reconstruction helpers (forward-compat)
         "numpy.core.multiarray",
         "numpy.core.numeric",
-        # numpy.dtypes.* — parametric dtype factories
-        "numpy.dtypes.Float64DType",
-        "numpy.dtypes.BoolDType",
     ],
 )
 def test_module_prefix_allow_numpy_subpaths(module: str) -> None:
-    """numpy reconstruction-helper / dtype submodules are allowed via prefix.
+    """numpy reconstruction-helper submodules are allowed via prefix.
 
-    The prefix list is intentionally narrow: only ``numpy._core.``,
-    ``numpy.core.`` and ``numpy.dtypes.`` are allowed.  Other numpy
-    submodules (``numpy.fft``, ``numpy.linalg``, ``numpy.random``,
-    ``numpy.foo`` …) are NOT permitted via the prefix list — see
+    The prefix list is intentionally narrow: only ``numpy._core.`` and
+    ``numpy.core.`` are allowed.  Other numpy submodules (``numpy.fft``,
+    ``numpy.linalg``, ``numpy.random``, ``numpy.foo`` …) are NOT permitted
+    via the prefix list — see
     :func:`test_module_prefix_rejects_other_numpy_submodules`.
+
+    Every entry here is a real module.  This used to also carry
+    ``numpy.dtypes.Float64DType`` and ``numpy.dtypes.BoolDType``, which are
+    classes rather than modules — no pickle ever passes them as the *module*
+    half of the pair, so the case asserted a path that cannot occur and made
+    a dead prefix entry look exercised.  See
+    :func:`test_numpy_dtypes_is_not_on_the_prefix_allow_list`.
     """
     from recotem.artifact.signing import _is_allowed
 
@@ -1492,3 +1496,51 @@ def test_allowed_class_names_are_plain_identifiers() -> None:
 
     dotted = sorted(f"{m}.{n}" for m, n in _ALLOWED_CLASSES if "." in n)
     assert dotted == []
+
+
+def test_numpy_dtypes_is_not_on_the_prefix_allow_list() -> None:
+    """``numpy.dtypes`` classes are not allow-listed, and nothing needs them.
+
+    A prefix entry ending in a dot matches sub-modules only, and
+    ``numpy.dtypes`` has none, so an entry for it would be dead. numpy's own
+    pickles reach dtypes through the hand-enumerated ``numpy.dtype`` plus
+    ``numpy._core.multiarray._frombuffer``, never through a
+    ``numpy.dtypes.*`` name.
+
+    Pinned so that re-adding it is a deliberate decision: widening the prefix
+    list to that whole module would also admit its two non-class callables.
+    """
+    from recotem.artifact.signing import _ALLOWED_MODULE_PREFIXES, _is_allowed
+
+    assert "numpy.dtypes." not in _ALLOWED_MODULE_PREFIXES
+    assert "numpy.dtypes" not in _ALLOWED_MODULE_PREFIXES
+    assert _is_allowed("numpy.dtypes", "Float64DType") is False
+
+
+def test_numpy_pickles_do_not_reference_numpy_dtypes_fqcns() -> None:
+    """The reason the entry is unnecessary, asserted against real pickles."""
+    import io
+    import pickle  # noqa: S403
+    import pickletools
+
+    import numpy as np
+
+    samples = [
+        np.arange(3, dtype="float64"),
+        np.arange(3, dtype="int64"),
+        np.array([True, False]),
+        np.array(["a", "b"]),
+        np.dtype("float32"),
+    ]
+    names: set[str] = set()
+    for sample in samples:
+        stream = io.BytesIO(pickle.dumps(sample, protocol=4))  # noqa: S301
+        for op, arg, _pos in pickletools.genops(stream):
+            if op.name in {
+                "GLOBAL",
+                "STACK_GLOBAL",
+                "SHORT_BINUNICODE",
+            } and isinstance(arg, str):
+                names.add(arg)
+
+    assert [n for n in names if n.startswith("numpy.dtypes")] == []

@@ -42,7 +42,7 @@ source:
 |---|---|---|---|
 | `dsn_env` | yes | — | Name of an env var matching `^RECOTEM_RECIPE_[A-Z0-9_]+$` containing the DSN. The DSN itself is never written to the recipe. |
 | `query` | yes | — | Raw SQL. Never subject to `${...}` expansion (SQL injection foreclosure). |
-| `query_parameters` | no | `{}` | Bound via SQLAlchemy `text().bindparams(...)`. Subject to `${RECOTEM_RECIPE_*}` expansion. |
+| `query_parameters` | no | `{}` | Bound via SQLAlchemy `text().bindparams(...)`. **Not** subject to `${RECOTEM_RECIPE_*}` expansion — `query` and `query_parameters` are both on the loader's no-expand list, so a `${...}` here reaches the database as those literal characters. That is deliberate: expansion into a SQL string is an injection path. Parameterise with `:name` placeholders and set the values in the recipe. |
 | `connect_timeout_seconds` | no | 10 | Valid range `[1, 60]` (out-of-range raises ValidationError). Passed as `connect_timeout` (PG/MySQL) or `timeout` (SQLite). |
 | `statement_timeout_seconds` | no | 300 | Valid range `[1, 1800]` (out-of-range raises ValidationError). PG: `SET LOCAL statement_timeout = <ms>`. MySQL: `SET SESSION MAX_EXECUTION_TIME = <ms>`. MariaDB: `SET SESSION max_statement_time = <seconds>` (different unit and variable from MySQL). Failure aborts training on PG/MySQL/MariaDB. SQLite: not enforced (no server-side timeout primitive); a `sql_statement_timeout_unsupported_on_sqlite` warning is logged so operators know the documented safety control is not in effect. |
 

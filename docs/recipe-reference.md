@@ -150,7 +150,7 @@ The message depends on which layer noticed. Sources that do not check for themse
 |-------|-----------|
 | `keep_first` | Keep the first occurrence of each (user, item) pair. |
 | `keep_last` | Keep the last occurrence of each (user, item) pair by row order in the source DataFrame. |
-| `none` | No deduplication. |
+| `none` | No deduplication — every row is kept. The interaction matrix stays **binary** either way: duplicate `(user, item)` pairs are collapsed to a single 1 when the model is built, in both the search and the final refit, so `none` changes how many rows are scanned and what `data_stats.n_rows` reports, not what the model is trained on. If you want repeat interactions to carry weight, aggregate them in the source query into a column the recipe does not use as `user_column`/`item_column`; recotem has no confidence-weighting setting. |
 
 `keep_first` / `keep_last` use the row order returned by the data source — they do **not** sort by `time_column`. If you need time-ordered deduplication, sort in the source query (BigQuery `ORDER BY ts`) or pre-sort the CSV before training.
 

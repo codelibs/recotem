@@ -1483,11 +1483,14 @@ def test_dimension_cap_message_matches_the_measured_scaling(
 ) -> None:
     """The advice in the error must not contradict the sizing documentation.
 
-    `docs/operations.md` was corrected to say the per-trial cost grows at
-    roughly `dim^2.4` — a doubling costs 5.1-5.8x, not the 8x a pure cubic
-    would — while this message still told the operator the cost was cubic. The
-    message is where someone reads the advice at the moment they are deciding
-    whether to raise the cap, so it is the copy that matters most.
+    The message once said the cost was cubic; #208 corrected it and
+    `docs/operations.md` to a flat `dim^2.4`. Re-measuring across the whole
+    ladder showed no single power fits: a doubling costs 1.7-1.9x below the
+    default 5,000 cap, 5.1x from 5,000 to 10,000 and 7.5x from 10,000 to
+    20,000. The flat figure was right only in the middle, and it understated
+    exactly the step an operator takes when the default cap refuses their
+    catalogue. The message is where someone reads the advice at the moment they
+    are deciding whether to raise the cap, so it is the copy that matters most.
     """
     monkeypatch.setenv("RECOTEM_MAX_FEATURE_DIM", "16")
     d = pd.DataFrame(
@@ -1498,7 +1501,11 @@ def test_dimension_cap_message_matches_the_measured_scaling(
 
     message = str(excinfo.value)
     assert "cubic in this number" not in message
-    assert "dim^2.4" in message
+    # A single exponent is what was measured to be wrong; the message must give
+    # the operator the two steps that bracket the cap instead.
+    assert "dim^2.4" not in message
+    assert "5.1x" in message and "7.5x" in message
+    assert "10,000" in message and "20,000" in message
     assert "quadratic" in message
 
 
@@ -1518,10 +1525,15 @@ def test_no_shipped_prose_still_calls_the_feature_cost_cubic() -> None:
     So the list is now the whole surface a reader can reach: the top-level
     prose files, every file under `docs/`, and the product source. The match is
     a pattern rather than one literal string, so a reworded restatement of the
-    same wrong claim is caught too -- while the correct sentences that *use*
-    the word (``"not the 8x a pure cubic would"``, ``"dilute the cubic
-    decomposition"``) are not, because they do not say the cost *is* cubic in
-    anything.
+    same wrong claim is caught too -- while a sentence that merely *uses* the
+    word (``"dilute the cubic decomposition"``) is not, because it does not say
+    the cost *is* cubic in anything.
+
+    ``"not the 8x a pure cubic would"`` used to be listed here as a second such
+    sentence. It is gone from the tree: the 10,000 -> 20,000 doubling measured
+    7.46x, so ruling the cubic out was itself the wrong claim, and
+    ``test_no_shipped_prose_rules_out_the_cubic_doubling_it_measures`` below now
+    keeps it gone.
     """
     root = Path(__file__).resolve().parents[2]
     sources = [
@@ -1541,7 +1553,8 @@ def test_no_shipped_prose_still_calls_the_feature_cost_cubic() -> None:
     ]
     assert not offenders, (
         "these lines still describe the feature-dimension cost as cubic; the "
-        f"measured growth is dim^2.4 (a doubling costs 5.1-5.8x): {offenders}"
+        f"measured growth is super-linear with a rising exponent -- 5.1x per "
+        f"doubling at 5,000-10,000 and 7.5x at 10,000-20,000: {offenders}"
     )
 
 
@@ -1846,3 +1859,58 @@ def test_multi_label_tokenization_ignores_empty_and_whitespace_tokens(
     m, unknown = encode_one(state, {"genre": "action", "year": 2000.0, "tags": raw})
     np.testing.assert_allclose(m.toarray(), m_canonical.toarray())
     assert unknown == []
+
+
+def test_no_shipped_prose_rules_out_the_cubic_doubling_it_measures() -> None:
+    """The 10,000 -> 20,000 doubling costs 7.5x; prose must not deny the 8x.
+
+    #208 replaced "cubic in this number" with a flat `dim^2.4` and the gloss
+    "a doubling costs 5.1-5.8x, not the 8x a pure cubic would".  Re-measured
+    across the whole ladder on a 100k-row fixture, `parallelism: 1`, median of
+    three interleaved passes:
+
+        1,251 -> 2,501    1.74x   (exponent 0.80)
+        2,501 -> 5,001    1.85x   (exponent 0.89)
+        5,001 -> 10,001   5.07x   (exponent 2.34)
+        10,001 -> 20,001  7.46x   (exponent 2.90)
+
+    The gloss is right only for the middle step.  7.46x is the 8x it rules out,
+    and that step is the one an operator takes when the default 5,000 cap
+    refuses their catalogue -- so the sentence is wrong exactly where it is
+    read.  The page's own per-trial table already showed 7.0x and 10.2x per
+    doubling; the gloss narrowed it to the bottom of its own range.
+    """
+    root = Path(__file__).resolve().parents[2]
+    # The same surface `test_no_shipped_prose_still_calls_the_feature_cost_cubic`
+    # scans.  Scanning only `docs/` would be the defect this round saw most
+    # often: the identical sentence lives in `CHANGELOG.md`'s 2.1.0 section and
+    # in `get_max_feature_dim`'s own docstring, and a guard that misses those
+    # lets the release ship the corrected exponent and the superseded one side
+    # by side.
+    sources = [
+        root / "CLAUDE.md",
+        root / "README.md",
+        root / "CHANGELOG.md",
+        *sorted((root / "docs").rglob("*.md")),
+        *sorted((root / "src").rglob("*.py")),
+    ]
+    # A pattern, not a literal: `CHANGELOG.md` and `src/recotem/config.py`
+    # spelled it "not the 8x", `CLAUDE.md` spelled the identical claim "not
+    # the `dim^3`", and a scan for either alone leaves the other shipping.
+    ruling_out_cubic = re.compile(r"not the\s+`?(?:8|dim\^3|dim\*\*3)", re.IGNORECASE)
+    offenders = [
+        f"{path.relative_to(root)}"
+        for path in sources
+        if path.exists()
+        and ruling_out_cubic.search(path.read_text(encoding="utf-8").replace("\n", " "))
+    ]
+    assert not offenders, (
+        "these files rule out a cubic doubling for the feature dimension; the "
+        "10,000 -> 20,000 doubling measured 7.46x, which is that cubic: "
+        f"{offenders}"
+    )
+    ops = (root / "docs" / "operations.md").read_text(encoding="utf-8")
+    assert "7.46" in ops and "exponent itself\nrises" in ops, (
+        "docs/operations.md no longer carries the per-doubling measurements "
+        "that show the exponent rising with the dimension"
+    )

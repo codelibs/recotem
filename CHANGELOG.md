@@ -240,9 +240,11 @@ exit 8.
   fetched feature table (so cold-start entities are representable), which
   means encoded dimension scales with **catalog size, not interaction
   count**; `min_frequency` on high-cardinality columns is the only
-  recipe-level lever. Per-trial time grows at roughly `dim^2.4` (measured — a
-  doubling costs 5.1–5.8×, not the 8× the dense `Fᵀ F` Cholesky suggests,
-  because forming the Gram matrix dilutes the decomposition) and memory
+  recipe-level lever. Per-trial time grows super-linearly, and the exponent
+  rises with the dimension: a doubling costs 1.7–1.9× below the default 5,000
+  cap, 5.1× from 5,000 to 10,000, and 7.5× from 10,000 to 20,000 — effectively
+  the cubic the dense `Fᵀ F` Cholesky suggests, at exactly the step an operator
+  takes when the default cap refuses their catalogue. Memory grows
   quadratically; both multiply with `training.parallelism`. See
   `docs/operations.md#feature-aware-ials-sizing`.
 - Artifact headers for feature-aware models gain a `features` block

@@ -567,10 +567,13 @@ def get_max_feature_dim() -> int:
     """Return RECOTEM_MAX_FEATURE_DIM, clamped to [16, 100000].
 
     irspack forms a dense ``F.T @ F`` and solves it by Cholesky, and never
-    errors from either cost -- it only degrades.  Time grows at roughly
-    ``dim^2.4`` (measured: a doubling costs 5.1-5.8x, not the 8x the Cholesky
-    suggests, because forming the Gram matrix dilutes the decomposition) and
-    memory quadratically.  Measured per trial on a 100k-row fixture:
+    errors from either cost -- it only degrades.  Time grows super-linearly and
+    the exponent RISES with the dimension, so no single power fits the range: a
+    doubling costs 1.7-1.9x below the default 5,000 cap, 5.1x from 5,000 to
+    10,000, and 7.5x from 10,000 to 20,000 -- effectively the cubic the
+    Cholesky suggests, at exactly the step an operator takes when the default
+    cap refuses their catalogue.  Memory grows quadratically.  Measured per
+    trial on a 100k-row fixture:
     5k -> 2.4 s / 200 MB; 10k -> 12 s / 771 MB; 20k -> 70 s / 3 GB; the lower
     times in docs/operations.md's table come from a small fixture.  Both
     multiply with training.parallelism.

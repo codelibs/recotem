@@ -99,8 +99,28 @@ command -v gh >/dev/null 2>&1 || fail \
     "gh is not installed, so the milestone cannot be read." \
     "Install GitHub CLI, or run this check from CI where gh is preinstalled."
 
+# This one prevents a WRONG answer, not merely an unanswerable one, and the
+# distinction is why it has to run BEFORE any ancestry question.  Measured on a
+# six-commit repository, asking whether a commit that genuinely IS an ancestor
+# of HEAD is one:
+#
+#   full clone                           -> exit 0    correct
+#   shallow, ancestor object fetched in  -> exit 1    confidently WRONG
+#   object absent entirely               -> exit 128  loud
+#
+# In a shallow clone the tip object can be present while the connecting history
+# is not, and `merge-base --is-ancestor` then reports "not an ancestor" with
+# nothing to indicate it could not see.  Exit 1 is indistinguishable from a
+# genuine negative, so without this refusal the gate would fail a legitimate
+# release and name the wrong PRs as stranded.  Only the third row is loud, and
+# the `cat-file -e` pre-check below is what keeps 128 from being read as "not
+# an ancestor" -- keep that check ahead of the comparison too.
 if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-    fail "the checkout is shallow, so ancestry cannot be determined." \
+    fail "the checkout is shallow, so ancestry cannot be answered correctly." \
+         "A shallow clone does not merely fail to answer: it reports 'not an" \
+         "ancestor' (exit 1) for commits that ARE ancestors, because the" \
+         "connecting history is absent.  That is indistinguishable from a real" \
+         "negative, so this refuses rather than reporting the wrong PRs." \
          "Use actions/checkout with fetch-depth: 0 for this job."
 fi
 

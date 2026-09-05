@@ -324,12 +324,40 @@ def test_absent_milestone_opt_out_is_explicit(repo: Path) -> None:
 
 @requires_bash
 def test_shallow_clone_is_refused(repo: Path) -> None:
-    """Ancestry is unanswerable in a shallow clone; refuse rather than guess."""
+    """The precondition prevents a WRONG answer, not merely an unanswerable one.
+
+    Measured on a six-commit repository, asking whether a commit that genuinely
+    IS an ancestor of HEAD is one::
+
+        full clone                           -> exit 0    correct
+        shallow, ancestor object fetched in  -> exit 1    confidently WRONG
+        object absent entirely               -> exit 128  loud
+
+    The middle row is the hazard. In a shallow clone the tip object can be
+    present while the connecting history is not, and ``git merge-base
+    --is-ancestor`` then answers "not an ancestor" with nothing to signal that
+    it could not see. Exit 1 is indistinguishable from a genuine negative, so a
+    gate without this precondition would not merely fail to answer — it would
+    fail a legitimate release and name the wrong PRs as stranded. Only the
+    third row is loud, and the ``cat-file -e`` pre-check handles that one.
+
+    The refusal therefore has to come BEFORE any ancestry question is asked,
+    which is where the script puts it.
+    """
     shallow = repo.parent / "shallow"
+    # Cloned over file://, not as a local path: `--depth` is SILENTLY IGNORED
+    # when cloning a local path, because git hardlinks the object store
+    # instead of fetching. Measured -- a local-path `--depth 1` clone of this
+    # fixture reports is-shallow false and carries all six commits. The
+    # assertion below is what stops a future "simplification" to a plain path
+    # from leaving this test green while testing nothing.
     subprocess.run(
         ["git", "clone", "-q", "--depth", "1", f"file://{repo}", str(shallow)],
         check=True,
         capture_output=True,
+    )
+    assert _git(shallow, "rev-parse", "--is-shallow-repository") == "true", (
+        "the fixture is not actually shallow, so this test proves nothing"
     )
     shutil.copytree(repo / ".fakegh", shallow / ".fakegh", dirs_exist_ok=True)
     env = dict(os.environ)

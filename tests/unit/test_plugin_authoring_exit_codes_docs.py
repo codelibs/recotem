@@ -93,9 +93,42 @@ def test_bare_importerror_maps_to_1() -> None:
 # ---------------------------------------------------------------------------
 
 
+# Phrasings that mark a sentence as *describing history* rather than *making a
+# claim*.  A `mustNot` is file-wide by default -- scoped, the withdrawn claim
+# can reappear outside the scope and be missed -- but file-wide it fires on
+# sentences that are legitimately true, and "Changed in 2.1.0: this was
+# documented as exit code 3" is exactly such a sentence, one a maintainer
+# should be free to write.
+#
+# Measured: adding that note made two assertions here fail on a correct edit.
+# A guard that reddens CI for a true sentence is a guard someone deletes, so
+# the escape is deliberate. It is narrow on purpose -- the markers all place
+# the claim in the past explicitly, so smuggling a live claim through one
+# requires writing a sentence that says the opposite of what it means.
+#
+# Same shape as `_SUPERSEDED_MARKERS` in #257.
+_SUPERSEDED_MARKERS = (
+    "changed in",
+    "before this release",
+    "previously",
+    "used to",
+    "was documented as",
+    "no longer",
+)
+
+
+def _is_historical(line: str) -> bool:
+    return any(m in line.lower() for m in _SUPERSEDED_MARKERS)
+
+
+def _live_claim_lines() -> list[str]:
+    """Document lines that make a claim, excluding ones marked as history."""
+    return [ln for ln in _doc().splitlines() if not _is_historical(ln)]
+
+
 def test_withdrawn_claims_are_gone() -> None:
     """The three statements the product does not support must not reappear."""
-    doc = _doc()
+    doc = "\n".join(_live_claim_lines())
     withdrawn = [
         # contract violations were said to be exit 3
         "plugin-discovery time (exit code 3)",
@@ -162,7 +195,7 @@ def test_no_paragraph_claims_exit_3_for_a_contract_violation() -> None:
     """
     offenders = [
         ln
-        for ln in _doc().splitlines()
+        for ln in _live_claim_lines()
         if re.search(r"discovery|duplicate `?type_name|Duplicate DataSource", ln)
         and re.search(r"exit(?:s)?(?: code)? \*{0,2}3\*{0,2}\b", ln)
     ]

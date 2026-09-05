@@ -1338,6 +1338,38 @@ exit 8.
 
 ### Security
 
+- **A malformed `RECOTEM_SIGNING_KEYS` printed the signing key in clear text,
+  past the redaction processor.** When the variable does not parse, the
+  resulting exception quotes the offending value — and for this variable the
+  offending value *is* the signing key. The trigger is ordinary: pasting the
+  hex half of what `recotem keygen` prints, without the `kid:` prefix. The
+  redaction processor really is first in the log chain, and that is why it did
+  not help: `structlog.processors.format_exc_info` runs **last**, so the
+  `exception` field is rendered after redaction has already passed over the
+  event. Two exits leaked. `recotem train` printed the raw key to stderr
+  through `cli._exit`, one line below a correctly-redacted `error` field; and
+  under `RECOTEM_LOG_FORMAT=json`, `serve` emitted a single
+  `signing_key_construction_failed` event whose `error` was redacted and whose
+  `exception` traceback was not. JSON logs ship to Datadog, ELK and CloudWatch
+  as they are, and `foreign_pre_chain` reuses the same processor list, so
+  third-party loggers were affected too.
+
+  A second, idempotent redaction pass now runs at the **end** of the chain, so
+  the traceback is scrubbed after it is rendered; the first-position pass is
+  unchanged, and the existing ordering guarantee still holds. Tracebacks are
+  redacted, not discarded — frames are preserved and only the secret becomes
+  `[REDACTED-HEX64]`, because a redaction that destroys the diagnostic is its
+  own defect. `log_redaction.redact_text()` is now public so `cli._exit`, which
+  is outside the log chain, can use it. The same handling covers
+  `RECOTEM_API_KEYS` and credential-bearing DSNs.
+
+  **If you ran any 2.1.0 development build or 2.0.0 with a malformed
+  `RECOTEM_SIGNING_KEYS`, treat the affected key as disclosed and rotate it.**
+  Log retention is the exposure window and redaction cannot be applied
+  retroactively to lines already shipped. `docs/operations.md` has the
+  four-step rotation procedure; `KeyRing` supports multiple `kid`s so the
+  rotation is zero-downtime.
+
 - **The FQCN allow-list could be walked out of with a dotted name, so a signed
   payload reached arbitrary code.** `pickle.Unpickler.find_class` resolves
   protocol-4 `STACK_GLOBAL` names with `_getattribute`, which walks dots, but

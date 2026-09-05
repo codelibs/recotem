@@ -169,11 +169,20 @@ def get_recommender_cls(class_name: str):  # type: ignore[return]
     except (ImportError, AttributeError, ValueError, KeyError) as exc:
         extra = _GATED_CLASS_EXTRAS.get(class_name)
         if extra is not None:
+            # Names ONLY the narrow extra, never `recotem[all]`.  `[all]`
+            # depends on `[bprfm]`, so on any platform where the narrow extra
+            # cannot install, `[all]` cannot either -- it is offered as an
+            # alternative to the very thing that just failed and rescues
+            # nobody, while asking the operator to pull in eight extras they
+            # did not want.  Measured across {3.12, 3.13, 3.14} x
+            # {amd64, arm64}: `[bprfm]` and `[all]` install on amd64 3.12 and
+            # amd64 3.13 only, because `lightfm-next` publishes no wheel for
+            # the other four cells and a source build needs a compiler the
+            # slim image does not carry.
             raise UnknownAlgorithmError(
                 f"Algorithm {class_name!r} is supported by recotem but is not "
                 f"installed: it requires the optional {extra!r} extra. "
-                f"Install it with: pip install 'recotem[{extra}]' "
-                f"(or 'recotem[all]'), then retry."
+                f"Install it with: pip install 'recotem[{extra}]', then retry."
             ) from exc
         raise UnknownAlgorithmError(
             f"irspack does not know recommender class {class_name!r}."

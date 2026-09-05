@@ -48,6 +48,22 @@ def test_missing_extra_names_the_extra_and_the_install_command(without_bprfm) ->
     assert "irspack does not know" not in message
 
 
+def test_the_remedy_does_not_offer_the_all_extra(without_bprfm) -> None:
+    """`recotem[all]` must never be offered as the alternative here.
+
+    `[all]` depends on `[bprfm]`, so wherever the narrow extra cannot install,
+    `[all]` cannot either: it is an alternative to the thing that just failed
+    and rescues nobody, at the price of eight extras the operator did not ask
+    for.  Measured across {3.12, 3.13, 3.14} x {amd64, arm64}, both install on
+    amd64 3.12 and amd64 3.13 only -- `lightfm-next` publishes no wheel for the
+    other four cells.
+    """
+    with pytest.raises(UnknownAlgorithmError) as exc:
+        algorithms.get_recommender_cls("BPRFMRecommender")
+
+    assert "recotem[all]" not in str(exc.value)
+
+
 def test_a_real_unknown_class_still_says_irspack_does_not_know_it(
     without_bprfm,
 ) -> None:

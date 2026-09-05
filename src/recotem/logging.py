@@ -66,6 +66,20 @@ def configure_logging(log_format: str = "auto") -> None:
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
+        # ...and it must ALSO be last.  ``format_exc_info`` renders ``exc_info``
+        # into a new ``exception`` string field, so that field is created after
+        # the first pass has already run and would otherwise ship unscrubbed.
+        # That is not hypothetical: ``logger.error(..., exc_info=True)`` on a
+        # KeyRingConfigError produced one event whose ``error`` field read
+        # ``[REDACTED-HEX64]`` while its sibling ``exception`` field carried the
+        # raw signing key into the log aggregator.
+        #
+        # The first pass is still the load-bearing one — it must run before any
+        # processor can serialize the event — so this is an addition, not a
+        # move.  The processor is idempotent (``_scrub_string_value``
+        # early-returns on ``[REDACTED`` prefixes), so fields already scrubbed
+        # by the first pass are untouched by the second.
+        redact_sensitive_keys,
     ]
 
     structlog.configure(

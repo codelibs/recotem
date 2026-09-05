@@ -49,6 +49,7 @@ from recotem._exit_codes import (
     _EXIT_UNKNOWN,
     _map_exception_to_exit,
 )
+from recotem.log_redaction import redact_text
 from recotem.version import __version__
 
 app = typer.Typer(
@@ -110,9 +111,18 @@ __all__ = [
 
 
 def _exit(code: int, message: str | None = None) -> None:
-    """Print *message* to stderr (if provided) and sys.exit with *code*."""
+    """Print *message* to stderr (if provided) and sys.exit with *code*.
+
+    *message* is almost always built from an exception, and an exception that
+    reports a bad configuration value quotes that value back — for
+    ``RECOTEM_SIGNING_KEYS`` the quoted value IS the signing key.  This writes
+    to stderr with ``typer.echo``, entirely outside the structlog chain, so
+    ``redact_sensitive_keys`` never sees it; without the explicit scrub below a
+    malformed-key paste printed the raw key next to a correctly redacted log
+    line for the same error.
+    """
     if message:
-        typer.echo(message, err=True)
+        typer.echo(redact_text(message), err=True)
     raise typer.Exit(code=code)
 
 

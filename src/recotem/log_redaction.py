@@ -356,6 +356,29 @@ def _scrub_string_value(s: str) -> str:
     return s
 
 
+def redact_text(s: str) -> str:
+    """Scrub high-entropy substrings out of a free-text string.
+
+    The value-side half of the processor, exposed for the two sinks that write
+    text **outside** the structlog chain and therefore never see
+    ``redact_sensitive_keys``:
+
+    - ``cli.py``'s ``_exit``, which prints an exception message to stderr with
+      ``typer.echo``; and
+    - the ``exception`` field that ``structlog.processors.format_exc_info``
+      materialises *after* redaction has already run.
+
+    An exception message is attacker-independent but not secret-independent: a
+    config error quotes the malformed value back, and for
+    ``RECOTEM_SIGNING_KEYS`` that value *is* the signing key.  Any code path
+    that renders an exception to a human or to a log sink must send it through
+    here first.
+
+    Idempotent: already-redacted placeholders are returned unchanged.
+    """
+    return _scrub_string_value(s)
+
+
 def _redact_bytes_value(value: bytes | bytearray) -> Any:
     """Redact or summarise a bytes/bytearray log value.
 

@@ -28,6 +28,20 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           serviceAccountName: {{ include "recotem.serviceAccountName" . }}
+          # Kubernetes injects a legacy Docker-link env var per Service in the
+          # namespace, named <SERVICE>_PORT and valued `tcp://<clusterIP>:<port>`.
+          # The chart's own Service is `recotem` by default, so every pod created
+          # after it in the namespace inherits
+          # `RECOTEM_PORT=tcp://10.96.0.1:8080` -- and RECOTEM_PORT is one of the
+          # variables recotem treats as fatal when it does not parse as an
+          # integer.  `recotem serve` and `recotem inspect` then exit 8 with
+          # "Configuration error: RECOTEM_PORT must be an integer", naming a
+          # variable the operator never set.  The serve container only escapes it
+          # by setting RECOTEM_PORT explicitly; blanking `env.RECOTEM_PORT` in
+          # values.yaml drops that line and re-opens the hole.  These env vars
+          # have been deprecated since Kubernetes 1.13 and nothing here reads
+          # them.
+          enableServiceLinks: false
           securityContext:
             {{- toYaml .Values.podSecurityContext | nindent 12 }}
           restartPolicy: OnFailure

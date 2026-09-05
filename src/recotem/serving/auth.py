@@ -272,11 +272,22 @@ def verify_api_key(
     # kids cannot be inferred from response latency.  hmac.compare_digest
     # is constant-time; the OR accumulation preserves that property.
     #
-    # Retain only the FIRST matching kid for audit attribution.  Today the
-    # ConfigError at startup rejects duplicate sha256 hashes so at most one
-    # entry can ever match, but if that invariant is ever relaxed (e.g. to
-    # support shared keys with distinct labels) the first-match policy
-    # avoids misattributing access logs to the last duplicate.
+    # Retain only the FIRST matching kid for audit attribution.
+    #
+    # More than one entry CAN match.  ``ServeConfig.from_env`` rejects a
+    # duplicate *kid*, but it does not reject two entries whose *hashes* are
+    # equal — ``RECOTEM_API_KEYS="a:sha256:<h>,b:sha256:<h>"`` is accepted and
+    # loads both.  That is one plaintext key registered under two labels, which
+    # is almost certainly an operator mistake, but it is not refused, so the
+    # fold below must stay tolerant of it rather than assume a unique match.
+    # First-match keeps audit attribution deterministic (the earlier kid in
+    # RECOTEM_API_KEYS wins) instead of silently recording the last duplicate.
+    #
+    # This comment previously claimed startup "rejects duplicate sha256 hashes
+    # so at most one entry can ever match".  It never did — only duplicate kids
+    # are rejected — so do not build on that invariant.
+    # ``tests/unit/test_auth_duplicate_hash.py`` pins the real behaviour on both
+    # sides so this comment cannot drift from the code again.
     matched_kid: str | None = None
     matched = False
     for entry in api_keys:

@@ -329,7 +329,26 @@ Defaults:
 For multi-process Optuna search (parallelism on a single host or a
 distributed cluster), set `training.storage_path` in the recipe. Accepted
 forms: a bare path → SQLite, or a URL beginning with `sqlite://`,
-`postgresql+psycopg://`, or `mysql+pymysql://`. The `+driver` suffix is
+`postgresql+psycopg://`, or `mysql+pymysql://`.
+
+**The server-backed forms need their driver extra installed**, and a bare
+`pip install recotem` does not have one:
+
+```bash
+pip install "recotem[postgres]"   # for postgresql+psycopg://
+pip install "recotem[mysql]"      # for mysql+pymysql://
+```
+
+This is easy to miss because the URL still *parses* without them. `sqlalchemy`
+reaches every install transitively — Optuna depends on it and Optuna is a core
+dependency — while `psycopg` and `pymysql` ship only in the extras above. So on
+a bare install the recommended `postgresql+psycopg://` spelling fails with the
+same `ImportError: Failed to import DB access module for the specified storage
+URL` that a wrong *spelling* produces, and the two are indistinguishable from
+the message. If you have already written the `+driver` suffix and still see
+that error, install the extra.
+
+The `+driver` suffix is
 required: this URL is handed straight to Optuna's `RDBStorage`, which has no
 driver preflight, so a bare `postgresql://` (which routes to the uninstalled
 `psycopg2`) fails inside Optuna with `ImportError: Failed to import DB access

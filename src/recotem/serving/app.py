@@ -45,7 +45,11 @@ from recotem._features import (
     check_artifact_feature_version,
 )
 from recotem._irspack_compat import check_artifact_irspack_version
-from recotem.artifact.format import ArtifactError, parse_header_from_bytes
+from recotem.artifact.format import (
+    SIZE_CAP_MSG_MARKER,
+    ArtifactError,
+    parse_header_from_bytes,
+)
 from recotem.artifact.signing import KeyRing, unpickle_payload, verify_hmac
 from recotem.config import ConfigError, ServeConfig, get_max_body_bytes
 from recotem.recipe.errors import format_recipe_load_failure
@@ -891,6 +895,32 @@ def _failed_entry(recipe: Any, reason: str) -> ModelEntry:
     )
 
 
+def _size_cap_or(exc: ArtifactError, fallback: str) -> str:
+    """Return ``"size_cap"`` for a cap refusal, else *fallback*.
+
+    Both size caps raise ``ArtifactError`` from inside a structural step, so
+    without this the startup path files them under whichever step happened to
+    notice: ``RECOTEM_MAX_ARTIFACT_BYTES`` under ``"read"`` (the read helper
+    checks the file length) and ``RECOTEM_MAX_PAYLOAD_BYTES`` under
+    ``"parse"`` (``parse_header_from_bytes`` checks the payload length).  The
+    watcher's ``_classify_artifact_error`` already reports both as
+    ``"size_cap"``, so the same artifact under the same cap in the same
+    process was labelled two different things depending on whether it was
+    present at startup or arrived later by hot-swap -- and startup is the one
+    an operator meets first, on a fresh deploy or a pod restart.
+
+    ``"parse"`` and ``"read"`` both read as "the file is damaged", which sends
+    the operator to re-train or check their signing key; the actual remedy is
+    to raise the cap or shrink the model.  Keyed on the shared message marker
+    rather than on the exception type because every cap raise site is an
+    ``ArtifactError`` like any other -- see ``SIZE_CAP_MSG_MARKER``, whose
+    whole purpose is to be that discriminator.
+    """
+    if SIZE_CAP_MSG_MARKER in str(exc).lower():
+        return "size_cap"
+    return fallback
+
+
 def _try_load_artifact(
     recipe: Any,
     key_ring: KeyRing | None,
@@ -911,7 +941,7 @@ def _try_load_artifact(
         data = read_artifact_bytes(artifact_path, max_artifact_bytes)
     except ArtifactError as exc:
         logger.warning("initial_artifact_read_failed", name=recipe.name, error=str(exc))
-        return _failed_entry(recipe, f"read failed: {exc}"), "read"
+        return _failed_entry(recipe, f"read failed: {exc}"), _size_cap_or(exc, "read")
     except (MemoryError, RecursionError):
         raise
     except Exception as exc:
@@ -929,7 +959,7 @@ def _try_load_artifact(
         logger.warning(
             "initial_artifact_parse_failed", name=recipe.name, error=str(exc)
         )
-        return _failed_entry(recipe, f"parse failed: {exc}"), "parse"
+        return _failed_entry(recipe, f"parse failed: {exc}"), _size_cap_or(exc, "parse")
 
     payload_bytes = data[hdr.payload_offset :]
 

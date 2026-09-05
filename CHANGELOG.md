@@ -511,6 +511,34 @@ exit 8.
 
 ### Fixed
 
+- **An over-cap model was reported as a damaged file when `recotem serve`
+  started, and as `size_cap` when the same file arrived by hot-swap.** The
+  classifier that resolves an `ArtifactError` to a `reason` label lives in
+  `serving/watcher.py` and only the watcher called it. `serving/app.py`'s
+  startup path took its label from a hard-coded string per `except` block, and
+  had no branch for either size cap: over `RECOTEM_MAX_PAYLOAD_BYTES` came out
+  as `parse` (the payload length is checked inside `parse_header_from_bytes`)
+  and over `RECOTEM_MAX_ARTIFACT_BYTES` as `read` (the file length is checked
+  inside the read helper). Measured on one 8,559,920-byte artifact against a
+  1 MiB payload cap in one process: present at startup it reported
+  `"reason": "parse"`, dropped in afterwards for the watcher it reported
+  `"reason": "size_cap"` — same file, same cap, two labels.
+
+  Startup is the path that matters here. An over-cap artifact is met on a
+  fresh deploy or a pod restart, where the pod simply never becomes ready, and
+  `reason` is a Prometheus label on `recotem_artifact_load_failures_total` —
+  so both the log line and the alert said `parse`, which reads as a corrupt
+  artifact and sends the operator to re-train or check their signing key when
+  the remedy is to raise the cap or shrink the model. Both branches now route
+  through a `_size_cap_or` helper keyed on `SIZE_CAP_MSG_MARKER`, the
+  discriminator that already exists for exactly this purpose. An absent file
+  is still `read` and a corrupt one still `parse`.
+
+  `docs/operations.md`'s documented `reason` enum for
+  `recotem_artifact_load_failures_total` did not list `size_cap` at all, so it
+  had been stale since the label was introduced. It does now, and a test reads
+  the enum and the two source files together so it cannot drift again.
+
 - **The sdist shipped nine example READMEs and none of the files they tell you
   to run.** `[tool.hatch.build.targets.sdist] include` read `["src/recotem",
   "README.md", "LICENSE"]`. Hatchling's include patterns are gitignore-style,

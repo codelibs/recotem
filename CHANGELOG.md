@@ -140,12 +140,16 @@ exit 8.
   irspack's import works unchanged. The published Docker image includes it;
   `pip install recotem` alone does not.
 
-  It is an extra rather than a core dependency because `lightfm-next` publishes
-  no linux/aarch64 wheel: adding it to `dependencies` would have made `pip
-  install recotem` fail on arm64 hosts without a C toolchain, including for
-  users who never train BPRFM. On arm64, `pip install recotem[bprfm]` builds it
-  from source and needs `build-essential`. On macOS the extension is built
-  without OpenMP, so BPRFM training there is single-threaded.
+  It is an extra rather than a core dependency because `lightfm-next`'s wheel
+  coverage is partial: adding it to `dependencies` would have made `pip install
+  recotem` fail wherever no wheel matches, on hosts without a C toolchain,
+  including for users who never train BPRFM. `lightfm-next==1.19.0` publishes
+  wheels for CPython **3.12 and 3.13 only**, and on Linux for **x86_64 only**,
+  so `pip install recotem[bprfm]` (and `recotem[all]`, which includes it)
+  compiles from source and needs `build-essential` on every linux/arm64 host
+  **and on Python 3.14 at every architecture, x86_64 included** — 3.14 being a
+  supported interpreter does not mean a BPRFM wheel exists for it. On macOS the
+  extension is built without OpenMP, so BPRFM training there is single-threaded.
 
   **The image does not ship the published wheel even on x86_64.** Upstream's
   `setup.py` compiles with `-march=native`, and their release CI does not

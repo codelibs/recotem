@@ -118,11 +118,12 @@ jobs:
       - name: Install dependencies (all extras)
         run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite --extra bprfm
         env:
-          # lightfm-next publishes a linux x86_64 wheel for cp312 only, and it is
-          # compiled `-march=native` on the upstream project's runner -- so on
-          # 3.12 we would install that machine's ISA, and on 3.13/3.14 uv builds
-          # from sdist and bakes in *this* runner's ISA instead.  Either way the
-          # result is machine-specific, and `enable-cache: true` then restores it
+          # lightfm-next publishes linux x86_64 wheels for cp312 and cp313, and
+          # they are compiled `-march=native` on the upstream project's runner
+          # -- so on 3.12 and 3.13 we would install that machine's ISA, and on
+          # 3.14 (no wheel exists for it on any platform) uv builds from sdist
+          # and bakes in *this* runner's ISA instead.  Either way the result is
+          # machine-specific, and `enable-cache: true` then restores it
           # onto whichever runner comes next: importing `lightfm._lightfm_fast`
           # dies with `Fatal Python error: Illegal instruction` (exit 132) when
           # that runner is older than the one that built it.  Same reasoning, and

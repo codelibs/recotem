@@ -39,7 +39,10 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from recotem._artifact_identity import check_artifact_recipe_name
+from recotem._artifact_identity import (
+    check_artifact_recipe_hash,
+    check_artifact_recipe_name,
+)
 from recotem._features import (
     check_artifact_feature_state,
     check_artifact_feature_version,
@@ -1026,6 +1029,12 @@ def _try_load_artifact(
             error=str(exc),
         )
         return _failed_entry(recipe, str(exc)), "recipe_name"
+
+    # Same two values, one step weaker: the name must match, the content need
+    # not. A recipe edited without a retrain still serves its last model, which
+    # is correct -- but nothing said so, and /v1/recipes/{name} reports the
+    # artifact's algorithms and cutoff as though they were the recipe's.
+    check_artifact_recipe_hash(header_dict, recipe=recipe, name=recipe.name)
 
     # Preflight the irspack version before deserializing: an unverified
     # (algorithm, version) combination may fail inside the C++ __setstate__

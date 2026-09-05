@@ -39,6 +39,7 @@ import structlog
 
 from recotem._artifact_identity import (
     RECIPE_NAME_MSG_PREFIX,
+    check_artifact_recipe_hash,
     check_artifact_recipe_name,
 )
 from recotem._features import (
@@ -1170,6 +1171,11 @@ class ArtifactWatcher(threading.Thread):
         # matter what the rest of the header says, and the check needs only
         # the dict already in hand — no payload, no version lookup.
         check_artifact_recipe_name(header_dict, name=name)
+        # Mirrored from the startup path deliberately: an artifact that
+        # arrives by hot-swap after a recipe edit is the same staleness,
+        # and a check wired into only one of the two load paths is the
+        # divergence #270 had to correct.
+        check_artifact_recipe_hash(header_dict, recipe=recipe, name=name)
 
         # Preflight the irspack version before deserializing: a skewed artifact
         # fails inside the C++ __setstate__ with an error that names neither

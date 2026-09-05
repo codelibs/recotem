@@ -181,6 +181,14 @@ def test_stranded_commit_is_refused(repo: Path) -> None:
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "are marked" in proc.stderr and "NOT in the tree" in proc.stderr
     assert "#245" in proc.stderr
+    # The operator advice must not call HEAD "on-main" (R9-P3). HEAD is the
+    # tree being released, which this script does not establish is main --
+    # naming it on-main here is the assumption an off-main tag exploits,
+    # printed in the gate's own help text.
+    assert "echo on-main" not in proc.stderr, (
+        "the stranded remedy tells the operator that an ancestor of HEAD is "
+        "'on-main'; HEAD is not checked against any mainline ref"
+    )
 
 
 @requires_bash

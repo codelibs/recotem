@@ -582,7 +582,12 @@ if [ ${#STRANDED[@]} -gt 0 ]; then
         echo "    4. re-tag once it has landed"
         echo ""
         echo "  To confirm by hand:"
-        echo "    git merge-base --is-ancestor <merge-commit> HEAD && echo on-main"
+        # Deliberately not "echo on-main": HEAD is the tree being released,
+        # which this script does not establish is main -- see the header and
+        # the second NOT-checked line in the success output.  Calling it
+        # on-main here is the exact assumption R9-P3's off-main commit
+        # exploits, printed in the gate's own help text.
+        echo "    git merge-base --is-ancestor <merge-commit> HEAD && echo in-this-tree"
     } >&2
     exit 1
 fi

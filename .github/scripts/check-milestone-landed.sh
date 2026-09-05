@@ -104,11 +104,19 @@
 #      tagging (see Usage above).  A hard "HEAD must be on main" check would
 #      make its own documented workflow fail.
 #
-# Note for whoever reads this next: #259's implementation is NOT on main.  #276
-# reverted it and #277's re-land is one of the no-ops described above, so today
-# NEITHER script checks that the released commit is on main.  The rule returns
-# with #277's rebuild.  Until then this is an open hole, named here rather than
-# left for a reader to infer from a success message.
+# History, which is why the pointer above is worth following rather than
+# assuming: #259 added that rule, #276 reverted it, and #277 -- titled as its
+# re-land -- is one of the no-ops described above and restores none of it.
+# R9-P3 re-landed it properly in #297.  All of that is past tense on purpose.
+#
+# Whether check-release-tag.sh implements the rule TODAY is a fact about that
+# file, and a sentence here cannot know when it stopped being true: whichever
+# of the two PRs merges second, a present-tense claim written in this one is
+# wrong from that moment until somebody notices.  So this file states only what
+# it does not check, and points at the owner.  Read the owner.
+#
+# (That is this round's own recurring defect -- prose restating a fact that
+# lives in another file -- which is exactly why it is not repeated here.)
 # ---------------------------------------------------------------------------
 #
 # A re-land is normally a cherry-pick, which produces a NEW commit — the
@@ -607,6 +615,7 @@ echo "  survives contact with legitimate later refactoring; see the header."
 echo "  NOT checked, 2 of 2: that ${HEAD_SHA} is on main. Everything above is"
 echo "  asked of HEAD, and 'every milestone PR is an ancestor of HEAD' stays"
 echo "  true when HEAD is main plus a commit no PR explains. This line is not"
-echo "  a statement that the release is main. check-release-tag.sh owns that"
-echo "  rule -- and it is NOT on main today: #259 added it, #276 reverted it,"
-echo "  and #277's re-land is an empty no-op. It returns with #277's rebuild."
+echo "  a statement that the release is main -- check-release-tag.sh owns that"
+echo "  rule. Whether that script currently implements it is a fact about that"
+echo "  file and not about this one: read it there rather than trusting a"
+echo "  sentence here, which cannot know when it went out of date."

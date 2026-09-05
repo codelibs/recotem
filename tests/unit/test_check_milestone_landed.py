@@ -20,6 +20,7 @@ can say OK, which is also what a script that checks nothing says.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -806,6 +807,52 @@ def test_success_message_does_not_present_head_as_main(repo: Path) -> None:
     assert "check-release-tag.sh" in proc.stdout, (
         "the disclaimer must name the check that owns the rule, or it reads as "
         "'nobody checks this' rather than 'someone else does'"
+    )
+
+
+@requires_bash
+def test_success_message_makes_no_dated_claim_about_another_file(repo: Path) -> None:
+    """The disclaimer may name its owner; it may not report the owner's state.
+
+    R9-P3 caught the first version doing both: it said check-release-tag.sh
+    "is NOT on main today: #259 added it, #276 reverted it, and #277's re-land
+    is an empty no-op. It returns with #277's rebuild."  Two defects in one
+    sentence, in text printed on every release run.
+
+    The PR number was wrong in the costly direction -- the rebuild is #297;
+    #277 is still open and still a no-op, so an operator following the pointer
+    lands on the PR that does nothing, which is the trap the sentence exists to
+    warn about.  And the status half goes false on merge in EITHER order: if
+    #297 lands first this file ships already untrue, and if this lands first it
+    goes untrue the moment #297 does.  No merge order avoids it.
+
+    That is this round's own recurring defect -- prose restating a fact that
+    lives in another file -- reappearing in a success message.  The durable
+    half is ownership ("check-release-tag.sh owns that rule"), which is true
+    whatever that file contains; the perishable half is its state, which
+    belongs in that file and nowhere else.
+
+    Scoped to the success path deliberately: the header comment may narrate the
+    history in the past tense, because past tense cannot expire.
+    """
+    _set_prs(repo, f"1\t{_sha(repo, 'landed')}\ta landed change")
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    assert "check-release-tag.sh" in proc.stdout, (
+        "the disclaimer must still name the owner of the on-main rule"
+    )
+    for perishable in ("NOT on main today", "on main today", "re-land", "rebuild"):
+        assert perishable not in proc.stdout, (
+            f"the success message reports {perishable!r} about another file's "
+            "current state. That claim cannot know when it went out of date, "
+            "and it is printed on every release run. Name the owner; do not "
+            "report the owner's status."
+        )
+    assert not re.search(r"#\d+", proc.stdout), (
+        "the success message names a PR number. PR numbers in a printed "
+        "message go stale silently -- the first version of this line pointed "
+        "at #277, whose re-land restores nothing, instead of #297."
     )
 
 

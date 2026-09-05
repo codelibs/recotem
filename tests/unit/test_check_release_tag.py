@@ -520,3 +520,116 @@ def test_repo_deployment_pins_are_where_the_script_looks(tmp_path: Path) -> None
         "examples/ or docs/. The script refuses this case at release time; if "
         "the pins genuinely moved, teach the script where they went."
     )
+
+
+# ---------------------------------------------------------------------------
+# The tree the script reads must be the tree the tag would publish
+# ---------------------------------------------------------------------------
+# Everything above builds a synthetic tree that is not a git work tree, which
+# is the case the script cannot check.  These commit the tree first, so the
+# working-tree-vs-commit question is answerable and has to be answered.
+#
+# It matters because the release procedure calls this script authoritative
+# while it reads the working tree.  Measured before the check existed: with the
+# repository's own committed pyproject.toml at 2.1.0.dev0 and chart at 2.0.0,
+# editing only the working tree to the release-ready values made the script
+# print `pyproject.toml version = 2.1.0` and exit 0 for tag v2.1.0.
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.email=tests@recotem.invalid",
+            "-c",
+            "user.name=recotem tests",
+            *args,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _commit_everything(root: Path) -> None:
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "synthetic release tree")
+
+
+requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+
+
+@requires_git
+def test_a_committed_release_tree_passes_and_says_which_tree_it_read(
+    tmp_path: Path,
+) -> None:
+    script = _make_tree(tmp_path)
+    _commit_everything(tmp_path)
+
+    proc = _run(script, "v2.1.0")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Those files are committed" in proc.stdout, proc.stdout
+
+
+@requires_git
+def test_an_uncommitted_edit_to_a_checked_file_is_refused(tmp_path: Path) -> None:
+    """The exact shape that used to pass: commit stale, edit the work tree."""
+    script = _make_tree(tmp_path, pyproject="2.0.0", chart_version="2.0.0")
+    _commit_everything(tmp_path)
+
+    # Fix only the working tree.  A tag here would publish 2.0.0.
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "recotem"\nversion = "2.1.0"\n', encoding="utf-8"
+    )
+    (tmp_path / "helm" / "recotem" / "Chart.yaml").write_text(
+        "apiVersion: v2\nname: recotem\ntype: application\n"
+        'version: 2.1.0\nappVersion: "2.1.0"\n',
+        encoding="utf-8",
+    )
+
+    proc = _run(script, "v2.1.0")
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    combined = proc.stdout + proc.stderr
+    assert "differ from the commit" in combined, combined
+    assert "pyproject.toml" in combined, combined
+    assert "helm/recotem/Chart.yaml" in combined, combined
+    # The version numbers must not be reported at all: they would describe the
+    # working tree, and printing them is how the old behaviour looked correct.
+    assert "OK:" not in combined, combined
+
+
+@requires_git
+def test_an_untracked_file_outside_the_checked_paths_does_not_block(
+    tmp_path: Path,
+) -> None:
+    """Only the files this script reads matter.
+
+    Refusing on an unrelated scratch file would make the gate fire on releases
+    it has nothing to say about, which is how operators learn to look past it.
+    """
+    script = _make_tree(tmp_path)
+    _commit_everything(tmp_path)
+    (tmp_path / "release-notes-draft.md").write_text("scratch\n", encoding="utf-8")
+
+    proc = _run(script, "v2.1.0")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_outside_a_git_work_tree_the_success_message_does_not_overclaim(
+    tmp_path: Path,
+) -> None:
+    """No git, no answer -- and the OK line has to say so rather than imply it."""
+    script = _make_tree(tmp_path)
+
+    proc = _run(script, "v2.1.0")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "NOT a git work tree" in proc.stdout, proc.stdout
+    assert "Those files are committed" not in proc.stdout, proc.stdout

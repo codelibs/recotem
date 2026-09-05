@@ -110,6 +110,67 @@ fi
 EXPECTED="${TAG#v}"
 
 # ---------------------------------------------------------------------------
+# 2b. The files this script is about to read must match the commit
+# ---------------------------------------------------------------------------
+# Everything below reads the WORKING TREE.  A tag names a COMMIT.  When the two
+# differ, every line this script prints — and its "OK" — describes a tree
+# nobody is about to publish.  Measured on this repository at 7871f9f, whose
+# committed pyproject.toml says 2.1.0.dev0 and whose chart says 2.0.0: edit
+# only the working tree to the release-ready values, commit nothing, and
+#
+#   $ bash .github/scripts/check-release-tag.sh v2.1.0
+#   pyproject.toml       version = 2.1.0
+#   helm Chart.yaml version      = 2.1.0
+#   OK: v2.1.0 is a final release and matches pyproject.toml, ...
+#
+# The release procedure has an adjacent `git status --porcelain  # MUST be
+# empty` step (release-recotem, Phase 3 step 1), but the same procedure calls
+# THIS script the authoritative check, and an authoritative check that quietly
+# reads different bytes from the ones being tagged is the shape a gate is
+# supposed to remove.  In CI the checkout is clean and this is a no-op; the
+# local pre-tag rehearsal is where it earns its place, which is precisely the
+# run the procedure tells an operator to trust.
+#
+# Scoped to the paths this script reads, not to the whole tree: an untracked
+# scratch file elsewhere cannot change the verdict, and refusing on one would
+# train operators to look past this gate.
+#
+# Skipped outside a git work tree, and when the enclosing repository is not
+# this tree — the unit tests build synthetic trees in tmp dirs, which may sit
+# inside some unrelated checkout.  Same guard shape either way.
+GIT_TOPLEVEL="$(git -C "${REPO_ROOT}" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "${GIT_TOPLEVEL}" ] && [ "${GIT_TOPLEVEL}" = "${REPO_ROOT}" ]; then
+    DIRTY="$(
+        git -C "${REPO_ROOT}" status --porcelain -- \
+            pyproject.toml \
+            src/recotem/version.py \
+            helm/recotem/Chart.yaml \
+            helm/recotem/values.yaml \
+            examples \
+            docs \
+            2>/dev/null || true
+    )"
+    if [ -n "${DIRTY}" ]; then
+        DIRTY_LINES=()
+        while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            DIRTY_LINES+=("  ${line}")
+        done <<< "${DIRTY}"
+        fail "Refusing to verify '${TAG}': files this check reads differ from the commit." \
+             "${DIRTY_LINES[@]}" \
+             "" \
+             "This script reads the working tree; a tag names a commit.  With these" \
+             "uncommitted, everything below would describe a tree that is not the one" \
+             "being tagged — including the 'OK' line." \
+             "" \
+             "To fix: commit the release changes (they belong in the release PR), then" \
+             "re-run against the merge commit you are about to tag:" \
+             "  git status --porcelain" \
+             "  bash $0 ${TAG}"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # 3. Every in-tree version declaration must equal the tag
 # ---------------------------------------------------------------------------
 PYPROJECT_VERSION="$(
@@ -300,6 +361,14 @@ fi
 echo "OK: ${TAG} is a final release and matches pyproject.toml,"
 echo "    src/recotem/version.py, helm/recotem/Chart.yaml, helm/recotem/values.yaml,"
 echo "    and every pinned image reference under examples/ and docs/."
+# Say which tree the lines above describe.  Without this the success message
+# reads the same whether it inspected the commit or an uncommitted edit of it.
+if [ -n "${GIT_TOPLEVEL}" ] && [ "${GIT_TOPLEVEL}" = "${REPO_ROOT}" ]; then
+    echo "    Those files are committed, so this describes the tree ${TAG} would publish."
+else
+    echo "    NOT a git work tree: this describes the files on disk, which may not be"
+    echo "    the ones ${TAG} would publish."
+fi
 echo "    Not checked here: uv.lock (run 'uv lock --check'), and version strings"
 echo "    outside those files — see the verification block in"
 echo "    .claude/skills/release-recotem/references/version-locations.md."

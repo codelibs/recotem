@@ -32,6 +32,11 @@ The `echo-source` example is a working scaffold you can copy and adapt.
 ```bash
 pip install recotem
 pip install -e examples/plugins/echo-source
+
+# `recotem train` refuses to write an unsigned artifact; without a signing key
+# it exits 8 with `RECOTEM_SIGNING_KEYS is not set`.
+export $(recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
+
 recotem train your-recipe-using-echo.yaml
 ```
 

@@ -17,6 +17,10 @@ and writing artifacts to GCS.
 pip install "recotem[bigquery]"
 gcloud auth application-default login
 # Or set GOOGLE_APPLICATION_CREDENTIALS to a service-account key path.
+
+# A signing key is required too: `recotem train` refuses to write an unsigned
+# artifact, and exits 8 with `RECOTEM_SIGNING_KEYS is not set` without one.
+export $(recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
 ```
 
 The service account / ADC identity needs:

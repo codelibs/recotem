@@ -57,8 +57,19 @@ jobs:
           enable-cache: true
           python-version: "3.12"
 
+      # `--locked`, not `--frozen`.  `--frozen` installs from uv.lock without
+      # checking it against pyproject.toml, so a release that bumps the
+      # version but forgets `uv lock` sails through: measured, `uv sync
+      # --frozen` exits 0 with pyproject at 2.1.0 and uv.lock recording
+      # 2.1.0.dev0, while `uv sync --locked` exits 1 naming the lockfile.
+      # The release-tag guard cannot catch it: that script reads pyproject,
+      # version.py and the chart, and its success message says as much -- it
+      # never claims the lockfile.  Every other `uv sync` in the repository now
+      # passes --locked too, and test.yml runs `uv lock --check` explicitly, so
+      # this is the release path's copy of a check the whole repository shares
+      # rather than the only one.
       - name: Install dependencies (all extras)
-        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite
+        run: uv sync --locked --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite
 
       - name: ruff check
         run: uv run ruff check src/ tests/

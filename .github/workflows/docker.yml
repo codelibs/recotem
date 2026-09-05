@@ -116,7 +116,7 @@ jobs:
           cache-suffix: lightfm-portable-1
 
       - name: Install dependencies (all extras)
-        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite --extra bprfm
+        run: uv sync --locked --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite --extra bprfm
         env:
           # lightfm-next publishes linux x86_64 wheels for cp312 and cp313, and
           # they are compiled `-march=native` on the upstream project's runner

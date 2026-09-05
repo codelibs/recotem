@@ -591,6 +591,14 @@ def _pod_specs_in(docs: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]
             "override alongside ingress",
         ),
         (
+            (
+                "env.RECOTEM_ALLOWED_HOSTS=recotem.recotem.svc.cluster.local",
+                "ingress.enabled=true",
+                "ingress.hosts[0].host=api.example.com",
+            ),
+            "override that does not restate the ingress host",
+        ),
+        (
             ("ingress.enabled=true", "ingress.hosts[0].host=api.example.com"),
             "ingress-derived",
         ),
@@ -770,3 +778,95 @@ def test_example_probes_never_read_the_strict_health_endpoint() -> None:
                 f"examples/k8s {container['name']}.{probe} is {path!r}, "
                 f"expected {expected!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# RECOTEM_ALLOWED_HOSTS is a union, not a winner-takes-all
+#
+# The two sources used to be if/else: an explicit `env.RECOTEM_ALLOWED_HOSTS`
+# replaced the ingress-derived list outright.  values.yaml tells operators to
+# set it "when traffic reaches the pod under a hostname not listed in
+# ingress.hosts (e.g. internal Service DNS)" -- i.e. to ADD a name -- and doing
+# exactly that dropped every host the chart's own Ingress routes:
+#
+#   $ helm template ... --set ingress.enabled=true \
+#       --set ingress.hosts[0].host=recotem.example.com \
+#       --set env.RECOTEM_ALLOWED_HOSTS=recotem.recotem.svc.cluster.local
+#     RECOTEM_ALLOWED_HOSTS = "localhost,recotem.recotem.svc.cluster.local"
+#     Ingress rules:          host: recotem.example.com
+#
+# The chart renders an Ingress for a host it then refuses. Measured on a live
+# cluster: a request whose Host header is absent from the list gets 400 from
+# TrustedHostMiddleware while the pod stays Ready, so the failure looks like a
+# broken Ingress rather than a chart value.
+#
+# `test_allowed_hosts_always_admits_the_probe_host` could not see this: its
+# "override alongside ingress" case happens to name the same host in both
+# places, and it only asserts `localhost` is present.
+# ---------------------------------------------------------------------------
+
+
+def _allowed_hosts(set_args: tuple[str, ...]) -> list[str]:
+    docs = _load_all_strict(_helm_template(*set_args))
+    values = [
+        env["value"]
+        for _, spec in _pod_specs_in(docs)
+        for container in spec.get("containers", [])
+        for env in container.get("env", [])
+        if env.get("name") == "RECOTEM_ALLOWED_HOSTS"
+    ]
+    assert values, "expected the chart to render RECOTEM_ALLOWED_HOSTS"
+    return [h.strip() for h in values[0].split(",")]
+
+
+@requires_helm
+def test_allowed_hosts_override_does_not_drop_the_ingress_hosts() -> None:
+    hosts = _allowed_hosts(
+        (
+            "ingress.enabled=true",
+            "ingress.hosts[0].host=recotem.example.com",
+            "env.RECOTEM_ALLOWED_HOSTS=recotem.recotem.svc.cluster.local",
+        )
+    )
+    assert "recotem.example.com" in hosts, (
+        "the chart renders an Ingress routing recotem.example.com and then "
+        f"refuses it: {hosts}. TrustedHostMiddleware 400s every external "
+        "request while the pod stays Ready"
+    )
+    assert "recotem.recotem.svc.cluster.local" in hosts, (
+        f"the operator's own hostname was dropped: {hosts}"
+    )
+    assert "localhost" in hosts, f"the probe host was dropped: {hosts}"
+
+
+@requires_helm
+def test_allowed_hosts_union_does_not_duplicate() -> None:
+    """A name in both sources must appear once, and `localhost` never twice."""
+    hosts = _allowed_hosts(
+        (
+            "ingress.enabled=true",
+            "ingress.hosts[0].host=api.example.com",
+            "env.RECOTEM_ALLOWED_HOSTS=api.example.com\\,localhost",
+        )
+    )
+    assert sorted(hosts) == sorted(set(hosts)), f"duplicated entries: {hosts}"
+    assert set(hosts) == {"api.example.com", "localhost"}, hosts
+
+
+@requires_helm
+def test_allowed_hosts_stays_unset_when_neither_source_supplies_one() -> None:
+    """No ingress and no override must still omit the var, not render an empty one.
+
+    An empty value would be worse than absent: `_split_csv_env` falls back to
+    the app default only when the variable strips to empty, and an omitted
+    variable is the shape the rest of the chart's comments describe.
+    """
+    docs = _load_all_strict(_helm_template())
+    rendered = [
+        env
+        for _, spec in _pod_specs_in(docs)
+        for container in spec.get("containers", [])
+        for env in container.get("env", [])
+        if env.get("name") == "RECOTEM_ALLOWED_HOSTS"
+    ]
+    assert rendered == [], f"expected the variable to be omitted, got {rendered}"

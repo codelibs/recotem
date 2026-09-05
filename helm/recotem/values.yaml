@@ -99,10 +99,13 @@ env:
   RECOTEM_ALLOWED_ORIGINS: ""           # empty = deny CORS
   # RECOTEM_ALLOWED_HOSTS gates TrustedHostMiddleware.  Leave empty when
   # ingress.enabled=true: the chart auto-derives the value from
-  # ingress.hosts[*].host so external requests do not 400.  Set explicitly
-  # (comma-separated) to override — required when traffic reaches the pod
-  # under a hostname not listed in ingress.hosts (e.g. internal Service DNS,
+  # ingress.hosts[*].host so external requests do not 400.  Set it
+  # (comma-separated) to ADD hostnames — needed when traffic reaches the pod
+  # under a name not listed in ingress.hosts (e.g. internal Service DNS,
   # external LoadBalancer, ServiceMonitor scraping a custom hostname).
+  # What you set is UNIONed with ingress.hosts[*].host and `localhost`, so
+  # naming one hostname here can never silence another; you do not have to
+  # restate the Ingress hosts the chart already knows about.
   # The app's own default ("127.0.0.1,localhost") only matches probes; with
   # an Ingress in front it must be widened.
   RECOTEM_ALLOWED_HOSTS: ""

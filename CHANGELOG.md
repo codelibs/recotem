@@ -315,6 +315,35 @@ exit 8.
 
 ### Changed
 
+- **The operations runbook told you to validate against popularity, which is
+  not a bar.** "Score the served model and a most-popular-items list on it, and
+  require the model to win" is nearly free on any personalisable dataset.
+  Measured across four industries — a repeat-purchase grocery catalogue, a B2B
+  parts catalogue, a media catalogue and a long-tail marketplace, each with a
+  verified leave-one-out holdout — the shipped model beat popularity by 11.3× to
+  57.6× on ndcg@10 while beating a hand-written 30-line item-item cosine kNN
+  by between −9.5% and +56.2%, over four runs of each recipe. On the grocery
+  catalogue all four runs beat popularity by more than 11× and all four
+  **lost** to the kNN; popularity would have called every one a success. The
+  advice now names the kNN, says why popularity is insufficient, and gives the
+  five lines of linear algebra needed to build it.
+
+- **`docs/operations.md` now says what `best_score` is and is not.** It is the
+  winning trial's score on recotem's own internal validation split, over the
+  same trained item set. It is not an estimate of quality on your task, and the
+  gap has been observed in both directions and at sizes that would reverse a
+  go/no-go decision. Two consequences the field does not advertise: `best_score`
+  is also the criterion the search maximises, so a disagreement with your task's
+  ranking is acted on rather than merely reported; and it does not measure the
+  cold-start paths at all, because the objective is built from held-out rows of
+  the trained matrix (`recotem/training/evaluate.py`) and no trial ever issues a
+  cold-item or cold-user request. That last point matters most with a
+  `features:` block, where `lambda_item_feature` / `lambda_user_feature` govern
+  the feature-to-embedding map the cold-start verbs depend on and are tuned on
+  evidence nearly indifferent to them — measured on one recipe and one dataset,
+  four runs, cold-item precision@10 ranged over an order of magnitude while
+  `best_score` moved by under 2%.
+
 - **A numerical `features:` column with a tiny-but-nonzero training std is
   now treated as zero-variance, like an exactly-constant column.** Previously
   only an exact `std == 0.0` was floored; a column whose values differ only

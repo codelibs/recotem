@@ -171,6 +171,13 @@ _COLUMN_SAMPLE_MAX_CHARS = 64
 # would call real, intentional variance.
 _NUMERICAL_STD_RELATIVE_FLOOR = 1e-8
 
+# Share of a column's rows that must be left with an all-zero encoded block by
+# `min_frequency` pruning before `_warn_if_vocabulary_pruned` fires. Pruning a
+# long tail that covers a couple of percent of the catalog is the intended use
+# of `min_frequency`; a warning there would be noise an operator learns to
+# ignore. One row in five losing its signal is not a tail -- it is the column.
+_PRUNED_ROWS_WARN_RATIO = 0.2
+
 # The encoded matrices are float32 (`encode` / `encode_one` both build with
 # `dtype=np.float32`). A standardized value finite as float64 whose magnitude
 # exceeds float32's max becomes +-inf on the cast, so it must be caught on the
@@ -363,6 +370,23 @@ def _tokens(raw: Any, delimiter: str) -> list[str]:
     return [t for t in (p.strip() for p in text.split(delimiter)) if t]
 
 
+def _kept_tokens(
+    raw: object, vocab: dict[str, int], *, encoding: str, delimiter: str
+) -> frozenset[str]:
+    """Reduce one raw cell to the token set ``_row_values`` would encode.
+
+    Missing, empty, and unknown (out-of-vocab) values all collapse to the empty
+    set -- an empty set means the row emits nothing but the bias for this
+    column. Shared by ``_column_block_varies`` and ``_rows_without_signal`` so
+    the "does this row carry signal" question is answered identically wherever
+    it is asked.
+    """
+    if encoding == "multi_label":
+        return frozenset(t for t in _tokens(raw, delimiter) if t in vocab)
+    key = "" if _is_missing(raw) else str(raw)
+    return frozenset((key,)) if (key != "" and key in vocab) else frozenset()
+
+
 def _column_block_varies(
     series: pd.Series, vocab: dict[str, int], *, encoding: str, delimiter: str
 ) -> bool:
@@ -371,24 +395,35 @@ def _column_block_varies(
     Keys on the same property the numerical branch expresses with ``std``: does
     the column actually carry signal, or is every row's block identical (and
     therefore collinear with the always-1 bias)? Each row is reduced to the SAME
-    "kept token set" that ``_row_values`` would encode -- missing, empty, and
-    unknown (out-of-vocab) values all collapse to the empty set -- so a
-    null-bearing column like ``[rock, None, rock]`` correctly VARIES
-    (``{rock}`` vs ``{}``) while a constant one like ``[rock, rock, rock]`` does
-    not. Returns as soon as a second distinct block is seen, so it is O(rows)
-    with an early-out on the common (varying) case.
+    "kept token set" that ``_row_values`` would encode, so a null-bearing column
+    like ``[rock, None, rock]`` correctly VARIES (``{rock}`` vs ``{}``) while a
+    constant one like ``[rock, rock, rock]`` does not. Returns as soon as a
+    second distinct block is seen, so it is O(rows) with an early-out on the
+    common (varying) case.
     """
     seen: set[frozenset[str]] = set()
     for raw in series.tolist():
-        if encoding == "multi_label":
-            kept = frozenset(t for t in _tokens(raw, delimiter) if t in vocab)
-        else:  # categorical
-            key = "" if _is_missing(raw) else str(raw)
-            kept = frozenset((key,)) if (key != "" and key in vocab) else frozenset()
-        seen.add(kept)
+        seen.add(_kept_tokens(raw, vocab, encoding=encoding, delimiter=delimiter))
         if len(seen) > 1:
             return True
     return False
+
+
+def _rows_without_signal(
+    series: pd.Series, vocab: dict[str, int], *, encoding: str, delimiter: str
+) -> int:
+    """Count rows whose encoded block for this column is entirely zero.
+
+    Such a row contributes nothing for this column -- it is indistinguishable,
+    on this axis, from every other row in the same state. Counted so that
+    ``min_frequency`` pruning is reported as a row-level cost rather than only
+    as a vocabulary-size change.
+    """
+    return sum(
+        1
+        for raw in series.tolist()
+        if not _kept_tokens(raw, vocab, encoding=encoding, delimiter=delimiter)
+    )
 
 
 def spec_is_live(series: pd.Series, spec: dict) -> bool:
@@ -476,6 +511,62 @@ def _warn_if_column_dead(
     )
 
 
+def _warn_if_vocabulary_pruned(
+    col: FeatureColumn,
+    *,
+    distinct_values: int,
+    kept_values: int,
+    n_rows: int,
+    rows_without_signal: int,
+) -> None:
+    """Warn when ``min_frequency`` pruned a material share of ROWS to nothing.
+
+    ``_warn_if_column_dead`` catches only total collapse -- the encoded block
+    is identical for EVERY row. It is silent on the far more common partial
+    collapse, because a single surviving token is enough to make the block
+    vary: with one value kept out of 41, rows carrying the survivor differ from
+    rows carrying nothing, ``varies`` is True, and nothing is reported. The
+    pruned rows are nonetheless byte-identical to each other on this axis, so
+    the column silently stops distinguishing them.
+
+    That matters because ``min_frequency`` is the exact lever the
+    ``RECOTEM_MAX_FEATURE_DIM`` error recommends. An operator who hits the cap,
+    raises ``min_frequency`` as instructed, and retrains successfully has no
+    signal at all that most of the column just stopped existing.
+
+    Keyed on the share of ROWS left with an all-zero block rather than on the
+    share of vocabulary pruned: dropping 40 of 41 values is the INTENDED effect
+    when those values are long-tail junk covering 2% of the catalog, and a
+    warning there would be noise. It is only a problem when it costs a material
+    share of the rows their signal, so that is what the threshold measures.
+
+    Logs column names and counts only, never token values -- catalog data, and
+    the redaction processor is keyed to credentials, not to feature values.
+    """
+    if kept_values >= distinct_values or n_rows <= 0:
+        return
+    if rows_without_signal < _PRUNED_ROWS_WARN_RATIO * n_rows:
+        return
+    _logger.warning(
+        "feature_vocabulary_pruned",
+        column=col.name,
+        encoding=col.encoding,
+        min_frequency=col.min_frequency,
+        distinct_values=distinct_values,
+        kept_values=kept_values,
+        rows_without_signal=rows_without_signal,
+        n_rows=n_rows,
+        detail=(
+            f"min_frequency={col.min_frequency} kept {kept_values} of "
+            f"{distinct_values} distinct values; {rows_without_signal} of "
+            f"{n_rows} rows now encode to an all-zero block for this column "
+            f"and are indistinguishable from each other on this axis. Lower "
+            f"min_frequency to keep more values, or drop the column if its "
+            f"long tail carries no signal."
+        ),
+    )
+
+
 def build_encoder_state(
     df: pd.DataFrame,
     columns: Sequence[FeatureColumn],
@@ -516,6 +607,16 @@ def build_encoder_state(
                     series, vocab, encoding="categorical", delimiter=""
                 ),
             )
+            dead_rows = _rows_without_signal(
+                series, vocab, encoding="categorical", delimiter=""
+            )
+            _warn_if_vocabulary_pruned(
+                col,
+                distinct_values=len(set(present)),
+                kept_values=len(vocab),
+                n_rows=len(series),
+                rows_without_signal=dead_rows,
+            )
             spec = {
                 "name": col.name,
                 "encoding": "categorical",
@@ -537,6 +638,16 @@ def build_encoder_state(
                 varies=_column_block_varies(
                     series, vocab, encoding="multi_label", delimiter=delimiter
                 ),
+            )
+            dead_rows = _rows_without_signal(
+                series, vocab, encoding="multi_label", delimiter=delimiter
+            )
+            _warn_if_vocabulary_pruned(
+                col,
+                distinct_values=len(set(flat)),
+                kept_values=len(vocab),
+                n_rows=len(series),
+                rows_without_signal=dead_rows,
             )
             spec = {
                 "name": col.name,
@@ -861,7 +972,18 @@ def encode_one(state: dict, values: dict) -> tuple[sps.csr_matrix, list[str]]:
 
 
 def state_descriptor(state: dict | None) -> dict | None:
-    """Return the small header summary for *state*, or None."""
+    """Return the small header summary for *state*, or None.
+
+    Deliberately still just ``n_features`` + column names, even though
+    ``feature_vocabulary_pruned`` shows there is per-column detail worth
+    auditing after the fact. ``_FEATURE_SIDE_KEYS`` pins this key set exactly
+    and ``check_artifact_feature_version`` fails CLOSED on any other, so a new
+    key here is an artifact-format break in both directions: artifacts written
+    by this build would be refused by every 2.0.x serve, and relaxing the check
+    to accept both shapes would give up the property that makes it worth
+    having. Carrying the counts is a ``FEATURE_STATE_VERSION`` bump -- and a
+    forced retrain for every feature-aware operator -- not a diagnostics tweak.
+    """
     if state is None:
         return None
     return {

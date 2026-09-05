@@ -431,6 +431,25 @@ column's vocabulary is built, so that transient is paid in full even on the
 run the cap then rejects. `min_frequency` protects the trials; it does not
 protect the encoder-state build.
 
+Raising `min_frequency` to clear the cap has a cost the dimension number does
+not show: every value it prunes takes its rows' signal with it. Those rows
+encode to an all-zero block for that column and become indistinguishable from
+each other on that axis. When pruning leaves **20% or more** of a column's rows
+with no signal, training logs
+
+```
+feature_vocabulary_pruned  column=category min_frequency=5 distinct_values=41
+  kept_values=1 rows_without_signal=40 n_rows=50
+```
+
+Treat it as a real warning, not noise: a column that keeps only its head value
+still varies across rows — so it is not "dead" and the
+`feature_empty_vocabulary_column` check stays silent — while contributing
+nothing for the long tail it just dropped. Lower `min_frequency` and find the
+dimension elsewhere (drop a column, raise the cap and pay the `dim^2.4` cost),
+or drop the column if its tail genuinely carries no signal. Pruning that costs
+fewer than 20% of rows is the intended use of the lever and is not reported.
+
 ### Per-trial time grows faster than the dimension, memory quadratically, and both multiply with `training.parallelism`
 
 irspack forms a dense `Fᵀ F` Gram matrix per side and solves it by Cholesky

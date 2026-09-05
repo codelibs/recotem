@@ -869,6 +869,54 @@ def validate(
             code = _map_exception_to_exit(exc)
             _exit(code, f"Schema column check failed [{where}]: {exc}")
 
+    # `item_metadata:` is not a DataSource, so the loop above never saw it.
+    # Left unchecked it is the one block that can be wrong in a recipe that
+    # validates AND trains to a signed artifact with exit 0 -- the failure
+    # first appears when `serve` starts and the recipe does not load, or,
+    # worse, on a hot-swap in production, where the previous model keeps
+    # serving and the only signal is /v1/health going degraded.
+    #
+    # This deliberately calls the SAME loader serving uses rather than a
+    # cheaper header-only check. A second, independent notion of "valid
+    # metadata" is exactly how validate and serve came to disagree in the
+    # first place; sharing the code means they cannot. The cost is that this
+    # one check does read the file, unlike the interaction-source probes above
+    # -- which is why the output says so.
+    if loaded_recipe.item_metadata is not None:
+        meta = loaded_recipe.item_metadata
+        try:
+            from recotem.metadata.loader import load_item_metadata
+
+            frame = load_item_metadata(
+                meta,
+                list(meta.fields),
+                on_field_missing=meta.on_field_missing,
+                recipe_name=loaded_recipe.name,
+            )
+        except Exception as exc:
+            code = _map_exception_to_exit(exc)
+            # `load_item_metadata` reports a missing `item_id_column` or a
+            # missing `fields` entry as a bare ValueError, and its own
+            # MetadataError subclasses ValueError -- neither is in the global
+            # mapper, so both would land on _EXIT_UNKNOWN (1), which CLAUDE.md
+            # reserves for genuinely unmapped exceptions and which supervisors
+            # read as a crash.  These are ordinary structural data problems,
+            # the same family as the missing-column failures the interaction
+            # source reports as 3.
+            #
+            # Narrowed to the _EXIT_UNKNOWN case so the global mapper still
+            # wins where it has an answer -- in particular an `http://`
+            # metadata path whose fetch fails chains an HttpFetchError and
+            # keeps exit 7, which CronJob retry logic treats as transient.
+            # Mapping ValueError globally instead would be far too broad.
+            if code == _EXIT_UNKNOWN and isinstance(exc, ValueError):
+                code = _EXIT_DATASOURCE
+            _exit(code, f"Item metadata check failed [item_metadata]: {exc}")
+        typer.echo(
+            f"Item metadata: OK ({meta.type}, {len(frame)} rows, "
+            f"fields {sorted(meta.fields)}) [item_metadata]"
+        )
+
     typer.echo("Validation passed.")
 
 

@@ -496,7 +496,9 @@ Treat it as a real warning, not noise: a column that keeps only its head value
 still varies across rows — so it is not "dead" and the
 `feature_empty_vocabulary_column` check stays silent — while contributing
 nothing for the long tail it just dropped. Lower `min_frequency` and find the
-dimension elsewhere (drop a column, raise the cap and pay the `dim^2.4` cost),
+dimension elsewhere (drop a column, or raise the cap and pay a cost whose
+exponent rises with the cap you already have — a doubling measured 5.07× from
+5,000 and 7.46× from 10,000; see the per-doubling table below),
 or drop the column if its tail genuinely carries no signal. Pruning that costs
 fewer than 20% of rows is the intended use of the lever and is not reported.
 

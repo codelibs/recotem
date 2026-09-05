@@ -1914,3 +1914,91 @@ def test_no_shipped_prose_rules_out_the_cubic_doubling_it_measures() -> None:
         "docs/operations.md no longer carries the per-doubling measurements "
         "that show the exponent rising with the dimension"
     )
+
+
+# The three phrasings #208 introduced together, and the order they were caught
+# in: "cubic in this number" (#220), "not the 8x" (#243), and the flat
+# `dim^2.4` itself -- which is the number the other two were replaced *with*,
+# and so the one no guard was watching.
+# Deliberately NOT "replaced": it is symmetric about which figure is the stale
+# one.  "`dim^2.4` was replaced" is honest, "replaced with the measured
+# `dim^2.4`" asserts it -- and the second is the sentence that actually shipped
+# in CHANGELOG.md.  A marker has to name `dim^2.4` as the OLD value to count.
+_SUPERSEDED_MARKERS = (
+    "earlier revision",
+    "old `dim^2.4`",
+    "superseded",
+    "itself corrected",
+    "narrowed",
+)
+
+
+def test_no_shipped_prose_states_the_flat_dim24_cost_as_current() -> None:
+    """`dim^2.4` may be named as superseded, never asserted as the cost.
+
+    #243 corrected the sizing section, `config.py`, `_features.py` and the
+    `RECOTEM_MAX_FEATURE_DIM` CHANGELOG entry, and widened two guards -- one
+    for "cubic in", one for "not the 8x".  Neither watches the flat `dim^2.4`
+    string, so two assertions of it survived in the same release that refutes
+    them:
+
+        docs/operations.md  "raise the cap and pay the `dim^2.4` cost"
+        CHANGELOG.md        "already replaced with the measured `dim^2.4`"
+
+    The first was added by #232 -- *after* the correction round began -- into a
+    troubleshooting paragraph 24 lines above the table giving 7.46x.  That is
+    the failure mode the sibling guard's own comment names: "lets the release
+    ship the corrected exponent and the superseded one side by side".
+
+    The measured ladder (100k-row fixture, `parallelism: 1`, median of three):
+    1.74x / 1.85x / 5.07x / 7.46x per doubling.  A flat `dim^2.4` predicts
+    5.3x everywhere -- it over-states the two cheap steps and under-states the
+    10,000 -> 20,000 one by 41%, which is the step the default cap forces.
+
+    Honest mentions are allowed and must stay: the page explains at length that
+    its own earlier revision said `dim^2.4`.  A mention is honest when its
+    sentence also marks the figure as superseded.
+    """
+    root = Path(__file__).resolve().parents[2]
+    sources = [
+        root / "CLAUDE.md",
+        root / "README.md",
+        root / "CHANGELOG.md",
+        *sorted((root / "docs").rglob("*.md")),
+        *sorted((root / "src").rglob("*.py")),
+    ]
+    # Matches `dim^2.4`, dim**2.4 and a bare "dim 2.4", with or without ticks.
+    claim = re.compile(r"dim\s*(?:\^|\*\*)?\s*2\.4", re.IGNORECASE)
+
+    checked = 0
+    offenders: list[str] = []
+    for path in sources:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for match in claim.finditer(text):
+            checked += 1
+            # The enclosing sentence, with newlines flattened: these are
+            # wrapped Markdown paragraphs, so the marker that makes a mention
+            # honest is routinely on a different line from the figure itself.
+            start = max(text.rfind(".", 0, match.start()) + 1, 0)
+            end = text.find(".", match.end())
+            sentence = " ".join(text[start : end if end != -1 else len(text)].split())
+            if any(m in sentence.lower() for m in _SUPERSEDED_MARKERS):
+                continue
+            lineno = text.count("\n", 0, match.start()) + 1
+            offenders.append(f"{path.relative_to(root)}:{lineno}: {sentence[:160]!r}")
+
+    assert checked, (
+        "no `dim^2.4` mention found in any shipped prose file -- the pattern "
+        "has stopped matching and this guard is watching nothing. If the "
+        "figure is genuinely gone from the tree, delete this test rather than "
+        "leaving it green over an empty scan."
+    )
+    assert not offenders, (
+        "these lines state the flat `dim^2.4` as the current feature-dimension "
+        "cost. The exponent rises with the dimension (5.07x per doubling from "
+        "5,000, 7.46x from 10,000), so a flat 2.4 under-states the step an "
+        "operator takes when the default cap refuses their catalogue. Say it "
+        "is superseded, or give the measured range:\n  " + "\n  ".join(offenders)
+    )

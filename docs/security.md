@@ -823,14 +823,25 @@ reads and JSON-parses the request body while it resolves the endpoint's
 parameters, and the `X-API-Key` dependency is resolved in that same phase — so a
 request that is ultimately rejected with `401` has *already* had its body
 buffered and JSON-parsed. An unauthenticated caller can therefore drive the
-allocation, and a body **under** the raw cap still expands to several times its
-size once it is parsed into Python objects: a ~120 MiB array-of-numbers body was
-measured at ~600 MiB resident, so four concurrent such requests — all answered
-`401` — pushed a serve process from ~250 MiB to ~2.7 GiB. `RECOTEM_MAX_BODY_BYTES`
-bounds the **raw** bytes, not this parse expansion; bound the aggregate with a
-proxy body-size limit (see the nginx block below), per-IP rate limits, and a pod
-memory limit (`resources.limits.memory`, so an over-allocation OOM-kills one pod
-rather than the node). The middleware enforces the cap at two
+allocation, and a body **under** the raw cap still expands several-fold once it is
+parsed into Python objects. Measured with every request answered `401`: four
+concurrent 120 MiB array-of-numbers bodies took a serve process from ~250 MiB to a
+~2.7 GiB peak; four concurrent 60 MiB bodies took a fresh one from ~219 MiB to
+~1.24 GiB. Across runs the expansion landed between roughly **2.5x and 5x** the raw
+bytes — it varies with the JSON shape, and it varied run to run at a *fixed* body
+size, so size it as an order of magnitude and never as a constant.
+
+The exposure is a **ceiling, not a ratchet**. The arenas are reused rather than
+returned to the OS, so resident memory stays high after the burst but a second
+identical batch lifted the peak by only ~22 MiB. What sets the ceiling is
+therefore **peak concurrency x body size x expansion**, not cumulative traffic: an
+attacker has to hold many requests open *simultaneously* and cannot climb by
+sending a long sequence. That is the number to bound.
+`RECOTEM_MAX_BODY_BYTES` bounds one request's **raw** bytes — neither the
+expansion nor the concurrency. Bound the product at the proxy with a body-size
+limit **and** a concurrent-connection limit (see the nginx block below), and set a
+pod memory limit (`resources.limits.memory`) so an over-allocation OOM-kills one
+pod rather than the node. The middleware enforces the cap at two
 points so the header cannot be omitted to bypass it: a declared `Content-Length`
 over the cap is refused outright, and a chunked/streamed body with no
 `Content-Length` is counted as it arrives and cut off the moment the running
@@ -865,6 +876,11 @@ amplify into the error body or logs.
 ```nginx
 # Define a rate-limit zone keyed by IP address (adjust burst/rate as needed).
 limit_req_zone $binary_remote_addr zone=recotem_v1:10m rate=20r/s;
+# Bound SIMULTANEOUS in-flight requests per client.  The pre-auth body
+# allocation scales with peak concurrency x body size, so this is the other
+# half of the body-size cap below -- a rate limit alone does not bound it,
+# because the ceiling is set by how many requests are open at once.
+limit_conn_zone $binary_remote_addr zone=recotem_conn:10m;
 
 server {
     # ... TLS and upstream configuration ...
@@ -872,15 +888,18 @@ server {
     location /v1/ {
         limit_req zone=recotem_v1 burst=40 nodelay;
         limit_req_status 429;
+        limit_conn recotem_conn 16;
+        limit_conn_status 429;
         # Refuse an oversized body at the proxy, before it reaches recotem and
         # is buffered/JSON-parsed (see "Request body is size-capped" above — the
         # allocation precedes authentication, so an unauthenticated caller can
         # drive it). Set this to the SMALLEST value that admits the verbs you
         # actually serve, and keep it below RECOTEM_MAX_BODY_BYTES: 1m suffices
         # for `:recommend`; cold-start feature payloads (`:recommend-related`,
-        # ~52 MiB) and batch verbs need more. Every increase widens the pre-auth
-        # allocation, so pair a larger value with per-IP rate limits and a pod
-        # memory limit.
+        # ~52 MiB) and batch verbs need more. Budget the product:
+        # client_max_body_size x limit_conn x ~5 is roughly the worst-case
+        # resident memory one client can demand, so raise either knob only
+        # against a pod memory limit you have checked it against.
         client_max_body_size 1m;
         proxy_pass http://recotem_backend;
     }

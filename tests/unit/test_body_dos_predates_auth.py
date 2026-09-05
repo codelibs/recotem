@@ -121,5 +121,21 @@ def test_security_doc_nginx_config_caps_body_size() -> None:
     )
 
 
+def test_security_doc_nginx_config_bounds_concurrency() -> None:
+    """The ceiling is peak concurrency x body size, so a body cap is only half.
+
+    Resident memory is reused rather than returned to the OS, so a long request
+    sequence does not climb — but simultaneous requests do.  A rate limit alone
+    does not bound that, which is why the recommended config also carries a
+    concurrent-connection limit.
+    """
+    text = _SECURITY_DOC.read_text(encoding="utf-8")
+    assert "limit_conn" in text, (
+        "the recommended nginx config in docs/security.md must bound "
+        "simultaneous in-flight requests: the pre-auth allocation ceiling is "
+        "peak concurrency x body size, which a rate limit alone does not cap."
+    )
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))

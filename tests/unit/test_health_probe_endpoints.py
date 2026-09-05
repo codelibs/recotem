@@ -6,10 +6,19 @@ model still serves 200.  The shipped chart and ``examples/k8s/`` pointed
 readiness *and* liveness at that endpoint, so a routine "1 YAML = 1 model"
 onboarding took every replica out of the Service and then CrashLooped it -- and
 each restart reloaded the same missing artifact, so it never self-healed.
+
+Four files ship a probe pointed at this server, not two, and the check below
+covers all four.  Two of them are Docker's: the image ``HEALTHCHECK`` and
+``compose.yaml``'s ``serve`` healthcheck, which orchestrators that act on
+container health (Swarm, ECS, ``docker compose up --wait``, another service's
+``depends_on: condition: service_healthy``) read as the readiness question.
+The other two are the Helm chart and ``examples/k8s/``.  A guard that reads
+only one of them lets the same defect return through any of the others.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -18,6 +27,15 @@ from fastapi.testclient import TestClient
 from recotem.config import ServeConfig
 
 _ROOT = Path(__file__).resolve().parents[2]
+
+# The count-based endpoint.  Fine for a startup gate ("has train produced an
+# artifact for every recipe yet?"); wrong for anything that removes traffic or
+# restarts a process, because one untrained recipe among many trips it.
+_COUNT_BASED = "/v1/health"
+_READY = "/v1/health/ready"
+_LIVE = "/v1/health/live"
+
+_HEALTH_PATH_RE = re.compile(r"/v1/health(?:/[a-z]+)?")
 
 
 def _config(tmp_path: Path) -> ServeConfig:
@@ -128,6 +146,95 @@ def test_shipped_example_splits_the_three_probes() -> None:
         "a restart cannot fix a missing artifact -- the replacement pod reads "
         "the same store, dies the same way, and drops the models that did load"
     )
+
+
+def _template_probe_paths(text: str) -> dict[str, str]:
+    """Probe -> path from a Go-templated manifest, without rendering it.
+
+    ``helm template`` is not used here on purpose: helm is not installed in the
+    ``pytest`` CI job (only in ``manifests.yml``), so a helm-gated assertion
+    would silently skip in the job that runs on every source PR -- the exact
+    way a guard gets blinded by its own environment rather than by its target.
+    The probe blocks are plain YAML inside the template, so a line scan reads
+    them on any machine.
+    """
+    out: dict[str, str] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        for probe in ("startupProbe:", "readinessProbe:", "livenessProbe:"):
+            if stripped == probe:
+                current = probe.rstrip(":")
+        if current and stripped.startswith("path:"):
+            out.setdefault(current, stripped.split(":", 1)[1].strip())
+            current = None
+    return out
+
+
+def _healthcheck_urls(text: str) -> list[str]:
+    """Every /v1/health* path mentioned on a container healthcheck line."""
+    return [
+        m
+        for line in text.splitlines()
+        if "urlopen" in line
+        for m in _HEALTH_PATH_RE.findall(line)
+    ]
+
+
+def test_helm_chart_splits_the_three_probes() -> None:
+    """The chart is the primary production deployment path and had no guard.
+
+    ``test_shipped_example_splits_the_three_probes`` reads ``examples/k8s/``
+    only, and no other test or ``validate-manifests.sh`` check looks at the
+    probe paths, so reverting the chart's readiness and liveness back to
+    ``/v1/health`` left the whole suite and the manifest gate green.
+    """
+    paths = _template_probe_paths(
+        (_ROOT / "helm" / "recotem" / "templates" / "deployment.yaml").read_text()
+    )
+    assert paths.get("startupProbe") == _COUNT_BASED, (
+        "the chart's startup gate keeps the strict count-based endpoint, so a "
+        "NEW pod does not enter the Service before every recipe has an artifact"
+    )
+    assert paths.get("readinessProbe") == _READY, (
+        "readiness on the count-based endpoint takes every replica out of the "
+        "Service at once when one recipe is added and not yet trained -- they "
+        "all read the same recipes directory"
+    )
+    assert paths.get("livenessProbe") == _LIVE, (
+        "a restart cannot fix a missing artifact; liveness on the count-based "
+        "endpoint CrashLoops the pod and drops the models that did load"
+    )
+
+
+def test_container_healthchecks_use_the_readiness_endpoint() -> None:
+    """The image and Compose healthchecks are probes too, and were missed.
+
+    A container has exactly ONE healthcheck, and Swarm, ECS, `docker compose
+    up --wait` and `depends_on: condition: service_healthy` all read it as the
+    readiness question.  Pointed at the count-based endpoint it reports a
+    server that is still serving every model it loaded as unhealthy the moment
+    one untrained recipe appears in the mounted recipes directory -- and the
+    replacement container reads the same directory, so it never self-heals.
+    """
+    sources = {
+        "Dockerfile": _ROOT / "Dockerfile",
+        "compose.yaml": _ROOT / "compose.yaml",
+        "docs/deployment/docker.md": _ROOT / "docs" / "deployment" / "docker.md",
+    }
+    seen = 0
+    for label, path in sources.items():
+        urls = _healthcheck_urls(path.read_text(encoding="utf-8"))
+        assert urls, f"{label}: expected at least one healthcheck probe URL"
+        for url in urls:
+            seen += 1
+            assert url == _READY, (
+                f"{label}: healthcheck probes {url}, which answers 'is EVERY "
+                "recipe present?'. One untrained recipe then marks a container "
+                "that is still serving every loaded model unhealthy, and the "
+                f"replacement fails identically. Use {_READY}."
+            )
+    assert seen >= 3, f"expected the shipped healthcheck probes, found {seen}"
 
 
 def test_shipped_allowed_hosts_example_keeps_localhost() -> None:

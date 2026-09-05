@@ -76,9 +76,16 @@ services:
       RECOTEM_ENV: "production"
     restart: unless-stopped
     healthcheck:
+      # /v1/health/ready, not /v1/health.  `/v1/health` answers "is EVERY
+      # recipe present?", so adding one untrained recipe to the mounted
+      # directory marks the container unhealthy while every loaded model is
+      # still serving -- and a replacement container reads the same directory
+      # and fails identically.  `/v1/health/ready` is 200 while at least one
+      # recipe is loaded and 503 only when none is, so a cold server still
+      # never becomes healthy.
       test:
         - "CMD-SHELL"
-        - "python -c \"import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/v1/health', timeout=5).status == 200 else 1)\""
+        - "python -c \"import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/v1/health/ready', timeout=5).status == 200 else 1)\""
       interval: 30s
       timeout: 10s
       retries: 3

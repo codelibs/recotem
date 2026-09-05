@@ -104,9 +104,14 @@ sqlite = ["sqlalchemy>=2,<3"]
 # unchanged.  Pinned exactly, matching the `irspack==0.5.2` policy: the payload
 # format of a BPRFM artifact is this package's pickle format.
 #
-# Not a core dependency: `lightfm-next` publishes no linux/aarch64 wheel, so
-# adding it to `dependencies` would make `pip install recotem` fail on arm64
-# hosts without a C toolchain -- including for users who never train BPRFM.
+# Not a core dependency: `lightfm-next`'s wheel coverage is partial -- 1.19.0
+# publishes wheels for CPython 3.12 and 3.13 only, and on Linux for x86_64
+# only -- so adding it to `dependencies` would make `pip install recotem` fail
+# on every linux/aarch64 host and on Python 3.14 at any architecture, whenever
+# no C toolchain is present, including for users who never train BPRFM.  The
+# interpreter axis is not implied by the platform axis: 3.14 is a supported
+# interpreter (see the classifiers above) with no lightfm-next wheel anywhere.
+# `tests/unit/test_packaging_metadata.py` pins that wheel matrix.
 # See docs/recipe-reference.md#algorithms.
 bprfm = ["lightfm-next==1.19.0"]
 all = ["recotem[bigquery,postgres,mysql,sqlite,s3,gcs,azure,metrics,bprfm]"]

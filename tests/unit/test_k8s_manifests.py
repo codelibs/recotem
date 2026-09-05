@@ -691,3 +691,82 @@ def test_example_spread_constraint_does_not_deadlock_a_read_write_once_volume() 
                     "a hard hostname spread on a Deployment that mounts a PVC "
                     "strands the second replica whenever the volume is RWO"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Probe paths
+#
+# #219 split /v1/health into /v1/health/live and /v1/health/ready but left the
+# startupProbe on the strict, count-based /v1/health.  A failing startup probe
+# RESTARTS the container, so one valid-but-untrained recipe put every newly
+# created pod into a restart loop while the running replicas served normally:
+# `kubectl rollout restart` (the documented way to pick up a new recipe) and
+# every HPA scale-out stalled indefinitely.  Measured on a 3-node cluster:
+# `Killing  Container serve failed startup probe, will be restarted` with
+# `Startup probe failed: HTTP probe failed with statuscode: 503`, while the
+# same pod answered /v1/health/ready with 200.
+#
+# /v1/health/ready still 503s on a cold store, so pointing the startup probe
+# there keeps the first-install guarantee that these tests and
+# docs/deployment/k8s.md both describe.
+# ---------------------------------------------------------------------------
+
+# The strict endpoint answers "is EVERY recipe present?".  No probe may read
+# it: readiness would drop the whole fleet, liveness and startup would restart
+# pods that a restart cannot help.
+_STRICT_HEALTH_PATH = "/v1/health"
+_EXPECTED_PROBE_PATHS = {
+    "startupProbe": "/v1/health/ready",
+    "readinessProbe": "/v1/health/ready",
+    "livenessProbe": "/v1/health/live",
+}
+
+
+def _serve_containers(specs: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
+    return [
+        container
+        for _, spec in specs
+        for container in spec.get("containers", [])
+        if any(probe in container for probe in _EXPECTED_PROBE_PATHS)
+    ]
+
+
+@requires_helm
+def test_chart_probes_never_read_the_strict_health_endpoint() -> None:
+    docs = _load_all_strict(_helm_template("train.enabled=true"))
+    containers = _serve_containers(_pod_specs_in(docs))
+    assert containers, "expected the chart to render a probed container"
+    for container in containers:
+        for probe, expected in _EXPECTED_PROBE_PATHS.items():
+            path = container.get(probe, {}).get("httpGet", {}).get("path")
+            if path is None:
+                continue
+            assert path != _STRICT_HEALTH_PATH, (
+                f"chart {container['name']}.{probe} reads {_STRICT_HEALTH_PATH}, "
+                "which 503s whenever any single recipe is untrained; a probe "
+                "there restarts or de-registers pods that are serving fine"
+            )
+            assert path == expected, (
+                f"chart {container['name']}.{probe} is {path!r}, expected {expected!r}"
+            )
+
+
+def test_example_probes_never_read_the_strict_health_endpoint() -> None:
+    docs = _load_all_strict((K8S_EXAMPLES / "serve-deployment.yaml").read_text())
+    containers = _serve_containers(_pod_specs_in(docs))
+    assert containers, (
+        "expected examples/k8s/serve-deployment.yaml to probe a container"
+    )
+    for container in containers:
+        for probe, expected in _EXPECTED_PROBE_PATHS.items():
+            path = container.get(probe, {}).get("httpGet", {}).get("path")
+            if path is None:
+                continue
+            assert path != _STRICT_HEALTH_PATH, (
+                f"examples/k8s {container['name']}.{probe} reads "
+                f"{_STRICT_HEALTH_PATH}; see the chart test for why"
+            )
+            assert path == expected, (
+                f"examples/k8s {container['name']}.{probe} is {path!r}, "
+                f"expected {expected!r}"
+            )

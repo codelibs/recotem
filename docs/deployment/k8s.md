@@ -12,13 +12,13 @@ Recipes can be delivered to both objects via ConfigMap (small, static recipes), 
 ## First install: seed an artifact before serve starts
 
 **Read this before your first `helm install` or `kubectl apply`.** Train and
-serve are ordered: serve cannot start healthy until train has produced an
-artifact for every recipe, and nothing in the chart or the example manifests
-runs train for you at install time.
+serve are ordered: serve cannot start healthy until train has produced at
+least one artifact, and nothing in the chart or the example manifests runs
+train for you at install time.
 
-`recotem serve` loads one artifact per recipe at startup. Until every recipe
-has one, `/v1/health` answers **503** with
-`{"status":"degraded","total":1,"loaded":0}`. On an empty artifact store that
+`recotem serve` loads one artifact per recipe at startup. Until at least one
+recipe has one, `/v1/health/ready` answers **503** with
+`{"status":"unready","total":1,"loaded":0}`. On an empty artifact store that
 means:
 
 ```
@@ -61,6 +61,17 @@ the ones serve is configured with.
 In every case the serve pods recover on their own once an artifact appears —
 the watcher picks it up within `RECOTEM_WATCH_INTERVAL` seconds and the next
 probe succeeds. No rollout restart is needed.
+
+**Adding a recipe later is not a first install.** All three probes read the
+same "at least one recipe loaded" state, so a valid recipe whose artifact has
+not been trained yet leaves the running fleet in the Service *and* lets new
+pods start. `/v1/recipes/<name>:recommend` for that one recipe answers 503
+`RECIPE_UNAVAILABLE` until the next train run; every other recipe keeps
+serving. Point a probe at `/v1/health` instead and you get the opposite:
+`/v1/health` is the strict "is *every* recipe present?" endpoint, and a
+startup probe that reads it restarts the container, so one untrained recipe
+stops every new pod — a rolling update or an HPA scale-out never converges.
+Use `/v1/health` for alerting, not for probes.
 
 > **Why no post-install hook in the chart?** Training is an unbounded
 > operation — the CronJob allows it an hour (`activeDeadlineSeconds: 3600`).
@@ -346,14 +357,19 @@ spec:
           # the default rather than extending it. See the note on the env var
           # above; the Helm chart prepends `localhost` for you, a hand-written
           # env var does not.
-          # Startup keeps the strict, count-based gate: a NEW pod does not
-          # enter the Service until every recipe has an artifact.  Readiness
-          # and liveness below deliberately do not -- adding an untrained
-          # recipe to a running fleet must not take the loaded models offline,
-          # and a restart cannot fix a missing artifact anyway.
+          # All three probes read artifact state through the SAME question as
+          # readiness: "is at least one recipe loaded?".  A startupProbe is not
+          # a gate that withholds traffic -- a failing one RESTARTS the
+          # container.  Pointed at the strict, count-based /v1/health it turned
+          # one untrained recipe into a restart loop for every NEW pod, so a
+          # rolling update or an HPA scale-out could not converge while the
+          # running replicas served happily.  /v1/health/ready still answers
+          # 503 on a cold store (nothing loaded), which is what keeps the
+          # first-install guarantee: serve does not enter the Service before
+          # train has produced something.
           startupProbe:
             httpGet:
-              path: /v1/health
+              path: /v1/health/ready
               port: http
               httpHeaders:
                 - name: Host

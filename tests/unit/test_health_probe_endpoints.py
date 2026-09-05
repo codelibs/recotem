@@ -137,9 +137,12 @@ def test_shipped_example_splits_the_three_probes() -> None:
         (_ROOT / "examples" / "k8s" / "serve-deployment.yaml").read_text()
     )
     paths = _probe_paths(manifest)
-    assert paths["startupProbe"] == "/v1/health", (
-        "startup keeps the strict count-based gate, so a NEW pod does not enter "
-        "the Service before train has produced every artifact"
+    assert paths["startupProbe"] == "/v1/health/ready", (
+        "a failing startup probe RESTARTS the container rather than merely "
+        "withholding traffic, so the strict count-based gate turned one "
+        "untrained recipe into a restart loop for every new pod; readiness' "
+        "question still 503s on a cold store, keeping the first-install "
+        "guarantee"
     )
     assert paths["readinessProbe"] == "/v1/health/ready"
     assert paths["livenessProbe"] == "/v1/health/live", (

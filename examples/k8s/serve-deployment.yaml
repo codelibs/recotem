@@ -144,14 +144,19 @@ spec:
           # the default rather than extending it. See the note on the env var
           # above; the Helm chart prepends `localhost` for you, a hand-written
           # env var does not.
-          # Startup keeps the strict, count-based gate: a NEW pod does not
-          # enter the Service until every recipe has an artifact.  Readiness
-          # and liveness below deliberately do not -- adding an untrained
-          # recipe to a running fleet must not take the loaded models offline,
-          # and a restart cannot fix a missing artifact anyway.
+          # All three probes read artifact state through the SAME question as
+          # readiness: "is at least one recipe loaded?".  A startupProbe is not
+          # a gate that withholds traffic -- a failing one RESTARTS the
+          # container.  Pointed at the strict, count-based /v1/health it turned
+          # one untrained recipe into a restart loop for every NEW pod, so a
+          # rolling update or an HPA scale-out could not converge while the
+          # running replicas served happily.  /v1/health/ready still answers
+          # 503 on a cold store (nothing loaded), which is what keeps the
+          # first-install guarantee: serve does not enter the Service before
+          # train has produced something.
           startupProbe:
             httpGet:
-              path: /v1/health
+              path: /v1/health/ready
               port: http
               httpHeaders:
                 - name: Host

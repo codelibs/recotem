@@ -654,9 +654,13 @@ def make_router(
 
         A cold fleet (nothing loaded) still fails, which is what keeps the
         documented first-install guarantee: ``serve`` does not enter the Service
-        before ``train`` has produced something.  Keep the startupProbe on
-        ``/health`` if you want the stricter "every recipe present" gate to hold
-        before a *new* pod receives traffic; that is what the shipped chart does.
+        before ``train`` has produced something.  The shipped chart and
+        ``examples/k8s/`` therefore point the startupProbe here too.  Do not
+        point one at ``/health``: a failing startup probe *restarts* the
+        container rather than withholding traffic, so the stricter "every recipe
+        present" gate turns one untrained recipe into a restart loop for every
+        newly created pod, and a rolling update or an HPA scale-out can never
+        converge.  ``/health`` is for alerting.
         """
         loaded_count, total, skipped_count = registry.health_counts()
         ready = total == 0 or loaded_count > 0

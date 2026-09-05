@@ -3331,3 +3331,90 @@ def test_effective_scheme_is_fail_closed_not_fail_open() -> None:
         # identical (no regression); the helper only diverges when urlparse
         # returned "" AND a real "://" protocol was hidden by an illegal char.
         assert _effective_scheme(path) == up, path
+
+
+@pytest.mark.parametrize(
+    "field_name,validator_name",
+    [
+        ("source.path", "_validate_input_path"),
+        ("output.path", "_validate_output_path"),
+    ],
+)
+@pytest.mark.parametrize(
+    "canonical,underscore_alias",
+    [
+        ("hdfs://namenode.example:8020/x", "arrow_hdfs://namenode.example:8020/x"),
+    ],
+)
+def test_underscore_alias_refused_exactly_like_its_canonical_spelling(
+    field_name: str, validator_name: str, canonical: str, underscore_alias: str
+) -> None:
+    """The paired contrast that *is* the bug: same backend, two spellings.
+
+    ``hdfs://`` and ``arrow_hdfs://`` resolve to the SAME fsspec class
+    (``fsspec.implementations.arrow.HadoopFileSystem``). Before the fix the
+    canonical spelling was refused by the allow-list while its underscore alias
+    was waved through, because urlparse cannot see a scheme containing "_".
+    Asserting both in one test is what makes this a bypass test rather than a
+    test about one string: the canonical leg proves the allow-list is live and
+    working, and the alias leg proves it no longer misses this spelling.
+
+    Both legs must REJECT. Reverting the validator to `urlparse(path).scheme`
+    leaves the canonical leg passing and kills only the alias leg.
+    """
+    import fsspec
+    from fsspec.core import split_protocol
+
+    import recotem.recipe.loader as loader_mod
+
+    validator = getattr(loader_mod, validator_name)
+
+    # Same underlying backend: this is why one may not be refused without the other.
+    assert fsspec.get_filesystem_class(
+        split_protocol(canonical)[0]
+    ) is fsspec.get_filesystem_class(split_protocol(underscore_alias)[0]), (
+        "precondition: the two spellings must name the same fsspec backend"
+    )
+
+    with pytest.raises(RecipeError):
+        validator(canonical, field_name)
+    with pytest.raises(RecipeError):
+        validator(underscore_alias, field_name)
+
+
+@pytest.mark.parametrize(
+    "validator_name", ["_validate_input_path", "_validate_output_path"]
+)
+def test_async_wrapper_alias_refused_by_both_validators(validator_name: str) -> None:
+    """async_wrapper is the other underscore protocol fsspec registers."""
+    import recotem.recipe.loader as loader_mod
+
+    validator = getattr(loader_mod, validator_name)
+    with pytest.raises(RecipeError):
+        validator("async_wrapper://whatever/x", "path")
+
+
+def test_output_allowlist_is_still_a_strict_subset_after_the_fix() -> None:
+    """Regression fence: the output list must keep rejecting what it rejected.
+
+    The underscore bypass defeated the OUTPUT allow-list too, so an artifact
+    could be written to an attacker-chosen backend. Fixing that must not
+    loosen (or tighten) the documented subset.
+    """
+    from recotem.recipe.loader import _validate_input_path, _validate_output_path
+
+    # Output rejects these; input accepts http/https.
+    for bad in ("http://h/x", "https://h/x", "ftp://h/x", "memory://x", "hdfs://h/x"):
+        with pytest.raises(RecipeError):
+            _validate_output_path(bad, "output.path")
+    for good_in in ("http://e/x", "https://e/x"):
+        _validate_input_path(good_in, "source.path")  # must not raise
+
+    # Both accept these.
+    for good in ("s3://b/k", "gs://b/k", "file:///abs/x", "/tmp/bare.recotem"):
+        _validate_input_path(good, "source.path")
+        _validate_output_path(good, "output.path")
+
+    # Chained protocols stay rejected on the input side.
+    with pytest.raises(RecipeError, match="chained scheme"):
+        _validate_input_path("simplecache::https://e/x", "source.path")

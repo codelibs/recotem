@@ -1121,3 +1121,109 @@ def test_allow_kubelet_probes_warning_names_the_client_traffic_loss() -> None:
             f"{phrase!r}; an operator reading it cannot tell that the pods "
             "stay green while every request is dropped"
         )
+
+
+# ---------------------------------------------------------------------------
+# Size caps must reach BOTH workloads
+#
+# `.Values.env` renders into the serve Deployment; `.Values.train.env` renders
+# into the train CronJob. They are separate maps, and only `env` used to carry
+# a RECOTEM_MAX_* key. `recotem train` compares the artifact it has just
+# written against the caps resolved in ITS OWN environment, so an operator who
+# lowers a cap on serve alone leaves the train job on the default: it writes an
+# over-cap artifact, exits 0 with no warning, and serve refuses it
+# (`reason: size_cap`, /v1/health/ready 503). `docs/deployment/k8s.md` tells
+# operators to lower `RECOTEM_MAX_PAYLOAD_BYTES`, which is the walk-in.
+# ---------------------------------------------------------------------------
+
+_CAP_VARS = ("RECOTEM_MAX_ARTIFACT_BYTES", "RECOTEM_MAX_PAYLOAD_BYTES")
+
+
+def _env_by_workload(docs: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+    """Map kind -> {env name: value} for the Deployment and the train CronJob."""
+    out: dict[str, dict[str, str]] = {}
+    for doc in docs:
+        kind = doc.get("kind")
+        if kind == "Deployment":
+            spec = doc["spec"]["template"]["spec"]
+        elif kind == "CronJob":
+            spec = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+        else:
+            continue
+        out[kind] = {
+            e["name"]: e["value"]
+            for c in spec["containers"]
+            for e in c.get("env", [])
+            if "value" in e
+        }
+    return out
+
+
+@requires_helm
+def test_a_lowered_cap_reaches_the_train_cronjob_too() -> None:
+    """Setting a cap in both maps must render it into both workloads.
+
+    Deliberately a render rather than a scan of values.yaml: the keys existing
+    in the file proves nothing about whether the templates emit them, and the
+    two templates have separate env loops.
+    """
+    rendered = _helm_template(
+        "train.enabled=true",
+        "env.RECOTEM_MAX_PAYLOAD_BYTES=268435456",
+        "train.env.RECOTEM_MAX_PAYLOAD_BYTES=268435456",
+    )
+    env = _env_by_workload(_load_all_strict(rendered))
+    assert set(env) == {"Deployment", "CronJob"}, sorted(env)
+    for kind, values in env.items():
+        assert values.get("RECOTEM_MAX_PAYLOAD_BYTES") == "268435456", (
+            f"{kind} did not receive the payload cap. `recotem train` compares "
+            "against the caps in its own environment, so a cap that reaches "
+            "only serve cannot be warned about before deploy."
+        )
+
+
+@requires_helm
+def test_unset_caps_render_nothing_so_defaults_are_untouched() -> None:
+    """The new keys ship empty; empty must mean absent, not an empty string.
+
+    An empty string reaching the process would log `env_var_unparseable` and
+    fall back to the default anyway, but silently and with a warning the
+    operator did not cause.
+    """
+    rendered = _helm_template("train.enabled=true")
+    env = _env_by_workload(_load_all_strict(rendered))
+    for kind, values in env.items():
+        for var in _CAP_VARS:
+            assert var not in values, (
+                f"{kind} rendered {var}={values[var]!r} from an unset value; "
+                "empty must render nothing so the process default applies."
+            )
+
+
+def test_both_env_maps_offer_the_same_cap_knobs() -> None:
+    """values.yaml must expose each cap on serve AND train, or the pairing is
+    undiscoverable: an operator sets what the file offers."""
+    values = yaml.safe_load((CHART / "values.yaml").read_text(encoding="utf-8"))
+    serve_env = values["env"]
+    train_env = values["train"]["env"]
+    for var in _CAP_VARS:
+        assert var in serve_env, f"values.yaml `env` does not offer {var}"
+        assert var in train_env, (
+            f"values.yaml `train.env` does not offer {var}, so an operator who "
+            "lowers it on serve has nowhere obvious to set it for train -- and "
+            "train is the half that produces the warning."
+        )
+
+
+def test_the_k8s_doc_tells_you_to_set_the_cap_on_both() -> None:
+    """The advice that walks operators into this must carry the caveat."""
+    doc = (REPO_ROOT / "docs" / "deployment" / "k8s.md").read_text(encoding="utf-8")
+    assert "lower `RECOTEM_MAX_PAYLOAD_BYTES`" in doc, (
+        "the sizing advice that motivates this pairing has moved or been "
+        "reworded; this guard is watching nothing."
+    )
+    assert "train.env" in doc and "two separate maps" in doc, (
+        "docs/deployment/k8s.md tells operators to lower "
+        "RECOTEM_MAX_PAYLOAD_BYTES but never says the chart has separate env "
+        "maps for serve and train, so the cap reaches only serve."
+    )

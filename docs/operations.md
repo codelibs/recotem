@@ -428,7 +428,47 @@ into**.
 it at ~4.8× the cap, not at the cap. At the 512 MiB default, plan for roughly
 2.5 GiB of resident memory per recipe that actually reaches the cap.
 
-For large models (IALS with many components, large item sets), use `recotem inspect` to read `data_stats` and `best_params` from the header before committing to a host size. Note that `n_components` — the term that dominates artifact size, since the factor matrices are `(n_users + n_items) × n_components × 4` bytes — is an Optuna-searched parameter over irspack's `[4, 300]`, so it is a property of the run rather than of the recipe: the same recipe on the same data can produce a materially different artifact size on the next train. `recotem train` logs `artifact_bytes` on `artifact_written` for every run.
+For large models (IALS with many components, large item sets), use `recotem inspect` to read `data_stats` and `best_params` from the header before committing to a host size. Two terms set the payload size, and **which one dominates depends on the dataset**:
+
+```
+payload ≈ (n_users + n_items) × n_components × 4 B     ← factor matrices
+        + n_rows × ~12 B                                ← the pickled interaction matrix
+```
+
+irspack's recommenders retain `X_train_all`, the user–item CSR, on the trained
+object, so every deduplicated interaction row is pickled into the artifact at
+roughly 12 bytes (a 4-byte column index plus an 8-byte value). That term does
+not shrink when the search picks a small `n_components`. Measured, four runs on
+this machine:
+
+| n_users | n_items | n_rows | `n_components` | payload | factor term | interaction term |
+|---|---|---|---|---|---|---|
+| 5,000 | 1,000 | 123,525 | 69 | 3.06 MiB | 1.58 MiB (52%) | 1.41 MiB (46%) |
+| 20,000 | 4,000 | 498,536 | 219 | 26.02 MiB | 20.05 MiB (77%) | 5.71 MiB (22%) |
+| 60,000 | 10,000 | 1,498,219 | 44 | 29.71 MiB | 11.75 MiB (40%) | 17.15 MiB (58%) |
+| 150,000 | 20,000 | 2,998,529 | 218 | 177.75 MiB | 141.36 MiB (80%) | 34.32 MiB (19%) |
+
+The two-term estimate lands within **2.7%** on all four. Reading `n_components`
+alone does not: expressed as bytes per `(n_users + n_items) × n_components`
+entry, the same four runs span **5.03 to 10.11** — a factor of two, set by how
+many interactions sit behind each factor entry, not by anything in the header's
+`best_params`.
+
+`n_components` is an Optuna-searched parameter over irspack's `[4, 300]`, so it
+is a property of the run rather than of the recipe: the same recipe on the same
+data can produce a materially different artifact size on the next train. But a
+small `n_components` is **not** a guarantee of a small artifact. A 1.2M-entity
+catalogue against the 512 MiB `RECOTEM_MAX_PAYLOAD_BYTES` default crosses the
+cap at `n_components` **112** with no interaction term at all, at **99** with
+5M interactions, at **62** with 20M — and at 50M interactions the interaction
+matrix alone is 572 MiB, so **no value in irspack's search range fits**. Size a
+catalogue that large on `n_rows` first.
+
+`recotem train` logs `artifact_bytes` and `payload_bytes` on `artifact_written`
+for every run, and warns with `artifact_payload_exceeds_serve_cap` (naming
+`RECOTEM_MAX_PAYLOAD_BYTES`) when the file it just wrote is one this host's
+`recotem serve` would refuse — so the arithmetic above is for planning, and the
+run itself tells you the answer.
 
 > Measured on macOS/arm64 (16 cores, 128 GB). The double-resident raw bytes are
 > arithmetic and hold on any platform; whether a freed buffer is returned to the

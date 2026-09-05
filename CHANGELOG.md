@@ -511,6 +511,43 @@ exit 8.
 
 ### Fixed
 
+- **The artifact-sizing guidance named one of the two terms that set payload
+  size.** `docs/operations.md` said `n_components` is "the term that dominates
+  artifact size, since the factor matrices are
+  `(n_users + n_items) × n_components × 4` bytes". irspack's recommenders also
+  retain `X_train_all`, the user-item CSR, on the trained object and define no
+  `__getstate__`, so every deduplicated interaction row is pickled into the
+  payload at roughly 12 bytes as well — a term that does not shrink when the
+  search picks a small `n_components`.
+
+  Measured on four fresh runs: expressed as bytes per
+  `(n_users + n_items) × n_components` entry the single-term reading spans
+  **5.03 to 10.11** — a factor of two — while the two-term estimate
+  `(n_users + n_items) × n_components × 4 B + n_rows × 12 B` lands within
+  **2.7%** on all four. On a 60,000-user / 10,000-item / 1.5M-row model where
+  the search chose `n_components: 44`, the factor matrices were 40% of the
+  payload and the interaction matrix 58%.
+
+  The consequence is a host sized from `best_params` alone, in the direction
+  that OOMKills a pod. A 1.2M-entity catalogue against the 512 MiB
+  `RECOTEM_MAX_PAYLOAD_BYTES` default crosses the cap at `n_components` 112
+  with no interactions, 99 at 5M interactions, and 62 at 20M; at 50M the
+  interaction matrix alone is 572 MiB and **no value in irspack's `[4, 300]`
+  search range fits**. The section now states both terms, shows the four
+  measured points, and says a small `n_components` is not a guarantee of a
+  small artifact.
+
+  Separately verified and left unchanged: the serve-RSS rule
+  `RSS ≈ 4.8 × artifact + 0.22 GiB` reproduces on three fresh points spanning
+  3 MiB to 178 MiB of artifact (worst error −6.7%, and conservative in the
+  safe direction at all three). A least-squares refit of those points gives
+  `4.78 × artifact + 0.206 GiB`, so the published constants stand.
+
+  `tests/unit/test_artifact_size_guidance.py`, four tests: the formula block
+  carries both terms, the prose names `X_train_all` and `n_rows`, the section
+  says a small `n_components` is not a guarantee, and `X_train_all` is still a
+  real `irspack.recommenders.base.BaseRecommender` annotation.
+
 - **An over-cap model was reported as a damaged file when `recotem serve`
   started, and as `size_cap` when the same file arrived by hot-swap.** The
   classifier that resolves an `ArtifactError` to a `reason` label lives in

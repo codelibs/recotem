@@ -75,3 +75,27 @@ def test_release_notes_do_not_claim_one_probe_path_for_the_shipped_chart() -> No
         f"helm/recotem/templates/deployment.yaml points them at "
         f"{sorted(set(chart.values()))}."
     )
+
+
+def test_release_notes_do_not_attribute_a_wrong_path_to_a_chart_probe() -> None:
+    """Naming the right endpoints somewhere is not enough.
+
+    The two checks above both passed while the notes said "The shipped Helm
+    chart points its **startupProbe** at `/v1/health`" -- every path the chart
+    polls was mentioned elsewhere in the section, and the guarded sentence uses
+    different words.  A whole upgrade-planning paragraph was built on that
+    claim.  So each probe is also checked against what the notes attribute to
+    it by name.
+    """
+    section = _unreleased_section()
+    for probe, path in sorted(_probe_paths(_CHART_DEPLOYMENT).items()):
+        for m in re.finditer(
+            rf"{probe}Probe\**[^.\n]{{0,80}}?at\s+`?(/v1/[A-Za-z0-9/_-]+)`?",
+            section,
+            re.IGNORECASE,
+        ):
+            assert m.group(1) == path, (
+                f"the release notes say the chart points its {probe}Probe at "
+                f"{m.group(1)}; helm/recotem/templates/deployment.yaml points "
+                f"it at {path}."
+            )

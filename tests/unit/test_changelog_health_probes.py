@@ -119,6 +119,56 @@ def test_release_notes_do_not_attribute_a_wrong_path_to_a_chart_probe() -> None:
 # `/v1/health/live` must not be read as mentions of it.
 _COUNT_BASED = re.compile(r"`/v1/health`")
 _PROBE_TOKEN = re.compile(r"\b(?:startup|readiness|liveness)Probe\b", re.IGNORECASE)
+_UPGRADING_HEADING = "### Upgrading from 2.0.0"
+
+
+def _upgrading_section() -> str:
+    """The "Upgrading from 2.0.0" subsection of the release notes."""
+    section = _unreleased_section()
+    start = section.index(_UPGRADING_HEADING)
+    after = section[start + len(_UPGRADING_HEADING) :]
+    nxt = re.search(r"^### ", after, re.MULTILINE)
+    return section[
+        start : start + len(_UPGRADING_HEADING) + (nxt.start() if nxt else len(after))
+    ]
+
+
+def test_the_upgrading_section_still_discusses_the_probes() -> None:
+    """A `must` companion for the pairing guard, which is `mustNot`-shaped.
+
+    R9-P8's shape 2: a `mustNot` can only see the old wording COMING BACK, and a
+    wholesale deletion is the one thing that does not produce. Measured on this
+    guard before this test existed -- excising the whole "On Kubernetes the blast
+    radius ... CrashLoop them." discussion removes 1,721 characters of
+    upgrade-planning prose and **all four tests passed**, because the `Added`
+    section further down carries its own probe names and paths and satisfied
+    every needle. Shapes 1 and 2 compounding: blind to deletion, and the needles
+    were findable elsewhere in the same file.
+
+    A botched merge or a careless trim produces exactly that, and the operator
+    it strands is the one this section is written for -- someone planning a
+    Kubernetes upgrade, who then gets no probe guidance at all. The fix is the
+    one P8 applied to their own pins: anchor the `must` on the same passage the
+    `mustNot` guards, not on the file.
+    """
+    upgrading = _upgrading_section()
+
+    assert _PROBE_TOKEN.search(upgrading), (
+        f"{_UPGRADING_HEADING!r} no longer names any <kind>Probe. The pairing "
+        "guard below is mustNot-shaped and cannot see this: it only fires when "
+        "a WRONG attribution appears, not when the discussion is deleted."
+    )
+    assert _COUNT_BASED.search(upgrading), (
+        f"{_UPGRADING_HEADING!r} no longer mentions `/v1/health`, so a reader "
+        "upgrading from 2.0.0 -- where all three probes polled it -- is not "
+        "told to move them."
+    )
+    for path in sorted(set(_probe_paths(_CHART_DEPLOYMENT).values())):
+        assert path in upgrading, (
+            f"the chart polls {path} but {_UPGRADING_HEADING!r} never mentions "
+            "it. An operator rewriting their own manifests reads this section, "
+            "not the Added section and not the chart."
+        )
 
 
 def _sentences(text: str) -> list[str]:

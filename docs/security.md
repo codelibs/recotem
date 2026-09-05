@@ -440,11 +440,12 @@ a single pickle graph: if any embedded class is absent the artifact is rejected
 at serve time even though training and signing succeeded, so the list must
 cover the full object graph, not just the entry-point recommender.
 
-In addition to the FQCN list, classes whose defining module sits under
-one of the following narrow prefixes are permitted via the prefix
-allow-list (numpy and scipy reorganise their internal layout between
-releases — reconstruction helpers like `_reconstruct` move between
-submodules):
+In addition to the FQCN list, a `(module, name)` pair is permitted via the
+prefix allow-list only when **both** its module sits under one of the following
+narrow prefixes **and** its leaf name is in a small allow-set of stable
+reconstruction-helper names (numpy and scipy reorganise their internal layout
+between releases — reconstruction helpers like `_reconstruct` move between
+submodules, but their names do not):
 
 ```
 numpy._core.       numpy 2.x reconstruction helpers + scalar / dtype machinery
@@ -453,6 +454,22 @@ scipy.sparse._csr. CSR matrix reconstructor + helpers
 scipy.sparse._csc. CSC equivalent
 scipy.sparse._coo. COO equivalent
 ```
+
+The name allow-set (`_ALLOWED_PREFIX_NAMES` in `artifact/signing.py`) is
+`_reconstruct`, `scalar`, `_frombuffer`, `csr_matrix`, `csc_matrix`,
+`coo_matrix` — all data/reconstruction constructors, none accepting a
+caller-supplied callable. This gate is essential: a prefix match *alone* would
+admit every attribute of every importable submodule under it — ~900 callables
+under `numpy._core.` — including code-execution primitives unrelated to
+reconstruction, such as `numpy._core._multiarray_tests.npy_import_entry_point`
+(a getattr-by-string that returns any `module:attr`, e.g. `os.system`, as a
+value — a laundry that would walk an arbitrary callable straight past this
+allow-list) and `numpy._core.memmap.memmap` (an arbitrary file create/truncate
+primitive). Neither of those modules is on the deny-list below, so the name
+gate — not the deny-list — is what keeps them out. A name that is not a known
+reconstruction helper is refused even under an allowed prefix (fail-closed); a
+genuinely new helper is added to the set, with justification, and a test pins
+the set's exact contents so it cannot grow unnoticed.
 
 `numpy.dtypes` is **not** on this list. numpy 2.x parametric dtype classes
 (`Float64DType`, `BoolDType`, …) live directly in that module, and a prefix

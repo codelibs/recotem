@@ -202,6 +202,39 @@ _ALLOWED_MODULE_PREFIXES: tuple[str, ...] = (
     "scipy.sparse._coo.",
 )
 
+# Leaf names the module-prefix allow-list may admit.
+#
+# A module-prefix match by itself would permit EVERY attribute of EVERY
+# importable submodule under the prefix -- 896 callables under ``numpy._core.``
+# alone, including code-execution primitives that have nothing to do with
+# reconstruction: ``numpy._core._multiarray_tests.npy_import_entry_point``
+# (a getattr-by-string that returns any ``module:attr``, e.g. ``os.system``,
+# as a value -- a laundry that walks arbitrary callables straight past this
+# allow-list, exactly like the dotted-name bypass closed in #202), and
+# ``numpy._core.memmap.memmap`` (an arbitrary file create/truncate primitive).
+# The prefix list exists only to absorb cross-version *module* moves of a
+# handful of numpy/scipy reconstruction helpers whose *names* are stable, so
+# gate it on those names.  A name that is not a known reconstruction helper is
+# refused even under an allowed prefix -- fail-closed; a genuinely new helper
+# name is added here (or its class to _ALLOWED_CLASSES) with justification.
+_ALLOWED_PREFIX_NAMES: frozenset[str] = frozenset(
+    {
+        # numpy ndarray / scalar reconstruction helpers.  These are the entry
+        # points every ndarray pickle goes through; their defining submodule
+        # has moved across releases (numpy.core.multiarray -> numpy._core.*),
+        # which is the whole reason for a prefix rather than an exact list.
+        "_reconstruct",
+        "scalar",
+        "_frombuffer",
+        # scipy sparse matrix classes.  Also pinned exactly in _ALLOWED_CLASSES;
+        # kept here so a future scipy that relocates them under a matched
+        # prefix still loads.  Data constructors, no callable argument.
+        "csr_matrix",
+        "csc_matrix",
+        "coo_matrix",
+    }
+)
+
 # Denied submodules that fall under an allowed prefix but expose
 # code-execution gadgets or risky helpers (test runners, build helpers,
 # foreign function bindings, code generators, callable proxies, file-IO
@@ -319,6 +352,11 @@ def _is_allowed(module: str, name: str) -> bool:
         return False
     if (module, name) in _ALLOWED_CLASSES:
         return True
+    # A prefix match alone would admit every attribute of every submodule under
+    # the prefix (getattr-by-string / file-IO gadgets included); restrict it to
+    # the stable reconstruction-helper names the prefix exists to carry.
+    if name not in _ALLOWED_PREFIX_NAMES:
+        return False
     return _module_matches(module, _ALLOWED_MODULE_PREFIXES)
 
 

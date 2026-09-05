@@ -217,6 +217,18 @@ _LOAD_FAILURE_REASONS: frozenset[str] = frozenset(
         # from every reason above because the artifact itself is fine; it is
         # the wiring between recipe and file that is wrong.
         "recipe_name",
+        # Artifact refused by RECOTEM_MAX_ARTIFACT_BYTES or
+        # RECOTEM_MAX_PAYLOAD_BYTES. Distinct from "read" and "parse" -- both
+        # of which read as "the file is damaged" and send the operator to
+        # re-train or check their signing key -- because the remedy is to
+        # raise the cap or shrink the model.
+        #
+        # This entry is what makes the label reachable. Both call sites have
+        # returned "size_cap" since #239 (watcher) and #270 (startup), but
+        # omitting it here meant inc_artifact_load_failure's coercion below
+        # filed every over-cap artifact under "unexpected" -- the bucket that
+        # means "this build does not recognise this failure".
+        "size_cap",
     }
 )
 
@@ -227,9 +239,15 @@ def inc_artifact_load_failure(recipe: str, reason: str = "unexpected") -> None:
     *reason* must be one of the values in ``_LOAD_FAILURE_REASONS``
     (``read | parse | hmac | header_json | deserialize | metadata | yaml |
     unexpected | dir_scan | timeout | version_skew | feature_version |
-    feature_state | recipe_name``); any other value is silently coerced
-    to ``"unexpected"`` so callers cannot accidentally explode the cardinality
-    of the label.
+    feature_state | recipe_name | size_cap``); any other value is silently
+    coerced to ``"unexpected"`` so callers cannot accidentally explode the
+    cardinality of the label.
+
+    That coercion is a cardinality guard, not a validator: it is silent by
+    design, so a label the code emits but this set omits disappears into
+    ``"unexpected"`` with no error and no log line.
+    ``tests/unit/test_artifact_size_cap_label.py`` diffs the emitted labels
+    against this set for exactly that reason.
     """
     _ensure_initialized()
     if _ARTIFACT_LOAD_FAILURES is None:

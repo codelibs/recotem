@@ -609,6 +609,47 @@ Mount a `ReadWriteMany` PVC (e.g. NFS, EFS, GCS FUSE) to both the CronJob and th
 
 If the PVC does not support `ReadWriteMany`, use `ReadWriteOnce` for the Deployment and accept that you cannot mount it to the CronJob simultaneously. In that case, write artifacts to object storage instead (see below).
 
+#### A network-filesystem outage stalls `train`, and says nothing
+
+Serve and train do not degrade the same way when the file server behind an RWX
+PVC stops answering. Measured on a live 3-node cluster with an NFS-backed RWX
+PVC, by scaling the NFS server to zero replicas mid-run:
+
+| | what happens | what the operator sees |
+|---|---|---|
+| `serve`, already running | keeps answering `:recommend` (10/10 `200`), stays `1/1` Ready, 0 restarts, 2–3 millicores | `artifact_stat_timeout` (WARN, per recipe, one scan every ~20 s), then `artifact_stat_failed` naming `OSError [Errno 116] Stale file handle` |
+| `serve`, new pod | never starts | `FailedMount ... exit status 32` on the pod; the rollout stalls |
+| `train`, mid-run | **blocks in the artifact write and never returns** — measured 16 min 50 s at 1 millicore before the run was abandoned | nothing. The last log line is `final_model_trained`; no error, no exit code |
+
+The asymmetry is deliberate on one side only. The watcher stats artifacts on a
+worker thread with a wall-clock timeout and reports the ones that hang
+(`src/recotem/serving/watcher.py`), so a wedged mount costs the scan loop a
+timeout rather than the process. The artifact write
+(`src/recotem/artifact/io.py`) is a plain `mkstemp` → `write` → `fsync` →
+`os.replace`; on a hard NFS mount whose server is gone every one of those
+blocks in the kernel, uninterruptibly, for as long as the server stays away.
+
+Consequences on the shipped chart:
+
+* Nothing in the process ends the stall. The chart's
+  `activeDeadlineSeconds: 3600` on the train Job is the only bound, so the run
+  occupies its slot for a full hour.
+* It is then killed as `DeadlineExceeded` — `Job was active longer than
+  specified deadline` — which names the deadline, not the storage. Nothing in
+  the Job's status or events mentions the file server.
+* With `concurrencyPolicy: Forbid` (the chart default) that one stalled run
+  suppresses every scheduled run behind it for the same hour, each skipped with
+  `JobAlreadyActive`.
+* The per-recipe lock is held for the whole stall, on a file the process can no
+  longer reach.
+
+If your artifact store is a network filesystem, either mount it `soft` with a
+bounded `timeo`/`retrans` so the write fails instead of parking (accepting that
+a soft mount can surface a short write as an error), lower
+`activeDeadlineSeconds` to something you are willing to wait, or put artifacts
+in object storage (next section), where a stalled request fails on the HTTP
+timeout instead of in the kernel.
+
 ### Object storage (S3 / GCS)
 
 Set `output.path` in the recipe to an `s3://` or `gs://` URI. The CronJob and Deployment need no shared volume; they access the artifact directly via fsspec.

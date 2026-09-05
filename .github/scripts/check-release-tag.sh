@@ -374,7 +374,78 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Report -- every class of failure in a single run
+# 6. The commit being tagged must be on main
+# ---------------------------------------------------------------------------
+# Everything above reads files, so it describes the tree and says nothing about
+# where that tree sits in history.  A tag placed on a feature branch -- or on a
+# commit whose PR was merged into a branch that had already stopped being a path
+# to main -- carries a perfectly consistent set of version strings and passes
+# every check above.
+#
+# HEAD is the right commit to test in both usages: in CI `actions/checkout` has
+# checked out the tag, and locally the operator runs this before tagging, so
+# HEAD is the commit about to be tagged.
+#
+# This is the script's first and only use of git, and it is deliberately
+# fail-closed rather than skip-quietly.  `actions/checkout`'s default
+# `fetch-depth: 1` produces a work tree in which `origin/main` does not exist at
+# all -- measured: a depth-1 single-branch clone reports
+# `--is-inside-work-tree true`, `rev-parse origin/main` fails, and
+# `rev-list --count HEAD` is 1.  Skipping in that case would make this check
+# vacuous exactly where it matters, so the guard jobs set `fetch-depth: 0` and
+# a work tree without a main ref is refused.  That makes the workflow setting
+# self-enforcing: remove it and this fails loudly instead of passing silently.
+#
+# Outside a git work tree (the unit tests build synthetic trees in tmp dirs)
+# there is nothing to check and nothing to enforce; the success message says so
+# rather than implying it was verified.
+BRANCH_PROBLEM=""
+BRANCH_DETAIL=()
+BRANCH_CHECKED=0
+
+GIT_TOPLEVEL="$(git -C "${REPO_ROOT}" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "${GIT_TOPLEVEL}" ] && [ "${GIT_TOPLEVEL}" = "${REPO_ROOT}" ]; then
+    BRANCH_CHECKED=1
+    MAIN_REF=""
+    for candidate in refs/remotes/origin/main refs/heads/main; do
+        if git -C "${REPO_ROOT}" rev-parse --verify -q "${candidate}" > /dev/null 2>&1
+        then
+            MAIN_REF="${candidate}"
+            break
+        fi
+    done
+
+    if [ -z "${MAIN_REF}" ]; then
+        BRANCH_PROBLEM="cannot be checked against main"
+        BRANCH_DETAIL=(
+            "This is a git work tree, but neither origin/main nor refs/heads/main exists," \
+            "so whether the tagged commit is on main cannot be determined." \
+            "" \
+            "In CI this means the checkout was shallow: actions/checkout defaults to" \
+            "fetch-depth: 1, which fetches only the tagged commit.  The guard jobs set" \
+            "fetch-depth: 0 for this reason -- restore it rather than removing this check." \
+            "" \
+            "Locally:  git fetch origin main"
+        )
+    elif ! git -C "${REPO_ROOT}" merge-base --is-ancestor HEAD "${MAIN_REF}" \
+            > /dev/null 2>&1; then
+        BRANCH_PROBLEM="is on a commit that is not on main"
+        BRANCH_DETAIL=(
+            "HEAD ($(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null)) is not an" \
+            "ancestor of ${MAIN_REF}." \
+            "" \
+            "A release is cut from main.  A tag on a commit that never reached main" \
+            "publishes a tree nobody reviewed on main, and the version strings above" \
+            "cannot detect it -- they describe the tree, not where it sits in history." \
+            "" \
+            "If the branch really is merged, fetch first: git fetch origin main" \
+            "Otherwise merge it, then tag the merge commit."
+        )
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Report -- every class of failure in a single run
 # ---------------------------------------------------------------------------
 # Section 3 compares every version declaration before reporting so that one run
 # names every file that did not move.  The pin scan used to defeat that: it
@@ -411,6 +482,9 @@ fi
 if [ -n "${CHANGELOG_PROBLEM}" ]; then
     REPORT+=("${CHANGELOG_DETAIL[@]}" "")
 fi
+if [ -n "${BRANCH_PROBLEM}" ]; then
+    REPORT+=("${BRANCH_DETAIL[@]}" "")
+fi
 
 if [ "${#REPORT[@]}" -gt 0 ]; then
     # Clauses joined rather than concatenated by hand, so adding a fourth class
@@ -422,6 +496,8 @@ if [ "${#REPORT[@]}" -gt 0 ]; then
         CLAUSES+=("does not match the project version: ${MISMATCH}")
     [ -z "${CHANGELOG_PROBLEM}" ] || \
         CLAUSES+=("${CHANGELOG_PROBLEM}")
+    [ -z "${BRANCH_PROBLEM}" ] || \
+        CLAUSES+=("${BRANCH_PROBLEM}")
     HEADLINE="Tag '${TAG}'"
     SEPARATOR=" "
     for clause in "${CLAUSES[@]}"; do
@@ -444,6 +520,11 @@ echo "OK: ${TAG} is a final release and matches pyproject.toml,"
 echo "    src/recotem/version.py, helm/recotem/Chart.yaml, helm/recotem/values.yaml,"
 echo "    and every pinned image reference under examples/ and docs/."
 echo "    CHANGELOG.md declares ${EXPECTED} released."
+if [ "${BRANCH_CHECKED}" -eq 1 ]; then
+    echo "    The tagged commit is on main."
+else
+    echo "    NOT checked: whether the tagged commit is on main (not a git work tree)."
+fi
 echo "    Not checked here: uv.lock (run 'uv lock --check'), and version strings"
 echo "    outside those files — see the verification block in"
 echo "    .claude/skills/release-recotem/references/version-locations.md."

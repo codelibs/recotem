@@ -758,3 +758,159 @@ def test_the_repository_changelog_has_a_section_for_its_own_version() -> None:
         "renames that section rather than creating one, and the guard in "
         "check-release-tag.sh refuses a tag without it."
     )
+
+
+# ---------------------------------------------------------------------------
+# The tagged commit must be on main
+#
+# Everything above reads files, so it describes the *tree* and says nothing
+# about where that tree sits in history.  PR #245 is the worked example: merged
+# against milestone 2.1.0, shown as merged on GitHub, and its merge commit is
+# not an ancestor of main -- `get_driver_name` appears 0 times in
+# `origin/main:src/recotem/datasource/sql.py`.  A tag on such a commit carries a
+# perfectly consistent set of version strings.
+# ---------------------------------------------------------------------------
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+        },
+    )
+
+
+def _make_repo(root: Path, *, with_main: bool = True) -> Path:
+    """Turn a synthetic tree into a real git repo whose toplevel is `root`."""
+    script = _make_tree(root)
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "-qm", "base")
+    if not with_main:
+        # A work tree with no main ref at all -- what actions/checkout's default
+        # fetch-depth: 1 produces on a tag build.
+        _git(root, "checkout", "-q", "-b", "detached-from-main")
+        _git(root, "branch", "-q", "-D", "main")
+    return script
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+def test_a_commit_on_main_passes(tmp_path: Path) -> None:
+    """Control: without it, the two failure cases below prove nothing."""
+    script = _make_repo(tmp_path)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "The tagged commit is on main." in proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+def test_a_commit_that_never_reached_main_is_refused(tmp_path: Path) -> None:
+    """The #245 shape: a consistent tree on a commit main does not contain."""
+    script = _make_repo(tmp_path)
+    _git(tmp_path, "checkout", "-q", "-b", "stranded")
+    (tmp_path / "extra.txt").write_text("only on the branch\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(
+        tmp_path,
+        "-c",
+        "user.email=a@b.c",
+        "-c",
+        "user.name=a",
+        "commit",
+        "-qm",
+        "never merged",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "is on a commit that is not on main" in proc.stdout
+    assert "is not an" in proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+def test_a_work_tree_without_a_main_ref_is_refused_not_skipped(
+    tmp_path: Path,
+) -> None:
+    """A shallow CI checkout must fail loudly rather than skip.
+
+    `actions/checkout`'s default `fetch-depth: 1` yields a work tree in which
+    `origin/main` does not resolve.  Skipping there would make the check
+    vacuous exactly where it matters, so the guard jobs set `fetch-depth: 0`
+    and this state is refused -- which is what makes that setting
+    self-enforcing.
+    """
+    script = _make_repo(tmp_path, with_main=False)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "cannot be checked against main" in proc.stdout
+    assert "fetch-depth" in proc.stdout
+
+
+def test_outside_a_git_work_tree_the_success_message_says_so(
+    tmp_path: Path,
+) -> None:
+    """Not a repo: nothing to check, and the script must not imply otherwise."""
+    script = _make_tree(tmp_path)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "NOT checked: whether the tagged commit is on main" in proc.stdout
+    assert "The tagged commit is on main." not in proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+def test_branch_and_version_problems_are_reported_in_one_run(
+    tmp_path: Path,
+) -> None:
+    """Fourth class of failure, same single-run contract as the other three."""
+    script = _make_repo(tmp_path)
+    _git(tmp_path, "checkout", "-q", "-b", "stranded")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "recotem"\nversion = "2.0.0"\n', encoding="utf-8"
+    )
+    _git(tmp_path, "add", "-A")
+    _git(
+        tmp_path,
+        "-c",
+        "user.email=a@b.c",
+        "-c",
+        "user.name=a",
+        "commit",
+        "-qm",
+        "stale and stranded",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1
+    for expected in ("pyproject.toml (2.0.0)", "is on a commit that is not on main"):
+        assert expected in proc.stdout, f"{expected!r} missing from:\n{proc.stdout}"
+
+
+@pytest.mark.parametrize("workflow", ["publish.yml", "docker.yml"])
+def test_guard_jobs_check_out_full_history(workflow: str) -> None:
+    """The workflow half of the check.
+
+    Without `fetch-depth: 0` the guard's checkout has no main ref and the
+    script refuses -- so this asserts the setting that keeps the guard green
+    for the right reason rather than red for the wrong one.
+    """
+    import yaml
+
+    spec = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
+    )
+    checkouts = [
+        step
+        for step in spec["jobs"]["guard"]["steps"]
+        if "actions/checkout" in str(step.get("uses", ""))
+    ]
+    assert checkouts, f"{workflow} guard job has no checkout step"
+    for step in checkouts:
+        assert (step.get("with") or {}).get("fetch-depth") == 0, (
+            f"{workflow} guard job checks out shallow; check-release-tag.sh "
+            "needs main to verify the tagged commit is on it, and refuses "
+            "rather than skipping when it cannot."
+        )

@@ -56,6 +56,26 @@ SUPPORTED_CLASS_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# Class names that are in SUPPORTED_CLASS_NAMES but that irspack only exports
+# when an OPTIONAL recotem extra is installed -> the extra that supplies them.
+#
+# Used for the error message only; availability itself is still established by
+# asking irspack (see `constructible_class_names`), never by consulting this
+# map, so a stale entry can misname a remedy but can never make a working
+# algorithm look unavailable or the reverse.
+#
+# Without it the failure is indistinguishable from a typo: `BPRFM` is a valid,
+# documented alias that resolves cleanly through `resolve_algorithm_name`, then
+# dies in `get_recommender_cls` with a message blaming irspack. An operator
+# reads "irspack does not know recommender class 'BPRFMRecommender'" and goes
+# looking through irspack's issue tracker, when one `pip install` fixes it.
+_GATED_CLASS_EXTRAS: dict[str, str] = {
+    # irspack imports `lightfm` unconditionally in irspack/recommenders/bpr.py
+    # and drops BPRFMRecommender from its exports when that import fails; the
+    # `bprfm` extra installs `lightfm-next`, which provides that module.
+    "BPRFMRecommender": "bprfm",
+}
+
 # Algorithms that accept `user_features` / `item_features` constructor kwargs.
 # As of irspack 0.5.0 feature-aware iALS is not a distinct class -- it is
 # IALSRecommender with extra kwargs -- so this set holds exactly one entry.
@@ -130,14 +150,31 @@ def resolve_algorithm_name(alias: str) -> str:
 def get_recommender_cls(class_name: str):  # type: ignore[return]
     """Return the irspack recommender class for *class_name*.
 
+    Two different conditions reach the same irspack failure, and they need
+    different remedies: the name is not a recommender at all, or it is one
+    recotem supports but that irspack only exports when an optional extra is
+    installed.  irspack reports both by simply not having the class, so the
+    distinction has to be drawn here -- otherwise a missing dependency reads as
+    a typo and sends the operator to irspack's issue tracker instead of to
+    ``pip install``.
+
     Raises
     ------
     UnknownAlgorithmError
-        If irspack does not know the class.
+        If irspack does not know the class, naming the missing extra when the
+        class is one of recotem's own gated algorithms.
     """
     try:
         return get_recommender_class(class_name)
     except (ImportError, AttributeError, ValueError, KeyError) as exc:
+        extra = _GATED_CLASS_EXTRAS.get(class_name)
+        if extra is not None:
+            raise UnknownAlgorithmError(
+                f"Algorithm {class_name!r} is supported by recotem but is not "
+                f"installed: it requires the optional {extra!r} extra. "
+                f"Install it with: pip install 'recotem[{extra}]' "
+                f"(or 'recotem[all]'), then retry."
+            ) from exc
         raise UnknownAlgorithmError(
             f"irspack does not know recommender class {class_name!r}."
         ) from exc
@@ -150,7 +187,8 @@ def constructible_class_names() -> frozenset[str]:
     ``SUPPORTED_CLASS_NAMES`` is recotem's frozen contract, but irspack gates
     some recommenders behind optional dependencies and simply does not export
     the class when they are absent -- ``BPRFMRecommender`` needs ``lightfm``,
-    which has no Python 3.12 release.  Availability is therefore established by
+    which recotem supplies through its optional ``bprfm`` extra (see
+    ``_GATED_CLASS_EXTRAS``).  Availability is therefore established by
     asking irspack rather than by hard-coding the gated names here: which
     recommenders are gated is irspack's decision to change, not ours, and a
     hard-coded copy would go stale silently.

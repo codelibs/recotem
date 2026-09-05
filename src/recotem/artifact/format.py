@@ -46,6 +46,18 @@ MIN_KID_LEN: int = 1
 MAX_HEADER_LEN: int = 65_536
 DEFAULT_MAX_PAYLOAD_BYTES: int = 512 * 1024 * 1024  # 512 MiB
 
+# Shared wording for every size-cap refusal (payload cap here, artifact cap in
+# ``artifact/io.py``, ``serving/watcher.py`` and ``cli.py``).  Kept as a
+# constant because ``serving/watcher.py``'s ``_classify_artifact_error`` keys
+# the ``size_cap`` reason label off it: without a distinct label a model too
+# large for ``RECOTEM_MAX_PAYLOAD_BYTES`` -- the most likely refusal on a large
+# catalogue -- lands in the ``unexpected`` bucket and logs
+# ``artifact_error_unclassified``, as if a configured, documented cap were an
+# unrecognised failure.  Note "exceeds maximum" (``header_len``) is
+# deliberately *not* this wording: that one is a corrupt-file signal and stays
+# under the ``parse`` label.
+SIZE_CAP_MSG_MARKER: str = "exceeds cap "
+
 # Struct format strings (little-endian)
 _FMT_VERSION_RESERVED = "<HH"  # 2 × uint16 LE
 _FMT_HEADER_LEN = "<I"  # uint32 LE
@@ -182,7 +194,7 @@ def parse_header_from_bytes(data: bytes, max_payload_bytes: int) -> ArtifactHead
     payload_size = len(data) - offset
     if payload_size > max_payload_bytes:
         raise ArtifactError(
-            f"payload size {payload_size} exceeds cap {max_payload_bytes}; "
+            f"payload size {payload_size} {SIZE_CAP_MSG_MARKER}{max_payload_bytes}; "
             "refusing to load"
         )
 

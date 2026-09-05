@@ -42,6 +42,7 @@ import structlog
 
 from recotem.artifact.format import (
     DEFAULT_MAX_PAYLOAD_BYTES,
+    SIZE_CAP_MSG_MARKER,
     ArtifactError,
     ArtifactHeader,
     build_artifact_bytes,
@@ -323,7 +324,7 @@ def read_artifact(
     # Enforce total size cap
     if len(resolved_data) > max_bytes:
         raise ArtifactError(
-            f"artifact size {len(resolved_data)} exceeds cap {max_bytes}; "
+            f"artifact size {len(resolved_data)} {SIZE_CAP_MSG_MARKER}{max_bytes}; "
             "refusing to load"
         )
 
@@ -400,7 +401,7 @@ def resolve_artifact_pointer(
     if len(artifact_raw) > max_bytes:
         raise ArtifactError(
             f"artifact {target_path!r} size {len(artifact_raw)} "
-            f"exceeds cap {max_bytes}; refusing to load"
+            f"{SIZE_CAP_MSG_MARKER}{max_bytes}; refusing to load"
         )
 
     return artifact_raw, target_path

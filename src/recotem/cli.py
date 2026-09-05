@@ -549,6 +549,7 @@ def inspect(
     import fsspec
 
     from recotem.artifact.format import (
+        SIZE_CAP_MSG_MARKER,
         ArtifactError,
         parse_header_from_bytes,
     )
@@ -630,7 +631,7 @@ def inspect(
 
         if len(data) > read_cap:
             raise ArtifactError(
-                f"artifact size {len(data)} exceeds cap {read_cap}; refusing to load"
+                f"artifact size {len(data)} {SIZE_CAP_MSG_MARKER}{read_cap}; refusing to load"
             )
 
         hdr = parse_header_from_bytes(data, parse_cap)

@@ -246,19 +246,44 @@ def test_reland_naming_an_unlanded_replacement_still_fails(repo: Path) -> None:
 
 
 @requires_bash
-def test_missing_merge_commit_is_reported_not_passed(repo: Path) -> None:
+def test_missing_merge_commit_warns_but_does_not_fail_the_gate(repo: Path) -> None:
+    """A null merge commit is reported, and deliberately does NOT block.
+
+    The name matters: an earlier version of this test was called
+    ``..._is_reported_not_passed`` and asserted only that the PR appeared in
+    the output, never checking the exit code — so it claimed blocking
+    behaviour that neither the test nor the script had.  The exit code is
+    asserted explicitly here, whichever way it goes.
+
+    Warning rather than failing is a judgement, not an oversight: unlike an
+    object missing from a complete clone, a null ``mergeCommit`` is not
+    locally determinate — the API can return one transiently, and a release
+    should not be blocked by that.  The absent-object case below IS fatal.
+    """
     _set_prs(repo, "7\tnone\ta merged PR with no merge commit")
     proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "could not be verified" in proc.stdout
     assert "#7" in proc.stdout
 
 
 @requires_bash
-def test_commit_absent_from_the_clone_is_reported(repo: Path) -> None:
+def test_commit_absent_from_a_complete_clone_fails_the_gate(repo: Path) -> None:
+    """Fatal, because it is a fail-open on this gate's own motivating case.
+
+    The clone is complete (a shallow one is refused earlier), so an absent
+    object is genuinely absent.  The usual cause is that the branch it sat on
+    was deleted — and a stranded merge commit lives on exactly such a branch.
+    Delete `fix/probe-guard-contradicts-shipped-chart` and 26a8c3b leaves the
+    clone, turning a correct "STRANDED, exit 1" into "could not be verified,
+    exit 0": the gate goes quiet on #245 the moment someone tidies up merged
+    branches.  Unverifiable and unreachable are the same state of knowledge —
+    the release cannot be shown to contain the PR.
+    """
     _set_prs(repo, "8\t" + "0" * 40 + "\tcommit from a deleted branch")
     proc = _run(repo)
-    assert "could not be verified" in proc.stdout
-    assert "not in this clone" in proc.stdout
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "not in this clone" in proc.stderr
 
 
 @requires_bash

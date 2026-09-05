@@ -187,6 +187,8 @@ sanitize_title() {
 
 STRANDED=()
 STRANDED_COUNT=0
+MISSING_COMMIT=()
+MISSING_COUNT=0
 UNKNOWN=()
 RELANDED=()
 CHECKED=0
@@ -204,13 +206,25 @@ while IFS=$'\t' read -r NUMBER OID TITLE; do
             ;;
     esac
     if [ "${OID}" = "none" ]; then
-        # A merged PR with no merge commit cannot be verified either way.
-        # Reported rather than passed over.
+        # Warn, do not fail.  Unlike the absent-object case below this is not
+        # locally determinate: the API can report a null merge commit for a
+        # transient reason, and a release should not be blocked by one.  It is
+        # still reported, never passed over in silence.
         UNKNOWN+=("#${NUMBER}  ${TITLE}")
         continue
     fi
     if ! git cat-file -e "${OID}^{commit}" 2>/dev/null; then
-        UNKNOWN+=("#${NUMBER}  ${TITLE}  (commit ${OID} not in this clone)")
+        # FATAL, unlike the `none` case above.  This one is locally
+        # determinate -- the clone is complete (checked above) and the object
+        # is still absent -- and it is a fail-open on the gate's own motivating
+        # case: delete the branch a stranded merge sits on and its commit
+        # leaves the clone entirely, turning a correct "STRANDED, exit 1" into
+        # "could not be verified, exit 0".  The gate would go quiet on exactly
+        # the situation it exists to catch, at the moment someone tidies up
+        # merged branches.  Unverifiable and unreachable are the same state of
+        # knowledge here: we cannot say the release contains this PR.
+        MISSING_COMMIT+=("#${NUMBER}  ${OID}  ${TITLE}")
+        MISSING_COUNT=$((MISSING_COUNT + 1))
         continue
     fi
     if git merge-base --is-ancestor "${OID}" "${HEAD_SHA}"; then
@@ -255,6 +269,27 @@ if [ ${#UNKNOWN[@]} -gt 0 ]; then
     for line in "${UNKNOWN[@]}"; do
         echo "  ${line}"
     done
+fi
+
+if [ ${#MISSING_COMMIT[@]} -gt 0 ]; then
+    {
+        echo "::error::${MISSING_COUNT} PR(s) in milestone '${MILESTONE}' have a merge"
+        echo "  commit that is not in this clone, so it cannot be verified:"
+        for line in "${MISSING_COMMIT[@]}"; do
+            echo "    ${line}"
+        done
+        echo ""
+        echo "  The checkout is complete, so the object is genuinely absent -- the"
+        echo "  usual cause is that the branch it sat on was deleted. That is the"
+        echo "  same state of knowledge as a stranded PR: this release cannot be"
+        echo "  shown to contain it."
+        echo ""
+        echo "  To fix: restore the ref so the object is fetchable"
+        echo "    git fetch origin '+refs/pull/<n>/merge:refs/remotes/pr/<n>'"
+        echo "  or, if the change was re-landed, record it in"
+        echo "  .github/relanded-prs.tsv naming the PR that did land."
+    } >&2
+    exit 1
 fi
 
 if [ ${#STRANDED[@]} -gt 0 ]; then

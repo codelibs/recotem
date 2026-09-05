@@ -406,6 +406,29 @@ BRANCH_CHECKED=0
 GIT_TOPLEVEL="$(git -C "${REPO_ROOT}" rev-parse --show-toplevel 2>/dev/null || true)"
 if [ -n "${GIT_TOPLEVEL}" ] && [ "${GIT_TOPLEVEL}" = "${REPO_ROOT}" ]; then
     BRANCH_CHECKED=1
+
+    # A shallow repository is refused before the ancestry question is asked,
+    # because in a shallow clone git answers it *wrongly* rather than failing.
+    # Measured: with a feature commit that genuinely is an ancestor of main,
+    # a full clone gives `--is-ancestor` exit 0, and a `--depth 1` clone of the
+    # same repository gives exit 1 -- the connecting history is cut, the tip
+    # object is still present, and git reports "not an ancestor" with no hint
+    # that it could not see.  (A missing object gives 128; this case does not,
+    # which is what makes it dangerous.)  Left unguarded, a shallow checkout
+    # would fail a legitimate release and name the wrong reason.
+    if [ "$(git -C "${REPO_ROOT}" rev-parse --is-shallow-repository 2>/dev/null)" \
+         = "true" ]; then
+        BRANCH_PROBLEM="cannot be checked against main (shallow clone)"
+        BRANCH_DETAIL=(
+            "This is a shallow repository, so whether the tagged commit is on main" \
+            "cannot be determined: git answers the ancestry question from truncated" \
+            "history and reports 'not an ancestor' for commits that are on main." \
+            "" \
+            "In CI, set fetch-depth: 0 on the guard job's actions/checkout step." \
+            "Locally:  git fetch --unshallow origin"
+        )
+    fi
+
     MAIN_REF=""
     for candidate in refs/remotes/origin/main refs/heads/main; do
         if git -C "${REPO_ROOT}" rev-parse --verify -q "${candidate}" > /dev/null 2>&1
@@ -415,7 +438,9 @@ if [ -n "${GIT_TOPLEVEL}" ] && [ "${GIT_TOPLEVEL}" = "${REPO_ROOT}" ]; then
         fi
     done
 
-    if [ -z "${MAIN_REF}" ]; then
+    if [ -n "${BRANCH_PROBLEM}" ]; then
+        : # already refused above; do not overwrite the more specific reason
+    elif [ -z "${MAIN_REF}" ]; then
         BRANCH_PROBLEM="cannot be checked against main"
         BRANCH_DETAIL=(
             "This is a git work tree, but neither origin/main nor refs/heads/main exists," \

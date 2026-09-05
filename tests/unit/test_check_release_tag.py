@@ -914,3 +914,48 @@ def test_guard_jobs_check_out_full_history(workflow: str) -> None:
             "needs main to verify the tagged commit is on it, and refuses "
             "rather than skipping when it cannot."
         )
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+def test_a_shallow_clone_is_refused_rather_than_answered_wrongly(
+    tmp_path: Path,
+) -> None:
+    """Shallowness poisons the answer, and git gives no hint that it has.
+
+    A missing object makes `merge-base --is-ancestor` exit 128, which is loud.
+    A *shallow* repository is worse: the tip object is present, the connecting
+    history is not, and git returns a confident "not an ancestor" for a commit
+    that is on main.  Measured on the fixture below -- exit 0 in the full
+    clone, exit 1 in the depth-1 clone of the same repository.  Unguarded, that
+    would fail a legitimate release and name the wrong reason.
+    """
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _git(upstream, "init", "-q", "-b", "main")
+    author = ("-c", "user.email=a@b.c", "-c", "user.name=a")
+    _git(upstream, *author, "commit", "-q", "--allow-empty", "-m", "c1")
+    for i in range(2, 6):
+        _git(upstream, *author, "commit", "-q", "--allow-empty", "-m", f"c{i}")
+
+    work = tmp_path / "work"
+    # `--depth` is silently ignored for a local *path* clone (git hardlinks the
+    # object store), so the URL has to be file:// for this to be shallow at all.
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{upstream}", str(work)],
+        check=True,
+        capture_output=True,
+    )
+    assert (
+        _git(work, "rev-parse", "--is-shallow-repository").stdout.strip() == "true"
+    ), "fixture is not shallow; the case under test was not created"
+
+    script = _make_tree(work)
+    _git(work, "add", "-A")
+    _git(work, *author, "commit", "-qm", "release tree")
+
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "shallow clone" in proc.stdout
+    assert "fetch-depth: 0" in proc.stdout
+    # It must NOT claim the commit is off main -- that is the wrong reason.
+    assert "is on a commit that is not on main" not in proc.stdout

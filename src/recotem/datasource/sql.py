@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import socket
 from typing import ClassVar, Literal
 
@@ -187,20 +188,75 @@ def _server_is_mariadb(conn, dialect: str) -> bool:
     return dialect == "mariadb"
 
 
+# Userinfo inside a URL that appears in free text: ``scheme://user:pass@host``.
+# Bounded character classes (no ``/``, ``@`` or whitespace on either side of
+# the colon) so the match cannot run past the authority section.
+_USERINFO_IN_TEXT = re.compile(r"(?<=://)[^\s/@]*:[^\s/@]*@")
+
+# Upper bound on the SQLAlchemy diagnostic appended by ``_error_label``.  Long
+# enough for the sentences SQLAlchemy actually writes and short enough that a
+# message quoting a large statement cannot flood the log line.
+_MAX_SA_DETAIL = 200
+
+
+def _sqlalchemy_detail(exc: Exception) -> str | None:
+    """Return SQLAlchemy's own message for *exc*, redacted, or ``None``.
+
+    Only ``sqlalchemy.exc.SQLAlchemyError`` instances qualify, and only those
+    with no DBAPI error beneath them.  That combination is precisely the set
+    whose ``__str__`` is text SQLAlchemy wrote itself rather than text a driver
+    handed it, which is what makes it safe to surface: the reason
+    ``_error_label`` refuses to interpolate ``str(exc)`` in general is that a
+    *driver* exception can embed DSN userinfo, and a driver exception always
+    arrives with an ``orig``.
+
+    Userinfo is stripped anyway.  Three samples is not a proof about every
+    SQLAlchemy exception type, and the redaction costs nothing.
+    """
+    try:
+        from sqlalchemy.exc import SQLAlchemyError  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - sqlalchemy is a hard dep here
+        return None
+    if not isinstance(exc, SQLAlchemyError):
+        return None
+    detail = " ".join(str(exc).split())
+    if not detail:
+        return None
+    detail = _USERINFO_IN_TEXT.sub("***@", detail)
+    if len(detail) > _MAX_SA_DETAIL:
+        detail = detail[:_MAX_SA_DETAIL] + "…"
+    return detail
+
+
 def _error_label(exc: Exception) -> str:
     """Name *exc* and, when present, the DBAPI error underneath it.
 
-    Only class names and the SQLSTATE are used.  Driver exception ``__str__``
-    can embed DSN userinfo and hostnames; a class name cannot, and SQLSTATE is
-    a fixed five-character code from the SQL standard (``42P01`` undefined
-    table, ``42501`` insufficient privilege, ...), so both stay safe to put in
-    an operator-visible message.  The code is length- and charset-checked
-    before use so a driver that puts something else in that attribute cannot
-    smuggle free text into the message.
+    When a DBAPI error is present, only class names and the SQLSTATE are used.
+    Driver exception ``__str__`` can embed DSN userinfo and hostnames; a class
+    name cannot, and SQLSTATE is a fixed five-character code from the SQL
+    standard (``42P01`` undefined table, ``42501`` insufficient privilege,
+    ...), so both stay safe to put in an operator-visible message.  The code is
+    length- and charset-checked before use so a driver that puts something else
+    in that attribute cannot smuggle free text into the message.
+
+    When there is **no** DBAPI error, the class name alone is usually not
+    actionable, and SQLAlchemy's own message is.  The case that made this worth
+    fixing: a ``mariadb+pymysql://`` DSN pointed at a MySQL server reported
+
+        probe failed for dialect 'mariadb': InvalidRequestError
+
+    and nothing else, while SQLAlchemy's message underneath said "MySQL version
+    8.4.11 is not a MariaDB variant" — which tells the operator exactly what to
+    change.  ``docs/data-sources/sql.md`` recommends ``mysql+pymysql://`` for
+    MariaDB servers, so assuming the mirror image works is an ordinary mistake
+    to make, and the operator was left with a bare class name for it.
     """
     orig = _dbapi_error(exc)
     if orig is None:
-        return type(exc).__name__
+        detail = _sqlalchemy_detail(exc)
+        if detail is None:
+            return type(exc).__name__
+        return f"{type(exc).__name__}: {detail}"
     label = f"{type(exc).__name__} ({type(orig).__module__}.{type(orig).__name__})"
     sqlstate = getattr(orig, "sqlstate", None)
     if isinstance(sqlstate, str) and len(sqlstate) == 5 and sqlstate.isalnum():

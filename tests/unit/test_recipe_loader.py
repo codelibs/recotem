@@ -1354,19 +1354,25 @@ def test_output_path_file_scheme_accepted_localhost(tmp_path: Path) -> None:
 def test_output_path_object_store_schemes_accepted(tmp_path: Path) -> None:
     """s3://, gs://, az://, abfs://, and abfss:// output paths must be accepted.
 
-    Note: abfs/abfss URLs that use the ``container@account`` addressing form
-    are rejected by ``_check_userinfo`` because urlparse treats the ``@`` as a
-    userinfo separator (extracting ``container`` as the username).  Use the
-    plain-host form without ``@`` for the scheme-acceptance test; the
-    credential check is independent of the allow-list test.
+    Both Azure addressing forms are covered: the plain-host form and the
+    canonical ``container@account`` form that Azure's own documentation uses.
+    urlparse reports ``username='container'`` for the latter, but the ``@``
+    there separates the container from the storage account — it is addressing
+    syntax, not a credential, and adlfs accepts it for all three protocol
+    aliases.  ``_check_userinfo`` rejects an Azure URI only when a real
+    ``user:pass@`` pair is present.
     """
     schemes_and_paths = [
         ("s3_out", "s3://my-bucket/key.recotem"),
         ("gs_out", "gs://my-bucket/key.recotem"),
         ("az_out", "az://my-container/blob.recotem"),
-        # abfs/abfss without the @-form host (plain host, no userinfo):
+        # plain-host form (no @):
         ("abfs_out", "abfs://account.dfs.core.windows.net/container/out.recotem"),
         ("abfss_out", "abfss://account.dfs.core.windows.net/container/out.recotem"),
+        # canonical container@account form:
+        ("az_at", "az://cont@acct.blob.core.windows.net/out.recotem"),
+        ("abfs_at", "abfs://cont@acct.dfs.core.windows.net/out.recotem"),
+        ("abfss_at", "abfss://cont@acct.dfs.core.windows.net/out.recotem"),
     ]
     for name, output_path in schemes_and_paths:
         content = MINIMAL_RECIPE_TEMPLATE.format(
@@ -3133,3 +3139,74 @@ features:
         "the two recipes differ only in which source carries the typo, so "
         f"their errors must not be identical; both were: {top_msg}"
     )
+
+
+# ---------------------------------------------------------------------------
+# R8-P3: the canonical Azure container@account URI must be accepted
+# ---------------------------------------------------------------------------
+#
+# `az://`, `abfs://` and `abfss://` are three protocol aliases for one adlfs
+# filesystem.  Verified against a real Azure Blob Storage account, adlfs reads
+# the same object through all five of these:
+#
+#   az://container/path            abfs://container/path
+#   az://container@account.blob.core.windows.net/path
+#   abfs://container@account.blob.core.windows.net/path
+#   abfss://container@account.dfs.core.windows.net/path   <- Azure's own docs
+#
+# recotem accepted the az:// @-form and rejected the abfs/abfss ones as
+# "embedded credentials in the URI", so the scheme CLAUDE.md documents as
+# supported was unusable in the form operators copy out of Azure's
+# documentation — and the error blamed them for a credential they had not
+# written.
+
+
+def _azure_recipe(tmp_path: Path, name: str, source_path: str) -> Path:
+    out = tmp_path / f"{name}.recotem"
+    content = f"""\
+name: {name}
+source:
+  type: csv
+  path: {source_path}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
+    return _write_recipe(tmp_path, content, filename=f"{name}.yaml")
+
+
+@pytest.mark.parametrize(
+    ("name", "path"),
+    [
+        ("az_at", "az://cont@acct.blob.core.windows.net/data.csv"),
+        ("abfs_at", "abfs://cont@acct.blob.core.windows.net/data.csv"),
+        ("abfss_at", "abfss://cont@acct.dfs.core.windows.net/data.csv"),
+    ],
+)
+def test_azure_container_at_account_input_accepted(
+    tmp_path: Path, name: str, path: str
+) -> None:
+    """container@account is Azure addressing syntax, not an embedded credential."""
+    recipe = load_recipe(_azure_recipe(tmp_path, name, path))
+    assert recipe.source.path == path
+
+
+@pytest.mark.parametrize(
+    ("name", "path"),
+    [
+        ("az_cred", "az://user:secret@acct.blob.core.windows.net/data.csv"),
+        ("abfs_cred", "abfs://user:secret@acct.dfs.core.windows.net/data.csv"),
+        ("abfss_cred", "abfss://user:secret@acct.dfs.core.windows.net/data.csv"),
+    ],
+)
+def test_azure_user_password_uri_still_rejected(
+    tmp_path: Path, name: str, path: str
+) -> None:
+    """A real user:pass@ pair is still an embedded credential and still fails."""
+    with pytest.raises(RecipeError, match="embedded credentials"):
+        load_recipe(_azure_recipe(tmp_path, name, path))

@@ -88,11 +88,20 @@ come from the environment (instance profile, ADC, `AWS_*` env vars, etc.).
 
 The userinfo check is applied selectively by scheme:
 
-- **Rejected** (`http`, `https`, `ftp`, `ftps`, `s3`, `abfs`, `abfss`): any
-  URI with a `username` or `password` component raises `RecipeError`. These
-  schemes do not use `@` in their canonical addressing syntax, so any
-  `user:pass@host` pattern means embedded plaintext credentials.
-- **Permitted** (`gs`, `az`, bare paths, `file`): the `@` character may be
+- **Rejected** (`http`, `https`, `ftp`, `ftps`, `s3`): any URI with a
+  `username` or `password` component raises `RecipeError`. These schemes do
+  not use `@` in their canonical addressing syntax, so any `user:pass@host`
+  pattern means embedded plaintext credentials.
+- **Password-only rejection** (`az`, `abfs`, `abfss`): these are three
+  protocol aliases for one adlfs filesystem, and
+  `abfss://<container>@<account>.dfs.core.windows.net/<path>` is the form
+  Azure's own documentation uses — the `@` separates the container from the
+  storage account, so it is addressing syntax, not a credential. A bare
+  `container@account` is accepted; a real `user:pass@` pair still raises
+  `RecipeError`. Authentication comes from the environment
+  (`AZURE_STORAGE_ACCOUNT_NAME` / `AZURE_STORAGE_ACCOUNT_KEY`, a connection
+  string, or a managed identity), never from the URI.
+- **Permitted** (`gs`, bare paths, `file`): the `@` character may be
   part of the canonical URI syntax. For GCS, `gs://project@bucket/key` is a
   valid billing-project override accepted by gcsfs. Authentication is always
   via ADC / `GOOGLE_APPLICATION_CREDENTIALS`, not the URI userinfo.

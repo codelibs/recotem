@@ -78,27 +78,46 @@ def _network_scheme(path: str) -> bool:
 # from the bucket name, not a credential.  GCS authentication is always via
 # ADC / GOOGLE_APPLICATION_CREDENTIALS.
 #
-# S3 (`s3://`), Azure Data Lake (`abfs://`, `abfss://`) do NOT use `@` in
-# their canonical addressing syntax.  Any `user:pass@host` pattern in an
-# s3:// or abfs(s):// URI means embedded AWS access keys / SAS tokens in
+# S3 (`s3://`) does NOT use `@` in its canonical addressing syntax.  Any
+# `user:pass@host` pattern in an s3:// URI means embedded AWS access keys in
 # plaintext, which is explicitly prohibited.  Authentication must come from
-# environment-based mechanisms (instance profile, Azure managed identity,
-# `AWS_*` env vars, etc.).
+# environment-based mechanisms (instance profile, `AWS_*` env vars, etc.).
 #
-# az:// Azure Blob Storage similarly does not use `@` as an addressing
-# separator; exclude it from the reject set only because adlfs parses
-# `az://container@account.blob.core.windows.net/` — the `@` here is part
-# of the fsspec URI convention for Azure, not a credential.
+# `az://`, `abfs://` and `abfss://` are three protocol aliases for one adlfs
+# filesystem, and all three accept the canonical Azure form
+# `<container>@<account>.dfs.core.windows.net` (`.blob.` for Blob storage).
+# The `@` there separates the container from the account: it is addressing
+# syntax, not a credential.  They are handled by `_AZURE_SCHEMES` below rather
+# than by this set, which would reject the documented form outright.
 #
 # Aligned with `_USERINFO_SCHEMES` in `_http_fetch.py`.
 _USERINFO_REJECT_SCHEMES: frozenset[str] = frozenset(
-    {"http", "https", "ftp", "ftps", "s3", "abfs", "abfss"}
+    {"http", "https", "ftp", "ftps", "s3"}
 )
+
+# Schemes where a *bare* `something@host` is addressing syntax but a
+# `user:pass@host` is still an embedded credential.  Splitting these out keeps
+# the security intent (no plaintext key:secret in a recipe) without rejecting
+# `abfss://container@account.dfs.core.windows.net/path`, the form Azure's own
+# documentation uses.  urlparse reports `username='container', password=None`
+# for that URI and `password='...'` only when a `:` is actually present, so the
+# password component is the discriminator.
+_AZURE_SCHEMES: frozenset[str] = frozenset({"az", "abfs", "abfss"})
 
 
 def _check_userinfo(path: str, field_name: str) -> None:
     parsed = urlparse(path)
     scheme = (parsed.scheme or "").lower()
+    if scheme in _AZURE_SCHEMES:
+        # `container@account.dfs.core.windows.net` is addressing, not a
+        # credential — reject only a real `user:pass@` pair.
+        if parsed.password:
+            raise RecipeError(
+                f"'{field_name}' contains embedded credentials in the URI. "
+                "Use environment-based authentication instead.",
+                category="security",
+            )
+        return
     if scheme not in _USERINFO_REJECT_SCHEMES:
         # Object-store and bare paths: `@` may be part of the addressing
         # syntax (e.g. `gs://project@bucket/key`); skip the credentials check.

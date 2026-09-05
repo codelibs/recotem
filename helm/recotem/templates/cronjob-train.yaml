@@ -63,6 +63,7 @@ spec:
           {{- $mounts = append $mounts (dict "name" "recipes" "mountPath" $.Values.recipes.mountPath) }}
           {{- $_ := set $ic "volumeMounts" $mounts }}
           {{- $_ := set $ic "name" (default "sync-recipes" $ic.name) }}
+          {{- $_ := set $ic "securityContext" (mergeOverwrite (deepCopy .Values.securityContext) (default (dict) $ic.securityContext)) }}
           initContainers:
             {{- toYaml (list $ic) | nindent 12 }}
           {{- end }}

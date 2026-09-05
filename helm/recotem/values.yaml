@@ -181,6 +181,20 @@ recipes:
     #     `recipes` volume at recipes.mountPath to your list.  That one entry
     #     always wins: an entry of yours named `recipes` is dropped, because
     #     redirecting it would leave serve reading an unpopulated emptyDir.
+    #   * `securityContext` — the chart merges `.Values.securityContext`
+    #     underneath yours, so the init container is admitted by a namespace
+    #     labelled `pod-security.kubernetes.io/enforce=restricted`.  That
+    #     profile requires `allowPrivilegeEscalation: false` and
+    #     `capabilities.drop: ["ALL"]` on EVERY container including init
+    #     containers, and neither has a pod-level equivalent — without the
+    #     merge the API server admits the Deployment and then refuses every
+    #     Pod, visible only as a ReplicaSet `FailedCreate` event.
+    #     `.Values.securityContext` also carries
+    #     `readOnlyRootFilesystem: true`; a sync tool that needs to write
+    #     (an `aws s3 sync` caching credentials, say) wants either a
+    #     writable mount from the list above or
+    #     `securityContext: {readOnlyRootFilesystem: false}` here — your keys
+    #     win over the chart's.
     # Any volumeMounts you add must name a volume the chart declares — one of
     # `recipes`, `artifacts` (when artifacts.enabled), `tmp` or `workspace`.
     # There is no extraVolumes hook, so a mount naming anything else renders

@@ -64,11 +64,19 @@ spec:
 
              Precedence: an operator-supplied `name` wins, `sync-recipes` is
              only the default, so an existing spec that names its container
-             keeps that name.  The chart's `recipes` mount is the exception —
-             it is appended last and any operator entry of the same name is
-             dropped, because redirecting it would leave serve reading an
-             unpopulated emptyDir.  Keep this block identical to the one in
-             cronjob-train.yaml. */}}
+             keeps that name.  `securityContext` is merged the same way —
+             `.Values.securityContext` underneath, the operator's own keys on
+             top — so the init container carries the container-level fields the
+             Pod Security Standards `restricted` profile requires
+             (`allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`).
+             Those two have no pod-level equivalent, so the pod
+             `securityContext` cannot supply them: without this, a restricted
+             namespace admits the Deployment and then rejects every Pod, and the
+             only trace is a ReplicaSet `FailedCreate` event.  The chart's
+             `recipes` mount is the exception — it is appended last and any
+             operator entry of the same name is dropped, because redirecting it
+             would leave serve reading an unpopulated emptyDir.  Keep this block
+             identical to the one in cronjob-train.yaml. */}}
       {{- $ic := deepCopy .Values.recipes.objectStore.initContainer }}
       {{- $mounts := list }}
       {{- range default (list) $ic.volumeMounts }}
@@ -77,6 +85,7 @@ spec:
       {{- $mounts = append $mounts (dict "name" "recipes" "mountPath" $.Values.recipes.mountPath) }}
       {{- $_ := set $ic "volumeMounts" $mounts }}
       {{- $_ := set $ic "name" (default "sync-recipes" $ic.name) }}
+      {{- $_ := set $ic "securityContext" (mergeOverwrite (deepCopy .Values.securityContext) (default (dict) $ic.securityContext)) }}
       initContainers:
         {{- toYaml (list $ic) | nindent 8 }}
       {{- end }}

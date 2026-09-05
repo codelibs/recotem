@@ -918,3 +918,95 @@ def test_rendered_allowed_hosts_is_a_valid_trusted_host_pattern_list(
     # want surfaced here rather than at container start.
     middleware = TrustedHostMiddleware(app=None, allowed_hosts=hosts)
     assert not middleware.allow_any, f"host checking would be disabled: {hosts}"
+
+
+# ---------------------------------------------------------------------------
+# Pod Security Standards: the objectStore init container
+#
+# `test_chart_pod_specs_satisfy_pod_security_standards_restricted` above renders
+# the default `recipes.source=configMap`, which emits no init container, so the
+# objectStore path was never checked.  The init container inherited only the
+# POD securityContext, and the two fields the `restricted` profile demands per
+# container -- `allowPrivilegeEscalation: false` and `capabilities.drop:
+# ["ALL"]` -- have no pod-level equivalent.  Measured against a namespace
+# labelled `pod-security.kubernetes.io/enforce=restricted`: `helm install`
+# succeeds, the Deployment is created, and every Pod is refused with
+#
+#   Error creating: pods "recotem-..." is forbidden: violates PodSecurity
+#   "restricted:latest": allowPrivilegeEscalation != false (container
+#   "sync-recipes" must set securityContext.allowPrivilegeEscalation=false),
+#   unrestricted capabilities (container "sync-recipes" must set
+#   securityContext.capabilities.drop=["ALL"])
+#
+# -- a ReplicaSet event, so `kubectl get deploy` shows only 0/2 ready.
+# ---------------------------------------------------------------------------
+
+_OBJECT_STORE_ARGS = (
+    "recipes.source=objectStore",
+    "recipes.objectStore.initContainer.image=amazon/aws-cli:latest",
+    "train.enabled=true",
+)
+
+
+@requires_helm
+def test_object_store_init_container_satisfies_restricted_profile() -> None:
+    docs = _load_all_strict(_helm_template(*_OBJECT_STORE_ARGS))
+    init_containers = [
+        (label, container)
+        for label, spec in _pod_specs_in(docs)
+        for container in spec.get("initContainers", [])
+    ]
+    assert init_containers, (
+        "expected the objectStore permutation to render an init container in "
+        "both the Deployment and the train CronJob"
+    )
+    assert len(init_containers) == 2, (
+        f"expected 2 init containers (Deployment + CronJob), got "
+        f"{[label for label, _ in init_containers]}"
+    )
+    for label, container in init_containers:
+        security = container.get("securityContext", {})
+        assert security.get("allowPrivilegeEscalation") is False, (
+            f"{label}/{container['name']}: restricted requires "
+            "allowPrivilegeEscalation=false on every container; the pod-level "
+            "securityContext cannot supply it"
+        )
+        assert security.get("capabilities", {}).get("drop") == ["ALL"], (
+            f"{label}/{container['name']}: restricted requires "
+            "capabilities.drop=[ALL] on every container"
+        )
+
+
+@requires_helm
+def test_object_store_init_container_security_context_is_operator_overridable() -> None:
+    """The chart's posture is a floor, not a ceiling -- yours wins.
+
+    A sync tool that must write (an `aws s3 sync` caching credentials) needs
+    `readOnlyRootFilesystem: false`, and the merge has to let it through or the
+    fix above would break a working deployment on upgrade.
+    """
+    docs = _load_all_strict(
+        _helm_template(
+            *_OBJECT_STORE_ARGS,
+            "recipes.objectStore.initContainer.securityContext."
+            "readOnlyRootFilesystem=false",
+        )
+    )
+    init_containers = [
+        container
+        for _, spec in _pod_specs_in(docs)
+        for container in spec.get("initContainers", [])
+    ]
+    assert init_containers
+    for container in init_containers:
+        security = container.get("securityContext", {})
+        assert security.get("readOnlyRootFilesystem") is False, (
+            "operator-supplied securityContext keys must override the chart's"
+        )
+        # ...without losing the fields that make it admissible.
+        assert security.get("allowPrivilegeEscalation") is False, (
+            "the operator override dropped the chart's restricted-profile floor"
+        )
+        assert security.get("capabilities", {}).get("drop") == ["ALL"], (
+            "the operator override dropped the chart's restricted-profile floor"
+        )

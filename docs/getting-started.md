@@ -141,6 +141,13 @@ Write the recipe out instead. It is the same file as
 `examples/tutorial-purchase-log/recipe.yaml`, and it needs no checkout: the
 interaction data is a small public CSV fetched over HTTPS.
 
+> The other recipes — `quickstart/`, `csv-local/`, `sql-sqlite/`,
+> `ga4-bigquery/`, `feature-aware/`, `k8s/`, `plugins/echo-source/` — live in
+> [`examples/`](https://github.com/codelibs/recotem/tree/main/examples) in the
+> repository, and in the source distribution
+> (`pip download recotem --no-binary :all:`). You do not need any of them for
+> this walkthrough.
+
 ```bash
 mkdir -p recotem-tutorial/recipes && cd recotem-tutorial
 cat > recipes/purchase_log.yaml <<'EOF'

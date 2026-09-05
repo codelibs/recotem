@@ -75,13 +75,20 @@ def test_path_b_does_not_reference_the_examples_directory() -> None:
 
 
 def test_the_wheel_really_ships_no_examples_directory() -> None:
-    """Why the heredoc exists.
+    """Why the heredoc exists, and the packaging decision behind it.
 
-    Path B installs a *wheel*: `pip install recotem` prefers the wheel whenever
-    one matches, so what the sdist contains does not reach that reader.  Scoped
-    to the wheel target for exactly that reason -- the sdist may legitimately
-    ship `examples/` (it is the tree a `--no-binary` install unpacks) without
-    making the heredoc redundant.
+    **The wheel deliberately ships no `examples/`; the sdist deliberately
+    does.**  A wheel unpacks into `site-packages`, where an `examples/`
+    directory would be neither findable by the relative path the docs use nor
+    cleanly removable on uninstall.  The sdist is the source tree, so it should
+    carry the files its READMEs describe -- that is what #258 fixes, and it is
+    a packaging bug on its own terms, independent of any document.  Path B is
+    therefore written to depend on neither: it creates the one recipe it needs.
+
+    This test is scoped to the wheel target for exactly that reason.  An sdist
+    that ships `examples/` is correct and must not fail this assertion; an
+    earlier version of it read the whole `[tool.hatch.build*]` region and would
+    have gone red on #258's legitimate change.
     """
     config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     wheel = (

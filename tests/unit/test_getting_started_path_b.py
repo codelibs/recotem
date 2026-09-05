@@ -22,6 +22,7 @@ the tutorial trains.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -76,14 +77,29 @@ def test_path_b_does_not_reference_the_examples_directory() -> None:
 def test_the_wheel_really_ships_no_examples_directory() -> None:
     """Why the heredoc exists.
 
-    If a future packaging change started shipping `examples/` inside the
-    distribution, the heredoc would be redundant and this file should be
-    revisited -- so the assumption is pinned rather than assumed.
+    Path B installs a *wheel*: `pip install recotem` prefers the wheel whenever
+    one matches, so what the sdist contains does not reach that reader.  Scoped
+    to the wheel target for exactly that reason -- the sdist may legitimately
+    ship `examples/` (it is the tree a `--no-binary` install unpacks) without
+    making the heredoc redundant.
     """
-    force_include = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert "examples" not in force_include.split("[tool.hatch.build")[-1], (
-        "pyproject.toml now includes examples/ in the build; Path B's heredoc "
-        "may no longer be necessary."
+    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    wheel = (
+        config.get("tool", {})
+        .get("hatch", {})
+        .get("build", {})
+        .get("targets", {})
+        .get("wheel", {})
+    )
+    named = [
+        entry
+        for value in wheel.values()
+        for entry in (value if isinstance(value, list) else [value])
+        if isinstance(entry, str) and "examples" in entry
+    ]
+    assert not named, (
+        "the wheel target now ships examples/ "
+        f"({named}); Path B's heredoc may no longer be necessary."
     )
 
 

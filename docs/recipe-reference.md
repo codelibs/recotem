@@ -555,7 +555,7 @@ training:
 | `per_algorithm_trials` | map | `null` | Per-algorithm trial overrides. **Explicit `0` disables that algorithm** (it is dropped from the search entirely). Algorithms in `algorithms` that are *unspecified* in this map split whatever budget remains after honouring the explicit values. If the explicit values sum to more than `n_trials`, positive values are scaled down proportionally (each remains ≥ 1 *when at least n_trials slots exist*; otherwise the first `n_trials` non-zero classes get one trial each and the remainder are skipped — the total budget never exceeds `n_trials`). **Unknown algorithm keys are rejected at recipe-load time with a ValidationError** — each key must be a valid alias or class name present in `algorithms`. When `parallelism > 1`, the actual per-algorithm trial count may exceed the configured budget by up to `parallelism - 1` trials due to in-flight concurrent trials; a warning is logged on each run where this condition applies. |
 | `per_trial_timeout_seconds` | int | `null` | Soft per-trial wall-clock cap. Implemented by running the trial in a worker thread; if it overshoots, Optuna prunes the trial but the underlying thread is daemonised and may continue until it finishes naturally (CPU/memory still spent). The count of threads still running at the time the study finishes is reported as `n_orphaned` in the `train_done` structured log event. Operators can monitor this field to detect trials that consistently exceed the timeout and adjust `per_trial_timeout_seconds` or `timeout_seconds` accordingly. Must be `>= 1` when set; `0` and negatives are a schema error (exit 2) — omit the field to disable the cap. |
 | `timeout_seconds` | int | `null` | Overall tuning wall-clock cap. Must be `>= 1` when set; `0` and negatives are a schema error (exit 2) — omit the field to disable the cap. |
-| `parallelism` | int | `1` | Optuna `n_jobs` (Python threads, not processes). **Whether it helps depends on the algorithm, and for IALS it reliably costs.** irspack's native learners already parallelise internally — an IALS trial on this project's fixtures runs at ~8 cores of its own accord — so Optuna threads stack on top of that and oversubscribe the machine. Measured on a 100k-row fixture with `n_trials: 20`, alternating runs on a 16-core host: `parallelism: 1` averaged **10.15 s**, `parallelism: 4` averaged **14.99 s** — 1.48× *slower*, with CPU time rising too, so it is contention rather than a busy host. The other algorithms are the opposite case: their trials are short and do not saturate the box on their own, so Optuna's threads have room. Measured on the same 100k-row fixture with `n_trials: 20`, median wall time at `parallelism: 1` vs `8` — `CosineKNN` 3.66 s -> 1.99 s (**1.84x**), `RP3beta` 4.07 s -> 2.15 s (**1.89x**), `DenseSLIM` 4.81 s -> 3.38 s (1.42x), `TruncatedSVD` 5.29 s -> 4.03 s (1.31x); `TopPop` is unchanged at 1.49 s because a trial is already trivial. Peak RSS rises with the concurrency (`CosineKNN` 354 -> 494 MB, `DenseSLIM` 343 -> 670 MB), so the gain is bought with memory. Leave it at `1` when `algorithms` contains `IALS`, which is the default shape of most recipes; raise it for an IALS-free search where the wall time matters, having accepted the loss of reproducibility ([Reproducibility](#reproducibility)). |
+| `parallelism` | int | `1` | Optuna `n_jobs` (Python threads, not processes). **Whether it helps depends on the algorithm, and for IALS it reliably costs.** irspack's native learners already parallelise internally — an IALS trial on this project's fixtures runs at ~8 cores of its own accord — so Optuna threads stack on top of that and oversubscribe the machine. Measured on a 100k-row fixture with `n_trials: 20`, alternating runs on a 16-core host: `parallelism: 1` averaged **10.15 s**, `parallelism: 4` averaged **14.99 s** — 1.48× *slower*, with CPU time rising too, so it is contention rather than a busy host. The other algorithms are the opposite case: their trials are short and do not saturate the box on their own, so Optuna's threads have room. Measured on the same 100k-row fixture with `n_trials: 20`, median wall time at `parallelism: 1` vs `8` — `CosineKNN` 3.66 s -> 1.99 s (**1.84x**), `RP3beta` 4.07 s -> 2.15 s (**1.89x**), `DenseSLIM` 4.81 s -> 3.38 s (1.42x), `TruncatedSVD` 5.29 s -> 4.03 s (1.31x); `TopPop` is unchanged at 1.49 s because a trial is already trivial. Peak RSS rises with the concurrency (`CosineKNN` 354 -> 494 MB, `DenseSLIM` 343 -> 670 MB), so the gain is bought with memory. **Both columns above are properties of that fixture, not of the algorithm** — see [How these numbers move with the catalogue](#how-the-parallelism-numbers-move-with-the-catalogue) below before sizing anything on them. Leave it at `1` when `algorithms` contains `IALS`, which is the default shape of most recipes; raise it for an IALS-free search where the wall time matters, having accepted the loss of reproducibility ([Reproducibility](#reproducibility)). |
 | `storage_path` | string | `""` | Empty = in-memory (no resume). A bare path becomes a SQLite URL (`sqlite:///<path>`); explicit `sqlite://`, `postgresql://`, `postgres://`, and `mysql://` URLs are also accepted. Study name is `recotem_<recipe_name>_<run_id>` and `load_if_exists=True`, so a fresh `run_id` per train invocation always starts a new study (resume requires reusing the same `run_id` — pass `recotem train --run-id <stable>`). **SQLite over NFS corrupts** — keep SQLite databases on a local filesystem. **URLs must not embed credentials** (`postgresql://user:pass@host/db` is rejected with `SearchError` so userinfo cannot leak through SQLAlchemy tracebacks). Provide credentials via `PGPASSFILE` / `~/.pgpass` / SQLAlchemy env vars instead. |
 | `split.scheme` | string | `random` | `random`, `time_global`, or `time_user`. See semantics below. |
 | `split.heldout_ratio` | float | `0.1` | Fraction of interactions held out. Must be in (0, 1). Applied **per user and floored**: a user with fewer than `1 / heldout_ratio` distinct items contributes nothing to the held-out set, so the default `0.1` needs at least 10 per user. See [Per-user holdout depth](#per-user-holdout-depth). |
@@ -563,6 +563,48 @@ training:
 | `split.seed` | int | `42` | Random seed for the split (passed to irspack as `random_state`). **Not sufficient on its own for a reproducible run** — see [Reproducibility](#reproducibility). |
 
 Hyperparameter ranges are irspack's, not the recipe's, and some are wide relative to a small catalogue — `TruncatedSVD` searches `n_components` over [4, 512], and any value at or above your item count is clamped to `n_items - 1`, which reconstructs the matrix almost exactly and generalises poorly. On a small catalogue a low `n_trials` may never sample a usable value; if an algorithm scores far below its peers, raise `n_trials` before concluding it is a poor fit.
+
+#### How the parallelism numbers move with the catalogue
+
+The per-algorithm figures above were measured on one 100k-row fixture. Two of
+them are **not** stable properties of the algorithm — they scale with the item
+count, because a `DenseSLIM` trial's working set is an `n_items x n_items`
+dense matrix (`n_items^2 x 8` bytes) and every concurrent Optuna thread builds
+its own. Re-measured on two fixtures, `n_trials: 20`, alternating
+`parallelism: 1` / `parallelism: 8` runs on an otherwise-quiet 16-core host
+(median of three passes for the 100k fixture, two for the 1M one -- its
+`parallelism: 1` arm takes 13-16 minutes):
+
+| fixture | items | p=1 search | p=8 search | speedup | p=1 peak RSS | p=8 peak RSS | RSS ratio |
+|---|---|---|---|---|---|---|---|
+| 100k rows | 1,000 | 5.2 s | 3.7 s | 1.39x | 272 MB | 427 MB | 1.57x |
+| 1M rows | 5,000 | 852 s | 155 s | **5.49x** | 1,070 MB | **3,845 MB** | **3.59x** |
+
+A 5x larger catalogue moves the speedup from 1.4x to 5.5x and the memory cost
+from 1.6x to 3.6x. Size on `n_items^2 x 8 x parallelism` bytes for the dense
+matrices — 200 MB per thread at 5,000 items, 8 GB per thread at 32,000 — not on
+the ratio in the table above.
+
+The same caution applies in the other direction: `CosineKNN` and `RP3beta`
+measured **3.6x** and **3.7x** on an independent 100k-row fixture against the
+1.84x / 1.89x above, and `TruncatedSVD` measured 1.24x against 1.31x. Treat all
+of these as order-of-magnitude guidance and measure your own recipe before
+committing a host size.
+
+**Measure under a quiet machine.** The same `TruncatedSVD` comparison returned
+1.24x on an idle host and 0.98x — no benefit at all — on the same host under
+heavy external load, because the `parallelism: 8` arm is the one that loses when
+the cores are already taken. A parallelism measurement taken on a busy box
+understates the benefit.
+
+**`BPRFM` is absent from the table above and is deliberately left out here too.**
+Its profile is platform-dependent in a way the other algorithms' are not: on
+macOS the `lightfm` extension is built without OpenMP and trains single-threaded,
+so Optuna's threads have the whole machine and the search measured **2.7x**
+faster at `parallelism: 8` (40.1 s -> 14.7 s) with peak RSS 372 -> 540 MB. On
+Linux the extension *is* OpenMP-parallel, which puts `BPRFM` in the same
+oversubscription regime as `IALS` rather than this one. Do not carry the macOS
+figure to a Linux training host.
 
 #### Two reasons an even split wastes budget
 

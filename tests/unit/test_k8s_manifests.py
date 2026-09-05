@@ -819,24 +819,31 @@ def _allowed_hosts(set_args: tuple[str, ...]) -> list[str]:
     return [h.strip() for h in values[0].split(",")]
 
 
+# Exact host names, kept out of the assertions as literals: CodeQL reads
+# `"a.example.com" in <collection>` as the incomplete-URL-substring
+# anti-pattern even when the collection is a list of exact names. Comparing
+# whole sets is both pattern-free and a stricter assertion -- it pins what the
+# chart renders rather than only what it must contain.
+_INGRESS_HOST = "recotem.example.com"
+_SERVICE_DNS = "recotem.recotem.svc.cluster.local"
+_PROBE_HOST = "localhost"
+
+
 @requires_helm
 def test_allowed_hosts_override_does_not_drop_the_ingress_hosts() -> None:
     hosts = _allowed_hosts(
         (
             "ingress.enabled=true",
-            "ingress.hosts[0].host=recotem.example.com",
-            "env.RECOTEM_ALLOWED_HOSTS=recotem.recotem.svc.cluster.local",
+            f"ingress.hosts[0].host={_INGRESS_HOST}",
+            f"env.RECOTEM_ALLOWED_HOSTS={_SERVICE_DNS}",
         )
     )
-    assert "recotem.example.com" in hosts, (
-        "the chart renders an Ingress routing recotem.example.com and then "
-        f"refuses it: {hosts}. TrustedHostMiddleware 400s every external "
-        "request while the pod stays Ready"
+    assert set(hosts) == {_PROBE_HOST, _SERVICE_DNS, _INGRESS_HOST}, (
+        f"rendered {hosts}. The chart routes an Ingress for {_INGRESS_HOST!r} "
+        "and must not then refuse it -- TrustedHostMiddleware 400s every "
+        "external request while the pod stays Ready. The operator's own "
+        f"{_SERVICE_DNS!r} and the probe host must survive too."
     )
-    assert "recotem.recotem.svc.cluster.local" in hosts, (
-        f"the operator's own hostname was dropped: {hosts}"
-    )
-    assert "localhost" in hosts, f"the probe host was dropped: {hosts}"
 
 
 @requires_helm

@@ -11,7 +11,15 @@ Two separate failures this guards, both found by measuring rather than reading:
    +56% -- including one catalogue where it beat popularity 11.4x and *lost*
    to the kNN. Popularity would have called that run a success.
 
-2. **Nothing said what `best_score` measures.** It is the winning trial's
+2. **The popularity bar can be not merely low but degenerate.** On a
+   recency-driven catalogue, measured over four runs of a synthetic news
+   dataset split by time, popularity scored ndcg@10 = 0.0000 -- none of the
+   ten most-popular training articles survives into the holdout. "Require the
+   model to win" is then vacuously true for any model that returns anything,
+   while the shipped model ranged from 39% below to 1% above the same 30-line
+   kNN. Saying the bar is *low* does not cover the case where there is no bar.
+
+3. **Nothing said what `best_score` measures.** It is the winning trial's
    score on recotem's own internal split, over the same trained item set --
    not an estimate of quality on the operator's task, and not a measurement of
    the cold-start paths at all. It is also the criterion the search maximises,
@@ -70,6 +78,32 @@ def test_validation_advice_names_a_baseline_stronger_than_popularity() -> None:
     ), (
         "the advice names a kNN somewhere but no longer says that beating "
         "popularity is insufficient, which is the actual correction."
+    )
+
+
+def test_validation_advice_covers_the_degenerate_popularity_case() -> None:
+    """A low bar and an absent one need different advice.
+
+    The sibling guard above only requires the text to say popularity is
+    insufficient. That wording still reads as "popularity is a weak but
+    informative baseline", which is false on a catalogue that turns over:
+    there popularity scores exactly zero and the comparison carries no
+    information at all.
+    """
+    body = _section("Choosing a model on a small dataset")
+
+    assert re.search(r"recency|turns over|perishable", body, re.I), (
+        "the validation advice no longer covers recency-driven catalogues, "
+        "where popularity scores ndcg@10 = 0.0000 and 'beat popularity' is "
+        "vacuously true for any model that returns any items at all."
+    )
+    # A bare "zero" is deliberately NOT accepted: this section already
+    # contains "zero diagonal" in the kNN recipe, and matching that would let
+    # the consequence be deleted while the guard still passed.
+    assert re.search(r"0\.0000|no bar at all|undefined margin", body, re.I), (
+        "the advice mentions recency but no longer states the consequence -- "
+        "that popularity's score is 0.0000 there, so a passing comparison "
+        "carries no information."
     )
 
 

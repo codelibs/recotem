@@ -109,6 +109,35 @@ def _dbapi_error(exc: BaseException) -> BaseException | None:
     return None
 
 
+def _server_is_mariadb(conn, dialect: str) -> bool:
+    """Return True when the server on the other end of *conn* is MariaDB.
+
+    The DSN scheme is not authoritative about which server answers.
+    ``mysql+pymysql://`` is the DSN form PyMySQL documents and the only
+    PyMySQL row in ``docs/data-sources/sql.md``, and it connects to a MariaDB
+    server just as happily as to MySQL — so ``url.get_backend_name()`` reports
+    ``"mysql"`` for a large share of real MariaDB deployments.
+
+    That distinction is load-bearing here because the two servers have
+    disjoint statement-timeout variables: MariaDB has ``max_statement_time``
+    (seconds) and rejects ``MAX_EXECUTION_TIME``; MySQL has
+    ``MAX_EXECUTION_TIME`` (milliseconds) and rejects ``max_statement_time``.
+    Both rejections are ``ERROR 1193 (HY000) Unknown system variable``, which
+    ``_apply_statement_timeout`` turns into a refusal to run the query — so
+    picking the variable off the scheme fails the whole fetch.
+
+    SQLAlchemy already resolves this: its MySQL dialect reads the server
+    banner on connect and records the verdict on ``dialect._is_mariadb``,
+    regardless of which scheme the DSN used.  Prefer that answer and fall back
+    to the scheme when the attribute is absent or is not a real ``bool`` (a
+    test double, or a future SQLAlchemy that drops the attribute).
+    """
+    is_mariadb = getattr(conn.dialect, "_is_mariadb", None)
+    if isinstance(is_mariadb, bool):
+        return is_mariadb
+    return dialect == "mariadb"
+
+
 def _error_label(exc: Exception) -> str:
     """Name *exc* and, when present, the DBAPI error underneath it.
 
@@ -601,17 +630,26 @@ class SQLSource:
         try:
             if self._dialect.startswith("postgres"):
                 conn.execute(text(f"SET LOCAL statement_timeout = {ms}"))
-            elif self._dialect == "mariadb":
+            elif _server_is_mariadb(conn, self._dialect):
                 # MariaDB uses max_statement_time in seconds (DOUBLE), not ms.
                 seconds = self._config.statement_timeout_seconds
                 conn.execute(text(f"SET SESSION max_statement_time = {seconds}"))
-            elif self._dialect == "mysql":
+            elif self._dialect in {"mysql", "mariadb"}:
+                # Whole family, not just ``"mysql"``: the branch above already
+                # claimed every MariaDB *server*, so what is left here is a
+                # MySQL server — reached under either scheme.  Testing for
+                # ``"mysql"`` alone would leave a ``mariadb`` scheme in front
+                # of a MySQL server setting no timeout at all, which is the
+                # silent no-op the SQLite branch goes out of its way to warn
+                # about.
                 conn.execute(text(f"SET SESSION MAX_EXECUTION_TIME = {ms}"))
         except Exception as exc:
-            # Drop ``str(exc)`` — driver error messages can include DSN
-            # userinfo / hostnames.  ``from exc`` preserves the chain for
-            # debug-mode tracebacks.
+            # Do not interpolate ``str(exc)`` — driver error messages can embed
+            # DSN userinfo / hostnames.  ``_error_label`` names the DBAPI class
+            # and the SQLSTATE instead, which is what distinguishes "the server
+            # does not have this variable" from "this account may not SET it";
+            # ``from exc`` preserves the chain for debug-mode tracebacks.
             raise DataSourceError(
                 f"failed to enforce statement_timeout on {self._dialect!r}: "
-                f"{type(exc).__name__}; refusing to run the query"
+                f"{_error_label(exc)}; refusing to run the query"
             ) from exc

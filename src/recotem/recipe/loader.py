@@ -66,7 +66,32 @@ _NETWORK_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
 def _network_scheme(path: str) -> bool:
     """True iff *path* uses a scheme in `_NETWORK_SCHEMES`."""
-    return urlparse(path).scheme.lower() in _NETWORK_SCHEMES
+    return _effective_scheme(path) in _NETWORK_SCHEMES
+
+
+def _effective_scheme(path: str) -> str:
+    """Return the lowercased scheme *fsspec* will route ``path`` to.
+
+    ``urlparse`` alone is unsafe here: RFC 3986 forbids ``_`` in a scheme, so
+    ``urlparse("arrow_hdfs://h/x").scheme`` is ``""`` and the path looks like a
+    bare local path — but the datasource opens it with ``fsspec.open``, whose
+    parser splits on the first ``"://"`` and routes ``arrow_hdfs`` /
+    ``async_wrapper`` (the only two underscore protocols fsspec registers) to a
+    real remote backend. Validating the ``urlparse`` scheme therefore let an
+    un-allow-listed handler through even though the equivalent ``hdfs://`` form
+    is refused. Deriving the scheme the way fsspec's ``split_protocol`` does
+    closes that differential.
+
+    The ``len > 1`` guard mirrors fsspec so a Windows drive letter (``c:\\``)
+    is not mistaken for a protocol. Fail-closed: this can only surface a scheme
+    ``urlparse`` hid, never hide one it saw.
+    """
+    scheme = urlparse(path).scheme.lower()
+    if not scheme and "://" in path:
+        candidate = path.split("://", 1)[0]
+        if len(candidate) > 1:
+            return candidate.lower()
+    return scheme
 
 
 # Schemes for which a `user:pass@host` component is treated as embedded
@@ -149,8 +174,7 @@ def _validate_input_path(path: str, field_name: str) -> None:
 
     _check_userinfo(path, field_name)
 
-    parsed = urlparse(path)
-    scheme = (parsed.scheme or "").lower()
+    scheme = _effective_scheme(path)
     if scheme not in _INPUT_ALLOWED_SCHEMES:
         allowed_display = ", ".join(
             sorted(f"{s}://" if s else "(bare path)" for s in _INPUT_ALLOWED_SCHEMES)
@@ -171,7 +195,7 @@ def _validate_output_path(path: str, field_name: str) -> None:
     """
     _check_userinfo(path, field_name)
     parsed = urlparse(path)
-    scheme = (parsed.scheme or "").lower()
+    scheme = _effective_scheme(path)
     if scheme not in _OUTPUT_ALLOWED_SCHEMES:
         allowed_display = ", ".join(
             sorted(f"{s}://" if s else "(bare path)" for s in _OUTPUT_ALLOWED_SCHEMES)

@@ -3210,3 +3210,124 @@ def test_azure_user_password_uri_still_rejected(
     """A real user:pass@ pair is still an embedded credential and still fails."""
     with pytest.raises(RecipeError, match="embedded credentials"):
         load_recipe(_azure_recipe(tmp_path, name, path))
+
+
+# ---------------------------------------------------------------------------
+# S-U: underscore-scheme allow-list bypass (urlparse vs fsspec differential)
+# ---------------------------------------------------------------------------
+#
+# RFC 3986 forbids "_" in a URI scheme, so urlparse("arrow_hdfs://h/x").scheme
+# is "" and the path reads as a bare local path -- but the datasource opens it
+# with fsspec.open, whose parser splits on the first "://" and routes the only
+# two underscore protocols fsspec registers (arrow_hdfs -> pyarrow HDFS,
+# async_wrapper) to a real remote backend. Before the fix the scheme allow-list
+# (which validated the urlparse scheme) let these through even though the
+# equivalent hdfs:// form was refused. These tests die if _validate_*_path is
+# reverted to `urlparse(path).scheme` because then the underscore forms are no
+# longer rejected.
+
+
+@pytest.mark.parametrize(
+    "bypass_path",
+    [
+        "arrow_hdfs://namenode.example:8020/etc/x.csv",
+        "async_wrapper://whatever/x.csv",
+        "ARROW_HDFS://Namenode/x.csv",  # case-insensitive too
+    ],
+)
+def test_input_underscore_scheme_rejected(tmp_path: Path, bypass_path: str) -> None:
+    """Underscore-scheme inputs must be rejected, not read as bare local paths."""
+    from recotem.recipe.loader import _validate_input_path
+
+    with pytest.raises(RecipeError, match="not supported for input"):
+        _validate_input_path(bypass_path, "source.path")
+
+
+@pytest.mark.parametrize(
+    "bypass_path",
+    [
+        "arrow_hdfs://namenode.example:8020/out.recotem",
+        "async_wrapper://whatever/out.recotem",
+    ],
+)
+def test_output_underscore_scheme_rejected(tmp_path: Path, bypass_path: str) -> None:
+    """Underscore-scheme outputs must be rejected by the output allow-list."""
+    from recotem.recipe.loader import _validate_output_path
+
+    with pytest.raises(RecipeError, match="not supported"):
+        _validate_output_path(bypass_path, "output.path")
+
+
+def test_underscore_scheme_rejected_end_to_end(tmp_path: Path) -> None:
+    """A full recipe whose source.path is arrow_hdfs:// must fail to load."""
+    out = tmp_path / "out.recotem"
+    content = f"""\
+name: underscore_scheme
+source:
+  type: csv
+  path: arrow_hdfs://namenode.example:8020/etc/x.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="not supported for input"):
+        load_recipe(p)
+
+
+def test_effective_scheme_matches_fsspec_dispatch() -> None:
+    """_effective_scheme must agree with how fsspec splits the protocol.
+
+    This is the invariant the fix rests on: the validator and the datasource
+    reader (fsspec.open) must derive the same scheme, or an allow-listed check
+    can be bypassed by a form fsspec routes differently than urlparse.
+    """
+    from fsspec.core import split_protocol
+
+    from recotem.recipe.loader import _effective_scheme
+
+    for path in (
+        "arrow_hdfs://h/x",
+        "async_wrapper://h/x",
+        "s3://bucket/key",
+        "http://example.com/x",
+        "gs://project@bucket/key",
+    ):
+        proto, _ = split_protocol(path)
+        assert _effective_scheme(path) == (proto or "").lower(), path
+
+    # Bare paths and file:/// have no fsspec protocol; effective scheme is
+    # "" or "file" respectively and must stay that way.
+    assert _effective_scheme("/tmp/local.csv") == ""
+    assert _effective_scheme("file:///abs/x.csv") == "file"
+
+
+def test_effective_scheme_is_fail_closed_not_fail_open() -> None:
+    """The helper only ever surfaces a scheme urlparse hid; it never hides one.
+
+    Concretely: every legitimate allowed scheme urlparse already resolves must
+    be preserved unchanged, so the fix cannot newly-reject a valid recipe.
+    """
+    from urllib.parse import urlparse
+
+    from recotem.recipe.loader import _effective_scheme
+
+    for path in (
+        "s3://bucket/key",
+        "gs://bucket/key",
+        "az://container@acct.dfs.core.windows.net/p",
+        "http://example.com/x",
+        "https://example.com/x",
+        "file:///abs/x",
+        "/bare/local/path",
+    ):
+        up = urlparse(path).scheme.lower()
+        # For every path urlparse already understood, the effective scheme is
+        # identical (no regression); the helper only diverges when urlparse
+        # returned "" AND a real "://" protocol was hidden by an illegal char.
+        assert _effective_scheme(path) == up, path

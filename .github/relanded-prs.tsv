@@ -1,0 +1,15 @@
+# PRs that GitHub reports as MERGED but whose merge commit is not an ancestor
+# of main, together with the PR that actually put the change into main.
+#
+# Read by .github/scripts/check-milestone-landed.sh.  A row here is NOT a way
+# to skip that check: the replacement PR's own merge commit must be an ancestor
+# of the tree being released, or the original is still reported as stranded.
+#
+# A row is needed because a re-land is normally a cherry-pick, which creates a
+# new commit — the original merge commit stays unreachable forever, so without
+# this record the recovered PR would be flagged at every future release.
+#
+# Columns are tab-separated:
+#   <original-pr>	<replacement-pr>	<why>
+#
+245	256	merged into a base branch that had already been squash-merged by #250, five minutes earlier; re-landed by cherry-picking 26a8c3b onto main

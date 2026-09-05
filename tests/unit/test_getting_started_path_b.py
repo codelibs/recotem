@@ -13,7 +13,7 @@ that command failed for every reader who followed it literally::
 Path B now writes the recipe with a heredoc instead, which makes the page
 self-contained -- and makes it a second copy of a recipe that already exists in
 the repository.  These tests pin both halves of that: the wheel really does not
-carry `examples/`, so the heredoc is load-bearing rather than decorative; the
+declare `examples/` in its wheel target, so the heredoc is load-bearing; the
 embedded recipe is a valid recipe; and it still agrees with
 `examples/tutorial-purchase-log/recipe.yaml` on every field that decides what
 the tutorial trains.
@@ -74,8 +74,16 @@ def test_path_b_does_not_reference_the_examples_directory() -> None:
     )
 
 
-def test_the_wheel_really_ships_no_examples_directory() -> None:
+def test_the_wheel_target_declares_no_examples_directory() -> None:
     """Why the heredoc exists, and the packaging decision behind it.
+
+    Named for what it checks: the **declaration** in `pyproject.toml`, not a
+    built wheel.  Building one would need `uv build` and is out of scope for a
+    unit test, so this cannot catch a wheel that gained `examples/` some other
+    way (a hatch default change, a build plugin).  It catches the change anyone
+    would actually make.  The stronger end-to-end evidence is in the PR: a
+    clean `python:3.12-slim` container with only the wheel installed has no
+    `examples/` anywhere on disk.
 
     **The wheel deliberately ships no `examples/`; the sdist deliberately
     does.**  A wheel unpacks into `site-packages`, where an `examples/`

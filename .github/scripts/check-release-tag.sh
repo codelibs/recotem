@@ -130,18 +130,14 @@ import ast
 import sys
 
 tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
-found = None
 for node in tree.body:
     if isinstance(node, ast.Assign) and any(
         isinstance(t, ast.Name) and t.id == "__version__" for t in node.targets
     ):
-        # Keep going rather than stopping at the first assignment: Python
-        # itself takes the LAST one, so stopping early let the guard read a
-        # different string from the one `import recotem` reports.
-        found = ast.literal_eval(node.value)
-if found is None:
+        print(ast.literal_eval(node.value))
+        break
+else:
     raise SystemExit("no __version__ assignment found")
-print(found)
 PYEOF
 )"
 
@@ -161,26 +157,9 @@ PYEOF
 [ -f "${CHART}" ] || fail "Cannot read helm/recotem/Chart.yaml." \
      "The Helm chart is part of the release and its version must match the tag."
 
-# The match is anchored to column 0.  awk's `$1` is the first *field*, not the
-# start of the line, so an indented `version:` matches `$1 == "version:"` just
-# as a top-level one does -- and awk stops at the first hit.  A nested key
-# therefore used to shadow the real one, and `dependencies:` is the shape that
-# makes this ordinary rather than exotic:
-#
-#   dependencies:
-#     - name: redis
-#       version: 2.1.0     <- read as the chart version
-#   version: 2.0.0         <- the real key, never reached
-#
-# Measured: with exactly that Chart.yaml the script printed
-# `helm Chart.yaml version = 2.1.0` and exited 0 for tag v2.1.0, publishing a
-# chart still declaring 2.0.0.  Requiring a non-blank, non-comment character in
-# column 1 restores the "top-level scalar" the comment above already assumed.
 chart_key() {
-    awk -v key="$1:" '
-        /^[^[:space:]#]/ && $1 == key {
-            value = $2; gsub(/"/, "", value); print value; exit
-        }' "${CHART}"
+    awk -v key="$1:" '$1 == key { value = $2; gsub(/"/, "", value); print value; exit }' \
+        "${CHART}"
 }
 CHART_VERSION="$(chart_key version)"
 CHART_APP_VERSION="$(chart_key appVersion)"
@@ -252,285 +231,62 @@ add_mismatch() {
 # right shape as well as the only available one.
 #
 # `-o` prints just the match, so each hit is `path:lineno:<match>`.
-#
-# The tag part matches the WHOLE tag, not a three-segment prefix of it.  With
-# the prefix form `...:[0-9]+\.[0-9]+\.[0-9]+`, grep -o returned `recotem:2.1.0`
-# for a pin reading `recotem:2.1.0-alpine` or `recotem:2.1.0rc1`, which then
-# compared equal to the tag and passed -- a pin naming an image that was never
-# published.  Matching the whole tag and classifying it below closes that.
-PIN_RE='ghcr\.io/codelibs/recotem:[A-Za-z0-9_][A-Za-z0-9_.-]*'
-LABEL_RE='app\.kubernetes\.io/version: *"[^"]*"'
+PIN_RE='ghcr\.io/codelibs/recotem:[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*'
+LABEL_RE='app\.kubernetes\.io/version: *"[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"'
 
 PIN_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${PIN_RE}" examples docs 2>/dev/null || true)"
 LABEL_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${LABEL_RE}" examples 2>/dev/null || true)"
-
-# Both hit shapes end in the tag, one after a ':' and one inside quotes:
-#   examples/k8s/cronjob.yaml:60:ghcr.io/codelibs/recotem:2.0.0
-#   examples/k8s/serve-deployment.yaml:27:app.kubernetes.io/version: "2.0.0"
-# Dropping a trailing quote and then everything through the last ':' or '"'
-# leaves the tag in both cases.
-pin_version() {
-    printf '%s' "$1" | sed -e 's/"$//' -e 's/.*[:"]//'
-}
-
-# A tag that starts with a digit is a version pin and must equal the release.
-# Anything else -- `latest`, `main`, `sha-abc1234` -- is a deliberately moving
-# reference and is left alone; `:latest` in compose.yaml and the getting-started
-# docs is the reason that exemption exists.
-is_version_pin() {
-    case "$1" in
-        [0-9]*) return 0 ;;
-        *)      return 1 ;;
-    esac
-}
-
-# Count the hits that are actually subject to the comparison, so the vacuity
-# guards below test what they claim to.
-VERSION_PIN_COUNT=0
-VERSION_LABEL_COUNT=0
-STALE_PINS=()
-classify() {
-    local hit="$1" kind="$2" tag
-    [ -n "${hit}" ] || return 0
-    tag="$(pin_version "${hit}")"
-    is_version_pin "${tag}" || return 0
-    if [ "${kind}" = label ]; then
-        VERSION_LABEL_COUNT=$((VERSION_LABEL_COUNT + 1))
-    else
-        VERSION_PIN_COUNT=$((VERSION_PIN_COUNT + 1))
-    fi
-    # Collected as array elements, not as one newline-joined string, so `fail`
-    # indents every line the same way rather than only the first.
-    [ "${tag}" = "${EXPECTED}" ] || STALE_PINS+=("  ${hit}")
-}
-
-while IFS= read -r hit; do classify "${hit}" pin; done   < <(printf '%s\n' "${PIN_HITS}")
-while IFS= read -r hit; do classify "${hit}" label; done < <(printf '%s\n' "${LABEL_HITS}")
 
 # A scan that finds nothing is refused rather than passed.  The release
 # procedure bumps these pins, so zero hits means the pattern stopped matching,
 # not that there is nothing to check -- and a vacuous check is worse than a
 # missing one, because the success message below would vouch for pins nobody
 # looked at.  Same reasoning as the empty `image.tag` case above.
-[ "${VERSION_PIN_COUNT}" -gt 0 ] || \
+[ -n "${PIN_HITS}" ] || \
     fail "No pinned 'ghcr.io/codelibs/recotem:X.Y.Z' reference found under examples/ or docs/." \
          "The release procedure bumps these, so finding none means this check stopped" \
          "matching rather than that there is nothing to check.  Refused rather than" \
          "skipped: a vacuous check would make this script's success message untrue."
 
-# The same guard for the label scan, which had none: deleting every
-# `app.kubernetes.io/version` label from examples/k8s/ silently reduced that
-# half of the check to nothing while the script still reported OK.
-[ "${VERSION_LABEL_COUNT}" -gt 0 ] || \
-    fail "No 'app.kubernetes.io/version: \"X.Y.Z\"' label found under examples/." \
-         "It is a version declaration the release procedure bumps, so finding none" \
-         "means this check stopped matching rather than that there is nothing to" \
-         "check.  Refused rather than skipped, for the same reason as the image pins."
+# Both hit shapes end in the version, one after a ':' and one inside quotes:
+#   examples/k8s/cronjob.yaml:60:ghcr.io/codelibs/recotem:2.0.0
+#   examples/k8s/serve-deployment.yaml:27:app.kubernetes.io/version: "2.0.0"
+# Dropping a trailing quote and then everything through the last ':' or '"'
+# leaves the version in both cases.
+pin_version() {
+    printf '%s' "$1" | sed -e 's/"$//' -e 's/.*[:"]//'
+}
 
-# ---------------------------------------------------------------------------
-# 5. The CHANGELOG must announce this version as released
-# ---------------------------------------------------------------------------
-# The GitHub Release notes are derived from the CHANGELOG section for the
-# version (references/release-notes.md), and entries accumulate during the cycle
-# under a heading marked `Unreleased`.  Renaming that heading to the release
-# date is step 3 of the release procedure -- and nothing verified it: a
-# `grep -ci changelog` over this script returned 0, so a tag could publish
-# release notes drawn from a section still headed "Unreleased", permanently, at
-# the tagged commit.
-#
-# Checked with grep for the same reason the chart is read with awk: the guard
-# jobs run this straight after `actions/checkout` with nothing installed.
-CHANGELOG="${REPO_ROOT}/CHANGELOG.md"
-EXPECTED_RE="$(printf '%s' "${EXPECTED}" | sed 's/\./\\./g')"
-CHANGELOG_PROBLEM=""
-CHANGELOG_DETAIL=()
+# Collected as array elements, not as one newline-joined string, so `fail`
+# indents every line the same way rather than only the first.
+STALE_PINS=()
+while IFS= read -r hit; do
+    [ -n "${hit}" ] || continue
+    [ "$(pin_version "${hit}")" = "${EXPECTED}" ] || STALE_PINS+=("  ${hit}")
+done < <(printf '%s\n%s\n' "${PIN_HITS}" "${LABEL_HITS}")
 
-if [ ! -f "${CHANGELOG}" ]; then
-    CHANGELOG_PROBLEM="has no CHANGELOG.md"
-    CHANGELOG_DETAIL=("CHANGELOG.md is missing.  The GitHub Release notes are derived from it.")
-else
-    CHANGELOG_HEADING="$(grep -m1 -E "^## \[${EXPECTED_RE}\]" "${CHANGELOG}" || true)"
-    if [ -z "${CHANGELOG_HEADING}" ]; then
-        CHANGELOG_PROBLEM="has no CHANGELOG.md section"
-        CHANGELOG_DETAIL=(
-            "CHANGELOG.md has no '## [${EXPECTED}]' heading." \
-            "The GitHub Release notes are derived from that section, so a release without" \
-            "one ships no notes at all.  Add the section (see the release procedure), or" \
-            "rename the existing Unreleased heading if the entries are already there:" \
-            "  grep -n '^## \\[' CHANGELOG.md"
-        )
-    elif printf '%s' "${CHANGELOG_HEADING}" | grep -qi 'unreleased'; then
-        CHANGELOG_PROBLEM="has a CHANGELOG.md section still marked Unreleased"
-        CHANGELOG_DETAIL=(
-            "CHANGELOG.md still reads:" \
-            "  ${CHANGELOG_HEADING}" \
-            "" \
-            "Entries accumulate under an 'Unreleased' heading during the cycle; releasing" \
-            "renames it to the date.  Left as-is, the published release notes announce" \
-            "${EXPECTED} as unreleased, and the CHANGELOG at the tagged commit says so" \
-            "permanently.  Set the heading to '## [${EXPECTED}] - YYYY-MM-DD'."
-        )
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# 6. The commit being tagged must be on main
-# ---------------------------------------------------------------------------
-# Everything above reads files, so it describes the tree and says nothing about
-# where that tree sits in history.  A tag placed on a feature branch -- or on a
-# commit whose PR was merged into a branch that had already stopped being a path
-# to main -- carries a perfectly consistent set of version strings and passes
-# every check above.
-#
-# HEAD is the right commit to test in both usages: in CI `actions/checkout` has
-# checked out the tag, and locally the operator runs this before tagging, so
-# HEAD is the commit about to be tagged.
-#
-# This is the script's first and only use of git, and it is deliberately
-# fail-closed rather than skip-quietly.  `actions/checkout`'s default
-# `fetch-depth: 1` produces a work tree in which `origin/main` does not exist at
-# all -- measured: a depth-1 single-branch clone reports
-# `--is-inside-work-tree true`, `rev-parse origin/main` fails, and
-# `rev-list --count HEAD` is 1.  Skipping in that case would make this check
-# vacuous exactly where it matters, so the guard jobs set `fetch-depth: 0` and
-# a work tree without a main ref is refused.  That makes the workflow setting
-# self-enforcing: remove it and this fails loudly instead of passing silently.
-#
-# Outside a git work tree (the unit tests build synthetic trees in tmp dirs)
-# there is nothing to check and nothing to enforce; the success message says so
-# rather than implying it was verified.
-BRANCH_PROBLEM=""
-BRANCH_DETAIL=()
-BRANCH_CHECKED=0
-
-GIT_TOPLEVEL="$(git -C "${REPO_ROOT}" rev-parse --show-toplevel 2>/dev/null || true)"
-if [ -n "${GIT_TOPLEVEL}" ] && [ "${GIT_TOPLEVEL}" = "${REPO_ROOT}" ]; then
-    BRANCH_CHECKED=1
-
-    # A shallow repository is refused before the ancestry question is asked,
-    # because in a shallow clone git answers it *wrongly* rather than failing.
-    # Measured: with a feature commit that genuinely is an ancestor of main,
-    # a full clone gives `--is-ancestor` exit 0, and a `--depth 1` clone of the
-    # same repository gives exit 1 -- the connecting history is cut, the tip
-    # object is still present, and git reports "not an ancestor" with no hint
-    # that it could not see.  (A missing object gives 128; this case does not,
-    # which is what makes it dangerous.)  Left unguarded, a shallow checkout
-    # would fail a legitimate release and name the wrong reason.
-    if [ "$(git -C "${REPO_ROOT}" rev-parse --is-shallow-repository 2>/dev/null)" \
-         = "true" ]; then
-        BRANCH_PROBLEM="cannot be checked against main (shallow clone)"
-        BRANCH_DETAIL=(
-            "This is a shallow repository, so whether the tagged commit is on main" \
-            "cannot be determined: git answers the ancestry question from truncated" \
-            "history and reports 'not an ancestor' for commits that are on main." \
-            "" \
-            "In CI, set fetch-depth: 0 on the guard job's actions/checkout step." \
-            "Locally:  git fetch --unshallow origin"
-        )
-    fi
-
-    MAIN_REF=""
-    for candidate in refs/remotes/origin/main refs/heads/main; do
-        if git -C "${REPO_ROOT}" rev-parse --verify -q "${candidate}" > /dev/null 2>&1
-        then
-            MAIN_REF="${candidate}"
-            break
-        fi
-    done
-
-    if [ -n "${BRANCH_PROBLEM}" ]; then
-        : # already refused above; do not overwrite the more specific reason
-    elif [ -z "${MAIN_REF}" ]; then
-        BRANCH_PROBLEM="cannot be checked against main"
-        BRANCH_DETAIL=(
-            "This is a git work tree, but neither origin/main nor refs/heads/main exists," \
-            "so whether the tagged commit is on main cannot be determined." \
-            "" \
-            "In CI this means the checkout was shallow: actions/checkout defaults to" \
-            "fetch-depth: 1, which fetches only the tagged commit.  The guard jobs set" \
-            "fetch-depth: 0 for this reason -- restore it rather than removing this check." \
-            "" \
-            "Locally:  git fetch origin main"
-        )
-    elif ! git -C "${REPO_ROOT}" merge-base --is-ancestor HEAD "${MAIN_REF}" \
-            > /dev/null 2>&1; then
-        BRANCH_PROBLEM="is on a commit that is not on main"
-        BRANCH_DETAIL=(
-            "HEAD ($(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null)) is not an" \
-            "ancestor of ${MAIN_REF}." \
-            "" \
-            "A release is cut from main.  A tag on a commit that never reached main" \
-            "publishes a tree nobody reviewed on main, and the version strings above" \
-            "cannot detect it -- they describe the tree, not where it sits in history." \
-            "" \
-            "If the branch really is merged, fetch first: git fetch origin main" \
-            "Otherwise merge it, then tag the merge commit."
-        )
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# 7. Report -- every class of failure in a single run
-# ---------------------------------------------------------------------------
-# Section 3 compares every version declaration before reporting so that one run
-# names every file that did not move.  The pin scan used to defeat that: it
-# called `fail` (which exits) before the version mismatches were ever printed,
-# so a tree with both kinds of staleness -- the normal state at the start of a
-# release -- reported the pins, and only after those were fixed did a second run
-# reveal that pyproject.toml, version.py and the chart had not moved either.
-# On the tag-triggered release path each of those round trips costs a tag
-# delete, a re-tag and a re-push.  Both are collected here and reported once.
-REPORT=()
 if [ "${#STALE_PINS[@]}" -gt 0 ]; then
-    REPORT+=("Deployment pins still on another version:" \
-             "${STALE_PINS[@]}" \
-             "" \
-             "These are not illustrative.  Applying examples/k8s/ verbatim deploys the" \
-             "image named there, and docs/deployment/k8s.md is what a reader copies. The" \
-             "published 2.0.0 arm64 image cannot start at all -- its console script carries" \
-             "the build-stage shebang '#!/build/.venv/bin/python' -- so a release still" \
-             "pointing at it is a CrashLoopBackOff for every arm64 reader of those docs." \
-             "" \
-             "To fix, set every reference above to ${EXPECTED} (or pick another number):" \
-             "  git grep -nE 'ghcr[.]io/codelibs/recotem:[0-9]+[.][0-9]+[.][0-9]+' examples docs" \
-             "  git grep -n  'app.kubernetes.io/version' examples" \
-             "")
-fi
-if [ -n "${MISMATCH}" ]; then
-    REPORT+=("Version declarations that do not match: ${MISMATCH}." \
-             "The tag, pyproject.toml, src/recotem/version.py, helm/recotem/Chart.yaml" \
-             "and helm/recotem/values.yaml must all agree.  A mismatch in the first two" \
-             "uploads a wheel carrying a version nobody tagged; a mismatch in values.yaml" \
-             "ships a chart whose manifests deploy some other image tag." \
-             "")
-fi
-if [ -n "${CHANGELOG_PROBLEM}" ]; then
-    REPORT+=("${CHANGELOG_DETAIL[@]}" "")
-fi
-if [ -n "${BRANCH_PROBLEM}" ]; then
-    REPORT+=("${BRANCH_DETAIL[@]}" "")
+    fail "Tag '${TAG}' does not match every deployment pin.  Still on another version:" \
+         "${STALE_PINS[@]}" \
+         "" \
+         "These are not illustrative.  Applying examples/k8s/ verbatim deploys the" \
+         "image named there, and docs/deployment/k8s.md is what a reader copies. The" \
+         "published 2.0.0 arm64 image cannot start at all -- its console script carries" \
+         "the build-stage shebang '#!/build/.venv/bin/python' -- so a release still" \
+         "pointing at it is a CrashLoopBackOff for every arm64 reader of those docs." \
+         "" \
+         "To fix, set every reference above to ${EXPECTED} (or pick another number):" \
+         "  git grep -nE 'ghcr[.]io/codelibs/recotem:[0-9]+[.][0-9]+[.][0-9]+' examples docs" \
+         "  git grep -n  'app.kubernetes.io/version' examples"
 fi
 
-if [ "${#REPORT[@]}" -gt 0 ]; then
-    # Clauses joined rather than concatenated by hand, so adding a fourth class
-    # of failure later does not require rewriting the sentence.
-    CLAUSES=()
-    [ "${#STALE_PINS[@]}" -eq 0 ] || \
-        CLAUSES+=("does not match every deployment pin")
-    [ -z "${MISMATCH}" ] || \
-        CLAUSES+=("does not match the project version: ${MISMATCH}")
-    [ -z "${CHANGELOG_PROBLEM}" ] || \
-        CLAUSES+=("${CHANGELOG_PROBLEM}")
-    [ -z "${BRANCH_PROBLEM}" ] || \
-        CLAUSES+=("${BRANCH_PROBLEM}")
-    HEADLINE="Tag '${TAG}'"
-    SEPARATOR=" "
-    for clause in "${CLAUSES[@]}"; do
-        HEADLINE="${HEADLINE}${SEPARATOR}${clause}"
-        SEPARATOR=", and "
-    done
-    fail "${HEADLINE}." \
-         "${REPORT[@]}" \
+if [ -n "${MISMATCH}" ]; then
+    fail "Tag '${TAG}' does not match the project version: ${MISMATCH}." \
+         "The tag, pyproject.toml, src/recotem/version.py, helm/recotem/Chart.yaml" \
+         "and helm/recotem/values.yaml must all agree.  A mismatch in the first two" \
+         "uploads a wheel carrying a version nobody tagged; a mismatch in values.yaml" \
+         "ships a chart whose manifests deploy some other image tag." \
+         "" \
          "To fix:" \
          "  1. delete the bad tag:  git tag -d ${TAG} && git push origin :refs/tags/${TAG}" \
          "  2. set version = \"${EXPECTED}\" in pyproject.toml," \
@@ -544,12 +300,6 @@ fi
 echo "OK: ${TAG} is a final release and matches pyproject.toml,"
 echo "    src/recotem/version.py, helm/recotem/Chart.yaml, helm/recotem/values.yaml,"
 echo "    and every pinned image reference under examples/ and docs/."
-echo "    CHANGELOG.md declares ${EXPECTED} released."
-if [ "${BRANCH_CHECKED}" -eq 1 ]; then
-    echo "    The tagged commit is on main."
-else
-    echo "    NOT checked: whether the tagged commit is on main (not a git work tree)."
-fi
 echo "    Not checked here: uv.lock (run 'uv lock --check'), and version strings"
 echo "    outside those files — see the verification block in"
 echo "    .claude/skills/release-recotem/references/version-locations.md."

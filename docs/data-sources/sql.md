@@ -45,7 +45,7 @@ source:
 | `query` | yes | — | Raw SQL. Never subject to `${...}` expansion (SQL injection foreclosure). |
 | `query_parameters` | no | `{}` | Bound via SQLAlchemy `text().bindparams(...)`. **Not** subject to `${RECOTEM_RECIPE_*}` expansion — `query` and `query_parameters` are both on the loader's no-expand list, so a `${...}` here reaches the database as those literal characters. That is deliberate: expansion into a SQL string is an injection path. Parameterise with `:name` placeholders and set the values in the recipe. |
 | `connect_timeout_seconds` | no | 10 | Valid range `[1, 60]` (out-of-range raises ValidationError). Passed as `connect_timeout` (PG/MySQL) or `timeout` (SQLite). |
-| `statement_timeout_seconds` | no | 300 | Valid range `[1, 1800]` (out-of-range raises ValidationError). PG: `SET LOCAL statement_timeout = <ms>`. MySQL: `SET SESSION MAX_EXECUTION_TIME = <ms>`. MariaDB: `SET SESSION max_statement_time = <seconds>` (different unit and variable from MySQL). Failure aborts training on PG/MySQL/MariaDB. SQLite: not enforced (no server-side timeout primitive); a `sql_statement_timeout_unsupported_on_sqlite` warning is logged so operators know the documented safety control is not in effect. |
+| `statement_timeout_seconds` | no | 300 | Valid range `[1, 1800]` (out-of-range raises ValidationError). PG: `SET LOCAL statement_timeout = <ms>`. MySQL: `SET SESSION MAX_EXECUTION_TIME = <ms>`. MariaDB: `SET SESSION max_statement_time = <seconds>` (different unit and variable from MySQL; each server rejects the other's with `ERROR 1193 Unknown system variable`). Which of the two is issued follows the **server**, not the DSN scheme — SQLAlchemy identifies MariaDB from the connection banner, so `mysql+pymysql://` pointed at MariaDB still gets `max_statement_time`. Failure aborts training on PG/MySQL/MariaDB. SQLite: not enforced (no server-side timeout primitive); a `sql_statement_timeout_unsupported_on_sqlite` warning is logged so operators know the documented safety control is not in effect. |
 
 ## DSN examples
 
@@ -53,6 +53,7 @@ source:
 |---|---|
 | PostgreSQL | `postgresql+psycopg://user:pass@host:5432/db?sslmode=require` |
 | MySQL | `mysql+pymysql://user:pass@host:3306/db?ssl=true` |
+| MariaDB | `mariadb+pymysql://user:pass@host:3306/db?ssl=true` — `mysql+pymysql://` also works and reaches the same server |
 | SQLite (file) | `sqlite:///absolute/path/to/file.db` |
 | SQLite (read-only) | `sqlite:///file:absolute/path/to/file.db?mode=ro&uri=true` |
 

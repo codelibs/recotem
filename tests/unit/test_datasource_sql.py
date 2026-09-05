@@ -2266,3 +2266,116 @@ def test_error_label_walks_the_cause_chain_and_adds_sqlstate() -> None:
     sneaky = _error_label(_Wrap())
     assert "_Sneaky" in sneaky
     assert "s3cret" not in sneaky
+
+
+# ---------------------------------------------------------------------------
+# R7-P3 — the statement-timeout variable follows the SERVER, not the DSN scheme
+# ---------------------------------------------------------------------------
+#
+# Measured against mariadb:11.8.9 and mysql:8.4.11: the two variables are
+# disjoint and each server rejects the other's with
+# ``ERROR 1193 (HY000) Unknown system variable``.  A ``mysql+pymysql://`` DSN
+# (the only PyMySQL DSN in docs/data-sources/sql.md) pointed at MariaDB used to
+# take the MySQL branch and abort the whole fetch.
+
+
+class _FakeDialect:
+    def __init__(self, is_mariadb: bool | None) -> None:
+        if is_mariadb is not None:
+            self._is_mariadb = is_mariadb
+
+
+class _FakeConn:
+    """Connection double that records executed SQL and carries a dialect."""
+
+    def __init__(self, is_mariadb: bool | None) -> None:
+        self.dialect = _FakeDialect(is_mariadb)
+        self.executed: list[str] = []
+
+    def execute(self, stmt):
+        self.executed.append(str(stmt))
+        return None
+
+
+def _timeout_sql(dsn_backend: str, is_mariadb: bool | None, seconds: int = 120):
+    from recotem.datasource.sql import SQLSource
+
+    src = SQLSource.__new__(SQLSource)
+    src._dialect = dsn_backend
+    src._config = _make_cfg(statement_timeout_seconds=seconds)
+    conn = _FakeConn(is_mariadb)
+    src._apply_statement_timeout(conn)
+    return conn.executed
+
+
+def test_statement_timeout_mariadb_server_behind_mysql_dsn_scheme() -> None:
+    """A ``mysql+pymysql://`` DSN on a MariaDB server must use MariaDB's var.
+
+    Reverting ``_server_is_mariadb`` to ``self._dialect == "mariadb"`` makes
+    this emit ``MAX_EXECUTION_TIME``, which MariaDB refuses with
+    ``Unknown system variable`` and which aborts the fetch.
+    """
+    sqls = _timeout_sql("mysql", is_mariadb=True)
+    assert any("max_statement_time" in s for s in sqls), (
+        f"MariaDB server must get max_statement_time, got: {sqls}"
+    )
+    assert not any("MAX_EXECUTION_TIME" in s for s in sqls), (
+        f"MAX_EXECUTION_TIME is unknown to MariaDB, got: {sqls}"
+    )
+    # seconds, not milliseconds
+    assert any("120" in s and "120000" not in s for s in sqls), (
+        f"MariaDB max_statement_time is in seconds, got: {sqls}"
+    )
+
+
+def test_statement_timeout_mysql_server_behind_mariadb_dsn_scheme() -> None:
+    """A ``mariadb+...://`` DSN on a MySQL server must use MySQL's var."""
+    sqls = _timeout_sql("mariadb", is_mariadb=False)
+    assert any("MAX_EXECUTION_TIME" in s for s in sqls), (
+        f"MySQL server must get MAX_EXECUTION_TIME, got: {sqls}"
+    )
+    assert not any("max_statement_time" in s for s in sqls), (
+        f"max_statement_time is unknown to MySQL, got: {sqls}"
+    )
+    assert any("120000" in s for s in sqls), (
+        f"MySQL MAX_EXECUTION_TIME is in milliseconds, got: {sqls}"
+    )
+
+
+def test_statement_timeout_falls_back_to_scheme_without_dialect_flag() -> None:
+    """No ``_is_mariadb`` attribute → fall back to the DSN scheme."""
+    assert any("max_statement_time" in s for s in _timeout_sql("mariadb", None))
+    assert any("MAX_EXECUTION_TIME" in s for s in _timeout_sql("mysql", None))
+
+
+def test_statement_timeout_failure_names_the_driver_error() -> None:
+    """The timeout refusal must name the DBAPI class, as the sibling paths do.
+
+    ``_apply_read_only`` and the query/probe paths all report through
+    ``_error_label``; this one reported a bare ``type(exc).__name__``, which is
+    how an ``Unknown system variable`` reached operators as a naked
+    ``OperationalError``.
+    """
+    from recotem.datasource.base import DataSourceError
+    from recotem.datasource.sql import SQLSource
+
+    class _Driver(Exception):
+        sqlstate = "HY000"
+
+    class _Wrapper(Exception):
+        def __init__(self) -> None:
+            super().__init__("boom")
+            self.orig = _Driver("Unknown system variable")
+
+    class _RaisingConn(_FakeConn):
+        def execute(self, stmt):
+            raise _Wrapper()
+
+    src = SQLSource.__new__(SQLSource)
+    src._dialect = "mysql"
+    src._config = _make_cfg(statement_timeout_seconds=5)
+    with pytest.raises(DataSourceError) as ei:
+        src._apply_statement_timeout(_RaisingConn(False))
+    msg = str(ei.value)
+    assert "_Driver" in msg, f"driver class must be named, got: {msg}"
+    assert "SQLSTATE HY000" in msg, f"SQLSTATE must be reported, got: {msg}"

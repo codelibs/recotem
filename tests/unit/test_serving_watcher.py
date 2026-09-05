@@ -5627,3 +5627,143 @@ def test_malformed_recipe_stub_evicted_when_file_deleted(tmp_path: Path) -> None
     assert "skipped" not in body, (
         f"no skipped files remain, so /v1/health must not report any; got {body!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# R7-P3 — a permanently broken artifact must not be re-read on every tick
+# ---------------------------------------------------------------------------
+#
+# A failed load deliberately does not advance ``last_marker``, so before the
+# backoff the watcher re-read the whole artifact once per poll interval for as
+# long as it stayed broken.  Measured against a MinIO S3 endpoint: 12 full
+# reads of a 14.85 MB artifact in 60s at the default 5s interval (~180 MB/min
+# of GET traffic, versus ~0.3 MB/min while healthy), sustained indefinitely.
+
+
+def _run_watcher_over_broken_artifact(
+    tmp_path: Path, monkeypatch, seconds: float
+) -> tuple[int, Path, ModelRegistry, dict]:
+    """Run the watcher over a corrupt artifact and count full artifact reads."""
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving import watcher as _watcher_mod
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path, "broken")
+    yaml_path = _write_recipe_yaml(recipes_dir, "broken", artifact_path)
+
+    registry = ModelRegistry()
+    good_entry = _make_entry("broken")
+    good_entry.artifact_path = str(artifact_path)
+    registry.replace("broken", good_entry)
+
+    recipe = load_recipe(yaml_path)
+    initial_states = build_initial_states([recipe], {"broken": good_entry})
+    initial_states["broken"].last_sha256 = ""
+
+    artifact_path.write_bytes(b"corrupted garbage that will never verify")
+
+    reads = {"n": 0}
+    real_read = _watcher_mod._read_artifact_bytes
+
+    def counting_read(path, max_bytes):
+        reads["n"] += 1
+        return real_read(path, max_bytes)
+
+    monkeypatch.setattr(_watcher_mod, "_read_artifact_bytes", counting_read)
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=_make_serve_config(),
+        key_ring=KeyRing(f"active:{ACTIVE_KEY_HEX}"),
+        initial_states=initial_states,
+    )
+    watcher.start()
+    try:
+        time.sleep(seconds)
+    finally:
+        watcher.stop()
+        watcher.join(timeout=2.0)
+    return reads["n"], artifact_path, registry, initial_states
+
+
+def test_broken_artifact_is_not_re_read_on_every_poll_tick(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Repeated identical failures must back off, not re-download every tick.
+
+    At WATCH_INTERVAL=0.05s a 1.5s run is ~30 ticks.  With the exponential
+    backoff the reads fall on 0.05, 0.10, 0.20, 0.40, 0.80, 1.60 ... so at
+    most a handful land in the window.  Reverting ``_load_is_backing_off``
+    (or ``_arm_load_backoff``) puts one read on every tick and this fails.
+    """
+    reads, _path, registry, _states = _run_watcher_over_broken_artifact(
+        tmp_path, monkeypatch, seconds=1.5
+    )
+    assert reads >= 1, "the broken artifact was never read at all"
+    assert reads <= 10, (
+        f"broken artifact was re-read {reads} times in 1.5s at a 0.05s "
+        "interval — the retry backoff is not in effect"
+    )
+    # The fail-safe contract is unchanged: the old model still serves.
+    entry = registry.get("broken")
+    assert entry is not None
+    assert entry.last_load_error is not None
+
+
+def test_backoff_does_not_delay_a_replaced_artifact(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A *different* marker must be loaded at once, even while backing off.
+
+    The backoff keys on the exact bytes that failed.  An operator who fixes
+    the artifact changes the marker, and that must not wait out the cooldown.
+    """
+    from recotem.recipe.loader import load_recipe
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path, "recovers")
+    yaml_path = _write_recipe_yaml(recipes_dir, "recovers", artifact_path)
+
+    registry = ModelRegistry()
+    good_entry = _make_entry("recovers")
+    good_entry.artifact_path = str(artifact_path)
+    registry.replace("recovers", good_entry)
+
+    recipe = load_recipe(yaml_path)
+    initial_states = build_initial_states([recipe], {"recovers": good_entry})
+    initial_states["recovers"].last_sha256 = ""
+    artifact_path.write_bytes(b"corrupted garbage that will never verify")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=_make_serve_config(),
+        key_ring=KeyRing(f"active:{ACTIVE_KEY_HEX}"),
+        initial_states=initial_states,
+    )
+    watcher.start()
+    try:
+        # Let the failure repeat enough times to push the backoff well past
+        # the poll interval (0.05 * 2**5 = 1.6s).
+        time.sleep(1.0)
+        assert registry.get("recovers").last_load_error is not None
+        # Repair it.  The marker changes, so the cooldown must be bypassed.
+        _write_valid_artifact(artifact_path, "recovers")
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            if registry.get("recovers").last_load_error is None:
+                break
+            time.sleep(0.02)
+    finally:
+        watcher.stop()
+        watcher.join(timeout=2.0)
+
+    assert registry.get("recovers").last_load_error is None, (
+        "a replaced artifact was not picked up within 1s — the backoff is "
+        "gating on time rather than on the identity of the failing bytes"
+    )

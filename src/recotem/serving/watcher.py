@@ -176,6 +176,15 @@ def _stat_marker_with_error(
         return None, error_class
 
 
+#: Upper bound on the per-recipe retry backoff for a load that keeps failing
+#: on the same bytes.  The backoff doubles from one poll interval; capping at
+#: five minutes keeps recovery bounded (an operator who fixes the artifact
+#: waits at most this long even when the marker does not change) while cutting
+#: the re-read rate for a permanently broken artifact by ~60x at the default
+#: 5s interval.
+_MAX_LOAD_RETRY_BACKOFF_SECONDS: float = 300.0
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -205,6 +214,22 @@ class _RecipeWatchState:
     #: for the read / build / rescan-parse paths, which retry every tick
     #: because a failed load never advances ``last_marker``.
     _last_failure_signature: str | None = None
+    #: The change-marker the last *failed* load attempt was made against, and
+    #: the ``time.monotonic()`` deadline before which that same marker must
+    #: not be re-read.  A failed load deliberately does not advance
+    #: ``last_marker`` so that a transient fault recovers on its own, but the
+    #: retry re-downloads the whole artifact every tick — measured at 12 full
+    #: reads of a 14.85 MB artifact in 60s against an S3 endpoint, ~180 MB/min
+    #: sustained for as long as the artifact stays broken.  These two fields
+    #: hold an exponential backoff over *identical* bytes only: a marker that
+    #: differs from ``failed_marker`` (the operator replaced the artifact) is
+    #: always read immediately.
+    failed_marker: Any = None
+    consecutive_load_failures: int = 0
+    retry_not_before: float = 0.0
+    #: Marker the in-flight ``_load_recipe`` call is reading for; promoted to
+    #: ``failed_marker`` if that call fails.
+    last_attempted_marker: Any = None
     #: Set to True after the first TypeError from artifact_path + ".sha256"
     #: so subsequent polls skip the sidecar check rather than flooding logs
     #: with the same warning on every poll cycle (M7).
@@ -952,6 +977,8 @@ class ArtifactWatcher(threading.Thread):
             self._load_recipe(name, state, force=False, marker=marker)
             return
 
+        if self._load_is_backing_off(name, state, marker):
+            return
         self._load_recipe(name, state, force=False, marker=marker)
 
     # ------------------------------------------------------------------
@@ -974,6 +1001,9 @@ class ArtifactWatcher(threading.Thread):
         """
         artifact_path = state.artifact_path
         max_bytes = self._config.max_artifact_bytes
+        # Remember which bytes this attempt is for so a failure can back off
+        # against that exact marker and a replacement is still read at once.
+        state.last_attempted_marker = marker
 
         try:
             data = _read_artifact_bytes(artifact_path, max_bytes)
@@ -993,6 +1023,7 @@ class ArtifactWatcher(threading.Thread):
         if not force and sha256 == state.last_sha256:
             if marker is not None:
                 state.last_marker = marker
+            self._clear_load_backoff(state)
             return
 
         try:
@@ -1076,6 +1107,7 @@ class ArtifactWatcher(threading.Thread):
         self._registry.replace_with_marker(name, entry, (new_marker, sha256))
         state.last_sha256 = sha256
         state.last_marker = new_marker
+        self._clear_load_backoff(state)
         # Reset post-HMAC deserialization failure streak on successful load.
         self._post_hmac_failure_streak.pop(name, None)
         # Clear the repeat-suppression signature so the next failure — even an
@@ -1251,6 +1283,76 @@ class ArtifactWatcher(threading.Thread):
             )
             _metrics.inc_watcher_state_divergence()
 
+    def _load_is_backing_off(self, name: str, state: Any, marker: Any) -> bool:
+        """Return True when *marker* is the one that just failed and is cooling.
+
+        A failed load does not advance ``last_marker`` — deliberately, so a
+        transient fault heals without operator action.  The cost is that the
+        next tick re-reads the artifact in full, and for a fault that is *not*
+        transient (a kid that is not in the key ring, an irspack version skew,
+        a truncated object) that repeats for as long as the artifact stays
+        broken.  ``docs/operations.md`` describes exactly that steady state as
+        survivable — "a skewed artifact sits harmless in a running fleet" — so
+        it can persist for days, at one full object-store GET per tick.
+
+        Backing off only while the bytes are *identical* keeps both properties:
+        a replaced artifact has a different marker and is read at once, and a
+        genuinely transient fault still retries, just on a widening interval
+        rather than every tick.
+        """
+        if marker is None or marker != state.failed_marker:
+            return False
+        if _time.monotonic() >= state.retry_not_before:
+            return False
+        logger.debug(
+            "artifact_load_retry_backoff",
+            recipe=name,
+            consecutive_failures=state.consecutive_load_failures,
+            seconds_remaining=round(state.retry_not_before - _time.monotonic(), 1),
+        )
+        return True
+
+    def _arm_load_backoff(self, name: str) -> None:
+        """Widen the retry interval after a load failed on the current bytes.
+
+        Reached from ``_record_load_failure``, which runs inside the poll
+        loop's per-recipe path.  The backoff is an optimisation over an
+        already-correct retry, so arming it is best-effort: an exception
+        escaping here would reach the loop's global handler and count against
+        the consecutive-error budget that marks *every* recipe unhealthy
+        (W-5), turning one broken artifact into a fleet-wide outage to save
+        some bandwidth.  If anything about the state or the interval is not
+        what this expects, leave the backoff unarmed — the watcher then simply
+        retries on the next tick exactly as it did before.
+        """
+        state = self._states.get(name)
+        if state is None:
+            return
+        try:
+            state.failed_marker = state.last_attempted_marker
+            failures = int(state.consecutive_load_failures) + 1
+            state.consecutive_load_failures = failures
+            interval = float(self._config.watch_interval)
+            delay = min(
+                interval * (2 ** (failures - 1)),
+                _MAX_LOAD_RETRY_BACKOFF_SECONDS,
+            )
+            state.retry_not_before = _time.monotonic() + delay
+        except (MemoryError, RecursionError):
+            raise
+        except Exception as exc:
+            logger.debug(
+                "artifact_load_backoff_not_armed",
+                recipe=name,
+                error_class=type(exc).__name__,
+            )
+
+    def _clear_load_backoff(self, state: Any) -> None:
+        """Forget the backoff after a successful load."""
+        state.failed_marker = None
+        state.consecutive_load_failures = 0
+        state.retry_not_before = 0.0
+
     def _record_load_failure(
         self, name: str, error: str, reason: str = "unexpected"
     ) -> None:
@@ -1261,6 +1363,7 @@ class ArtifactWatcher(threading.Thread):
         self._mark_error(name, error)
         _metrics.inc_artifact_load_failure(name, reason=reason)
         _metrics.record_swap(name, ok=False)
+        self._arm_load_backoff(name)
 
 
 # ---------------------------------------------------------------------------

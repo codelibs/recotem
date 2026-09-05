@@ -629,9 +629,12 @@ exit 8.
   advice is now per-algorithm rather than blanket.
 
 - **The `RECOTEM_MAX_FEATURE_DIM` error still said the cost was cubic**, which
-  the same round's documentation correction had already replaced with the
-  measured `dim^2.4`. That message is what an operator reads at the moment they
-  decide whether to raise the cap. A test now ties the two together.
+  the same round's documentation correction had already replaced with a
+  measured exponent. That message is what an operator reads at the moment they
+  decide whether to raise the cap. A test now ties the two together. (The flat
+  `dim^2.4` figure that correction introduced was itself superseded later in
+  this same release — the exponent rises with the dimension; see the
+  `RECOTEM_MAX_FEATURE_DIM` entry above for the per-doubling measurements.)
 
 - **`data_stats` records the size of the held-out set.**
   `n_heldout_interactions` and `n_heldout_users` now appear in the artifact

@@ -192,11 +192,21 @@ def test_helm_chart_splits_the_three_probes() -> None:
     probe paths, so reverting the chart's readiness and liveness back to
     ``/v1/health`` left the whole suite and the manifest gate green.
 
-    This test is the one that actually runs in the ``pytest`` job. Its sibling
-    in ``tests/unit/test_k8s_manifests.py`` renders with ``helm template`` and
-    is therefore ``@requires_helm``-skipped there, so the line scan below is
-    the only chart probe assertion that executes on a source PR -- which is
-    why the expectations here have to be kept in step with that file by hand.
+    This scan and its ``helm template`` sibling in
+    ``tests/unit/test_k8s_manifests.py`` BOTH run in the ``pytest`` job: that
+    job installs no helm, but the ``ubuntu-24.04`` runner image ships one, so
+    ``@requires_helm`` does not skip there.  Measured at 9588d62, the job
+    reports ``2797 passed, 4 deselected`` with zero skips.  (An earlier
+    revision of this docstring said the sibling was skipped and that the scan
+    below was the only chart probe assertion running on a source PR.  It is
+    not, and a contributor who believed it would keep two files in step by
+    hand for no reason.)
+
+    The two are still worth keeping in step, because the runner image is an
+    undeclared dependency -- see
+    ``test_ci_actually_has_the_tools_these_skips_are_gated_on``, which fails
+    the build if CI ever loses helm rather than letting 28 rendered-chart
+    tests skip quietly.
     """
     paths = _template_probe_paths(
         (_ROOT / "helm" / "recotem" / "templates" / "deployment.yaml").read_text()

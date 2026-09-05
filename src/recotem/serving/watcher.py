@@ -53,7 +53,7 @@ from recotem._irspack_compat import (
 )
 from recotem._log_safe import format_kid_for_log as _format_kid_for_log
 from recotem._metrics_watcher import inc_recipes_dir_scan_failure as _inc_scan_failure
-from recotem.artifact.format import ArtifactError
+from recotem.artifact.format import SIZE_CAP_MSG_MARKER, ArtifactError
 from recotem.recipe.errors import format_recipe_load_failure
 from recotem.serving import metrics as _metrics
 from recotem.serving._header_utils import extract_algorithms, normalize_config_digest
@@ -104,7 +104,7 @@ def _read_artifact_bytes(path: str, max_bytes: int) -> bytes:
             data = fh.read(max_bytes + 1)
         if len(data) > max_bytes:
             raise ArtifactError(
-                f"artifact at '{path}' exceeds cap {max_bytes}; refusing load"
+                f"artifact at '{path}' {SIZE_CAP_MSG_MARKER}{max_bytes}; refusing load"
             )
         # If `data` is a pointer file, resolve it transparently.
         # `resolve_artifact_pointer` enforces its own size cap on the resolved
@@ -1417,6 +1417,14 @@ def _classify_artifact_error(err_msg: str) -> str:
         return "metadata"
     if lower.startswith("header json"):
         return "header_json"
+    # Must precede the "parse" branch below, whose `"version" in lower`
+    # catch-all would otherwise claim a message naming a `.recotem` path that
+    # happens to contain "version".  Every size-cap refusal -- the payload cap
+    # in `artifact/format.py` and the artifact cap at all four of its raise
+    # sites -- carries this marker; "exceeds maximum" (header_len) deliberately
+    # does not, so it stays `parse`.
+    if SIZE_CAP_MSG_MARKER in lower:
+        return "size_cap"
     if "hmac verification failed" in lower or "unknown kid" in lower:
         return "hmac"
     if (

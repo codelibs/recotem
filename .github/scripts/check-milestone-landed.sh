@@ -61,18 +61,14 @@ fail() {
 # 1. Determine the tag, and from it the milestone title
 # ---------------------------------------------------------------------------
 TAG=""
-PR_LIST_FILE=""
 RELAND_OVERRIDE=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        # Read the milestone's PRs from a file instead of calling `gh`, as
-        # `<number>\t<merge-oid>\t<title>` rows.  This is what lets the test
-        # suite drive this script against a real git repository with no
-        # network: the property under test is git reachability, and a test
-        # that mocked the ancestry check would only assert that the mock
-        # behaves.  Replacement PRs are resolved from this list too when it is
-        # given, so a whole scenario is one file.
-        --pr-list)      PR_LIST_FILE="$2"; shift 2 ;;
+        # The record is resolved relative to THIS SCRIPT, not the working
+        # directory, so a test running against a synthetic repository cannot
+        # supply one by writing a file there -- it would silently exercise the
+        # production record instead, and change behaviour whenever that file is
+        # edited.  This is the seam the behavioural tests use.
         --reland-file)  RELAND_OVERRIDE="$2"; shift 2 ;;
         -*)             fail "unknown option '$1'" ;;
         *)              TAG="$1"; shift ;;
@@ -99,11 +95,9 @@ echo "Milestone:   ${MILESTONE}"
 # it reports success for a question it never asked.  That is the same shape as
 # the defect this script exists to catch, so every precondition below fails
 # loudly.
-if [ -z "${PR_LIST_FILE}" ]; then
-    command -v gh >/dev/null 2>&1 || fail \
-        "gh is not installed, so the milestone cannot be read." \
-        "Install GitHub CLI, or run this check from CI where gh is preinstalled."
-fi
+command -v gh >/dev/null 2>&1 || fail \
+    "gh is not installed, so the milestone cannot be read." \
+    "Install GitHub CLI, or run this check from CI where gh is preinstalled."
 
 if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
     fail "the checkout is shallow, so ancestry cannot be determined." \
@@ -116,47 +110,40 @@ echo "Verifying against: ${HEAD_SHA}"
 # ---------------------------------------------------------------------------
 # 3. Read the milestone's merged PRs
 # ---------------------------------------------------------------------------
-if [ -n "${PR_LIST_FILE}" ]; then
-    [ -f "${PR_LIST_FILE}" ] || fail "--pr-list file not found: ${PR_LIST_FILE}"
-    PRS="$(grep -v '^[[:space:]]*#' "${PR_LIST_FILE}" | grep -v '^[[:space:]]*$' || true)"
-    echo "PR list: ${PR_LIST_FILE} (offline mode)"
-else
-    # `gh pr list --search` is used rather than --milestone so that a milestone
-    # with no PRs is distinguishable from one that does not exist (checked
-    # next).
-    MILESTONE_EXISTS="$(
-        gh api "repos/{owner}/{repo}/milestones?state=all&per_page=100" \
-            --jq "[.[] | select(.title == \"${MILESTONE}\")] | length"
-    )"
-    if [ "${MILESTONE_EXISTS}" = "0" ]; then
-        # Fail, do not pass.  A missing milestone is the one way this gate
-        # could report success for a question it never asked: rename the
-        # milestone, or forget to create it, and the check silently becomes a
-        # no-op forever while still printing a green tick.  That is precisely
-        # the "a monitor whose setup fails looks like a monitor with nothing to
-        # report" shape, so it is fatal, with a documented opt-out for a
-        # deliberate release that has no milestone.
-        if [ "${RECOTEM_ALLOW_NO_MILESTONE:-}" = "1" ]; then
-            echo "::notice::No milestone '${MILESTONE}'; skipped via" \
-                 "RECOTEM_ALLOW_NO_MILESTONE=1."
-            exit 0
-        fi
-        fail "no milestone titled '${MILESTONE}' exists, so this release cannot be verified." \
-             "This gate answers 'is every PR the milestone calls MERGED actually in" \
-             "this tree?'.  With no milestone there is nothing to check against, and" \
-             "passing would report success for a question that was never asked." \
-             "" \
-             "To fix, either:" \
-             "  - create a milestone named '${MILESTONE}' and assign the release's PRs, or" \
-             "  - set RECOTEM_ALLOW_NO_MILESTONE=1 to release without one deliberately."
+# `gh pr list --search` is used rather than --milestone so that a milestone
+# with no PRs is distinguishable from one that does not exist (checked next).
+MILESTONE_EXISTS="$(
+    gh api "repos/{owner}/{repo}/milestones?state=all&per_page=100" \
+        --jq "[.[] | select(.title == \"${MILESTONE}\")] | length"
+)"
+if [ "${MILESTONE_EXISTS}" = "0" ]; then
+    # Fail, do not pass.  A missing milestone is the one way this gate could
+    # report success for a question it never asked: rename the milestone, or
+    # forget to create it, and the check silently becomes a no-op forever while
+    # still printing a green tick.  That is precisely the "a monitor whose
+    # setup fails looks like a monitor with nothing to report" shape, so it is
+    # fatal, with a documented opt-out for a deliberate release that has no
+    # milestone.
+    if [ "${RECOTEM_ALLOW_NO_MILESTONE:-}" = "1" ]; then
+        echo "::notice::No milestone '${MILESTONE}'; skipped via" \
+             "RECOTEM_ALLOW_NO_MILESTONE=1."
+        exit 0
     fi
-
-    PRS="$(
-        gh pr list --state merged --search "milestone:${MILESTONE}" \
-            --limit 200 --json number,title,mergeCommit \
-            --jq '.[] | "\(.number)\t\(.mergeCommit.oid // "none")\t\(.title)"'
-    )"
+    fail "no milestone titled '${MILESTONE}' exists, so this release cannot be verified." \
+         "This gate answers 'is every PR the milestone calls MERGED actually in" \
+         "this tree?'.  With no milestone there is nothing to check against, and" \
+         "passing would report success for a question that was never asked." \
+         "" \
+         "To fix, either:" \
+         "  - create a milestone named '${MILESTONE}' and assign the release's PRs, or" \
+         "  - set RECOTEM_ALLOW_NO_MILESTONE=1 to release without one deliberately."
 fi
+
+PRS="$(
+    gh pr list --state merged --search "milestone:${MILESTONE}" \
+        --limit 200 --json number,title,mergeCommit \
+        --jq '.[] | "\(.number)\t\(.mergeCommit.oid // "none")\t\(.title)"'
+)"
 
 if [ -z "${PRS}" ]; then
     echo "Milestone '${MILESTONE}' has no merged pull requests. Nothing to verify."
@@ -186,7 +173,6 @@ pr_merge_oid() {
         printf '%s' "${found}"
         return 0
     fi
-    [ -n "${PR_LIST_FILE}" ] && return 0
     gh pr view "$1" --json mergeCommit --jq '.mergeCommit.oid // ""' 2>/dev/null || true
 }
 

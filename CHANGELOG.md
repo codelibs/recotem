@@ -505,6 +505,34 @@ exit 8.
 
 ### Fixed
 
+- **The sdist shipped nine example READMEs and none of the files they tell you
+  to run.** `[tool.hatch.build.targets.sdist] include` read `["src/recotem",
+  "README.md", "LICENSE"]`. Hatchling's include patterns are gitignore-style,
+  so the unanchored `README.md` matched a `README.md` at *any* depth: the
+  archive carried `docs/README.md` and all nine `examples/*/README.md`, while
+  no pattern named `examples`, so not one `recipe.yaml`, CSV, or manifest came
+  with them. Unpacking the sdist gave you nine example directories consisting
+  entirely of instructions for files that were not there. Every pattern is now
+  anchored with a leading `/` and `/examples` is included; all 28 tracked
+  files under `examples/` ship, and `docs/README.md` — which was only ever
+  collateral of the unanchored glob — no longer does.
+
+  **The wheel deliberately still ships no `examples/`.** A wheel unpacks into
+  `site-packages`, where an `examples/` directory would be neither findable by
+  the relative path a document could name nor cleanly removable on uninstall,
+  and it would be indistinguishable from an importable top-level package. Lean
+  wheel, complete sdist: `pip download recotem --no-binary :all:` is the
+  supported way to obtain the examples without a checkout, and it now works.
+
+  `tests/unit/test_packaging_claims.py` holds two guards, each failing under a
+  one-line revert of the thing it protects: the sdist include patterns must be
+  anchored and must name `/examples`; and every example file that a fenced
+  command in shipped prose tells you to run must exist. Both read whole files
+  and assert they matched something, so a rename cannot switch them off
+  silently. The file's docstring records that it owns the *distributions* and
+  asserts nothing about `docs/getting-started.md`'s Path B, which belongs to
+  the guard added alongside that section's rewrite.
+
 - **A BPRFM artifact trained successfully and then could not be served.** The
   FQCN allow-list named `BPRFMRecommender` but neither `BPRFMTrainer` nor
   `lightfm.lightfm.LightFM`. irspack's early-stopping base keeps the fitted

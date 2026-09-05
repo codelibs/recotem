@@ -39,7 +39,7 @@ The internet-facing boundary is `recotem serve`. `recotem train` has no inbound 
 | Malicious artifact file (serialization RCE) | HMAC-SHA256 verify before any deserialization; signing key required; no legacy unsigned fallback |
 | HMAC bypass leading to arbitrary class construction | Hand-enumerated FQCN allow-list as backstop (see below) |
 | Artifact-size DoS | `RECOTEM_MAX_ARTIFACT_BYTES` cap (default 2 GiB); header length cap (64 KiB); both enforced before deserialization |
-| Request-body DoS (multi-GB body buffered before validation) | `RECOTEM_MAX_BODY_BYTES` cap (default 128 MiB) enforced by `BodySizeLimitMiddleware` before Starlette buffers/parses the body — on both `Content-Length` and chunked bodies; over-cap → `413 PAYLOAD_TOO_LARGE`. All request fields (ids, `exclude_items`, `seed_items`, batch size, and feature-dict key/value lengths + key count) are individually bounded. See [Rate limiting and DoS](#rate-limiting-and-dos) |
+| Request-body DoS (body buffered + JSON-parsed before validation *and* before authentication) | `RECOTEM_MAX_BODY_BYTES` cap (default 128 MiB) enforced by `BodySizeLimitMiddleware` before Starlette buffers/parses the body — on both `Content-Length` and chunked bodies; over-cap → `413 PAYLOAD_TOO_LARGE`. The cap bounds the raw bytes; a body under it still expands several-fold when parsed, and the allocation precedes the `X-API-Key` check, so an unauthenticated caller can drive it — cap the body at the proxy too. All request fields (ids, `exclude_items`, `seed_items`, batch size, and feature-dict key/value lengths + key count) are individually bounded. See [Rate limiting and DoS](#rate-limiting-and-dos) |
 | Stat-then-read TOCTOU on artifact | Read-once protocol: bytes read into memory once, sha256 computed, then HMAC-verified from the same buffer |
 | Key material in logs | structlog redaction processor runs first in chain; unit test asserts no key material at any log level |
 | API key brute-force / timing attack | `hmac.compare_digest` constant-time compare; no logging of plaintext or hash |
@@ -816,9 +816,21 @@ job.
 **Request body is size-capped before it is parsed.** A `BodySizeLimitMiddleware`
 (`serving/app.py`) rejects any request body larger than `RECOTEM_MAX_BODY_BYTES`
 (default 128 MiB, clamped [1 MiB, 2 GiB]) with a `413 PAYLOAD_TOO_LARGE`
-**before** Starlette buffers and JSON-parses it. Without this an authenticated
-client could send a multi-GB body and force the process to allocate and parse it
-in full ahead of any pydantic validation. The middleware enforces the cap at two
+**before** Starlette buffers and JSON-parses it. Without this a client could
+send a multi-GB body and force the process to allocate and parse it in full ahead
+of any pydantic validation. **That allocation precedes authentication.** FastAPI
+reads and JSON-parses the request body while it resolves the endpoint's
+parameters, and the `X-API-Key` dependency is resolved in that same phase — so a
+request that is ultimately rejected with `401` has *already* had its body
+buffered and JSON-parsed. An unauthenticated caller can therefore drive the
+allocation, and a body **under** the raw cap still expands to several times its
+size once it is parsed into Python objects: a ~120 MiB array-of-numbers body was
+measured at ~600 MiB resident, so four concurrent such requests — all answered
+`401` — pushed a serve process from ~250 MiB to ~2.7 GiB. `RECOTEM_MAX_BODY_BYTES`
+bounds the **raw** bytes, not this parse expansion; bound the aggregate with a
+proxy body-size limit (see the nginx block below), per-IP rate limits, and a pod
+memory limit (`resources.limits.memory`, so an over-allocation OOM-kills one pod
+rather than the node). The middleware enforces the cap at two
 points so the header cannot be omitted to bypass it: a declared `Content-Length`
 over the cap is refused outright, and a chunked/streamed body with no
 `Content-Length` is counted as it arrives and cut off the moment the running
@@ -860,6 +872,16 @@ server {
     location /v1/ {
         limit_req zone=recotem_v1 burst=40 nodelay;
         limit_req_status 429;
+        # Refuse an oversized body at the proxy, before it reaches recotem and
+        # is buffered/JSON-parsed (see "Request body is size-capped" above — the
+        # allocation precedes authentication, so an unauthenticated caller can
+        # drive it). Set this to the SMALLEST value that admits the verbs you
+        # actually serve, and keep it below RECOTEM_MAX_BODY_BYTES: 1m suffices
+        # for `:recommend`; cold-start feature payloads (`:recommend-related`,
+        # ~52 MiB) and batch verbs need more. Every increase widens the pre-auth
+        # allocation, so pair a larger value with per-IP rate limits and a pod
+        # memory limit.
+        client_max_body_size 1m;
         proxy_pass http://recotem_backend;
     }
 }

@@ -313,3 +313,44 @@ def test_preflight_opens_no_network_connection() -> None:
                 pass  # refusals are fine; opening a socket is not
     finally:
         socket.socket = real_socket  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# The refusal must name the pip extra, not just the DSN spelling.
+# ---------------------------------------------------------------------------
+
+# `sqlalchemy` reaches every install transitively via optuna, but `psycopg` and
+# `pymysql` live only in the `postgres` / `mysql` extras.  So on a bare
+# `pip install recotem` the *recommended* spelling parses and then fails at
+# driver import — telling the operator to "write it as postgresql+psycopg://"
+# is, on its own, advice they have already followed.  The message has to name
+# the missing package too.
+_EXTRA_BY_DSN = [
+    ("postgresql://h/db", "recotem[postgres]"),
+    ("postgresql+psycopg2://h/db", "recotem[postgres]"),
+    ("mysql://h/db", "recotem[mysql]"),
+    ("mariadb://h/db", "recotem[mysql]"),
+]
+
+
+@pytest.mark.parametrize(("path", "extra"), _EXTRA_BY_DSN)
+def test_driver_refusal_names_the_pip_extra(path: str, extra: str) -> None:
+    with pytest.raises(TrainingError) as excinfo:
+        validate_storage_path(path)
+    message = str(excinfo.value)
+    assert extra in message, (
+        f"the refusal for {path!r} must name the extra that ships the driver "
+        f"({extra}); got: {message}"
+    )
+    assert "pip install" in message
+
+
+def test_unsupported_dialect_message_mentions_the_extras() -> None:
+    """The 'here are the supported forms' list must not imply they work bare."""
+    with pytest.raises(TrainingError) as excinfo:
+        validate_storage_path("oracle://h/db")
+    message = str(excinfo.value)
+    assert "recotem[postgres]" in message and "recotem[mysql]" in message, (
+        "listing the supported DSN forms without saying they need a driver "
+        f"extra reproduces the gap this check exists to close; got: {message}"
+    )

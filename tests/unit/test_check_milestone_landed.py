@@ -20,6 +20,7 @@ can say OK, which is also what a script that checks nothing says.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -181,6 +182,14 @@ def test_stranded_commit_is_refused(repo: Path) -> None:
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "are marked" in proc.stderr and "NOT in the tree" in proc.stderr
     assert "#245" in proc.stderr
+    # The operator advice must not call HEAD "on-main" (R9-P3). HEAD is the
+    # tree being released, which this script does not establish is main --
+    # naming it on-main here is the assumption an off-main tag exploits,
+    # printed in the gate's own help text.
+    assert "echo on-main" not in proc.stderr, (
+        "the stranded remedy tells the operator that an ancestor of HEAD is "
+        "'on-main'; HEAD is not checked against any mainline ref"
+    )
 
 
 @requires_bash
@@ -407,4 +416,485 @@ def test_a_stale_record_for_a_healthy_pr_does_not_mask_it(repo: Path) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "re-landed by" not in proc.stdout, (
         "a reachable PR passed via the record rather than on its own ancestry"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reverted PRs: the half of the question ancestry cannot answer.
+#
+# `merge-base --is-ancestor` detects "never reached main" (#245).  A PR that
+# reached main and was then reverted keeps its merge commit as an ancestor
+# forever, so the ancestry test reports it LANDED while the tree has none of
+# its lines.  Both end in the same false claim -- the milestone says the
+# release contains something it does not -- and only one was checked.
+#
+# `test_ancestry_alone_cannot_see_a_revert` is the positive control: it asserts
+# the blindness is real, so these tests cannot pass for the wrong reason.
+# ---------------------------------------------------------------------------
+
+
+def _revert(repo: Path, sha: str) -> str:
+    """Revert *sha* on the current branch and return the revert commit."""
+    _git(repo, "revert", "--no-edit", sha)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+@requires_bash
+def test_ancestry_alone_cannot_see_a_revert(repo: Path) -> None:
+    """Positive control on the defect, not on the fix.
+
+    The reverted commit is still an ancestor of main and `git show` still
+    renders it, exactly as for a healthy PR.  Nothing about the merge commit
+    distinguishes the two, which is why the check had to grow a second
+    question rather than a better version of the first one.
+    """
+    landed = _sha(repo, "landed")
+    _revert(repo, landed)
+
+    assert (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", landed, "main"], cwd=repo
+        ).returncode
+        == 0
+    ), "fixture is wrong: a reverted commit must still be an ancestor"
+
+    content = (repo / "file.txt").read_text(encoding="utf-8")
+    assert "side" not in content, "fixture is wrong: the revert removed nothing"
+
+
+@requires_bash
+def test_reverted_pr_is_refused(repo: Path) -> None:
+    """The case this check grew for. Ancestry passes; the content is gone."""
+    landed = _sha(repo, "landed")
+    revert = _revert(repo, landed)
+    _set_prs(repo, f"259\t{landed}\tfix(release): close six gate holes")
+
+    proc = _run(repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "REVERTED" in proc.stderr, proc.stderr
+    assert "#259" in proc.stderr
+    assert revert[:12] in proc.stderr, "the report must name the revert commit"
+    # A revert is not a stranding and must not be given the stranding remedy.
+    assert "stacked on a branch" not in proc.stderr
+    assert "move it off milestone" in proc.stderr
+
+
+@requires_bash
+def test_one_reverted_among_healthy_ones_is_still_caught(repo: Path) -> None:
+    landed = _sha(repo, "landed")
+    root = _git(repo, "rev-list", "--max-parents=0", "HEAD")
+    _revert(repo, landed)
+    _set_prs(repo, f"1\t{root}\tfine", f"259\t{landed}\tbacked out")
+
+    proc = _run(repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "#259" in proc.stderr and "#1" not in proc.stderr
+
+
+@requires_bash
+def test_a_revert_that_was_itself_reverted_is_not_reported(repo: Path) -> None:
+    """ "We put it back" is not a missing change.
+
+    Without this the gate would fail a release whose content is present,
+    which is the failure mode that gets a gate switched off.
+    """
+    landed = _sha(repo, "landed")
+    revert = _revert(repo, landed)
+    _revert(repo, revert)
+    assert "side" in (repo / "file.txt").read_text(encoding="utf-8"), (
+        "fixture is wrong: the un-revert did not restore the content"
+    )
+    _set_prs(repo, f"259\t{landed}\treverted then restored")
+
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@requires_bash
+def test_reland_record_clears_a_reverted_pr(repo: Path) -> None:
+    """The waiver works the same for both failure modes."""
+    landed = _sha(repo, "landed")
+    _revert(repo, landed)
+    replacement = _commit(repo, "re-land of #259", "root\nside\nrelanded\n")
+    _set_prs(repo, f"259\t{landed}\tbacked out")
+    _set_replacement(repo, 290, replacement)
+    _reland(repo, "259\t290\treverted by #276; re-landed for 2.2.0\n")
+
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "re-landed by #290" in proc.stdout
+
+
+@requires_bash
+def test_a_reland_that_was_itself_reverted_does_not_clear(repo: Path) -> None:
+    """A waiver must point at something that is in the tree, not merely merged.
+
+    Without the revert test on the replacement, reverting the re-land would
+    leave the record clearing the original -- the waiver would outlive the
+    change it vouches for.
+    """
+    landed = _sha(repo, "landed")
+    _revert(repo, landed)
+    replacement = _commit(repo, "re-land of #259", "root\nside\nrelanded\n")
+    _revert(repo, replacement)
+    _set_prs(repo, f"259\t{landed}\tbacked out")
+    _set_replacement(repo, 290, replacement)
+    _reland(repo, "259\t290\tre-landed, then that was reverted too\n")
+
+    proc = _run(repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "#259" in proc.stderr
+
+
+@requires_bash
+def test_a_healthy_pr_is_not_flagged_by_an_unrelated_revert(repo: Path) -> None:
+    """The trailer names a specific SHA; a nearby revert must not splash."""
+    landed = _sha(repo, "landed")
+    other = _commit(repo, "an unrelated change", "root\nside\nother\n")
+    _revert(repo, other)
+    _set_prs(repo, f"259\t{landed}\tuntouched by the revert above")
+
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# The live instance, run against this repository's real history.
+#
+# PR #276 reverted #259 (90c96f0) and #261 (d0118fc).  Both are still
+# ancestors of main, so this is the blind class sitting in the tree rather
+# than a shape invented for a fixture.  Skipped rather than failed where the
+# history is not available (a shallow CI clone), because "cannot see" and
+# "not present" are different states of knowledge.
+# ---------------------------------------------------------------------------
+
+_LIVE_REVERTED = {
+    "259": "90c96f08525b7bfbad1b99591bcea79266e73de9",
+    "261": "d0118fc66ac656d0f747a34813398c8f62e0665a",
+}
+_LIVE_REVERT = "504905c70d6946e2fea5ba2fb5f85fdbd30275ab"
+
+
+def _have_live_history() -> bool:
+    if (
+        subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == "true"
+    ):
+        return False
+    return all(
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", sha, "HEAD"], cwd=REPO_ROOT
+        ).returncode
+        == 0
+        for sha in (*_LIVE_REVERTED.values(), _LIVE_REVERT)
+    )
+
+
+requires_live_history = pytest.mark.skipif(
+    not _have_live_history(),
+    reason="needs full history containing #259/#261 and their revert #276",
+)
+
+
+@requires_bash
+@requires_live_history
+def test_the_live_reverted_prs_still_pass_the_ancestry_test(tmp_path: Path) -> None:
+    """The blindness, on this repository, stated as a fact about main."""
+    for sha in _LIVE_REVERTED.values():
+        assert (
+            subprocess.run(
+                ["git", "merge-base", "--is-ancestor", sha, "HEAD"], cwd=REPO_ROOT
+            ).returncode
+            == 0
+        ), f"{sha} is expected to be a reverted-but-still-ancestor commit"
+
+
+@requires_bash
+@requires_live_history
+def test_the_shipped_script_catches_the_live_reverted_prs(tmp_path: Path) -> None:
+    """Run the real script over this repository's own history.
+
+    The fixtures above build the shape; this one uses the instance that is
+    actually in the tree, so the check is pinned to a revert someone really
+    made rather than to one written to be caught.
+    """
+    fake = tmp_path / "fakegh"
+    fake.mkdir()
+    (fake / "gh").write_text(_FAKE_GH, encoding="utf-8")
+    (fake / "gh").chmod(0o755)
+    (fake / "milestone_count").write_text("1\n", encoding="utf-8")
+    (fake / "pr_list").write_text(
+        "\n".join(
+            f"{number}\t{sha}\tbacked out by #276"
+            for number, sha in _LIVE_REVERTED.items()
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    empty_reland = tmp_path / "relanded-prs.tsv"
+    empty_reland.write_text("# none\n", encoding="utf-8")
+
+    env = dict(os.environ)
+    env["PATH"] = f"{fake}{os.pathsep}{env['PATH']}"
+    env["FAKE_GH_DIR"] = str(fake)
+    proc = subprocess.run(
+        [str(_BASH), str(SCRIPT), "v2.2.0", "--reland-file", str(empty_reland)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "REVERTED" in proc.stderr
+    assert "#259" in proc.stderr and "#261" in proc.stderr
+    assert _LIVE_REVERT[:12] in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# No-op merges: the third class, and the one where ancestry does not merely
+# fail to notice but actively vouches.
+#
+# A PR can merge cleanly and move no bytes.  The live shape is PR #277, titled
+# "re-land of #259" and stacked on #276 which reverted #259: the branch reverts
+# #259, reverts #261, then restores #259, and the first and third cancel.
+# Merging it into main is clean and its net diff is empty.
+#
+# Measured on this repository before the check was written: of all 329
+# first-parent commits on main, ZERO have an empty diff against their first
+# parent.  The false-positive rate is not predicted here, it is counted.
+# ---------------------------------------------------------------------------
+
+
+def _empty_commit(repo: Path, message: str) -> str:
+    _git(repo, "commit", "--allow-empty", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _reland_that_cancels_itself(repo: Path, sha: str) -> str:
+    """The #277 shape: revert *sha*, then restore it, and merge the pair.
+
+    The branch's net contribution to main is nothing, but it merges cleanly and
+    its merge commit becomes an ancestor.
+    """
+    _git(repo, "checkout", "-q", "-b", "reland", sha)
+    _git(repo, "revert", "--no-edit", sha)
+    _git(repo, "revert", "--no-edit", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "re-land that cancels itself", "reland")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+@requires_bash
+def test_a_no_op_merge_is_refused(repo: Path) -> None:
+    """The case ancestry vouches for rather than merely missing."""
+    noop = _empty_commit(repo, "PR that changed nothing")
+    _set_prs(repo, f"277\t{noop}\tfix(release): re-land of #259")
+
+    proc = _run(repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "moved" in proc.stderr and "no bytes" in proc.stderr
+    assert "#277" in proc.stderr
+    # It is neither stranded nor reverted, and must not get either remedy.
+    assert "stacked on a branch" not in proc.stderr
+    assert "reverted by" not in proc.stderr
+    assert "rebuild it onto main" in proc.stderr
+
+
+@requires_bash
+def test_the_reland_that_cancels_itself_is_refused(repo: Path) -> None:
+    """#277's actual shape, built rather than asserted: revert then restore."""
+    landed = _sha(repo, "landed")
+    merge = _reland_that_cancels_itself(repo, landed)
+
+    assert (
+        subprocess.run(["git", "diff", "--quiet", f"{merge}^", merge], cwd=repo)
+    ).returncode == 0, "fixture is wrong: the merge was supposed to be a no-op"
+    assert (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", merge, "main"], cwd=repo
+        ).returncode
+        == 0
+    ), "fixture is wrong: a no-op merge is still an ancestor"
+
+    _set_prs(repo, f"277\t{merge}\tre-land of #259")
+    proc = _run(repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "#277" in proc.stderr and "no bytes" in proc.stderr
+
+
+@requires_bash
+def test_a_no_op_reland_record_does_not_clear_the_original(repo: Path) -> None:
+    """The hole a no-op opens in the waiver, which is the worst of the three.
+
+    Recording a no-op as the re-land of a reverted PR would clear the original
+    on the strength of a PR that restored nothing -- the gate would not just
+    miss the gap, it would certify it closed.
+    """
+    landed = _sha(repo, "landed")
+    _revert(repo, landed)
+    noop = _empty_commit(repo, "re-land that restored nothing")
+    _set_prs(repo, f"259\t{landed}\tbacked out")
+    _set_replacement(repo, 277, noop)
+    _reland(repo, "259\t277\tre-landed for 2.2.0\n")
+
+    proc = _run(repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "#259" in proc.stderr
+    assert "re-landed by #277" not in proc.stdout, (
+        "a no-op cleared the PR it was recorded against"
+    )
+
+
+@requires_bash
+def test_an_ordinary_pr_is_not_flagged_as_a_no_op(repo: Path) -> None:
+    """Negative control: a real change must stay green."""
+    real = _commit(repo, "a real change", "root\nside\nreal\n")
+    _set_prs(repo, f"300\t{real}\tan ordinary change")
+
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@requires_bash
+def test_success_message_states_what_is_not_checked(repo: Path) -> None:
+    """A gate that lets a reader infer completeness is worse than a loud one.
+
+    Three exact questions are asked; a fourth -- did a later commit remove the
+    change with no revert trailer -- is not, because no cheap form of it
+    survives legitimate refactoring. The output has to say that itself.
+    """
+    _set_prs(repo, f"1\t{_sha(repo, 'landed')}\ta landed change")
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # Asserted by their distinguishing markers, not by the shared "NOT checked"
+    # prefix: with two disclaimers present, a bare substring test for the prefix
+    # is satisfied by either one, so deleting the first would leave this green.
+    # (Measured -- an earlier version of this test did exactly that.)
+    assert "NOT checked, 1 of 2" in proc.stdout, proc.stdout
+    assert "NOT checked, 2 of 2" in proc.stdout, proc.stdout
+    assert "This reverts commit" in proc.stdout
+    assert "no-op" in proc.stdout
+
+
+@requires_bash
+def test_success_message_does_not_present_head_as_main(repo: Path) -> None:
+    """R9-P3's class: every question here is asked of HEAD, not of main.
+
+    "Every milestone PR is an ancestor of HEAD" stays true when HEAD is main
+    plus a commit no PR explains, and P3 demonstrated the consequence on a real
+    off-main commit: the script exited 0 and printed the smuggled SHA in its own
+    success line as though it were the release. The claim is true and narrower
+    than it reads.
+
+    The rule is deliberately not enforced here -- check-release-tag.sh runs on
+    the tag and owns it, and this script is documented as a local pre-flight run
+    from a branch, which a hard "HEAD must be on main" check would break. So the
+    output has to disclaim it instead, and name the owner.
+    """
+    _set_prs(repo, f"1\t{_sha(repo, 'landed')}\ta landed change")
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "is on main" in proc.stdout, (
+        "the success message does not disclaim that HEAD is main, so a reader "
+        "takes it as a statement about the release tree"
+    )
+    assert "check-release-tag.sh" in proc.stdout, (
+        "the disclaimer must name the check that owns the rule, or it reads as "
+        "'nobody checks this' rather than 'someone else does'"
+    )
+
+
+@requires_bash
+def test_success_message_makes_no_dated_claim_about_another_file(repo: Path) -> None:
+    """The disclaimer may name its owner; it may not report the owner's state.
+
+    R9-P3 caught the first version doing both: it said check-release-tag.sh
+    "is NOT on main today: #259 added it, #276 reverted it, and #277's re-land
+    is an empty no-op. It returns with #277's rebuild."  Two defects in one
+    sentence, in text printed on every release run.
+
+    The PR number was wrong in the costly direction -- the rebuild is #297;
+    #277 is still open and still a no-op, so an operator following the pointer
+    lands on the PR that does nothing, which is the trap the sentence exists to
+    warn about.  And the status half goes false on merge in EITHER order: if
+    #297 lands first this file ships already untrue, and if this lands first it
+    goes untrue the moment #297 does.  No merge order avoids it.
+
+    That is this round's own recurring defect -- prose restating a fact that
+    lives in another file -- reappearing in a success message.  The durable
+    half is ownership ("check-release-tag.sh owns that rule"), which is true
+    whatever that file contains; the perishable half is its state, which
+    belongs in that file and nowhere else.
+
+    Scoped to the success path deliberately: the header comment may narrate the
+    history in the past tense, because past tense cannot expire.
+    """
+    _set_prs(repo, f"1\t{_sha(repo, 'landed')}\ta landed change")
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    assert "check-release-tag.sh" in proc.stdout, (
+        "the disclaimer must still name the owner of the on-main rule"
+    )
+    for perishable in ("NOT on main today", "on main today", "re-land", "rebuild"):
+        assert perishable not in proc.stdout, (
+            f"the success message reports {perishable!r} about another file's "
+            "current state. That claim cannot know when it went out of date, "
+            "and it is printed on every release run. Name the owner; do not "
+            "report the owner's status."
+        )
+    assert not re.search(r"#\d+", proc.stdout), (
+        "the success message names a PR number. PR numbers in a printed "
+        "message go stale silently -- the first version of this line pointed "
+        "at #277, whose re-land restores nothing, instead of #297."
+    )
+
+
+@requires_bash
+@requires_live_history
+def test_no_commit_in_this_repositorys_history_is_a_false_positive() -> None:
+    """The false-positive rate, counted rather than predicted.
+
+    A check that flags ordinary work gets switched off, which costs more than
+    the case it catches. This pins the measurement the design rests on, so a
+    future change that starts flagging real commits fails here rather than in
+    a release.
+    """
+    shas = subprocess.run(
+        ["git", "rev-list", "--first-parent", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert len(shas) > 300, "history looks truncated; the measurement is not meaningful"
+
+    flagged = []
+    for sha in shas:
+        parents = subprocess.run(
+            ["git", "rev-list", "--parents", "-n", "1", sha],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()[1:]
+        if not parents:
+            continue
+        if (
+            subprocess.run(
+                ["git", "diff", "--quiet", parents[0], sha], cwd=REPO_ROOT
+            ).returncode
+            == 0
+        ):
+            flagged.append(sha)
+
+    assert not flagged, (
+        "the no-op check would flag real commits in this repository's history, "
+        f"so it is not the exact test it claims to be: {flagged}"
     )

@@ -28,6 +28,33 @@
 # release claims to contain, it is bounded, and it is what an operator reads
 # when deciding whether a fix is in a version.
 #
+# ---------------------------------------------------------------------------
+# Ancestry is only half the question, and this repository contains the other
+# half right now.
+#
+# "Is the merge commit an ancestor?" detects a PR that NEVER REACHED main.  It
+# is structurally blind to a PR that REACHED MAIN AND WAS TAKEN BACK OUT,
+# because a reverted PR's merge commit stays an ancestor forever.  Both end in
+# the same place -- the milestone says the release contains a change the tree
+# does not have -- and only one of them was being checked.
+#
+# The live instance: PR #276 reverted #259 (`90c96f0`) and #261 (`d0118fc`).
+# Both merge commits are still ancestors of main, so the ancestry test reports
+# them LANDED, while `is-ancestor|not on main` in check-release-tag.sh goes
+# from 3 hits at 90c96f0 to 0 in the tree, and `mariadb` in search.py from 5 at
+# d0118fc to 0.  Both carry milestone 2.2.0, so the 2.1.0 release is unaffected
+# -- but on the day 2.2.0 is cut, this gate would green-light a release missing
+# exactly the content it was written to catch.  That is #245's failure one turn
+# of the crank later.
+#
+# So each ancestor is also checked for a revert that still stands, using the
+# canonical `This reverts commit <sha>` trailer that `git revert` and GitHub's
+# Revert button both write.  A reverted PR is not "stranded" and does not get
+# the stranded remedy: the fix is either to re-land it (recorded in
+# relanded-prs.tsv, as for a stranded PR) or to move it off the milestone,
+# which for a deliberate revert is the honest record and the usual answer.
+# ---------------------------------------------------------------------------
+#
 # A re-land is normally a cherry-pick, which produces a NEW commit — the
 # original merge commit stays unreachable forever.  So "the fix is in the tree"
 # and "this PR's merge commit is an ancestor" stop agreeing the moment a lost PR
@@ -196,6 +223,38 @@ pr_merge_oid() {
     gh pr view "$1" --json mergeCommit --jq '.mergeCommit.oid // ""' 2>/dev/null || true
 }
 
+# reverts_of <commit> -> the commits in <commit>..HEAD that revert it, one per
+# line, newest first.  Empty when nothing reverts it.
+#
+# `git revert` and GitHub's own Revert button both write the canonical
+# `This reverts commit <40-hex>.` trailer, so this is a record the tooling
+# produces rather than a convention anyone has to remember.  `--fixed-strings`
+# keeps the SHA out of the regex engine.
+reverts_of() {
+    git log --fixed-strings --grep="This reverts commit $1" \
+        --format='%H' "$1..${HEAD_SHA}" 2>/dev/null || true
+}
+
+# revert_that_stands <commit> -> the revert commit that removed it and was not
+# itself reverted, or empty.
+#
+# Depth is deliberately ONE un-revert.  A revert-of-a-revert is an ordinary
+# "we put it back" and must not be reported; anything deeper is rare enough
+# that the relanded-prs.tsv waiver is the better answer than more recursion
+# here, and a silent wrong answer is worse than a loud one an operator clears
+# by hand.
+revert_that_stands() {
+    local revert
+    while read -r revert; do
+        [ -z "${revert}" ] && continue
+        if [ -z "$(reverts_of "${revert}")" ]; then
+            printf '%s' "${revert}"
+            return 0
+        fi
+    done <<< "$(reverts_of "$1")"
+    return 0
+}
+
 # PR titles are author-controlled text and this script echoes them into a log
 # that GitHub parses for `::workflow commands::`.  A title containing `::error::`
 # would otherwise emit a forged annotation.  Strip the delimiter and any control
@@ -209,9 +268,38 @@ STRANDED=()
 STRANDED_COUNT=0
 MISSING_COMMIT=()
 MISSING_COUNT=0
+REVERTED=()
+REVERTED_COUNT=0
 UNKNOWN=()
 RELANDED=()
 CHECKED=0
+
+# clear_by_reland <pr-number> -> 0 if a recorded re-land really landed.
+# Sets RELAND_NOTE to a human line either way.
+#
+# Shared by both failure modes on purpose: a waiver has to point at something
+# that is in the tree, and "in the tree" now means an ancestor that has not
+# been reverted either.  Without the second half, reverting a re-land would
+# clear the original it was recorded against.
+RELAND_NOTE=""
+clear_by_reland() {
+    local number="$1" replacement repl_oid
+    RELAND_NOTE=""
+    replacement="$(reland_replacement "${number}")"
+    case "${replacement}" in
+        ''|*[!0-9]*) return 1 ;;  # no row, or not a PR number; ignore it
+    esac
+    repl_oid="$(pr_merge_oid "${replacement}")"
+    if [ -n "${repl_oid}" ] \
+        && git cat-file -e "${repl_oid}^{commit}" 2>/dev/null \
+        && git merge-base --is-ancestor "${repl_oid}" "${HEAD_SHA}" \
+        && [ -z "$(revert_that_stands "${repl_oid}")" ]; then
+        RELAND_NOTE="#${number} -> re-landed by #${replacement} (${repl_oid})"
+        return 0
+    fi
+    RELAND_NOTE="       (relanded-prs.tsv names #${replacement}, which has not landed either)"
+    return 1
+}
 
 while IFS=$'\t' read -r NUMBER OID TITLE; do
     [ -z "${NUMBER}" ] && continue
@@ -248,30 +336,33 @@ while IFS=$'\t' read -r NUMBER OID TITLE; do
         continue
     fi
     if git merge-base --is-ancestor "${OID}" "${HEAD_SHA}"; then
+        # Ancestry answers "did it ever reach main?", which is only half the
+        # question the milestone asks.  A reverted PR's merge commit stays an
+        # ancestor forever, so the check above passes for a change whose every
+        # line has since been removed -- "reached main and was taken back out"
+        # is structurally invisible to it.  See the header.
+        REVERT="$(revert_that_stands "${OID}")"
+        if [ -z "${REVERT}" ]; then
+            continue
+        fi
+        if clear_by_reland "${NUMBER}"; then
+            RELANDED+=("${RELAND_NOTE}")
+            continue
+        fi
+        REVERTED+=("#${NUMBER}  ${OID}  ${TITLE}"$'\n'\
+"       reverted by ${REVERT}${RELAND_NOTE:+$'\n'${RELAND_NOTE}}")
+        REVERTED_COUNT=$((REVERTED_COUNT + 1))
         continue
     fi
 
     # Not an ancestor.  A recorded re-land clears it only if the replacement
     # PR's own merge commit is an ancestor — the waiver must point at something
     # that really landed.
-    REPLACEMENT="$(reland_replacement "${NUMBER}")"
-    case "${REPLACEMENT}" in
-        *[!0-9]*) REPLACEMENT="" ;;  # not a PR number; ignore the row
-    esac
-    if [ -n "${REPLACEMENT}" ]; then
-        REPL_OID="$(pr_merge_oid "${REPLACEMENT}")"
-        if [ -n "${REPL_OID}" ] \
-            && git cat-file -e "${REPL_OID}^{commit}" 2>/dev/null \
-            && git merge-base --is-ancestor "${REPL_OID}" "${HEAD_SHA}"; then
-            RELANDED+=("#${NUMBER} -> re-landed by #${REPLACEMENT} (${REPL_OID})")
-            continue
-        fi
-        STRANDED+=("#${NUMBER}  ${OID}  ${TITLE}"$'\n'\
-"       (relanded-prs.tsv names #${REPLACEMENT}, which has not landed either)")
-        STRANDED_COUNT=$((STRANDED_COUNT + 1))
+    if clear_by_reland "${NUMBER}"; then
+        RELANDED+=("${RELAND_NOTE}")
         continue
     fi
-    STRANDED+=("#${NUMBER}  ${OID}  ${TITLE}")
+    STRANDED+=("#${NUMBER}  ${OID}  ${TITLE}${RELAND_NOTE:+$'\n'${RELAND_NOTE}}")
     STRANDED_COUNT=$((STRANDED_COUNT + 1))
 done <<< "${PRS}"
 
@@ -312,6 +403,35 @@ if [ ${#MISSING_COMMIT[@]} -gt 0 ]; then
     exit 1
 fi
 
+if [ ${#REVERTED[@]} -gt 0 ]; then
+    {
+        echo "::error::${REVERTED_COUNT} PR(s) in milestone '${MILESTONE}' reached main"
+        echo "  and were REVERTED, so ${TAG} would publish without them:"
+        for line in "${REVERTED[@]}"; do
+            echo "    ${line}"
+        done
+        echo ""
+        echo "  Ancestry cannot see this. A reverted PR's merge commit stays an"
+        echo "  ancestor of HEAD forever, so the check above passes for a change"
+        echo "  whose every line has been removed. The milestone still says the"
+        echo "  release contains it, which is the same false claim as a stranded"
+        echo "  PR arrived at from the opposite direction."
+        echo ""
+        echo "  To fix, for each PR listed, pick one:"
+        echo "    - it should ship: re-land it and record the new PR in"
+        echo "      .github/relanded-prs.tsv as three tab-separated columns"
+        echo "        <original-pr>  <new-pr>  <why>"
+        echo "      (the new PR must be an ancestor AND not itself reverted)"
+        echo "    - it should NOT ship: move it off milestone '${MILESTONE}',"
+        echo "      which is the honest record and clears this on its own"
+        echo ""
+        echo "  To confirm by hand:"
+        echo "    git log --fixed-strings --grep='This reverts commit <merge-commit>' \\"
+        echo "      <merge-commit>..HEAD"
+    } >&2
+    exit 1
+fi
+
 if [ ${#STRANDED[@]} -gt 0 ]; then
     {
         echo "::error::${STRANDED_COUNT} PR(s) in milestone '${MILESTONE}' are marked"
@@ -339,4 +459,5 @@ if [ ${#STRANDED[@]} -gt 0 ]; then
     exit 1
 fi
 
-echo "OK: every merged PR in milestone '${MILESTONE}' is an ancestor of ${HEAD_SHA}."
+echo "OK: every merged PR in milestone '${MILESTONE}' is an ancestor of" \
+     "${HEAD_SHA} and none has been reverted."

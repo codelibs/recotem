@@ -1,9 +1,15 @@
-# PRs that GitHub reports as MERGED but whose merge commit is not an ancestor
-# of main, together with the PR that actually put the change into main.
+# PRs that GitHub reports as MERGED but whose change is not in main -- either
+# the merge commit is not an ancestor (stranded), or it is an ancestor and was
+# reverted -- together with the PR that actually put the change into main.
 #
 # Read by .github/scripts/check-milestone-landed.sh.  A row here is NOT a way
 # to skip that check: the replacement PR's own merge commit must be an ancestor
-# of the tree being released, or the original is still reported as stranded.
+# of the tree being released AND must not itself have been reverted, or the
+# original is still reported.
+#
+# For a DELIBERATE revert -- a change backed out because it does not belong in
+# this release -- do not add a row here.  Move the PR off the milestone
+# instead; that is the honest record and clears the check on its own.
 #
 # A row is needed because a re-land is normally a cherry-pick, which creates a
 # new commit — the original merge commit stays unreachable forever, so without

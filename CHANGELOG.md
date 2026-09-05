@@ -58,12 +58,24 @@ irspack versions, and the remedy. Requests to that recipe return `503`
 **On Kubernetes the blast radius is the whole pod, not one recipe.**
 `/v1/health` is count-based: it returns `degraded` with HTTP **503** whenever
 `loaded < total` — that is, whenever *any* recipe failed to load. The shipped
-Helm chart points all three probes (startup, readiness, liveness) at
-`/v1/health`, and `examples/k8s/` points readiness and liveness there too. So a
-single refused IALS artifact fails the startupProbe, the pod never becomes
-ready, it is kept out of the Service and restarted — and the recipes that would
-have served fine never receive traffic. "Other recipes keep serving" is true of
-the process, not of the deployment. Retrain before rolling serve.
+Helm chart points its **startupProbe** at `/v1/health`, and that is the probe a
+refused IALS artifact meets first: a new pod never finishes starting (12
+failures × 10 s = a 120 s window), readiness and liveness never take over, the
+pod is never added to the Service, and the kubelet restarts the container —
+while the recipes that would have served fine never receive traffic. "Other
+recipes keep serving" is true of the process, not of a pod that is still
+starting. Retrain before rolling serve.
+
+Readiness and liveness are a different matter in 2.1.0. This release moves them
+off the count-based endpoint onto `/v1/health/ready` and `/v1/health/live` (see
+**Added**), and the chart, `examples/k8s/` and `docs/deployment/k8s.md` all
+point them there. An *already-started* replica that later loses one recipe
+therefore stays Ready and keeps serving the rest — but that does not rescue a
+pod which has not passed startup yet, which is what a skewed IALS artifact
+gives you. **If your own manifests were copied from the 2.0.0 chart, all three
+of your probes are still on `/v1/health`.** Move readiness and liveness before
+you upgrade, or one refused artifact will take every replica out of the Service
+and then CrashLoop them.
 
 **That is the picture at startup only. A hot-swap fails silently instead.** When
 a skewed artifact lands in an *already-running* server, the previously loaded
@@ -270,6 +282,27 @@ exit 8.
   `Field(max_length=64)` bounded only the key COUNT, leaving key length
   unbounded. Over-length or empty keys now get a `422`; an over-length key
   reports only its length, never its (possibly huge) text.
+- **`GET /v1/health/live` and `GET /v1/health/ready`, so one unloadable recipe
+  no longer takes a running fleet offline.** Both are unauthenticated, like
+  `/v1/health`. `/v1/health/live` always answers `200 {"status": "alive"}`
+  while the process can answer and never reads artifact state — a restart
+  cannot fix a missing artifact, since the replacement pod reads the same
+  recipes directory and the same store, and each restart drops the models that
+  *had* loaded. `/v1/health/ready` answers `200` when at least one recipe is
+  loaded and `503` when none is, so a cold fleet still stays out of the Service
+  and the first-install guarantee holds. `/v1/health` itself is unchanged —
+  still `503` whenever `loaded < total` — and stays the startupProbe path,
+  where "every recipe present" is the right gate for a *new* pod.
+
+  In 2.0.0 all three probes polled `/v1/health`, so copying one untrained
+  recipe into a running server's recipes directory failed readiness on every
+  replica at the next watcher poll (they all read the same directory), dropped
+  every endpoint from the Service, and then CrashLooped the pods with no
+  self-healing path. The chart, `examples/k8s/` and `docs/deployment/k8s.md`
+  now wire `readinessProbe` to `/v1/health/ready` and `livenessProbe` to
+  `/v1/health/live`. **Hand-written manifests do not get this for free** — see
+  **Upgrading from 2.0.0** above. Full endpoint reference:
+  [docs/api-reference.md](docs/api-reference.md).
 
 ### Changed
 

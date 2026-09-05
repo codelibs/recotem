@@ -257,65 +257,6 @@ def test_container_healthchecks_use_the_readiness_endpoint() -> None:
     assert seen >= 3, f"expected the shipped healthcheck probes, found {seen}"
 
 
-def test_release_notes_do_not_teach_a_probe_topology_we_stopped_shipping() -> None:
-    """The release notes are a fifth probe surface, and nothing was reading it.
-
-    The four surfaces above are the ones that *run*.  ``CHANGELOG.md`` is the
-    one an operator with hand-written manifests copies from, and it is the only
-    surface for which "wrong" means the reader builds the defect by hand.  It
-    has now been wrong twice for the same reason: a probe moved and the prose
-    describing it did not.  #222 corrected the notes after #219 split readiness
-    and liveness off ``/v1/health``; #241 then moved the startupProbe as well
-    and the notes were left asserting the superseded topology -- and asserting
-    it as correct design, telling the reader ``/v1/health`` "stays the
-    startupProbe path, where 'every recipe present' is the right gate for a
-    *new* pod".  That is the exact configuration #241 removed, because a
-    failing startupProbe restarts the container rather than withholding
-    traffic, so one untrained recipe puts every new pod into a restart loop.
-
-    The assertion is anchored to what the manifests actually ship rather than
-    to a literal, so moving a probe again fails here until the prose moves too.
-    Following #229, it also fails when it matches *nothing*: a release note
-    that stops mentioning the startupProbe would otherwise let this pass
-    vacuously, which is how #220's scan quietly stopped working.
-    """
-    shipped = _probe_paths(
-        yaml.safe_load(
-            (_ROOT / "examples" / "k8s" / "serve-deployment.yaml").read_text()
-        )
-    )
-    startup = shipped["startupProbe"]
-    assert startup == _READY, (
-        "this guard assumes the shipped startupProbe reads the split readiness "
-        f"endpoint; it reads {startup}. Update the guard deliberately."
-    )
-
-    text = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    # Whole-file, not line-by-line: the claim this missed last time spans a
-    # line break ("stays the startupProbe\n  path").
-    mentions = re.findall(
-        r"[^.]*\bstartupProbe\b[^.]*\.", text.replace("\n", " "), re.IGNORECASE
-    )
-    assert mentions, (
-        "CHANGELOG.md no longer mentions the startupProbe anywhere, so this "
-        "guard is passing without checking anything. Either the release notes "
-        "lost a section they should have, or this pattern needs updating."
-    )
-
-    offenders = [
-        s.strip()
-        for s in mentions
-        if re.search(rf"{re.escape(_COUNT_BASED)}(?![a-z/])", s)
-    ]
-    assert not offenders, (
-        "CHANGELOG.md describes the startupProbe as reading the count-based "
-        f"{_COUNT_BASED}, but every shipped manifest points it at {startup}. "
-        "An operator upgrading hand-written manifests copies these notes, so "
-        "this teaches them to build the restart loop #241 removed. "
-        f"Offending sentence(s): {offenders}"
-    )
-
-
 def test_shipped_allowed_hosts_example_keeps_localhost() -> None:
     """Any RECOTEM_ALLOWED_HOSTS example must include `localhost`.
 

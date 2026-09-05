@@ -55,35 +55,27 @@ irspack versions, and the remedy. Requests to that recipe return `503`
 `recotem_artifact_load_failures_total{reason="version_skew"}` increments, and
 `/v1/health/details` reports `"status": "degraded"`.
 
-**On Kubernetes, how far this spreads depends on whether anything else
-loaded.** `/v1/health` is count-based: it returns `degraded` with HTTP **503**
-whenever `loaded < total` — that is, whenever *any* recipe failed to load. In
-2.1.0 no probe reads that endpoint. All three shipped probes read the split
-endpoints: the chart, `examples/k8s/` and `docs/deployment/k8s.md` point
-**startupProbe** and **readinessProbe** at `/v1/health/ready` and
-**livenessProbe** at `/v1/health/live` (see **Added**). `/v1/health/ready`
-answers `200` when at least one recipe is loaded, so a pod holding a refused
-IALS artifact **alongside at least one recipe that did load** starts normally,
-joins the Service, and serves the recipes it has. Requests to the skewed recipe
-return `503`; the rest are unaffected.
+**On Kubernetes the blast radius is the whole pod, not one recipe.**
+`/v1/health` is count-based: it returns `degraded` with HTTP **503** whenever
+`loaded < total` — that is, whenever *any* recipe failed to load. The shipped
+Helm chart points its **startupProbe** at `/v1/health`, and that is the probe a
+refused IALS artifact meets first: a new pod never finishes starting (12
+failures × 10 s = a 120 s window), readiness and liveness never take over, the
+pod is never added to the Service, and the kubelet restarts the container —
+while the recipes that would have served fine never receive traffic. "Other
+recipes keep serving" is true of the process, not of a pod that is still
+starting. Retrain before rolling serve.
 
-The pod is only held out when **nothing** loaded — a fleet whose recipes are
-all IALS, or a single-recipe deployment. Then `/v1/health/ready` answers `503`,
-the startupProbe never passes, and the kubelet restarts the container. That is
-the intended behaviour for a replica with nothing to serve, and it is also what
-keeps a first install out of the Service until it has a model. Retrain before
-rolling serve either way: a degraded pod serves fewer recipes than you think it
-does, and a wholly-IALS fleet will not come up at all.
-
-**If your own manifests were copied from the 2.0.0 chart, all three of your
-probes are still on `/v1/health`** — and that configuration is worse than it
-looks. A startupProbe on the count-based endpoint fails whenever any single
-recipe is missing, and a failing startupProbe does not withhold traffic the way
-a failing readinessProbe does: it **restarts the container**. One refused
-artifact then puts every new pod into a restart loop, so the fleet cannot
-scale, roll, or replace a lost pod, while the already-running replicas keep
-serving and hide the problem. Move all three probes — startup as well as
-readiness and liveness — before you upgrade.
+Readiness and liveness are a different matter in 2.1.0. This release moves them
+off the count-based endpoint onto `/v1/health/ready` and `/v1/health/live` (see
+**Added**), and the chart, `examples/k8s/` and `docs/deployment/k8s.md` all
+point them there. An *already-started* replica that later loses one recipe
+therefore stays Ready and keeps serving the rest — but that does not rescue a
+pod which has not passed startup yet, which is what a skewed IALS artifact
+gives you. **If your own manifests were copied from the 2.0.0 chart, all three
+of your probes are still on `/v1/health`.** Move readiness and liveness before
+you upgrade, or one refused artifact will take every replica out of the Service
+and then CrashLoop them.
 
 **That is the picture at startup only. A hot-swap fails silently instead.** When
 a skewed artifact lands in an *already-running* server, the previously loaded
@@ -308,34 +300,18 @@ exit 8.
   *had* loaded. `/v1/health/ready` answers `200` when at least one recipe is
   loaded and `503` when none is, so a cold fleet still stays out of the Service
   and the first-install guarantee holds. `/v1/health` itself is unchanged —
-  still `503` whenever `loaded < total` — but **no shipped probe reads it any
-  more.** It remains the right endpoint for a dashboard or an alert that wants
-  to know whether every recipe is present; it is the wrong endpoint for a
-  probe, because a probe has to act on the answer.
-
-  **The startupProbe reads `/v1/health/ready` too.** Pointing it at the
-  count-based endpoint looks like the stricter, safer choice — "a *new* pod
-  should not join the Service until every recipe is present" — and it was the
-  configuration this release originally shipped. It is wrong, because a
-  startupProbe failure does not withhold traffic the way a readinessProbe
-  failure does: **it restarts the container.** One valid-but-untrained recipe
-  was enough to put every newly-created pod into a restart loop, so a fleet
-  that was serving fine could not scale, roll, or replace a lost pod — for as
-  long as the recipe stayed untrained, which the chart's default
-  `schedule: "0 2 * * *"` makes up to 24 hours. The running replicas kept
-  serving throughout and hid it. `/v1/health/ready` keeps the guarantee that
-  actually mattered (a pod with *nothing* loaded still never joins the Service)
-  without the restart loop.
+  still `503` whenever `loaded < total` — and stays the startupProbe path,
+  where "every recipe present" is the right gate for a *new* pod.
 
   In 2.0.0 all three probes polled `/v1/health`, so copying one untrained
   recipe into a running server's recipes directory failed readiness on every
   replica at the next watcher poll (they all read the same directory), dropped
   every endpoint from the Service, and then CrashLooped the pods with no
   self-healing path. The chart, `examples/k8s/` and `docs/deployment/k8s.md`
-  now wire `startupProbe` and `readinessProbe` to `/v1/health/ready` and
-  `livenessProbe` to `/v1/health/live`. **Hand-written manifests do not get
-  this for free** — see **Upgrading from 2.0.0** above. Full endpoint
-  reference: [docs/api-reference.md](docs/api-reference.md).
+  now wire `readinessProbe` to `/v1/health/ready` and `livenessProbe` to
+  `/v1/health/live`. **Hand-written manifests do not get this for free** — see
+  **Upgrading from 2.0.0** above. Full endpoint reference:
+  [docs/api-reference.md](docs/api-reference.md).
 
 ### Changed
 

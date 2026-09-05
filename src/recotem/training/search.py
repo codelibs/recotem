@@ -110,6 +110,27 @@ class SearchResult:
 # Optuna storage factory
 # ---------------------------------------------------------------------------
 
+# Scheme prefixes that make a ``training.storage_path`` a *server* URL rather
+# than a filesystem path.  ``mariadb`` belongs here for the same reason
+# ``mysql`` does -- it is a real SQLAlchemy backend name, and recotem's own SQL
+# data source accepts ``mariadb+pymysql://`` -- so an operator who writes one
+# storage_path after the other reasonably expects both spellings to be read the
+# same way.
+#
+# Two call sites classify a storage_path and they must agree.  Omitting
+# ``mariadb`` made both misread it as a bare filename: ``_make_storage``
+# prefixed it to ``sqlite:///mariadb+pymysql://...`` and handed that to SQLite
+# (failing with "unable to open database file", which names neither the real
+# problem nor the fix), and the parallelism guard classified it as SQLite and
+# silently downgraded ``parallelism`` to 1 citing a SQLite limitation that did
+# not apply.  It also skipped the credential refusal below, because that check
+# lives inside the URL branch -- so a storage_path carrying ``user:pass@host``
+# was quietly turned into a *filename containing the password* instead of being
+# rejected.  Keeping one list is what stops the two sites drifting apart again.
+_RDB_URL_SCHEMES = ("postgresql", "postgres", "mysql", "mariadb")
+_STORAGE_URL_RE = re.compile(rf"^({'|'.join((*_RDB_URL_SCHEMES, 'sqlite'))})\b")
+_SERVER_URL_RE = re.compile(rf"^({'|'.join(_RDB_URL_SCHEMES)})\b")
+
 
 def _make_storage(storage_path: str) -> optuna.storages.BaseStorage | None:
     """Return an Optuna storage instance for *storage_path*, or ``None`` for
@@ -132,7 +153,7 @@ def _make_storage(storage_path: str) -> optuna.storages.BaseStorage | None:
         return None
 
     # Postgres or other SQLAlchemy-backed URL
-    if re.match(r"^(postgresql|postgres|mysql|sqlite)\b", path):
+    if _STORAGE_URL_RE.match(path):
         parsed = urlparse(path)
         if parsed.username or parsed.password:
             raise SearchError(
@@ -312,12 +333,12 @@ def run_search(
     # SQLite's WAL mode cannot be safely used across threads within a single
     # process when multiple threads simultaneously call ``study.optimize``.
     # Detect SQLite (bare path → sqlite:///, explicit sqlite:// prefix, or any
-    # non-Postgres/MySQL URL-shaped path) and downgrade parallelism to 1.
+    # non-server URL-shaped path) and downgrade parallelism to 1.
     # In-memory storage (storage_path=None or "") is not affected.
     if storage_path and parallelism > 1:
         _sp = storage_path.strip()
-        _is_pg_mysql = bool(re.match(r"^(postgresql|postgres|mysql)\b", _sp))
-        _is_sqlite = not _is_pg_mysql  # everything else is SQLite or file-based
+        _is_server_url = bool(_SERVER_URL_RE.match(_sp))
+        _is_sqlite = not _is_server_url  # everything else is SQLite or file-based
         if _is_sqlite:
             logger.warning(
                 "env_var_clamped",

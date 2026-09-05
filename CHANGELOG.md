@@ -240,8 +240,11 @@ exit 8.
   fetched feature table (so cold-start entities are representable), which
   means encoded dimension scales with **catalog size, not interaction
   count**; `min_frequency` on high-cardinality columns is the only
-  recipe-level lever. Cost is cubic in this number and multiplies with
-  `training.parallelism`. See `docs/operations.md#feature-aware-ials-sizing`.
+  recipe-level lever. Per-trial time grows at roughly `dim^2.4` (measured — a
+  doubling costs 5.1–5.8×, not the 8× the dense `Fᵀ F` Cholesky suggests,
+  because forming the Gram matrix dilutes the decomposition) and memory
+  quadratically; both multiply with `training.parallelism`. See
+  `docs/operations.md#feature-aware-ials-sizing`.
 - Artifact headers for feature-aware models gain a `features` block
   (`{"version": 1, "item": {...}, "user": {...}}`), inspectable via `recotem
   inspect`. Serve checks this version before deserializing the payload:

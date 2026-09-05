@@ -1033,6 +1033,38 @@ def _cleanse(
     return df, drop_count
 
 
+def _build_final_matrix(
+    df: pd.DataFrame, user_column: str, item_column: str
+) -> tuple[Any, Any, Any]:
+    """Build the final-refit matrix, binarised to match what the search scored.
+
+    ``df_to_sparse`` builds ``csr_matrix((ones, (row, col)))``, and scipy SUMS
+    duplicate coordinates -- so a frame that still holds repeat ``(user, item)``
+    pairs yields confidence weights, while the search phase's
+    ``split_dataframe_partial_user_holdout`` binarises and always scored a 0/1
+    matrix.  With ``cleansing.dedup: none`` the two therefore disagreed:
+    hyperparameters were chosen against 0/1 and the shipped model refit on
+    counts, while ``best_score`` -- computed during the search -- described a
+    model that was never built.  Measured on a repeat-heavy frame, search gave
+    ``max=1.0 mean=1.000`` and the refit ``max=7.0 mean=1.485``, with
+    ``best_score`` identical to 16 digits either way, so nothing surfaced it.
+
+    Binarising is the conservative repair: it makes the artifact the model the
+    search actually selected.  Count weighting is a defensible feature, but it
+    would have to be applied to the search too, which is a modelling change
+    rather than a fix.  ``dedup`` stays a cleansing control, which is what
+    ``recipe-reference.md`` documents it as.
+
+    A ``keep_first`` / ``keep_last`` frame carries no duplicate pairs, so every
+    entry is already 1 and this is a no-op on the default path.
+    """
+    X_full, uids, iids = df_to_sparse(df, user_column, item_column)
+    if X_full.nnz and X_full.data.max() != 1:
+        X_full = X_full.copy()
+        X_full.data[:] = 1
+    return X_full, uids, iids
+
+
 def _train_final(
     df: pd.DataFrame,
     user_column: str,
@@ -1073,7 +1105,7 @@ def _train_final(
     """
     import inspect as _inspect
 
-    X_full, uids, iids = df_to_sparse(df, user_column, item_column)
+    X_full, uids, iids = _build_final_matrix(df, user_column, item_column)
     uids_str = [str(u) for u in uids]
     iids_str = [str(i) for i in iids]
 

@@ -62,13 +62,32 @@ def test_the_scan_recognises_a_train_command() -> None:
 @pytest.mark.parametrize(
     "readme", _example_readmes(), ids=lambda p: str(p.relative_to(_EXAMPLES))
 )
-def test_readme_that_runs_train_names_the_signing_key(readme: Path) -> None:
+def test_readme_names_the_signing_key_before_it_runs_the_cli(readme: Path) -> None:
+    """The key step must come BEFORE the first train/serve command, not anywhere.
+
+    Ordering, not presence, is what makes the walkthrough work. A README that
+    mentions RECOTEM_SIGNING_KEYS in a trailing footnote still exits 8 for a
+    reader following it top to bottom -- and an earlier version of this guard
+    passed that file, because every mutation used to check it had deleted the
+    mention outright rather than moving it. Asserting the offset closes the gap
+    between "the file says the words" and "the procedure runs".
+    """
     text = readme.read_text(encoding="utf-8")
-    if not _RUNS_CLI.search(text):
+    first_cli = _RUNS_CLI.search(text)
+    if not first_cli:
         pytest.skip("does not invoke `recotem train` / `recotem serve`")
-    assert _NAMES_SIGNING_KEY.search(text), (
-        f"{readme.relative_to(_REPO_ROOT)} tells the reader to run the recotem "
-        "CLI but never mentions `recotem keygen --type signing` or "
-        "RECOTEM_SIGNING_KEYS. Without a signing key `recotem train` exits 8 "
-        "(signing_key_missing) on the first command of the example."
+
+    key = _NAMES_SIGNING_KEY.search(text)
+    rel = readme.relative_to(_REPO_ROOT)
+    assert key, (
+        f"{rel} tells the reader to run the recotem CLI but never mentions "
+        "`recotem keygen --type signing` or RECOTEM_SIGNING_KEYS. Without a "
+        "signing key `recotem train` exits 8 (signing_key_missing) on the "
+        "first command of the example."
+    )
+    assert key.start() < first_cli.start(), (
+        f"{rel} mentions the signing key only at offset {key.start()}, AFTER "
+        f"its first `recotem train`/`serve` command at offset "
+        f"{first_cli.start()}. A reader following the file top to bottom still "
+        "hits exit 8. Move the keygen step above the first CLI invocation."
     )

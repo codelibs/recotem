@@ -74,6 +74,14 @@ def _map_exception_to_exit(exc: BaseException) -> int:  # noqa: C901
     # remote ``output.path`` whose bucket/container is absent or whose
     # credentials were resolved and then refused — a rotated key, a typo in a
     # bucket name — which used to reach the operator as an unmapped exit 1.
+    #
+    # ``storage_path_unusable`` is the same shape one field over: a
+    # ``training.storage_path`` whose dialect or DBAPI cannot be loaded on this
+    # host.  It is environmental rather than textual — the identical recipe is
+    # valid where ``recotem[postgres]`` is installed and invalid where it is
+    # not — which is what puts it here rather than on _EXIT_RECIPE with
+    # ``output.path``'s scheme and artifact-root violations.  It too used to
+    # reach the operator as an unmapped exit 1, from inside Optuna.
     try:
         from recotem.training.errors import (
             TrainingError as _TrainingError,  # noqa: PLC0415
@@ -83,6 +91,7 @@ def _map_exception_to_exit(exc: BaseException) -> int:  # noqa: C901
             "signing_key_missing",
             "artifact_write_credentials",
             "artifact_write_destination",
+            "storage_path_unusable",
         ):
             return _EXIT_CONFIG
     except (ImportError, AttributeError):

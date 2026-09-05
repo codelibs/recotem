@@ -520,3 +520,119 @@ def test_repo_deployment_pins_are_where_the_script_looks(tmp_path: Path) -> None
         "examples/ or docs/. The script refuses this case at release time; if "
         "the pins genuinely moved, teach the script where they went."
     )
+
+
+# ---------------------------------------------------------------------------
+# Ways the gate used to pass a release it should have refused
+#
+# Each case below made the script print "OK" on a tree that would have shipped
+# a stale or non-existent version.  They are grouped because they share one
+# shape: the value the script reads is not the value that reaches a user.
+# ---------------------------------------------------------------------------
+
+
+def test_nested_version_key_does_not_shadow_the_chart_version(
+    tmp_path: Path,
+) -> None:
+    """`chart_key` must read a top-level key, not the first one at any depth.
+
+    awk's `$1` is the first *field*, so an indented `version:` matched the same
+    test as a top-level one and awk stopped there.  A `dependencies:` block is
+    the ordinary way a Helm chart acquires exactly that shape.
+    """
+    script = _make_tree(tmp_path, chart_version="2.0.0")
+    chart = tmp_path / "helm" / "recotem" / "Chart.yaml"
+    chart.write_text(
+        "apiVersion: v2\nname: recotem\ntype: application\n"
+        "dependencies:\n  - name: redis\n    version: 2.1.0\n"
+        "version: 2.0.0\n"
+        'appVersion: "2.1.0"\n',
+        encoding="utf-8",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "helm/recotem/Chart.yaml version: (2.0.0)" in proc.stdout
+
+
+def test_last_version_assignment_wins_as_python_reads_it(tmp_path: Path) -> None:
+    """The guard must read the string `import recotem` reports.
+
+    Stopping at the first `__version__` assignment read a different value from
+    the one Python binds, which is the last.  A file carrying both would have
+    passed the gate while the wheel reported the stale version.
+    """
+    script = _make_tree(tmp_path)
+    version_py = tmp_path / "src" / "recotem" / "version.py"
+    version_py.write_text(
+        '__version__ = "2.1.0"\n__version__ = "2.0.0"\n', encoding="utf-8"
+    )
+    # What Python itself binds, so the assertion is anchored to real semantics.
+    namespace: dict[str, str] = {}
+    exec(version_py.read_text(encoding="utf-8"), namespace)  # noqa: S102
+    assert namespace["__version__"] == "2.0.0"
+
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "src/recotem/version.py (2.0.0)" in proc.stdout
+
+
+@pytest.mark.parametrize("pin", ["2.1.0-alpine", "2.1.0rc1", "2.1.0.1"])
+def test_a_pin_whose_tag_merely_starts_with_the_version_is_refused(
+    tmp_path: Path, pin: str
+) -> None:
+    """The comparison is against the whole tag, not a three-segment prefix.
+
+    `grep -o` with a prefix pattern returned `recotem:2.1.0` for a pin reading
+    `recotem:2.1.0-alpine`, which compared equal to the tag and passed --
+    vouching for an image tag that was never published.
+    """
+    script = _make_tree(tmp_path, example_pin=pin)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "does not match every deployment pin" in proc.stdout
+    assert pin in proc.stdout
+
+
+def test_a_version_label_with_a_suffix_is_refused(tmp_path: Path) -> None:
+    """Same hole on the label side, where the old pattern simply missed it."""
+    script = _make_tree(tmp_path, version_label="2.1.0-rc1")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "2.1.0-rc1" in proc.stdout
+
+
+def test_no_version_label_anywhere_is_refused_rather_than_passed(
+    tmp_path: Path,
+) -> None:
+    """The label scan gets the vacuity guard the pin scan already had.
+
+    Deleting every `app.kubernetes.io/version` label reduced that half of the
+    check to nothing while the script still reported OK for the release.
+    """
+    script = _make_tree(tmp_path, version_label=None)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "app.kubernetes.io/version" in proc.stdout
+
+
+def test_stale_pins_and_stale_versions_are_reported_in_one_run(
+    tmp_path: Path,
+) -> None:
+    """Both classes of failure in a single run -- the contract section 3 claims.
+
+    The pin scan used to `fail` (which exits) before the version mismatches
+    were printed, so a tree stale in both ways -- the normal state at the start
+    of a release -- reported only the pins.  On the tag-triggered release path
+    each extra round trip costs a tag delete, a re-tag and a re-push.
+    """
+    script = _make_tree(
+        tmp_path, pyproject="2.0.0", version_py="2.0.0", example_pin="2.0.0"
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    for expected in (
+        "examples/k8s/serve-deployment.yaml",
+        "pyproject.toml (2.0.0)",
+        "src/recotem/version.py (2.0.0)",
+    ):
+        assert expected in proc.stdout, f"{expected!r} missing from:\n{proc.stdout}"

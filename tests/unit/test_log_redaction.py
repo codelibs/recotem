@@ -1650,3 +1650,83 @@ def test_py_warnings_logger_emits_above_the_root_level(rendered) -> None:
     assert "still visible" in rendered.raw, (
         f"warning suppressed by the root level; rendered {rendered.raw!r}"
     )
+
+
+# --- exception text is scrubbed on both non-structlog sinks -----------------
+#
+# Two sinks render an exception's text outside the reach of the first
+# redaction pass, and a config error quotes the offending value back -- for
+# RECOTEM_SIGNING_KEYS that value IS the signing key:
+#
+#   1. ``structlog.processors.format_exc_info`` materialises the ``exception``
+#      field AFTER ``redact_sensitive_keys`` has already run, so the rendered
+#      traceback shipped unscrubbed to the log aggregator while the sibling
+#      ``error`` field on the SAME event read ``[REDACTED-HEX64]``.
+#   2. ``cli._exit`` writes to stderr with ``typer.echo``, never entering the
+#      structlog chain at all.
+#
+# Both are keyed on a plain ``RuntimeError`` below, not on KeyRingConfigError:
+# the defect is "any exception whose message embeds a secret", and a guard
+# naming one exception class would not notice the next one.
+
+_SECRET_HEX64 = "ab12cd34" * 8
+
+
+def test_rendered_exception_field_is_scrubbed(rendered) -> None:
+    """The ``exception`` traceback must not carry a secret the ``error`` hides.
+
+    Regression: redaction ran only as the FIRST processor, while
+    ``format_exc_info`` (last) created the ``exception`` string afterwards.
+    """
+    import structlog
+
+    rendered.clear()
+    try:
+        raise RuntimeError(f"malformed entry '{_SECRET_HEX64}': expected kid:hex")
+    except RuntimeError:
+        structlog.get_logger("test.redaction").error("boom", exc_info=True)
+
+    line = rendered.lines()[0]
+    assert "exception" in line, f"no exception field rendered; got {rendered.raw!r}"
+    assert _SECRET_HEX64 not in rendered.raw, (
+        "raw secret leaked into the rendered log line via the exception "
+        f"traceback; rendered {rendered.raw!r}"
+    )
+    assert "[REDACTED-HEX64]" in line["exception"], (
+        "the exception field must be scrubbed in place, not dropped -- the "
+        f"traceback is the operator's diagnostic; got {line['exception']!r}"
+    )
+    # The traceback must survive as a traceback, not be flattened away.
+    assert "RuntimeError" in line["exception"]
+
+
+def test_cli_exit_scrubs_secret_from_stderr(capsys) -> None:
+    """``_exit`` writes outside structlog, so it must scrub explicitly."""
+    import typer
+
+    from recotem.cli import _exit
+
+    message = f"Training failed: malformed KeyRing entry '{_SECRET_HEX64}'"
+    with pytest.raises(typer.Exit):
+        _exit(8, message)
+
+    err = capsys.readouterr().err
+    assert _SECRET_HEX64 not in err, (
+        f"raw secret leaked to stderr via cli._exit; stderr was {err!r}"
+    )
+    assert "[REDACTED-HEX64]" in err, (
+        f"_exit must keep the diagnostic, scrubbed; stderr was {err!r}"
+    )
+
+
+def test_redact_text_is_idempotent() -> None:
+    """A second pass over already-scrubbed text must not corrupt it.
+
+    The processor now runs twice in the chain, so non-idempotence would
+    double-redact or mangle the placeholder.
+    """
+    from recotem.log_redaction import redact_text
+
+    once = redact_text(f"key '{_SECRET_HEX64}' is bad")
+    assert once == redact_text(once)
+    assert "[REDACTED-HEX64]" in once

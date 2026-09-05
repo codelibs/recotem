@@ -44,6 +44,31 @@ _ACTIONABLE_KEY_STEP = re.compile(
 )
 
 
+def _first_real_key_step(text: str) -> re.Match[str] | None:
+    """First actionable key step that is not inside a shell comment.
+
+    A commented *illustration* of the step is not the step. Without this
+    filter, a README reading
+
+        # 1. Train. You will need a signing key; it looks like this:
+        #    export RECOTEM_SIGNING_KEYS="dev:<hex64>"
+        uv run recotem train ...
+
+    satisfies the anchor above its train command while the real `export` sits
+    below it -- a file that still exits 8 on its first command. Verified by
+    building exactly that; see the regression test at the bottom.
+
+    ``_RUNS_CLI`` needs no equivalent filter: it is anchored to the start of a
+    line and ``#`` is not in its prefix, so a commented-out command cannot
+    match it.
+    """
+    for match in _ACTIONABLE_KEY_STEP.finditer(text):
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        if not text[line_start : match.start()].lstrip().startswith("#"):
+            return match
+    return None
+
+
 def _example_readmes() -> list[Path]:
     return sorted(_EXAMPLES.rglob("README.md"))
 
@@ -89,14 +114,20 @@ def test_readme_names_the_signing_key_before_it_runs_the_cli(readme: Path) -> No
     if not first_cli:
         pytest.skip("does not invoke `recotem train` / `recotem serve`")
 
-    key = _ACTIONABLE_KEY_STEP.search(text)
+    key = _first_real_key_step(text)
     rel = readme.relative_to(_REPO_ROOT)
+    commented_only = key is None and _ACTIONABLE_KEY_STEP.search(text) is not None
     assert key, (
         f"{rel} tells the reader to run the recotem CLI but never gives them a "
         "step that produces a signing key -- no `recotem keygen --type "
         "signing`, no export or assignment of RECOTEM_SIGNING_KEYS. Without "
         "one, `recotem train` exits 8 (signing_key_missing) on the first "
         "command of the example."
+        + (
+            " (It shows one inside a comment, which the reader cannot run.)"
+            if commented_only
+            else ""
+        )
     )
     assert key.start() < first_cli.start(), (
         f"{rel} gives the signing-key step at offset {key.start()}, AFTER its "
@@ -142,3 +173,65 @@ def test_a_prose_mention_before_the_command_does_not_satisfy_the_guard() -> None
         "the guard must reject a README whose actionable signing-key step "
         "comes after the command that needs it"
     )
+
+
+def test_a_commented_illustration_does_not_satisfy_the_guard() -> None:
+    """Showing the step in a comment is not giving the reader the step.
+
+    Third revision of this guard, and the third anchor that admitted a README
+    which exits 8 on its first command. Each was found by a probe the previous
+    version's author would not have written:
+
+    1. presence -- a trailing footnote naming the variable
+    2. ordering of a *mention* -- prose above, the real `export` below
+    3. ordering of an *action* -- a commented illustration above, the real
+       `export` below
+
+    Each fix moved the anchor one step closer to "what the reader can run".
+    """
+    broken = (
+        "# Run\n"
+        "```bash\n"
+        "# 1. Train. You will need a signing key; it looks like this:\n"
+        '#    export RECOTEM_SIGNING_KEYS="dev:<hex64>"\n'
+        "uv run recotem train examples/demo/recipe.yaml\n"
+        "\n"
+        "# 2. Generate the key if the above failed.\n"
+        "export $(uv run recotem keygen --type signing | grep '^env_entry=')\n"
+        "```\n"
+    )
+    first_cli = _RUNS_CLI.search(broken)
+    assert first_cli, "fixture must contain a train command"
+
+    # The unfiltered anchor is satisfied early by the comment -- the trap.
+    naive = _ACTIONABLE_KEY_STEP.search(broken)
+    assert naive is not None and naive.start() < first_cli.start()
+
+    # The filtered one finds only the real step, which is too late.
+    real = _first_real_key_step(broken)
+    assert real is not None, "fixture must contain a runnable keygen line"
+    assert real.start() > first_cli.start(), (
+        "the guard must reject a README whose only runnable signing-key step "
+        "comes after the command that needs it, however clearly a comment "
+        "above that command describes it"
+    )
+
+
+def test_every_shipped_readme_step_is_runnable_not_commented() -> None:
+    """The anchor the guard uses must be a real line in every shipped README.
+
+    Guards against the filter silently finding nothing: if a future edit moved
+    every key step into a comment, `_first_real_key_step` would return None and
+    the parametrised test would fail -- but this states the expectation
+    directly, so the reason is legible.
+    """
+    checked = 0
+    for readme in _example_readmes():
+        text = readme.read_text(encoding="utf-8")
+        if not _RUNS_CLI.search(text):
+            continue
+        checked += 1
+        assert _first_real_key_step(text) is not None, (
+            f"{readme.relative_to(_REPO_ROOT)} has no runnable signing-key step"
+        )
+    assert checked >= 7, f"expected >=7 READMEs invoking the CLI, saw {checked}"

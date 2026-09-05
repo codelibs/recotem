@@ -172,14 +172,40 @@ def test_no_paragraph_claims_exit_3_for_a_contract_violation() -> None:
     )
 
 
+def _serve_passage() -> str:
+    """Return the passage describing what ``recotem serve`` does on a collision.
+
+    Scoped for the same reason as ``_paragraph_containing``, and fixed after a
+    probe showed the file-wide version of this test was passing on luck: of its
+    three needles, ``recipe_load_error_skipped`` appears **twice** in this file
+    (rule 1 mentions it too), so that needle proves nothing on its own. The
+    assertion held only because a *companion* needle happened to be unique — and
+    a later edit that reworded the passage while mentioning
+    ``recipes_directory_loaded_lenient`` anywhere else would have silenced it
+    without anyone noticing.
+
+    Scoping removes the dependency on needle uniqueness entirely: only the
+    anchor has to be unique, and that is asserted.
+    """
+    text = _doc()
+    marker = "## Exit codes a plugin can actually produce"
+    assert text.count(marker) == 1, (
+        f"expected exactly one exit-code section heading, found "
+        f"{text.count(marker)}; the anchor is no longer unique"
+    )
+    start = text.index("If two installed plugins both declare")
+    return text[start : text.index(marker)]
+
+
 def test_serve_is_documented_as_not_exiting_on_a_duplicate_type_name() -> None:
     """Serve keeps running with the recipe unloaded; that is the operational risk."""
-    doc = _doc()
-    assert "does not\nexit at all" in doc or "does not exit at all" in doc, (
-        "the doc must say recotem serve does NOT exit on a duplicate type_name"
+    passage = _serve_passage()
+    assert "does not\nexit at all" in passage or "does not exit at all" in passage, (
+        "the serve passage must say recotem serve does NOT exit on a "
+        "duplicate type_name"
     )
-    assert "recipe_load_error_skipped" in doc
-    assert "recipes_directory_loaded_lenient" in doc
+    assert "recipe_load_error_skipped" in passage
+    assert "recipes_directory_loaded_lenient" in passage
 
 
 def test_exit_code_table_is_present_and_matches_measurement() -> None:

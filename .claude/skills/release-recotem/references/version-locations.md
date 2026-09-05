@@ -138,12 +138,13 @@ manifests on the last released version, and this block would flag them.
 
 ```bash
 # 1. every package-version location agrees.
-#    check-release-tag.sh is authoritative for pyproject.toml, version.py and
-#    helm/recotem/Chart.yaml: it is the same script the `guard` job of both
-#    publish.yml and docker.yml runs at the tag, it fails closed, and it checks
-#    all four declarations against the tag *together* — so it catches a partial
-#    bump (pyproject.toml moved, version.py not; or the package moved and the
-#    chart did not) that greps read by eye do not. uv.lock is not in its scope;
+#    check-release-tag.sh is authoritative for pyproject.toml, version.py,
+#    helm/recotem/Chart.yaml and helm/recotem/values.yaml: it is the same script
+#    the `guard` job of both publish.yml and docker.yml runs at the tag, it
+#    fails closed, and it checks every one of those declarations against the
+#    tag *together* — so it catches a partial bump (pyproject.toml moved,
+#    version.py not; or the package moved and the chart did not) that greps
+#    read by eye do not. uv.lock is not in its scope;
 #    `uv lock --check` covers that.
 bash .github/scripts/check-release-tag.sh "v$NEW"   # MUST print "OK: ..."
 uv lock --check                                     # MUST exit 0

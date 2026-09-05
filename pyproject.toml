@@ -133,7 +133,14 @@ build-backend = "hatchling.build"
 packages = ["src/recotem"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/recotem", "README.md", "LICENSE"]
+# Every pattern is anchored with a leading "/".  Hatchling's include patterns
+# are gitignore-style, so an unanchored "README.md" matches a README.md at ANY
+# depth: it pulled docs/README.md and all nine examples/*/README.md into the
+# sdist while "src/recotem" -- the only other pattern -- shipped none of the
+# recipe.yaml, CSV, or manifest files those READMEs tell the reader to run.
+# The result was nine example directories consisting of instructions for files
+# that were not there.  "/examples" ships the files as well.
+include = ["/src/recotem", "/examples", "/README.md", "/LICENSE"]
 
 [dependency-groups]
 dev = [

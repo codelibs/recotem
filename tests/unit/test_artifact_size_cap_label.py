@@ -275,26 +275,9 @@ def test_documented_reason_enum_covers_every_label_the_code_emits() -> None:
     test read the two together. Scanning the whole row and failing when the
     row itself cannot be found keeps that from recurring quietly.
     """
-    root = Path(__file__).resolve().parents[2]
-    serving = root / "src" / "recotem" / "serving"
-    emitted = set(
-        re.findall(r'\breturn "([a-z_]+)"', (serving / "watcher.py").read_text("utf-8"))
-    )
-    emitted |= set(
-        re.findall(
-            r'return _failed_entry\([^)]*\), "([a-z_]+)"',
-            (serving / "app.py").read_text("utf-8"),
-        )
-    )
-    emitted |= set(
-        re.findall(
-            r'_size_cap_or\([^)]*"([a-z_]+)"\)',
-            (serving / "app.py").read_text("utf-8"),
-        )
-    )
-    emitted.add("size_cap")
-    emitted.discard("ok")
+    emitted = _emitted_reason_labels()
 
+    root = Path(__file__).resolve().parents[2]
     doc = (root / "docs" / "operations.md").read_text(encoding="utf-8")
     row = re.search(
         r"recotem_artifact_load_failures_total.*?`reason` ∈ \{(?P<enum>[^}]*)\}",
@@ -313,4 +296,96 @@ def test_documented_reason_enum_covers_every_label_the_code_emits() -> None:
         "these reason labels are emitted by the code but absent from the "
         f"documented enum in docs/operations.md: {missing}. An operator "
         "alerting per-reason has no entry for them."
+    )
+
+
+def _emitted_reason_labels() -> set[str]:
+    """Every ``reason`` label the serving code can hand to the metrics module.
+
+    Scanned from source rather than exercised, because several of these
+    branches need a wedged mount or a 600 MiB artifact to reach. The scan is
+    the same one both guards below read, so they cannot disagree about what
+    "emitted" means.
+    """
+    serving = Path(__file__).resolve().parents[2] / "src" / "recotem" / "serving"
+    watcher = (serving / "watcher.py").read_text("utf-8")
+    app = (serving / "app.py").read_text("utf-8")
+
+    emitted = set(re.findall(r'\breturn "([a-z_]+)"', watcher))
+    emitted |= set(re.findall(r'return _failed_entry\([^)]*\), "([a-z_]+)"', app))
+    emitted |= set(re.findall(r'_size_cap_or\([^)]*"([a-z_]+)"\)', app))
+    emitted |= set(
+        re.findall(r'inc_artifact_load_failure\([^)]*reason="([a-z_]+)"', watcher)
+    )
+    emitted |= set(
+        re.findall(r'inc_artifact_load_failure\([^)]*reason="([a-z_]+)"', app)
+    )
+    emitted.add("size_cap")
+    emitted.discard("ok")
+    return emitted
+
+
+def test_metrics_accepts_every_reason_label_the_code_emits() -> None:
+    """``_LOAD_FAILURE_REASONS`` must contain every label the code emits.
+
+    ``inc_artifact_load_failure`` coerces anything outside that set to
+    ``"unexpected"`` -- silently, by design, because the set exists to bound
+    the label's cardinality. That makes an omission invisible: the log line
+    says ``size_cap`` and the counter says ``unexpected``, with no error
+    anywhere in between.
+
+    ``size_cap`` was exactly that. Both call sites have returned it since #239
+    and #270, the documented enum in docs/operations.md lists it, and the
+    counter could never carry it. The sibling guard below compares the emitted
+    set against the *documentation*, so it stayed green throughout -- which is
+    why this one compares against the code that actually labels the metric.
+    """
+    from recotem.serving.metrics import _LOAD_FAILURE_REASONS
+
+    unreachable = sorted(_emitted_reason_labels() - _LOAD_FAILURE_REASONS)
+    assert not unreachable, (
+        "these reason labels are emitted by the serving code but absent from "
+        f"_LOAD_FAILURE_REASONS: {unreachable}. inc_artifact_load_failure "
+        "will coerce each of them to 'unexpected', so the counter can never "
+        "carry the label and per-reason alerting on it is impossible."
+    )
+
+
+def test_size_cap_reaches_the_counter_as_its_own_label() -> None:
+    """End to end through the real registry, not just the allow-list.
+
+    The membership test above would still pass if ``inc_artifact_load_failure``
+    stopped consulting ``_LOAD_FAILURE_REASONS`` at all. This one reads the
+    label back off a rendered exposition, and pins that an unknown reason is
+    still coerced -- the cardinality guard has to keep working.
+    """
+    prometheus_client = pytest.importorskip("prometheus_client")
+    assert prometheus_client  # the metrics extra is what registers the counter
+
+    import recotem.serving.metrics as metrics_mod
+
+    metrics_mod._ensure_initialized()
+    if metrics_mod._ARTIFACT_LOAD_FAILURES is None:
+        pytest.skip("metrics are not enabled in this environment")
+
+    recipe = "sizecap_label_probe"
+    metrics_mod.inc_artifact_load_failure(recipe, reason="size_cap")
+    metrics_mod.inc_artifact_load_failure(recipe, reason="not_a_real_reason")
+
+    text = metrics_mod.generate_latest()[0].decode("utf-8")
+    rows = [
+        line
+        for line in text.splitlines()
+        if line.startswith("recotem_artifact_load_failures_total")
+        and f'recipe="{recipe}"' in line
+    ]
+    labels = {line.split('reason="', 1)[1].split('"', 1)[0] for line in rows}
+
+    assert "size_cap" in labels, (
+        'the counter did not carry reason="size_cap"; an over-cap artifact '
+        f"is being filed under something else. Rows: {rows}"
+    )
+    assert "unexpected" in labels, (
+        "an unrecognised reason must still be coerced to 'unexpected' -- the "
+        f"cardinality guard is gone. Rows: {rows}"
     )

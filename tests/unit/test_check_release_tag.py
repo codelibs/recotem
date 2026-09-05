@@ -18,12 +18,16 @@ Covered:
 - the chart's `version:` and `appVersion:` are checked, and a chart missing
   either key is refused rather than skipped;
 - `values.yaml`'s `image.tag` is checked, because that -- not `appVersion` --
-  is the image a chart install actually pulls.
+  is the image a chart install actually pulls;
+- the pinned `ghcr.io/codelibs/recotem:X.Y.Z` references under `examples/` and
+  `docs/`, and the `app.kubernetes.io/version` label in `examples/k8s/`, are
+  checked too, and a scan that matches nothing is refused rather than passed.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -47,6 +51,9 @@ def _make_tree(
     chart_version: str | None = "2.1.0",
     chart_app_version: str | None = "2.1.0",
     values_image_tag: str | None = "2.1.0",
+    example_pin: str | None = "2.1.0",
+    docs_pin: str | None = "2.1.0",
+    version_label: str | None = "2.1.0",
 ) -> Path:
     """Build a minimal tree the script can read, and return its script path.
 
@@ -57,6 +64,8 @@ def _make_tree(
     (root / ".github" / "scripts").mkdir(parents=True)
     (root / "src" / "recotem").mkdir(parents=True)
     (root / "helm" / "recotem").mkdir(parents=True)
+    (root / "examples" / "k8s").mkdir(parents=True)
+    (root / "docs" / "deployment").mkdir(parents=True)
 
     script = root / ".github" / "scripts" / SCRIPT.name
     shutil.copy(SCRIPT, script)
@@ -86,6 +95,26 @@ def _make_tree(
         values += f'  tag: "{values_image_tag}"\n'
     values += "  pullPolicy: IfNotPresent\n"
     (root / "helm" / "recotem" / "values.yaml").write_text(values, encoding="utf-8")
+
+    # Deployment pins.  `:latest` sits alongside the pinned reference in both
+    # files so the scan has to leave a deliberately-floating tag alone; it is
+    # what compose.yaml and the getting-started docs use on purpose.
+    deployment = "spec:\n  template:\n    metadata:\n      labels:\n"
+    if version_label is not None:
+        deployment += f'        app.kubernetes.io/version: "{version_label}"\n'
+    deployment += "    spec:\n      containers:\n"
+    deployment += "        - name: serve\n"
+    if example_pin is not None:
+        deployment += f"          image: ghcr.io/codelibs/recotem:{example_pin}\n"
+    (root / "examples" / "k8s" / "serve-deployment.yaml").write_text(
+        deployment, encoding="utf-8"
+    )
+
+    docs = "# Kubernetes\n\nPull the image:\n\n"
+    docs += "    docker run --rm ghcr.io/codelibs/recotem:latest --help\n\n"
+    if docs_pin is not None:
+        docs += f"          image: ghcr.io/codelibs/recotem:{docs_pin}\n"
+    (root / "docs" / "deployment" / "k8s.md").write_text(docs, encoding="utf-8")
 
     return script
 
@@ -388,3 +417,106 @@ def test_real_values_declares_an_image_tag(tmp_path: Path) -> None:
             found = line.split(":", 1)[1].strip().strip('"')
             break
     assert found, "helm/recotem/values.yaml must pin image.tag explicitly"
+
+
+# ---------------------------------------------------------------------------
+# Deployment pins outside the chart
+#
+# These used to be excluded from the script as "illustrative rather than
+# load-bearing".  Measured on a live arm64 kind cluster, applying
+# `examples/k8s/` verbatim deploys the image pinned there, and the published
+# 2.0.0 arm64 variant cannot start at all -- its console script carries the
+# build-stage shebang `#!/build/.venv/bin/python`, which does not exist in the
+# runtime stage, so the bootstrap Job fails and every replica goes
+# CrashLoopBackOff.  A release that bumps the chart and leaves these behind
+# hands that image to everyone who follows the deployment docs.
+# ---------------------------------------------------------------------------
+
+
+def test_stale_examples_k8s_pin_is_refused(tmp_path: Path) -> None:
+    """Everything else bumped, examples/k8s left on the previous image."""
+    script = _make_tree(tmp_path, example_pin="2.0.0")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "does not match every deployment pin" in proc.stdout
+    assert "examples/k8s/serve-deployment.yaml" in proc.stdout
+    assert "ghcr.io/codelibs/recotem:2.0.0" in proc.stdout
+
+
+def test_stale_docs_pin_is_refused(tmp_path: Path) -> None:
+    """docs/deployment/k8s.md is what a reader copies, so it is checked too."""
+    script = _make_tree(tmp_path, docs_pin="2.0.0")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "docs/deployment/k8s.md" in proc.stdout
+
+
+def test_stale_version_label_is_refused(tmp_path: Path) -> None:
+    """`app.kubernetes.io/version` is a version declaration like any other."""
+    script = _make_tree(tmp_path, version_label="2.0.0")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "app.kubernetes.io/version" in proc.stdout
+
+
+def test_every_stale_pin_is_named_in_one_run(tmp_path: Path) -> None:
+    """One run, one fix pass -- the same contract the version pins have."""
+    script = _make_tree(
+        tmp_path, example_pin="2.0.0", docs_pin="1.9.9", version_label="2.0.0"
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1
+    for expected in (
+        "examples/k8s/serve-deployment.yaml",
+        "docs/deployment/k8s.md",
+        "app.kubernetes.io/version",
+    ):
+        assert expected in proc.stdout, f"{expected!r} missing from:\n{proc.stdout}"
+
+
+def test_latest_tag_is_not_treated_as_a_pin(tmp_path: Path) -> None:
+    """`:latest` tracks the moving tag on purpose and must not be flagged.
+
+    The docs fixture carries a `:latest` reference alongside its pinned one; a
+    scan that refused it would make every release unable to pass.
+    """
+    script = _make_tree(tmp_path)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "latest" not in proc.stdout
+
+
+def test_no_pin_anywhere_is_refused_rather_than_passed(tmp_path: Path) -> None:
+    """A vacuous scan is worse than a missing one.
+
+    If the pattern stops matching -- a directory renamed, the registry path
+    changed -- the script must say so rather than print a success message
+    vouching for pins it never looked at.  Same reasoning as the empty
+    `image.tag` case above.
+    """
+    script = _make_tree(tmp_path, example_pin=None, docs_pin=None)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "No pinned" in proc.stdout
+
+
+def test_repo_deployment_pins_are_where_the_script_looks(tmp_path: Path) -> None:
+    """Pins the script scans for must actually exist in this repository.
+
+    The synthetic-tree cases above would all still pass if `examples/k8s/` were
+    restructured so the real pins moved out of the scanned paths.  This one
+    reads the repository.
+    """
+    hits = []
+    for rel in ("examples", "docs"):
+        for path in (REPO_ROOT / rel).rglob("*"):
+            if not path.is_file() or path.suffix not in {".yaml", ".yml", ".md"}:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if re.search(r"ghcr\.io/codelibs/recotem:[0-9]+\.[0-9]+\.[0-9]+", text):
+                hits.append(path.relative_to(REPO_ROOT))
+    assert hits, (
+        "no pinned ghcr.io/codelibs/recotem:X.Y.Z reference found under "
+        "examples/ or docs/. The script refuses this case at release time; if "
+        "the pins genuinely moved, teach the script where they went."
+    )

@@ -23,11 +23,24 @@
 # fires.  Checking appVersion alone let a release tagged vX.Y.Z ship a chart
 # whose manifests pull the *previous* image, with this script reporting OK.
 #
-# It does NOT check the remaining pins the release procedure bumps (the
-# examples/k8s manifests and the docs excerpts).  Those are illustrative rather
-# than load-bearing; step 3 of the verification block in
-# .claude/skills/release-recotem/references/version-locations.md covers them,
-# and the success message below says so rather than claiming otherwise.
+#        - examples/k8s/ and docs/    pinned ghcr.io/codelibs/recotem:X.Y.Z
+#
+# The deployment pins are checked for a reason that was measured rather than
+# assumed.  They used to be excluded as "illustrative rather than
+# load-bearing".  They are not: applying examples/k8s/ verbatim to a live arm64
+# cluster deploys the image named there, and the published 2.0.0 arm64 variant
+# cannot start --
+#
+#   $ head -1 /opt/venv/bin/recotem   # ghcr.io/codelibs/recotem:2.0.0, arm64
+#   #!/build/.venv/bin/python         # the BUILD stage venv, absent at runtime
+#
+# giving `exec /opt/venv/bin/recotem: no such file or directory`, a failed
+# bootstrap Job and CrashLoopBackOff on every replica.  A release that bumps the
+# chart and leaves these behind hands that image to everyone who follows the
+# deployment docs, and it is not visible from the package version.
+#
+# `:latest` references are deliberately exempt -- compose.yaml and the
+# getting-started docs track the moving tag on purpose.
 #
 # Usage (CI):    bash .github/scripts/check-release-tag.sh          # reads GITHUB_REF
 # Usage (local): bash .github/scripts/check-release-tag.sh v2.1.0   # before tagging
@@ -208,6 +221,65 @@ add_mismatch() {
 [ "${VALUES_IMAGE_TAG}" = "${EXPECTED}" ] || \
     add_mismatch "helm/recotem/values.yaml image.tag: (${VALUES_IMAGE_TAG})"
 
+# ---------------------------------------------------------------------------
+# 4. Deployment pins outside the chart
+# ---------------------------------------------------------------------------
+# Read with grep rather than a YAML/Markdown parser, for the same reason the
+# chart keys are read with awk: the guard jobs run this straight after
+# `actions/checkout` with nothing installed.  These are literal image
+# references in manifests and in fenced code blocks, so a textual scan is the
+# right shape as well as the only available one.
+#
+# `-o` prints just the match, so each hit is `path:lineno:<match>`.
+PIN_RE='ghcr\.io/codelibs/recotem:[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*'
+LABEL_RE='app\.kubernetes\.io/version: *"[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"'
+
+PIN_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${PIN_RE}" examples docs 2>/dev/null || true)"
+LABEL_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${LABEL_RE}" examples 2>/dev/null || true)"
+
+# A scan that finds nothing is refused rather than passed.  The release
+# procedure bumps these pins, so zero hits means the pattern stopped matching,
+# not that there is nothing to check -- and a vacuous check is worse than a
+# missing one, because the success message below would vouch for pins nobody
+# looked at.  Same reasoning as the empty `image.tag` case above.
+[ -n "${PIN_HITS}" ] || \
+    fail "No pinned 'ghcr.io/codelibs/recotem:X.Y.Z' reference found under examples/ or docs/." \
+         "The release procedure bumps these, so finding none means this check stopped" \
+         "matching rather than that there is nothing to check.  Refused rather than" \
+         "skipped: a vacuous check would make this script's success message untrue."
+
+# Both hit shapes end in the version, one after a ':' and one inside quotes:
+#   examples/k8s/cronjob.yaml:60:ghcr.io/codelibs/recotem:2.0.0
+#   examples/k8s/serve-deployment.yaml:27:app.kubernetes.io/version: "2.0.0"
+# Dropping a trailing quote and then everything through the last ':' or '"'
+# leaves the version in both cases.
+pin_version() {
+    printf '%s' "$1" | sed -e 's/"$//' -e 's/.*[:"]//'
+}
+
+# Collected as array elements, not as one newline-joined string, so `fail`
+# indents every line the same way rather than only the first.
+STALE_PINS=()
+while IFS= read -r hit; do
+    [ -n "${hit}" ] || continue
+    [ "$(pin_version "${hit}")" = "${EXPECTED}" ] || STALE_PINS+=("  ${hit}")
+done < <(printf '%s\n%s\n' "${PIN_HITS}" "${LABEL_HITS}")
+
+if [ "${#STALE_PINS[@]}" -gt 0 ]; then
+    fail "Tag '${TAG}' does not match every deployment pin.  Still on another version:" \
+         "${STALE_PINS[@]}" \
+         "" \
+         "These are not illustrative.  Applying examples/k8s/ verbatim deploys the" \
+         "image named there, and docs/deployment/k8s.md is what a reader copies. The" \
+         "published 2.0.0 arm64 image cannot start at all -- its console script carries" \
+         "the build-stage shebang '#!/build/.venv/bin/python' -- so a release still" \
+         "pointing at it is a CrashLoopBackOff for every arm64 reader of those docs." \
+         "" \
+         "To fix, set every reference above to ${EXPECTED} (or pick another number):" \
+         "  git grep -nE 'ghcr[.]io/codelibs/recotem:[0-9]+[.][0-9]+[.][0-9]+' examples docs" \
+         "  git grep -n  'app.kubernetes.io/version' examples"
+fi
+
 if [ -n "${MISMATCH}" ]; then
     fail "Tag '${TAG}' does not match the project version: ${MISMATCH}." \
          "The tag, pyproject.toml, src/recotem/version.py, helm/recotem/Chart.yaml" \
@@ -226,7 +298,8 @@ if [ -n "${MISMATCH}" ]; then
 fi
 
 echo "OK: ${TAG} is a final release and matches pyproject.toml,"
-echo "    src/recotem/version.py, helm/recotem/Chart.yaml and helm/recotem/values.yaml."
-echo "    The remaining release pins (examples/k8s manifests, docs excerpts) are not"
-echo "    machine-checked here — run step 3 of the verification block in"
+echo "    src/recotem/version.py, helm/recotem/Chart.yaml, helm/recotem/values.yaml,"
+echo "    and every pinned image reference under examples/ and docs/."
+echo "    Not checked here: uv.lock (run 'uv lock --check'), and version strings"
+echo "    outside those files — see the verification block in"
 echo "    .claude/skills/release-recotem/references/version-locations.md."

@@ -25,12 +25,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from recotem._exit_codes import _EXIT_UNKNOWN
+
 _ROOT = Path(__file__).resolve().parents[2]
 
 _K8S_DOC = _ROOT / "docs" / "deployment" / "k8s.md"
 _CRONJOB = _ROOT / "helm" / "recotem" / "templates" / "cronjob-train.yaml"
 _VALUES = _ROOT / "helm" / "recotem" / "values.yaml"
 _WATCHER = _ROOT / "src" / "recotem" / "serving" / "watcher.py"
+_ARTIFACT_IO = _ROOT / "src" / "recotem" / "artifact" / "io.py"
+
+# The call that blocks, and that then raises on a just-recovered mount despite
+# its own exist_ok.
+_MAKEDIRS = "os.makedirs(dest_dir, exist_ok=True)"
 
 # The heading the paragraph lives under.  Anything below is only meaningful
 # while this section is present.
@@ -104,6 +111,31 @@ def test_doc_forbid_claim_matches_the_shipped_default() -> None:
         f"{_K8S_DOC.relative_to(_ROOT)}: the outage section no longer names "
         f"the {_FORBID_EVENT!r} event those suppressed runs are logged with."
     )
+
+
+def test_doc_describes_the_recovery_failure_the_write_path_produces() -> None:
+    """The stall ends in an unmapped error, not in a completed write."""
+    io_src = _ARTIFACT_IO.read_text(encoding="utf-8")
+    assert _MAKEDIRS in io_src, (
+        f"{_ARTIFACT_IO.relative_to(_ROOT)} no longer calls {_MAKEDIRS!r}.  "
+        f"{_K8S_DOC.relative_to(_ROOT)} explains that this is the call that "
+        "blocks on a dead network mount and then raises FileExistsError once "
+        "the mount returns, because exist_ok defers to an isdir check that "
+        "does not survive the recovery."
+    )
+    assert _EXIT_UNKNOWN == 1, (
+        "the unmapped-exception exit code moved; "
+        f"{_K8S_DOC.relative_to(_ROOT)} tells operators the recovery failure "
+        "lands on exit 1, which the CronJob exit-code table reads as "
+        '"Unexpected error - Retry".'
+    )
+    doc = _doc()
+    for phrase in ("[Errno 17] File exists", "internal_error", "exit 1"):
+        assert phrase in doc, (
+            f"{_K8S_DOC.relative_to(_ROOT)}: the outage section no longer "
+            f"quotes {phrase!r}, so an operator who greps the failure cannot "
+            "reach the paragraph that explains it."
+        )
 
 
 def test_serve_still_has_the_timeout_that_train_lacks() -> None:

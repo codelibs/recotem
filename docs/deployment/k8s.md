@@ -619,27 +619,49 @@ PVC, by scaling the NFS server to zero replicas mid-run:
 |---|---|---|
 | `serve`, already running | keeps answering `:recommend` (10/10 `200`), stays `1/1` Ready, 0 restarts, 2–3 millicores | `artifact_stat_timeout` (WARN, per recipe, one scan every ~20 s), then `artifact_stat_failed` naming `OSError [Errno 116] Stale file handle` |
 | `serve`, new pod | never starts | `FailedMount ... exit status 32` on the pod; the rollout stalls |
-| `train`, mid-run | **blocks in the artifact write and never returns** — measured 16 min 50 s at 1 millicore before the run was abandoned | nothing. The last log line is `final_model_trained`; no error, no exit code |
+| `train`, mid-run | **blocks in the artifact write for as long as the outage lasts** — measured 23 min 19 s at 1 millicore — then fails | nothing at all while blocked: the last log line is `final_model_trained`, no error, no progress. On recovery, `exit 1` |
 
 The asymmetry is deliberate on one side only. The watcher stats artifacts on a
 worker thread with a wall-clock timeout and reports the ones that hang
 (`src/recotem/serving/watcher.py`), so a wedged mount costs the scan loop a
 timeout rather than the process. The artifact write
-(`src/recotem/artifact/io.py`) is a plain `mkstemp` → `write` → `fsync` →
-`os.replace`; on a hard NFS mount whose server is gone every one of those
-blocks in the kernel, uninterruptibly, for as long as the server stays away.
+(`src/recotem/artifact/io.py`) is a plain `makedirs` → `mkstemp` → `write` →
+`fsync` → `os.replace`; on a hard NFS mount whose server is gone every one of
+those blocks in the kernel, uninterruptibly, for as long as the server stays
+away.
+
+**And the run does not simply resume when storage comes back.** With the file
+server restored, the blocked `os.makedirs(dest_dir, exist_ok=True)` returned by
+raising, and the run ended like this:
+
+```console
+Training failed: [Errno 17] File exists: '/artifacts'
+RECOTEM_EXIT=1
+```
+```json
+{"code": "internal_error", "exit_code": 1,
+ "error": "[Errno 17] File exists: '/artifacts'", "event": "train_error"}
+```
+
+`exist_ok=True` suppresses `FileExistsError` only when the `isdir` check that
+follows it succeeds; against a mount that has just come back that check does
+not, so the error is re-raised. It is then unmapped, so it lands on **exit 1**,
+which the table above calls "Unexpected error — Retry". Retrying is the right
+action, but the message an operator is left holding is a `FileExistsError` on a
+directory that plainly exists, with a traceback through `recotem/artifact/io.py`
+and nothing naming the file server.
 
 Consequences on the shipped chart:
 
 * Nothing in the process ends the stall. The chart's
-  `activeDeadlineSeconds: 3600` on the train Job is the only bound, so the run
-  occupies its slot for a full hour.
+  `activeDeadlineSeconds: 3600` on the train Job is the only bound, so an
+  outage longer than that costs the run its whole slot.
 * It is then killed as `DeadlineExceeded` — `Job was active longer than
   specified deadline` — which names the deadline, not the storage. Nothing in
   the Job's status or events mentions the file server.
 * With `concurrencyPolicy: Forbid` (the chart default) that one stalled run
-  suppresses every scheduled run behind it for the same hour, each skipped with
-  `JobAlreadyActive`.
+  suppresses every scheduled run behind it for the same window, each skipped
+  with `JobAlreadyActive`.
 * The per-recipe lock is held for the whole stall, on a file the process can no
   longer reach.
 

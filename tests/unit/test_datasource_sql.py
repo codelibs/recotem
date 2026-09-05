@@ -128,7 +128,9 @@ def test_init_unknown_dialect_raises(monkeypatch) -> None:
 def test_init_missing_driver_extra_pg(monkeypatch) -> None:
     from recotem.datasource.sql import SQLSource
 
-    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/x")
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@db.example.com/x"
+    )
     monkeypatch.setitem(sys.modules, "psycopg", None)
     with pytest.raises(DataSourceError, match=r"recotem\[postgres\]"):
         SQLSource(_make_cfg())
@@ -138,7 +140,7 @@ def test_init_rejects_private_host_by_default(monkeypatch) -> None:
     from recotem.datasource.sql import SQLSource
 
     monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
-    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@127.0.0.1/x")
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@127.0.0.1/x")
     with pytest.raises(DataSourceError, match="SSRF|private|RECOTEM_SQL_ALLOW_PRIVATE"):
         SQLSource(_make_cfg())
 
@@ -147,7 +149,7 @@ def test_init_allows_private_host_when_opted_in(monkeypatch) -> None:
     from recotem.datasource.sql import SQLSource
 
     monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
-    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@127.0.0.1/x")
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@127.0.0.1/x")
     # Driver probe will succeed because psycopg is installed in dev env.
     # SSRF guard must NOT raise because allow_private=1.
     SQLSource(_make_cfg())  # must not raise
@@ -165,7 +167,7 @@ def test_init_does_not_log_dsn_userinfo(monkeypatch) -> None:
     from recotem.datasource.sql import SQLSource
 
     monkeypatch.setenv(
-        "RECOTEM_RECIPE_DB_DSN", "postgresql://alice:s3cret@db.public.example/x"
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://alice:s3cret@db.public.example/x"
     )
     monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
     with structlog.testing.capture_logs() as captured:
@@ -180,14 +182,14 @@ def test_init_log_safe_dsn_format(monkeypatch) -> None:
 
     monkeypatch.setenv(
         "RECOTEM_RECIPE_DB_DSN",
-        "postgresql://alice:s3cret@db.public.example:5432/orders",
+        "postgresql+psycopg://alice:s3cret@db.public.example:5432/orders",
     )
     monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
     with structlog.testing.capture_logs() as captured:
         SQLSource(_make_cfg())
     flat = repr(captured)
     # safe DSN includes scheme, host, port, and DB path separator — but no creds
-    assert "postgresql://" in flat
+    assert "postgresql+psycopg://" in flat
     assert "db.public.example" in flat
     assert "/orders" in flat  # path separator preserved
     assert "alice" not in flat
@@ -206,7 +208,9 @@ def test_probe_unreachable_db_raises(monkeypatch) -> None:
     from recotem.datasource.sql import SQLSource
 
     monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
-    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@127.0.0.1:1/none")
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@127.0.0.1:1/none"
+    )
     src = SQLSource(_make_cfg(connect_timeout_seconds=1))
     with pytest.raises(DataSourceError):
         src.probe()
@@ -322,7 +326,9 @@ def test_ssrf_blocked_private_hosts(monkeypatch, host) -> None:
 
     monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
     encoded = f"[{host}]" if ":" in host else host
-    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"postgresql://u:p@{encoded}/db")
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", f"postgresql+psycopg://u:p@{encoded}/db"
+    )
     monkeypatch.setitem(
         __import__("sys").modules, "psycopg", __import__("sys").modules.get("psycopg")
     )
@@ -341,7 +347,9 @@ def test_ssrf_allow_private_bypasses_ssrf_check(monkeypatch, host) -> None:
 
     monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
     encoded = f"[{host}]" if ":" in host else host
-    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"postgresql://u:p@{encoded}/db")
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", f"postgresql+psycopg://u:p@{encoded}/db"
+    )
     # Stub psycopg so driver probe succeeds even if not installed.
     import types
 
@@ -364,7 +372,7 @@ def test_ssrf_allow_private_bypasses_ssrf_check(monkeypatch, host) -> None:
 #
 # SQLAlchemy's ``make_url`` only populates ``url.host`` from the netloc.
 # When the destination is supplied via a URL query parameter (e.g.
-# ``postgresql:///db?host=169.254.169.254``), libpq / PyMySQL still route
+# ``postgresql+psycopg:///db?host=169.254.169.254``), libpq / PyMySQL still route
 # the TCP connect to the query value while ``url.host`` is empty.  Without
 # inspecting those keys the SSRF guard would be silently bypassed.  The
 # tests below cover every routing form recotem supports.
@@ -387,7 +395,7 @@ def test_ssrf_allow_private_bypasses_ssrf_check(monkeypatch, host) -> None:
 def test_ssrf_blocked_via_query_host_param(monkeypatch, dsn) -> None:
     """Query-parameter routing must be subject to the SSRF guard.
 
-    A DSN like ``postgresql:///db?host=169.254.169.254`` leaves
+    A DSN like ``postgresql+psycopg:///db?host=169.254.169.254`` leaves
     ``url.host`` empty (SQLAlchemy only populates it from the netloc) but
     libpq still pivots the TCP connect to the query value.  Without this
     check the cloud metadata service / RFC1918 destinations would be
@@ -965,7 +973,9 @@ def test_ipv6_private_addresses_blocked(monkeypatch, ipv6_addr) -> None:
     monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
     # psycopg stub so driver probe passes
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
-    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"postgresql://u:p@[{ipv6_addr}]/db")
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", f"postgresql+psycopg://u:p@[{ipv6_addr}]/db"
+    )
     with pytest.raises(DataSourceError, match="(?i)private|loopback"):
         SQLSource(_make_cfg())
 
@@ -980,7 +990,7 @@ def test_ipv6_public_hostname_not_blocked(monkeypatch) -> None:
     monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
     monkeypatch.setenv(
-        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@db.example.com/orders"
     )
     # Patch assert_host_public to avoid real DNS lookup in CI.  The function
     # now returns the full list of resolved public IPs (not a single string).
@@ -1287,7 +1297,7 @@ def test_rebinding_different_ip_raises(monkeypatch) -> None:
     monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
     monkeypatch.setenv(
-        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@db.example.com/orders"
     )
 
     # During __init__, assert_host_public returns the public IP list.  Pin
@@ -1328,7 +1338,9 @@ def test_rebinding_skipped_for_numeric_ip(monkeypatch, ip_literal) -> None:
     monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
     encoded = f"[{ip_literal}]" if ":" in ip_literal else ip_literal
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
-    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"postgresql://u:p@{encoded}/db")
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", f"postgresql+psycopg://u:p@{encoded}/db"
+    )
     src = SQLSource(_make_cfg())
 
     import socket
@@ -1366,7 +1378,9 @@ def test_safe_dsn_runtimeerror_propagates(monkeypatch) -> None:
     from recotem.datasource.sql import SQLSource
 
     monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
-    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/db")
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@db.example.com/db"
+    )
     import types
 
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
@@ -1394,7 +1408,7 @@ def test_dns_failure_message_does_not_say_private(monkeypatch) -> None:
     monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
     monkeypatch.setenv(
-        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@nonexistent.invalid/db"
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@nonexistent.invalid/db"
     )
 
     dns_error_msg = (
@@ -1472,7 +1486,7 @@ def test_rebinding_dual_stack_ipv4_pin_ipv6_rebind_detected(monkeypatch) -> None
     monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
     monkeypatch.setenv(
-        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@db.example.com/orders"
     )
 
     with patch(
@@ -1511,7 +1525,7 @@ def test_rebinding_dual_stack_ipv6_pin_ipv4_rebind_overlap_clears(monkeypatch) -
     monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
     monkeypatch.setenv(
-        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@db.example.com/orders"
     )
 
     # __init__ pins both families (the full set returned by assert_host_public).
@@ -1550,7 +1564,7 @@ def test_rebinding_ipv6_only_pin_ipv6_only_rebind_overlap_clears(monkeypatch) ->
     monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
     monkeypatch.setenv(
-        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db6.example.com/orders"
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@db6.example.com/orders"
     )
 
     with patch(
@@ -1581,7 +1595,7 @@ def test_rebinding_oserror_raises_with_clear_message(monkeypatch) -> None:
     monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
     monkeypatch.setenv(
-        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@db.example.com/orders"
     )
 
     with patch(
@@ -1713,7 +1727,7 @@ def test_dsn_password_with_url_encoded_at_sign(monkeypatch) -> None:
     # Password is ``p@ss:word!`` percent-encoded as ``p%40ss%3Aword%21``.
     monkeypatch.setenv(
         "RECOTEM_RECIPE_DB_DSN",
-        "postgresql://alice:p%40ss%3Aword%21@db.example.com:5432/orders",
+        "postgresql+psycopg://alice:p%40ss%3Aword%21@db.example.com:5432/orders",
     )
     with structlog.testing.capture_logs() as logs:
         src = SQLSource(_make_cfg())
@@ -1745,7 +1759,7 @@ def test_dsn_password_with_colons_does_not_confuse_ipv6_bracket_logic(
     monkeypatch.setenv(
         "RECOTEM_RECIPE_DB_DSN",
         # Password = "a:b:c:d" (encoded colons)
-        "postgresql://alice:a%3Ab%3Ac%3Ad@db.example.com:5432/orders",
+        "postgresql+psycopg://alice:a%3Ab%3Ac%3Ad@db.example.com:5432/orders",
     )
     src = SQLSource(_make_cfg())
     assert src._dialect == "postgresql"
@@ -1762,7 +1776,7 @@ def test_dsn_with_url_encoded_password_special_chars_via_log_redaction() -> None
 
     from recotem.log_redaction import _scrub_string_value
 
-    dsn = "postgresql://alice:p%40ss%3Aword%21@db.example.com:5432/orders"
+    dsn = "postgresql+psycopg://alice:p%40ss%3Aword%21@db.example.com:5432/orders"
     out = _scrub_string_value(dsn)
     assert "p%40ss%3Aword%21" not in out
     assert "alice" not in out
@@ -1832,7 +1846,7 @@ def test_tls_warning_postgres_without_sslmode(monkeypatch) -> None:
     monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
     monkeypatch.setenv(
-        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@db.example.com/orders"
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@db.example.com/orders"
     )
 
     with structlog.testing.capture_logs() as logs:
@@ -1857,7 +1871,7 @@ def test_tls_warning_postgres_with_weak_sslmode(monkeypatch, sslmode) -> None:
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
     monkeypatch.setenv(
         "RECOTEM_RECIPE_DB_DSN",
-        f"postgresql://u:p@db.example.com/orders?sslmode={sslmode}",
+        f"postgresql+psycopg://u:p@db.example.com/orders?sslmode={sslmode}",
     )
 
     with structlog.testing.capture_logs() as logs:
@@ -1882,7 +1896,7 @@ def test_tls_warning_postgres_silent_with_strong_sslmode(monkeypatch, sslmode) -
     monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
     monkeypatch.setenv(
         "RECOTEM_RECIPE_DB_DSN",
-        f"postgresql://u:p@db.example.com/orders?sslmode={sslmode}",
+        f"postgresql+psycopg://u:p@db.example.com/orders?sslmode={sslmode}",
     )
 
     with structlog.testing.capture_logs() as logs:
@@ -2034,7 +2048,9 @@ def test_init_rejects_full_loopback_unspecified_range(monkeypatch, private_ip) -
     from recotem.datasource.sql import SQLSource
 
     monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
-    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"postgresql://u:p@{private_ip}/x")
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", f"postgresql+psycopg://u:p@{private_ip}/x"
+    )
     with pytest.raises(
         DataSourceError, match="(?i)private/loopback|RECOTEM_SQL_ALLOW_PRIVATE"
     ):
@@ -2060,7 +2076,7 @@ def test_init_rejects_idn_hostname_resolving_to_private_ip(monkeypatch) -> None:
     # Punycode form of a non-ASCII hostname; SQLAlchemy's make_url will keep
     # it as-is, and our SSRF guard re-resolves it via getaddrinfo.
     monkeypatch.setenv(
-        "RECOTEM_RECIPE_DB_DSN", "postgresql://u:p@xn--exmple-cua.test/x"
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@xn--exmple-cua.test/x"
     )
 
     def fake_getaddrinfo(host, port, *args, **kwargs):
@@ -2141,7 +2157,7 @@ def test_error_label_names_the_dbapi_error_without_leaking_the_dsn() -> None:
 
     class _DriverError(Exception):
         def __str__(self) -> str:  # pragma: no cover - must never be called
-            return "postgresql://alice:s3cret@db.example/orders"
+            return "postgresql+psycopg://alice:s3cret@db.example/orders"
 
     class _Wrapper(Exception):
         def __init__(self) -> None:
@@ -2171,7 +2187,7 @@ def test_read_only_failure_message_carries_the_driver_error_class(
 
     class _Syntax(Exception):
         def __str__(self) -> str:  # pragma: no cover - must never be called
-            return "postgresql://alice:s3cret@db.example/orders"
+            return "postgresql+psycopg://alice:s3cret@db.example/orders"
 
     class _Programming(Exception):
         def __init__(self) -> None:
@@ -2239,7 +2255,7 @@ def test_error_label_walks_the_cause_chain_and_adds_sqlstate() -> None:
         sqlstate = "42P01"
 
         def __str__(self) -> str:  # pragma: no cover - must never be called
-            return "postgresql://alice:s3cret@db.example/orders"
+            return "postgresql+psycopg://alice:s3cret@db.example/orders"
 
     class _Alchemy(Exception):
         def __init__(self) -> None:
@@ -2257,7 +2273,7 @@ def test_error_label_walks_the_cause_chain_and_adds_sqlstate() -> None:
 
     # A driver whose ``sqlstate`` is free text must not reach the message.
     class _Sneaky(Exception):
-        sqlstate = "postgresql://alice:s3cret@db.example/orders"
+        sqlstate = "postgresql+psycopg://alice:s3cret@db.example/orders"
 
     class _Wrap(Exception):
         def __init__(self) -> None:

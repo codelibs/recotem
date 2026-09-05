@@ -15,17 +15,66 @@ from recotem.datasource.base import DataSourceError, FetchContext
 
 _DIALECT_TO_EXTRA = {
     "postgresql": "postgres",
-    "postgres": "postgres",
     "mysql": "mysql",
     "mariadb": "mysql",
     "sqlite": "sqlite",
 }
 
-# keyed by extra name, not dialect
-_DIALECT_DRIVER_PROBE = {
-    "postgres": "psycopg",
-    "mysql": "pymysql",
-    "sqlite": None,
+# `postgres://` is NOT in the table above, deliberately. SQLAlchemy 2.x removed
+# the dialect alias outright, so it cannot be rescued by any `+driver` suffix --
+# `make_url` parses it happily and `get_dialect()` then raises NoSuchModuleError.
+# Listing it as supported (which recotem did) advertised the one PostgreSQL
+# spelling that can never work, so it gets its own message instead.
+_REMOVED_DIALECT_ALIASES = {
+    "postgres": "postgresql",
+}
+
+# The DSN form recotem's extras actually provide a driver for, per backend.
+# This is what an operator has to type; the extra name alone is not enough,
+# because installing the extra does NOT make the bare scheme work.
+_BACKEND_RECOMMENDED_DSN = {
+    "postgresql": "postgresql+psycopg://",
+    "mysql": "mysql+pymysql://",
+    "mariadb": "mariadb+pymysql://",
+    "sqlite": "sqlite:///",
+}
+
+# SQLAlchemy driver name -> the module that must be importable for it.  The two
+# differ often enough to matter: SQLAlchemy's `mysqldb` driver imports
+# `MySQLdb`, and `pysqlite` is the stdlib `sqlite3`.
+#
+# Probing the driver the URL ACTUALLY routes to is the whole point.  Keying the
+# probe off the extra instead (which recotem did) validated a driver the DSN was
+# never going to load: `recotem[postgres]` installs psycopg v3, the probe
+# imported `psycopg` and passed, and SQLAlchemy then loaded its DEFAULT
+# PostgreSQL DBAPI -- psycopg2, which recotem never installs -- so every bare
+# `postgresql://` DSN died at DBAPI-import time with a bare ModuleNotFoundError
+# naming neither the module nor the fix.  The same held for `mysql://` and
+# `mariadb://`, which default to `mysqldb`, not the `pymysql` the extra ships.
+#
+# This table is a CLOSED ALLOW-LIST, and membership is tested before the value
+# is used.  ``get_driver_name()`` returns the ``+suffix`` from the DSN verbatim
+# and ``make_url`` accepts any suffix at all, so a DSN of
+# ``postgresql+<name>://`` would otherwise reach ``__import__(<name>)`` and run
+# that module's top-level code.  Nothing untrusted supplies a DSN today -- it
+# comes from an operator-set ``RECOTEM_RECIPE_*`` variable -- so this is a
+# fail-closed convention rather than a patched vulnerability, matching the FQCN
+# allow-list, the path-scheme allow-list and the SSRF guards, which all
+# enumerate what is permitted and refuse the rest.  A lookup whose fallback is
+# "import whatever string the DSN supplied" is the opposite shape.
+#
+# ``None`` means "known driver, nothing to import" (the stdlib sqlite3 module).
+# It must NOT be reachable for an unknown driver: collapsing "known, no probe
+# needed" into "unrecognised" would silently skip the preflight, which is the
+# same silent-no-op shape as a statement timeout that sets no variable.  The
+# membership test at the call site is what keeps the two apart.
+_DRIVER_MODULE = {
+    "psycopg": "psycopg",
+    "psycopg2": "psycopg2",
+    "pymysql": "pymysql",
+    "mysqldb": "MySQLdb",
+    "pysqlite": None,  # stdlib sqlite3, always importable
+    "pysqlite_numeric": None,
 }
 
 _log = structlog.get_logger(__name__)
@@ -199,7 +248,10 @@ class SQLSource:
         if not dsn:
             raise DataSourceError(
                 f"env var {config.dsn_env} is not set or is empty; "
-                f"set it to the database DSN (e.g. postgresql://user:pass@host/db)"
+                f"set it to the database DSN (e.g. "
+                f"postgresql+psycopg://user:pass@host/db). The +driver suffix "
+                f"is required: a bare postgresql:// or mysql:// DSN routes to "
+                f"a driver recotem does not install"
             )
 
         try:
@@ -210,21 +262,68 @@ class SQLSource:
             ) from exc
 
         backend = url.get_backend_name()
+
+        replacement = _REMOVED_DIALECT_ALIASES.get(backend)
+        if replacement is not None:
+            raise DataSourceError(
+                f"SQL dialect {backend!r} was removed in SQLAlchemy 2.x and "
+                f"cannot be loaded by any driver. Use "
+                f"{_BACKEND_RECOMMENDED_DSN[replacement]} instead."
+            )
+
         extra = _DIALECT_TO_EXTRA.get(backend)
         if extra is None:
             raise DataSourceError(
-                f"unsupported SQL dialect {backend!r}; "
-                f"officially supported: {sorted(set(_DIALECT_TO_EXTRA.values()))}."
+                f"unsupported SQL dialect {backend!r}; supported DSN forms: "
+                f"{sorted(_BACKEND_RECOMMENDED_DSN.values())}."
             )
 
-        driver_mod = _DIALECT_DRIVER_PROBE.get(extra)
+        # Probe the driver THIS URL routes to, not the extra's canonical one.
+        # A bare scheme picks SQLAlchemy's default DBAPI, which for every
+        # backend recotem supports except sqlite is a driver the extras do not
+        # install -- see _DRIVER_MODULE.
+        #
+        # Runs BEFORE the SSRF guard on purpose. This is a pure local import
+        # check: it does no I/O, cannot be influenced by the DSN's host, and
+        # raises DataSourceError, so no connection is attempted either way --
+        # the SSRF guard is not weakened by losing the race. Ordering it after
+        # the guard instead means the DNS lookup fails first whenever the host
+        # does not resolve, and a missing extra is then reported as "hostname
+        # does not resolve" -- in CI and offline dev, which is exactly where a
+        # missing extra is met.
+        driver = url.get_driver_name()
+        if driver not in _DRIVER_MODULE:
+            # Refuse rather than import a DSN-supplied name.  Membership is
+            # tested first so an unrecognised driver can never reach the
+            # ``None`` ("stdlib, no probe") branch below.
+            raise DataSourceError(
+                f"unknown SQL driver {driver!r} in the DSN for dialect "
+                f"{backend!r}. recotem probes a fixed set of drivers and will "
+                f"not import a name supplied by the DSN. Known drivers: "
+                f"{sorted(_DRIVER_MODULE)}. Write the DSN as "
+                f"{_BACKEND_RECOMMENDED_DSN[backend]} instead."
+            )
+        driver_mod = _DRIVER_MODULE[driver]
         if driver_mod is not None:
             try:
                 __import__(driver_mod)
             except ImportError as exc:
+                recommended = _BACKEND_RECOMMENDED_DSN[backend]
+                explicit = "+" in url.drivername
+                detail = (
+                    f"the DSN names driver {driver!r} explicitly"
+                    if explicit
+                    else (
+                        f"{backend}:// with no +driver suffix defaults to "
+                        f"{driver!r}, which recotem does not install"
+                    )
+                )
                 raise DataSourceError(
-                    f"{driver_mod} driver is required for dialect {backend!r}. "
-                    f"Install it with: pip install 'recotem[{extra}]'"
+                    f"cannot load the {driver!r} driver for dialect "
+                    f"{backend!r}: {detail}. Write the DSN as "
+                    f"{recommended} to use the driver "
+                    f"pip install 'recotem[{extra}]' provides, or install "
+                    f"{driver_mod!r} yourself."
                 ) from exc
 
         # SSRF guard: reject private/loopback/link-local hosts unless opted in.

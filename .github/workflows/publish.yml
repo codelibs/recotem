@@ -33,9 +33,13 @@ jobs:
             *) echo "::error::publish.yml requires a v* tag ref, got '${GITHUB_REF}'"; exit 1 ;;
           esac
 
-      # fetch-depth: 0 — the milestone check below asks an ancestry question,
-      # which a shallow clone cannot answer.  It refuses rather than guessing,
-      # so this is load-bearing rather than defensive.
+      # fetch-depth: 0 — BOTH steps below ask an ancestry question that a
+      # shallow clone cannot answer: check-release-tag.sh asserts the tagged
+      # commit is an ancestor of main, and check-milestone-landed.sh asserts
+      # every milestone PR's merge commit is an ancestor of the tag.  Measured
+      # at depth 1: origin/main does not resolve at all.  Both scripts refuse
+      # that state rather than guessing, so removing this line fails the guard
+      # loudly instead of making either check vacuous.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -46,9 +50,10 @@ jobs:
         run: bash .github/scripts/check-release-tag.sh
 
       # A PR can read MERGED on GitHub and still not be in main — see the
-      # script's header for the case that happened.  Nothing else in the repo
-      # asks this: check-release-tag.sh compares file contents and makes no git
-      # or API call.
+      # script's header for the case that happened.  This asks the reverse of
+      # the ancestry question check-release-tag.sh asks: that script checks the
+      # tag is on main, this one checks the milestone is in the tag.  Neither
+      # implies the other, and both are needed.
       #
       # Also runnable locally before tagging:
       #   bash .github/scripts/check-milestone-landed.sh v2.1.0

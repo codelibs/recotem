@@ -1068,3 +1068,56 @@ def test_example_pod_specs_disable_service_links(manifest: str) -> None:
             "so RECOTEM_SERVE_PORT is injected here; keep the flag off so a "
             "rename to `recotem` cannot poison RECOTEM_PORT"
         )
+
+
+# ---------------------------------------------------------------------------
+# networkPolicy.allowKubeletProbes=false is a silent total outage
+#
+# values.yaml said the consequence was that "readiness/liveness probes are
+# silently dropped ... and pods are eventually killed or removed from
+# Endpoints" -- i.e. something Kubernetes would show you.  Measured on a live
+# 3-node cluster whose CNI enforces NetworkPolicy, three minutes after applying
+# `allowKubeletProbes: false` with `ingressFromPodSelector: {}`:
+#
+#   pods            1/1 Ready, restartCount 0
+#   endpoints       ready=true for every replica
+#   in-cluster      curl -> 000 (timeout)
+#   via Ingress     curl -> 000 (timeout)
+#
+# The probes survive (many CNIs, kind's included, exempt node-originating
+# traffic from pod policies) and 100% of client traffic is dropped, with
+# nothing in pod status, endpoints or events to say so.  These two tests pin
+# the rendered shape and the corrected warning together, because the render is
+# intentional and the documentation is the whole remedy.
+# ---------------------------------------------------------------------------
+
+
+@requires_helm
+def test_allow_kubelet_probes_false_renders_a_true_deny_all() -> None:
+    docs = _load_all_strict(_helm_template("networkPolicy.allowKubeletProbes=false"))
+    policies = [d for d in docs if d.get("kind") == "NetworkPolicy"]
+    assert len(policies) == 1
+    spec = policies[0]["spec"]
+    assert "Ingress" in spec["policyTypes"]
+    assert spec.get("ingress") == [], (
+        "with no ingressFromPodSelector this must be the canonical deny-all "
+        "(`ingress: []`), not an omitted key and not a permissive `from: []`"
+    )
+
+
+def test_allow_kubelet_probes_warning_names_the_client_traffic_loss() -> None:
+    """The warning must describe what an operator will actually see.
+
+    A warning that only mentions probes invites the reading "I will notice,
+    because the pods will go unhealthy". They do not.
+    """
+    comment = (CHART / "values.yaml").read_text()
+    start = comment.index("allowKubeletProbes: when true")
+    end = comment.index("kubeletCIDRs: optional list")
+    warning = comment[start:end].lower()
+    for phrase in ("outage", "ready", "endpoints", "client"):
+        assert phrase in warning, (
+            f"values.yaml's allowKubeletProbes warning does not mention "
+            f"{phrase!r}; an operator reading it cannot tell that the pods "
+            "stay green while every request is dropped"
+        )

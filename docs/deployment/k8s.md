@@ -92,6 +92,53 @@ If `train.enabled=false` (the chart default) there is no CronJob to copy from;
 either enable it, or apply `examples/k8s/bootstrap-job.yaml` with the image,
 Secret and volume names adjusted to your release.
 
+## Verify the install with one request
+
+Nothing above proves the API answers. Two of this page's warnings only show
+up here, so make the request before you call the install done.
+
+```bash
+NS=recotem
+POD=$(kubectl -n "$NS" get pod -l app.kubernetes.io/name=recotem \
+        -o jsonpath='{.items[0].metadata.name}')
+
+# 1. probes, from inside the pod (Host: localhost always passes)
+kubectl -n "$NS" exec "$POD" -- \
+  python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8080/v1/health/ready').read())"
+
+# 2. a real recommendation, through the Service
+kubectl -n "$NS" port-forward svc/recotem 8080:8080 &
+PF=$!
+RECIPE=news_articles          # your recipe's `name:`, case-sensitive
+curl -sS -X POST \
+  -H 'Host: localhost' \
+  -H "X-API-Key: <the plaintext key, not the sha256 hash>" \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"u1","limit":3}' \
+  "http://127.0.0.1:8080/v1/recipes/${RECIPE}:recommend"
+kill "$PF"
+```
+
+Two traps this catches:
+
+- **`-H 'Host: localhost'` is not optional.** Without it the request carries
+  `Host: 127.0.0.1:8080` (or the Service DNS name) and
+  `TrustedHostMiddleware` answers **400** unless `RECOTEM_ALLOWED_HOSTS`
+  lists that name. With chart defaults and no Ingress, a request to
+  `http://recotem:8080/v1/health` from inside the cluster returns 400 — the
+  chart only widens the list when `ingress.enabled=true`. See the
+  `RECOTEM_ALLOWED_HOSTS` warning under [Service](#service).
+- **`${RECIPE}` must be brace-quoted.** In zsh, `$RECIPE:recommend` is the
+  `:r` history modifier, not a variable followed by a literal colon — the URL
+  silently becomes `/v1/recipes/RECIPEecommend` and the POST lands on the GET
+  route as a **405**, which reads exactly like a missing endpoint.
+
+A 200 with an `items` array means train, signing keys, the artifact store,
+the probes and the allow-list are all wired correctly. A 401 means the API
+key is wrong (the Secret holds `<kid>:sha256:<hex>`; clients send the
+plaintext). A 503 `RECIPE_UNAVAILABLE` means that one recipe has no artifact
+yet.
+
 ## CronJob (train)
 
 ```yaml
@@ -717,9 +764,25 @@ label. If you add a port named `http` to the train container, revisit this.
 
 `allowKubeletProbes` defaults to `true` for a reason: kubelet health checks
 originate from the **node** network rather than from a pod, so no
-`podSelector` rule can match them. Set it to `false` and readiness/liveness
-probes are silently dropped, pods never become Ready, and the Deployment
-never converges.
+`podSelector` rule can match them.
+
+**What setting it to `false` actually does is worse than a failed rollout.**
+With `ingressFromPodSelector` also empty the chart renders `ingress: []`, a
+true deny-all-inbound. Measured on a live 3-node cluster whose CNI enforces
+NetworkPolicy, three minutes after applying it:
+
+| | observed |
+|---|---|
+| pods | `1/1 Ready`, `restartCount 0` |
+| Service endpoints | `ready=true` for every replica |
+| in-cluster client -> Service | connection timeout (`000`) |
+| external client -> Ingress -> Service | connection timeout (`000`) |
+
+Many CNIs — including kind's default — exempt node-originating traffic from
+pod NetworkPolicies, so the probes keep passing. Kubernetes therefore reports
+a perfectly healthy fleet while **100% of client traffic is blackholed**, and
+no pod restart, no endpoint change and no event points at the cause. Whether
+probes survive is CNI-specific; the loss of client traffic is not.
 
 To narrow inbound while keeping probes working, do **not** set
 `allowKubeletProbes: false` — instead list your node CIDRs, which converts
@@ -735,10 +798,12 @@ networkPolicy:
     - "10.0.0.0/8"
 ```
 
-Only set `allowKubeletProbes: false` when a separate NetworkPolicy or CNI
-mechanism already admits node-originating traffic; with it false and
-`ingressFromPodSelector` empty, the chart does render a true `ingress: []`
-deny-all.
+Only set `allowKubeletProbes: false` when a separate NetworkPolicy already
+admits **both** node-originating probe traffic and your clients — `ingress: []`
+denies everything, and additive policies are the only way back. `kubeletCIDRs`
+does not help here: the template reads it only while `allowKubeletProbes` is
+`true`. Verify with a request, not with `kubectl get pods`; the pods will look
+healthy either way.
 
 Note that `policyTypes` always includes `Egress`, and the egress rules are
 port-based only (53, 443, 8080) with no destination restriction. Add your own

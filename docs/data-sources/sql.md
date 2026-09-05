@@ -57,6 +57,14 @@ source:
 | SQLite (file) | `sqlite:///absolute/path/to/file.db` |
 | SQLite (read-only) | `sqlite:///file:absolute/path/to/file.db?mode=ro&uri=true` |
 
+**The `+driver` suffix is required, not decorative.** A bare scheme picks
+SQLAlchemy's default DBAPI, and for every dialect except SQLite that default is
+a driver recotem does not install: `postgresql://` routes to `psycopg2` (the
+extra ships psycopg v3), and `mysql://` / `mariadb://` route to `mysqldb` (the
+extra ships PyMySQL). Recotem refuses such a DSN up front, naming the driver
+and the spelling to use. `postgres://` is refused outright — SQLAlchemy 2.x
+removed that dialect alias, so no suffix can rescue it.
+
 ## Parameter binding
 
 Use SQLAlchemy named bind parameters (`:name`) for any value that varies between runs.
@@ -155,9 +163,10 @@ source:
 
 | Error | Exit | Message pattern |
 |-------|------|----------------|
-| DSN env var not set or empty | 3 | `DataSourceError: env var RECOTEM_RECIPE_DB_DSN is not set or is empty; set it to the database DSN (e.g. postgresql://user:pass@host/db)` |
-| Unsupported dialect | 3 | `DataSourceError: unsupported SQL dialect 'oracle'; officially supported: ['mysql', 'postgres', 'sqlite'].` |
-| Missing driver for dialect | 3 | `DataSourceError: psycopg driver is required for dialect 'postgresql'. Install it with: pip install 'recotem[postgres]'` |
+| DSN env var not set or empty | 3 | `DataSourceError: env var RECOTEM_RECIPE_DB_DSN is not set or is empty; set it to the database DSN (e.g. postgresql+psycopg://user:pass@host/db). The +driver suffix is required: a bare postgresql:// or mysql:// DSN routes to a driver recotem does not install` |
+| Unsupported dialect | 3 | `DataSourceError: unsupported SQL dialect 'oracle'; supported DSN forms: ['mariadb+pymysql://', 'mysql+pymysql://', 'postgresql+psycopg://', 'sqlite:///'].` |
+| `postgres://` alias | 3 | `DataSourceError: SQL dialect 'postgres' was removed in SQLAlchemy 2.x and cannot be loaded by any driver. Use postgresql+psycopg:// instead.` |
+| DSN routes to an uninstalled driver | 3 | `DataSourceError: cannot load the 'psycopg2' driver for dialect 'postgresql': postgresql:// with no +driver suffix defaults to 'psycopg2', which recotem does not install. Write the DSN as postgresql+psycopg:// to use the driver pip install 'recotem[postgres]' provides, or install 'psycopg2' yourself.` |
 | Query exceeds row cap | 3 | `DataSourceError: query result exceeds RECOTEM_MAX_SQL_ROWS=50000000 rows; tighten the query or raise the cap` |
 | Private/loopback host refused | 3 | `DataSourceError: refusing to connect to private/loopback host '10.0.0.5'; set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in (intended for in-cluster or compose service-name destinations)` |
 | DSN hostname does not resolve | 3 | `DataSourceError: hostname 'db.internal' does not resolve; verify the DSN host or set RECOTEM_SQL_ALLOW_PRIVATE=1 to bypass for offline tests` |

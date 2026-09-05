@@ -148,6 +148,45 @@ exit 8.
 
 ### Added
 
+- **`recotem serve` now warns when the recipe has changed since the artifact it
+  is loading was trained.** `_artifact_identity.check_artifact_recipe_name`
+  already refuses an artifact whose header names a *different recipe*, and its
+  docstring gives the reason: *"a correctly-signed artifact therefore loaded
+  under any recipe pointing at it, and did so with no signal anywhere."* That
+  sentence was true of `recipe_hash` too. The trainer writes it into every
+  header, `/v1/recipes/{name}` reports it back, and the server held both values
+  at the moment of load and compared neither.
+
+  The failure is the ordinary one: edit a recipe, forget to retrain, restart
+  serve. Reproduced by training `gamma` with `algorithms: [TopPop], cutoff: 10`,
+  then editing to `algorithms: [IALS, CosineKNN], cutoff: 5` plus a new
+  `item_metadata:` block, and restarting without retraining. `/v1/health`
+  returned `ok`, `/v1/recipes/gamma` reported `algorithms:
+  ["TopPopRecommender"], cutoff: 10` — the artifact's values, contradicting the
+  recipe on disk with nothing marking them as historical — and `:recommend`
+  returned a **hybrid**: the new `item_metadata` block joined live onto the old
+  model, because metadata is read at serve time while the model is not.
+  Grepping the startup log for `hash`, `stale` or `mismatch` returned nothing.
+
+  It is a **WARNING, never a refusal**. A hash difference is the expected state
+  after any edit that does not require retraining — a comment, a rename, a
+  serve-side `item_metadata` field — and serving the last-trained model is the
+  correct default. Refusing would turn a routine edit into an outage. Absent or
+  non-string `recipe_hash` fails open, matching `_irspack_compat` and the
+  sibling name gate's treatment of pre-2.0 headers.
+
+  Wired into **both** load paths — `serving/app.py` (startup) and
+  `serving/watcher.py` (hot-swap). These duplicate the same header-decode
+  sequence, and a check wired into one of them is the divergence #270 had to
+  correct.
+
+  `_compute_recipe_hash` moved from `training/pipeline.py` to a neutral
+  `recotem/_recipe_hash.py` so `serving/` can reach it without importing
+  `training/` (see CLAUDE.md); `training/pipeline.py` re-exports the three
+  names under their original private spellings, so existing importers are
+  unchanged and the digest is byte-identical.
+
+
 - **`BPRFM` is trainable again, via the new `bprfm` extra.** irspack drops
   `BPRFMRecommender` from its exports when `lightfm` cannot be imported, and
   upstream `lightfm` has shipped no release since 1.17 and does not build on

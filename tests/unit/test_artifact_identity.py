@@ -194,19 +194,24 @@ def test_startup_path_loads_artifact_without_recipe_name(
 # ---------------------------------------------------------------------------
 
 
-def _write_artifact(path: Path, recipe_name: str, tag: str) -> None:
+def _write_artifact(
+    path: Path, recipe_name: str, tag: str, recipe_hash: str | None = None
+) -> None:
     import pickle  # noqa: S403  # test fixture: payload built locally
 
     payload = pickle.dumps({"tag": tag}, protocol=4)  # noqa: S301
+    header: dict = {
+        "recipe_name": recipe_name,
+        "best_class": "TopPop",
+        "trained_at": "2026-01-01T00:00:00Z",
+    }
+    if recipe_hash is not None:
+        header["recipe_hash"] = recipe_hash
     path.write_bytes(
         build_raw_artifact(
             kid="active",
             key_hex=ACTIVE_KEY_HEX,
-            header_dict={
-                "recipe_name": recipe_name,
-                "best_class": "TopPop",
-                "trained_at": "2026-01-01T00:00:00Z",
-            },
+            header_dict=header,
             payload_bytes=payload,
         )
     )
@@ -384,3 +389,245 @@ def test_mismatched_hot_swap_keeps_previous_model_and_degrades_health(
         f"a refused swap must be visible in health, not silent; got {body!r}"
     )
     assert "other" in body["recipes"]["demo"]["error"]
+
+
+# ---------------------------------------------------------------------------
+# recipe_hash: the same two values, one step weaker
+# ---------------------------------------------------------------------------
+#
+# The gate above binds an artifact to the recipe NAME. Nothing bound it to the
+# recipe CONTENT, even though the trainer writes ``recipe_hash`` into every
+# header and the server decodes that header while holding the parsed Recipe it
+# is loading for. Edit a recipe, forget to retrain, restart serve: the old
+# artifact loads, ``/v1/health`` says ``ok``, and ``/v1/recipes/{name}``
+# reports the artifact's algorithms/cutoff as though they were the recipe's.
+#
+# This is a WARNING, not a refusal -- a hash difference is the expected state
+# after any edit that does not require retraining, and refusing would turn a
+# comment change into an outage.
+
+
+def _recipe_yaml(tmp_path: Path, *, cutoff: int = 10, algos: str = "TopPop") -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    csv = tmp_path / "data.csv"
+    csv.write_text("user_id,item_id\nu1,i1\nu2,i2\n", encoding="utf-8")
+    y = tmp_path / "r.yaml"
+    y.write_text(
+        f"name: demo\n"
+        f"source: {{type: csv, path: {csv}}}\n"
+        f"schema: {{user_column: user_id, item_column: item_id}}\n"
+        f"training: {{algorithms: [{algos}], cutoff: {cutoff}}}\n"
+        f"output: {{path: {tmp_path}/out.recotem}}\n",
+        encoding="utf-8",
+    )
+    return y
+
+
+def _warnings(records) -> list[dict]:
+    return [r for r in records if r.get("event") == "artifact_recipe_hash_mismatch"]
+
+
+def test_matching_recipe_hash_is_silent(tmp_path: Path) -> None:
+    """The negative control: no warning when they agree.
+
+    Without this, a gate that warned unconditionally would pass every other
+    test in this block.
+    """
+    from recotem._artifact_identity import check_artifact_recipe_hash
+    from recotem._recipe_hash import compute_recipe_hash
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(str(_recipe_yaml(tmp_path)))
+    header = {"recipe_hash": compute_recipe_hash(recipe)}
+    with structlog.testing.capture_logs() as logs:
+        check_artifact_recipe_hash(header, recipe=recipe, name="demo")
+    assert not _warnings(logs), f"a matching hash must be silent; got {logs}"
+
+
+def test_changed_recipe_warns_and_names_both_digests(tmp_path: Path) -> None:
+    from recotem._artifact_identity import check_artifact_recipe_hash
+    from recotem._recipe_hash import compute_recipe_hash
+    from recotem.recipe.loader import load_recipe
+
+    trained = load_recipe(str(_recipe_yaml(tmp_path / "a", cutoff=10)))
+    edited = load_recipe(str(_recipe_yaml(tmp_path / "b", cutoff=5)))
+    trained_hash = compute_recipe_hash(trained)
+    assert trained_hash != compute_recipe_hash(edited), (
+        "the two recipes must actually hash differently, or this test proves "
+        "nothing about the gate"
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        check_artifact_recipe_hash(
+            {"recipe_hash": trained_hash}, recipe=edited, name="demo"
+        )
+    warns = _warnings(logs)
+    assert len(warns) == 1, f"expected exactly one warning; got {logs}"
+    assert warns[0]["artifact_recipe_hash"] == trained_hash[:12]
+    assert warns[0]["current_recipe_hash"] == compute_recipe_hash(edited)[:12]
+    assert "Retrain" in warns[0]["detail"], (
+        "the warning must name the remedy, not just report a difference"
+    )
+
+
+def test_absent_recipe_hash_is_silent(tmp_path: Path) -> None:
+    """Pre-2.0 headers predate the field; fail open, as `_irspack_compat` does."""
+    from recotem._artifact_identity import check_artifact_recipe_hash
+    from recotem.recipe.loader import load_recipe
+
+    recipe = load_recipe(str(_recipe_yaml(tmp_path)))
+    for header in ({}, {"recipe_hash": None}, {"recipe_hash": 7}, {"recipe_hash": ""}):
+        with structlog.testing.capture_logs() as logs:
+            check_artifact_recipe_hash(header, recipe=recipe, name="demo")
+        assert not _warnings(logs), f"{header!r} must fail open; got {logs}"
+
+
+def test_a_real_recipe_hashes_rather_than_taking_the_defensive_path(
+    tmp_path: Path,
+) -> None:
+    """The gate swallows hashing errors so it can never block a good artifact.
+
+    That means a test whose ``recipe`` cannot be hashed would pass every
+    silence assertion above for the wrong reason. Pin that a genuine Recipe
+    hashes to a real digest.
+    """
+    from recotem._recipe_hash import compute_recipe_hash
+    from recotem.recipe.loader import load_recipe
+
+    digest = compute_recipe_hash(load_recipe(str(_recipe_yaml(tmp_path))))
+    assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+
+
+def test_startup_path_warns_but_still_loads_a_changed_recipe(
+    tmp_path: Path, make_artifact, single_key_ring
+) -> None:
+    """End to end through serve's real startup loader: WARN, not refusal."""
+    from recotem._recipe_hash import compute_recipe_hash
+    from recotem.recipe.loader import load_recipe
+
+    trained = load_recipe(str(_recipe_yaml(tmp_path / "t", cutoff=10)))
+    edited_yaml = _recipe_yaml(tmp_path / "e", cutoff=5)
+    edited = load_recipe(str(edited_yaml))
+
+    art = tmp_path / "demo.recotem"
+    art.write_bytes(
+        make_artifact(
+            header_dict={
+                "recipe_name": "demo",
+                "best_class": "TopPopRecommender",
+                "recipe_hash": compute_recipe_hash(trained),
+            }
+        )
+    )
+    edited.output.path = str(art)
+
+    with structlog.testing.capture_logs() as logs:
+        entry, reason = _try_load_artifact(edited, single_key_ring, ServeConfig())
+
+    assert reason == "ok", (
+        f"a changed recipe must still serve its last model; got {reason!r}"
+    )
+    assert entry.loaded is True
+    assert len(_warnings(logs)) == 1, (
+        f"startup must warn exactly once about the stale artifact; got {logs}"
+    )
+
+
+def test_watcher_path_warns_but_still_hot_swaps_a_changed_recipe(
+    tmp_path: Path,
+) -> None:
+    """The hot-swap path is a SECOND header-decode sequence and needs the gate too.
+
+    Deliberately behavioural rather than a source scan. A scan for
+    ``check_artifact_recipe_hash(`` in ``watcher.py`` passes even when the call
+    sits under ``if False:`` -- verified by trying exactly that -- so it would
+    score a dead call as wiring. Running the watcher is what distinguishes the
+    two. A check wired into only one of the two paths is the divergence #270
+    had to correct.
+    """
+    artifact_path = tmp_path / "model.recotem"
+    _write_artifact(
+        artifact_path,
+        recipe_name="demo",
+        tag="v1",
+        recipe_hash="0" * 64,  # cannot match any real recipe
+    )
+    watcher, registry, _ = _build_watcher(tmp_path, "demo", artifact_path)
+
+    with structlog.testing.capture_logs() as logs:
+        watcher.start()
+        try:
+            loaded = _wait_until(
+                lambda: (e := registry.get("demo")) is not None and e.loaded
+            )
+        finally:
+            watcher.stop()
+            watcher.join(timeout=3.0)
+
+    assert loaded, "a changed recipe must still hot-load within 3s -- WARN, not refuse"
+    assert registry.get("demo").recommender == {"tag": "v1"}
+    assert _warnings(logs), (
+        "the hot-swap path decoded a header whose recipe_hash cannot match the "
+        "recipe it is serving and said nothing. Both load paths must call "
+        "check_artifact_recipe_hash."
+    )
+
+
+def test_watcher_path_is_silent_when_the_recipe_matches(tmp_path: Path) -> None:
+    """Negative control for the watcher path, so the test above cannot pass
+    merely because the watcher warns about everything."""
+    from recotem._recipe_hash import compute_recipe_hash
+    from recotem.recipe.loader import load_recipe
+
+    artifact_path = tmp_path / "model.recotem"
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir(exist_ok=True)
+    yaml_path = _write_recipe_yaml(recipes_dir, "demo", artifact_path)
+    _write_artifact(
+        artifact_path,
+        recipe_name="demo",
+        tag="v1",
+        recipe_hash=compute_recipe_hash(load_recipe(yaml_path)),
+    )
+    watcher, registry, _ = _build_watcher(tmp_path, "demo", artifact_path)
+
+    with structlog.testing.capture_logs() as logs:
+        watcher.start()
+        try:
+            _wait_until(lambda: (e := registry.get("demo")) is not None and e.loaded)
+        finally:
+            watcher.stop()
+            watcher.join(timeout=3.0)
+
+    assert registry.get("demo").loaded is True
+    assert not _warnings(logs), f"a matching hash must be silent; got {logs}"
+
+
+def test_the_new_event_is_documented_in_the_operations_runbook() -> None:
+    """An operator who greps the log for this event must find it in the table.
+
+    The sibling gate's events are documented there; a WARNING nobody can look
+    up is only marginally better than silence.
+    """
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "operations.md").read_text(
+        encoding="utf-8"
+    )
+    assert "`initial_artifact_recipe_name_mismatch`" in doc, (
+        "the log-event table has moved or been renamed; this guard is watching "
+        "nothing. Re-point it at the table's new location."
+    )
+    row = [
+        ln
+        for ln in doc.splitlines()
+        if ln.startswith("| `artifact_recipe_hash_mismatch` |")
+    ]
+    assert len(row) == 1, (
+        "docs/operations.md does not document artifact_recipe_hash_mismatch in "
+        "its log-event table (found "
+        f"{len(row)} rows)."
+    )
+    assert "still loads" in row[0] and "not a refusal" in row[0], (
+        "the documented row must say the artifact still loads -- an operator "
+        "who reads this as a load failure will go looking for an outage that "
+        "is not happening."
+    )

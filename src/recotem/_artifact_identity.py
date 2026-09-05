@@ -116,3 +116,69 @@ def check_artifact_recipe_name(header_dict: dict[str, Any], *, name: str) -> Non
         "recipes writing one artifact file overwrite each other's model, so "
         "this endpoint would serve the other recipe's recommendations."
     )
+
+
+# Bound on the digests quoted back in the warning. Enough to identify which
+# artifact is stale in a log without pasting two 64-char hashes into every
+# line; the full values are one `recotem inspect` away.
+_DIGEST_PREVIEW_CHARS = 12
+
+
+def check_artifact_recipe_hash(header_dict: Any, *, recipe: Any, name: str) -> None:
+    """Warn when *recipe* has changed since the artifact it is loading was trained.
+
+    The sibling gate above binds an artifact to the recipe *name*. Nothing
+    bound it to the recipe *content*, even though the trainer writes
+    ``recipe_hash`` into every header and the server has both values in hand at
+    this moment: it decodes the header dict here, and it is holding the parsed
+    ``Recipe`` it is loading for.
+
+    The failure this closes is the ordinary one -- edit a recipe, forget to
+    retrain, restart serve. The old artifact loads, ``/v1/health`` reports
+    ``ok``, and ``/v1/recipes/{name}`` reports the *artifact's*
+    ``algorithms`` / ``cutoff`` / ``metric``, which now contradict the recipe on
+    disk with nothing marking them as historical. Blocks that reach the model
+    are stale while blocks read at serve time are not, so a response can be a
+    hybrid: fresh ``item_metadata`` joined onto an old model.
+
+    **Warn, never refuse.** Unlike ``recipe_name``, a hash difference is not a
+    contradiction -- it is the expected state whenever a recipe is edited in a
+    way that does not require retraining (a comment, a rename, a serve-side
+    ``item_metadata`` field), and serving the last-trained model is the correct
+    default. Refusing would turn a routine edit into an outage. The operator
+    just has to be able to see it, which today they cannot.
+
+    Absent or non-string ``recipe_hash`` returns silently: pre-2.0 artifacts
+    predate the field, and ``check_artifact_recipe_name`` already warns once
+    about that header shape. Failing open on a missing field matches
+    ``_irspack_compat``.
+    """
+    header_hash = header_dict.get("recipe_hash")
+    if not isinstance(header_hash, str) or not header_hash:
+        return
+
+    from recotem._recipe_hash import compute_recipe_hash  # noqa: PLC0415
+
+    try:
+        current = compute_recipe_hash(recipe)
+    except Exception as exc:  # pragma: no cover - defensive
+        # Hashing must never be the reason a good artifact fails to load.
+        logger.debug("artifact_recipe_hash_uncomputable", name=name, error=str(exc))
+        return
+
+    if current == header_hash:
+        return
+
+    logger.warning(
+        "artifact_recipe_hash_mismatch",
+        name=name,
+        artifact_recipe_hash=header_hash[:_DIGEST_PREVIEW_CHARS],
+        current_recipe_hash=current[:_DIGEST_PREVIEW_CHARS],
+        detail=(
+            f"recipe {name!r} has changed since this artifact was trained. The "
+            "model being served reflects the older recipe, and "
+            "/v1/recipes/{name} reports that older recipe's algorithms, metric "
+            "and cutoff. Retrain to make them agree, or ignore this if the edit "
+            "does not affect training."
+        ),
+    )

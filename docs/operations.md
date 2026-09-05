@@ -1161,10 +1161,32 @@ What to do:
    the shipped examples hold out 12 (`csv-local`), 60 (`quickstart`) and 803
    (`tutorial-purchase-log`) interactions. The first two are fine for learning
    the tool and are not a basis for choosing between algorithms.
-2. **Compare against a popularity baseline yourself.** Recotem does not do this
-   for you, and it is the check that would have caught the case above. Hold out
-   a slice the training never sees, score the served model and a
-   most-popular-items list on it, and require the model to win.
+
+   A large `n_heldout_interactions` makes `best_score` *stable*; it does not
+   make it an estimate of quality on your task. See
+   [What `best_score` is, and is not](#what-best_score-is-and-is-not).
+2. **Compare against a baseline yourself — and not against popularity.**
+   Recotem does not do this for you, and it is the check that would have caught
+   the case above. Hold out a slice the training never sees, score the served
+   model on it, and require the model to win. But **beating popularity is not
+   the bar**: a most-popular-items list is so weak on a personalisable dataset
+   that a badly chosen model clears it comfortably. Measured on four
+   industries — a repeat-purchase grocery catalogue, a B2B parts catalogue,
+   a media catalogue and a long-tail marketplace, each with a verified
+   leave-one-out holdout, each trained four times — the shipped model beat
+   popularity by **11.3× to 57.6×** on ndcg@10 while beating a hand-written
+   30-line item-item cosine kNN by
+   between **−9.5% and +56.2%**. On the grocery catalogue **all four runs** beat
+   popularity by more than 11× and **all four lost to the kNN**. Popularity
+   would have called every one of them a success.
+
+   The baseline worth the twenty minutes is an item-item cosine kNN: binarise
+   the user × item matrix, normalise the columns, take `Sᵢⱼ = cos(i, j)` with a
+   zero diagonal, keep each item's top ~200 neighbours, score a user as
+   `X[u] @ S`, and exclude what they already interacted with. If recotem does
+   not beat that, the answer is not to ship it and hope — it is to widen
+   `algorithms`, raise `n_trials`, or accept that this dataset does not reward
+   a latent-factor model.
 3. **Narrow `algorithms` when the budget is small**, or raise `n_trials` so
    each algorithm still gets a meaningful number of trials.
 4. **Prefer one model over many tiny ones.** A per-tenant recipe for every
@@ -1175,6 +1197,53 @@ What to do:
 Recotem does not warn about this on its own. Any threshold that flagged the
 tenant above would also flag the shipped tutorials, so the number is reported
 rather than judged — the judgement is yours.
+
+### What `best_score` is, and is not
+
+`best_score` is the headline number in `recotem inspect` and in the
+`train_done` log line, and it is the most-misread field in the header.
+
+**It is** the winning trial's score on recotem's own internal validation
+split — the `metric` at `cutoff`, computed over
+`data_stats.n_heldout_interactions` interactions that were held out of the
+*same* interaction table by `training.split`, ranking over the *same* trained
+item set.
+
+**It is not** an estimate of how the model will score on your evaluation. Your
+task almost certainly differs on at least one of: which interactions are held
+out (a temporal leave-one-out, say, rather than a random 20%), which users are
+scored, which items are candidates, and which metric at which cutoff. Those
+are different measurements, and `best_score` is not an approximation of yours.
+
+The gap is not small and **not signed**. Measured against self-built holdouts
+across two rounds of release verification, `best_score` has been observed both
+over-stating and under-stating a hand-built ndcg@10 on the same artifact, in
+both directions and by amounts large enough to reverse a go/no-go decision.
+No correction factor is offered here because the size of the gap is a property
+of how far your task sits from an internal random split, not of recotem.
+
+Two consequences worth internalising:
+
+- **`best_score` is also the criterion that chooses which algorithm ships.**
+  The search maximises it, so when it disagrees with your task's ranking, the
+  disagreement is not merely reported — it is acted on. Widening `algorithms`
+  does not fix that; it gives the search more chances to pick a winner your
+  task would not have chosen. Train the candidates separately and score them
+  on your own holdout when the choice matters.
+- **`best_score` does not measure cold start at all.** The objective is built
+  from held-out rows of the trained matrix
+  (`recotem/training/evaluate.py`), so no trial ever issues a cold-item or
+  cold-user request. When a [`features:`](recipe-reference.md#features) block
+  is present, `lambda_item_feature` / `lambda_user_feature` — the parameters
+  that govern the feature-to-embedding map the cold-start verbs depend on —
+  are therefore tuned on evidence that is nearly indifferent to them.
+  Measured on one recipe and one dataset, four runs, cold-item precision@10
+  ranged over an order of magnitude while `best_score` moved by under 2%. If
+  you rely on the cold-start paths, validate them separately; the search will
+  not do it for you, and the header will not tell you it did not.
+
+Comparing `best_score` **between runs of the same recipe** is also weaker than
+it looks — see [Reproducibility](recipe-reference.md#reproducibility).
 
 ### `recotem train` exits 4 with `feature_axis_error`
 

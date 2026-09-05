@@ -591,6 +591,14 @@ def _pod_specs_in(docs: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]
             "override alongside ingress",
         ),
         (
+            (
+                "env.RECOTEM_ALLOWED_HOSTS=recotem.recotem.svc.cluster.local",
+                "ingress.enabled=true",
+                "ingress.hosts[0].host=api.example.com",
+            ),
+            "override that does not restate the ingress host",
+        ),
+        (
             ("ingress.enabled=true", "ingress.hosts[0].host=api.example.com"),
             "ingress-derived",
         ),
@@ -770,3 +778,143 @@ def test_example_probes_never_read_the_strict_health_endpoint() -> None:
                 f"examples/k8s {container['name']}.{probe} is {path!r}, "
                 f"expected {expected!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# RECOTEM_ALLOWED_HOSTS is a union, not a winner-takes-all
+#
+# The two sources used to be if/else: an explicit `env.RECOTEM_ALLOWED_HOSTS`
+# replaced the ingress-derived list outright.  values.yaml tells operators to
+# set it "when traffic reaches the pod under a hostname not listed in
+# ingress.hosts (e.g. internal Service DNS)" -- i.e. to ADD a name -- and doing
+# exactly that dropped every host the chart's own Ingress routes:
+#
+#   $ helm template ... --set ingress.enabled=true \
+#       --set ingress.hosts[0].host=recotem.example.com \
+#       --set env.RECOTEM_ALLOWED_HOSTS=recotem.recotem.svc.cluster.local
+#     RECOTEM_ALLOWED_HOSTS = "localhost,recotem.recotem.svc.cluster.local"
+#     Ingress rules:          host: recotem.example.com
+#
+# The chart renders an Ingress for a host it then refuses. Measured on a live
+# cluster: a request whose Host header is absent from the list gets 400 from
+# TrustedHostMiddleware while the pod stays Ready, so the failure looks like a
+# broken Ingress rather than a chart value.
+#
+# `test_allowed_hosts_always_admits_the_probe_host` could not see this: its
+# "override alongside ingress" case happens to name the same host in both
+# places, and it only asserts `localhost` is present.
+# ---------------------------------------------------------------------------
+
+
+def _allowed_hosts(set_args: tuple[str, ...]) -> list[str]:
+    docs = _load_all_strict(_helm_template(*set_args))
+    values = [
+        env["value"]
+        for _, spec in _pod_specs_in(docs)
+        for container in spec.get("containers", [])
+        for env in container.get("env", [])
+        if env.get("name") == "RECOTEM_ALLOWED_HOSTS"
+    ]
+    assert values, "expected the chart to render RECOTEM_ALLOWED_HOSTS"
+    return [h.strip() for h in values[0].split(",")]
+
+
+# Exact host names, kept out of the assertions as literals: CodeQL reads
+# `"a.example.com" in <collection>` as the incomplete-URL-substring
+# anti-pattern even when the collection is a list of exact names. Comparing
+# whole sets is both pattern-free and a stricter assertion -- it pins what the
+# chart renders rather than only what it must contain.
+_INGRESS_HOST = "recotem.example.com"
+_SERVICE_DNS = "recotem.recotem.svc.cluster.local"
+_PROBE_HOST = "localhost"
+
+
+@requires_helm
+def test_allowed_hosts_override_does_not_drop_the_ingress_hosts() -> None:
+    hosts = _allowed_hosts(
+        (
+            "ingress.enabled=true",
+            f"ingress.hosts[0].host={_INGRESS_HOST}",
+            f"env.RECOTEM_ALLOWED_HOSTS={_SERVICE_DNS}",
+        )
+    )
+    assert set(hosts) == {_PROBE_HOST, _SERVICE_DNS, _INGRESS_HOST}, (
+        f"rendered {hosts}. The chart routes an Ingress for {_INGRESS_HOST!r} "
+        "and must not then refuse it -- TrustedHostMiddleware 400s every "
+        "external request while the pod stays Ready. The operator's own "
+        f"{_SERVICE_DNS!r} and the probe host must survive too."
+    )
+
+
+@requires_helm
+def test_allowed_hosts_union_does_not_duplicate() -> None:
+    """A name in both sources must appear once, and `localhost` never twice."""
+    hosts = _allowed_hosts(
+        (
+            "ingress.enabled=true",
+            "ingress.hosts[0].host=api.example.com",
+            "env.RECOTEM_ALLOWED_HOSTS=api.example.com\\,localhost",
+        )
+    )
+    assert sorted(hosts) == sorted(set(hosts)), f"duplicated entries: {hosts}"
+    assert set(hosts) == {"api.example.com", "localhost"}, hosts
+
+
+@requires_helm
+def test_allowed_hosts_stays_unset_when_neither_source_supplies_one() -> None:
+    """No ingress and no override must still omit the var, not render an empty one.
+
+    An empty value would be worse than absent: `_split_csv_env` falls back to
+    the app default only when the variable strips to empty, and an omitted
+    variable is the shape the rest of the chart's comments describe.
+    """
+    docs = _load_all_strict(_helm_template())
+    rendered = [
+        env
+        for _, spec in _pod_specs_in(docs)
+        for container in spec.get("containers", [])
+        for env in container.get("env", [])
+        if env.get("name") == "RECOTEM_ALLOWED_HOSTS"
+    ]
+    assert rendered == [], f"expected the variable to be omitted, got {rendered}"
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "ingress_host",
+    ["recotem.example.com", "*.example.com"],
+    ids=["exact-host", "wildcard-host"],
+)
+def test_rendered_allowed_hosts_is_a_valid_trusted_host_pattern_list(
+    ingress_host: str,
+) -> None:
+    """What the chart renders must be something the product can actually load.
+
+    Nothing checked that these two layers agree. `TrustedHostMiddleware`
+    asserts at construction that every wildcard looks like `*.example.com`
+    (`ENFORCE_DOMAIN_WILDCARD`), so a chart that emitted a bare `*foo` would
+    crash serve on boot -- and a bare `*` would set `allow_any` and silently
+    disable host checking altogether. A Kubernetes Ingress may legitimately
+    carry a `*.foo.com` host, so this path is reachable from ordinary values.
+
+    Matching itself is exact (`host == pattern`), with `*.` as the only
+    widening form -- measured against the installed starlette:
+    `recotem.example.com` matches, while `arecotem.example.com`,
+    `recotem.example.com.attacker.net` and `evil-recotem.example.com.attacker.net`
+    do not. So the union in this chart cannot smuggle a host in as a suffix of
+    another.
+    """
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+    hosts = _allowed_hosts(
+        (
+            "ingress.enabled=true",
+            f"ingress.hosts[0].host={ingress_host}",
+            f"env.RECOTEM_ALLOWED_HOSTS={_SERVICE_DNS}",
+        )
+    )
+    assert "*" not in hosts, f"a bare '*' disables host checking entirely: {hosts}"
+    # Raises AssertionError on a malformed wildcard; that is the failure we
+    # want surfaced here rather than at container start.
+    middleware = TrustedHostMiddleware(app=None, allowed_hosts=hosts)
+    assert not middleware.allow_any, f"host checking would be disabled: {hosts}"

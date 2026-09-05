@@ -98,21 +98,28 @@ spec:
               value: {{ $value | quote }}
             {{- end }}
             {{- end }}
-            {{- /* RECOTEM_ALLOWED_HOSTS:
-                   - explicit value in .Values.env wins (operator override),
-                   - else derive from ingress.hosts[*].host when ingress is enabled,
-                     so TrustedHostMiddleware does not 400 every external request,
-                   - else omit and let the app default ("127.0.0.1,localhost") apply. */}}
+            {{- /* RECOTEM_ALLOWED_HOSTS is the UNION of the operator's
+                   explicit value and ingress.hosts[*].host, not either one
+                   alone.  These two used to be if/else, so an operator who set
+                   the variable for the reason values.yaml gives -- "required
+                   when traffic reaches the pod under a hostname not listed in
+                   ingress.hosts (e.g. internal Service DNS)" -- silently
+                   dropped every host the chart's own Ingress routes, and
+                   TrustedHostMiddleware then 400'd every external request
+                   while the pod stayed Ready.  Adding a hostname must never
+                   remove one; a chart that renders an Ingress for a host has
+                   already decided that host is legitimate.  If ingress is
+                   disabled and nothing is set, the variable is omitted and the
+                   app default ("127.0.0.1,localhost") applies. */}}
             {{- $hosts := list }}
             {{- $allowed := index .Values.env "RECOTEM_ALLOWED_HOSTS" }}
-            {{- if $allowed }}
-            {{- range splitList "," $allowed }}
+            {{- range splitList "," (default "" $allowed) }}
             {{- $trimmed := trim . }}
-            {{- if $trimmed }}{{ $hosts = append $hosts $trimmed }}{{ end }}
+            {{- if and $trimmed (not (has $trimmed $hosts)) }}{{ $hosts = append $hosts $trimmed }}{{ end }}
             {{- end }}
-            {{- else if and .Values.ingress.enabled .Values.ingress.hosts }}
+            {{- if and .Values.ingress.enabled .Values.ingress.hosts }}
             {{- range .Values.ingress.hosts }}
-            {{- if .host }}{{ $hosts = append $hosts .host }}{{ end }}
+            {{- if and .host (not (has .host $hosts)) }}{{ $hosts = append $hosts .host }}{{ end }}
             {{- end }}
             {{- end }}
             {{- /* localhost is prepended to every non-empty list -- the

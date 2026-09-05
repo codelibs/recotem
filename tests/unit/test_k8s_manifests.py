@@ -35,6 +35,7 @@ Tests:
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -55,6 +56,42 @@ _DASH = shutil.which("dash")
 
 requires_helm = pytest.mark.skipif(_HELM is None, reason="helm not on PATH")
 requires_dash = pytest.mark.skipif(_DASH is None, reason="dash not on PATH")
+
+
+def test_ci_actually_has_the_tools_these_skips_are_gated_on() -> None:
+    """In CI a missing tool must fail, not silently skip 28 tests.
+
+    ``requires_helm`` gates 28 tests in this file -- every assertion that
+    renders the chart with ``helm template`` rather than scanning its text.
+    Skipping is right locally, where not every contributor has helm.  In CI it
+    is the worst outcome: the job stays green while the chart goes unrendered,
+    and the summary line says ``passed`` with no mention of what did not run.
+
+    Nothing installs helm in the ``pytest`` job of ``test.yml`` -- only the
+    ``manifests`` job of ``manifests.yml`` does.  The ``pytest`` job gets helm
+    from the ``ubuntu-24.04`` runner image, which is a dependency nobody
+    declared and GitHub can drop in any image release.  Measured at 9588d62:
+    the job reports ``2797 passed, 4 deselected`` with **zero** skips, so the
+    28 do run today; with helm off ``PATH`` the same two files give
+    ``19 passed, 28 skipped``.
+
+    This asserts the tools exist whenever ``CI`` is set, so losing them is a
+    red build naming the tool rather than a quiet drop in coverage.  ``dash``
+    is included for the same reason: it is what proves the entrypoint script
+    runs under the runtime image's ``/bin/sh``.
+    """
+    if not os.environ.get("CI"):
+        pytest.skip("not running in CI; local skips are intentional")
+    missing = [
+        name for name, path in (("helm", _HELM), ("dash", _DASH)) if path is None
+    ]
+    assert not missing, (
+        f"{missing} not on PATH in CI. These gate the skipif marks in this "
+        "file -- 28 tests for helm alone -- so without them the job goes "
+        "green having rendered nothing. Install them in the workflow step "
+        "rather than relying on the runner image, which is where they come "
+        "from today and is not a declared dependency."
+    )
 
 
 # ---------------------------------------------------------------------------

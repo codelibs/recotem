@@ -24,6 +24,7 @@ from optuna.samplers import TPESampler
 
 # _compat applies IPython stub before irspack imports (see _compat.py).
 import recotem.training._compat  # noqa: F401
+from recotem.training._storage_url import validate_storage_path
 from recotem.training.algorithms import (
     get_recommender_cls,
     is_feature_capable,
@@ -381,6 +382,14 @@ def run_search(
             code="no_active_algorithms",
         )
     class_names = active_classes
+
+    # Refuse a study backend that cannot open, BEFORE Optuna is asked for one.
+    # Placed at the single production call site rather than inside
+    # ``_make_storage`` so the low-level constructor keeps its current shape.
+    # Without this the failure surfaces from inside Optuna as an unmapped
+    # exception (exit 1) -- and only here, after the data has been fetched,
+    # cleansed and split, so the scan is already paid for.
+    validate_storage_path(storage_path)
 
     storage = _make_storage(storage_path)
     study_name = f"recotem_{recipe_name}_{run_id}"

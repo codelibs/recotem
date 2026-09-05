@@ -131,7 +131,64 @@ Verify the install resolves the entry-point:
 
 ```bash
 recotem --help                 # should list train, serve, inspect, validate, schema, keygen
-recotem validate examples/tutorial-purchase-log/recipe.yaml
+```
+
+### 1. Write the recipe
+
+`pip install recotem` installs the **package**, not the repository, so there is
+no `examples/` directory on disk — the wheel ships `recotem/` and nothing else.
+Write the recipe out instead. It is the same file as
+`examples/tutorial-purchase-log/recipe.yaml`, and it needs no checkout: the
+interaction data is a small public CSV fetched over HTTPS.
+
+```bash
+mkdir -p recotem-tutorial/recipes && cd recotem-tutorial
+cat > recipes/purchase_log.yaml <<'EOF'
+name: purchase_log
+
+source:
+  type: csv
+  path: https://raw.githubusercontent.com/codelibs/recotem/refs/tags/v1.0.0/frontend/e2e/test_data/purchase_log.csv
+  # sha256 is mandatory for network-scheme paths.  If upstream rotates the
+  # file, regenerate with: curl -sL <url> | shasum -a 256
+  sha256: 945fc769205a5976d38c5783500ae473afbb04608043b703951a699993c8f8be
+  dtype:
+    user_id: str
+    item_id: str
+
+schema:
+  user_column: user_id
+  item_column: item_id
+  # No timestamp column on this dataset → split.scheme must be `random`.
+
+cleansing:
+  drop_null_ids: true
+  dedup: keep_last
+  min_rows: 100
+  min_users: 10
+  min_items: 10
+
+training:
+  algorithms: [IALS, TopPop]
+  metric: ndcg
+  cutoff: 10
+  n_trials: 10
+  parallelism: 1
+  split:
+    scheme: random
+    heldout_ratio: 0.2
+    seed: 42
+
+output:
+  path: ./artifacts/purchase_log.recotem
+  versioning: append_sha
+EOF
+```
+
+Check it before going further:
+
+```bash
+recotem validate recipes/purchase_log.yaml
 ```
 
 `validate` parses the recipe, instantiates the data source, and runs its
@@ -147,7 +204,7 @@ exit 0, artifact signed — and first appear when `serve` starts. Metadata files
 are catalog-sized and capped by `RECOTEM_MAX_DOWNLOAD_BYTES`, so the cost is
 bounded.
 
-### 1. Generate keys
+### 2. Generate keys
 
 ```bash
 recotem keygen --type signing --kid dev
@@ -162,20 +219,20 @@ export RECOTEM_API_KEYS="dev:sha256:<hash-hex-from-api>"
 export RECOTEM_API_PLAINTEXT="<plaintext-from-api>"
 ```
 
-### 2. Train
+### 3. Train
 
-The tutorial recipe writes to `./artifacts/...` (CWD-relative). Run from
-the repo root:
+`output.path` is CWD-relative, so run this from `recotem-tutorial/` — the
+directory created in step 1 — and the artifact lands in `./artifacts/`:
 
 ```bash
 mkdir -p artifacts
-recotem train examples/tutorial-purchase-log/recipe.yaml
+recotem train recipes/purchase_log.yaml
 ```
 
-### 3. Serve
+### 4. Serve
 
 ```bash
-recotem serve --recipes examples/tutorial-purchase-log/
+recotem serve --recipes recipes/
 ```
 
 `--port` / `-p` and `--host` / `-H` override `RECOTEM_PORT` and `RECOTEM_HOST`
@@ -184,7 +241,7 @@ loopback posture still wins over the flag: with no `RECOTEM_API_KEYS` and no
 `--insecure-no-auth`, the bind host is forced back to `127.0.0.1` whatever you
 pass, and a `host_forced_to_loopback` warning records what you asked for.
 
-### 4. Recommend
+### 5. Recommend
 
 ```bash
 curl -sX POST http://127.0.0.1:8080/v1/recipes/purchase_log:recommend \
@@ -232,10 +289,11 @@ See `docs/data-sources/sql.md` for PostgreSQL / MySQL recipes.
 | `RecipeError: 'source.path' uses a network scheme … requires a 'sha256' integrity pin` | Recipe edited; sha256 removed | Re-add the `sha256:` line in the recipe |
 | `DataSourceError: sha256 mismatch` | Upstream rotated the file | Re-compute with `curl -sL <url> \| shasum -a 256` and update the recipe |
 | `DataSourceError: HTTP 404 fetching …` | Upstream `source.path` URL moved or was removed | Verify the URL resolves in a browser; update the recipe `source.path` (and its `sha256:` pin) to the current location or a stable mirror |
-| `ArtifactError: RECOTEM_SIGNING_KEYS not set` | Step 1 not exported | Re-run the export and try again |
+| `ArtifactError: RECOTEM_SIGNING_KEYS not set` | Key export step not run | Re-run the export and try again |
 | `401 Unauthorized` on `:recommend` | Wrong API key plaintext | Use the `plaintext` line from `keygen --type api`, not the `hash` |
 | `503 recipe_unavailable` on `:recommend` immediately after train | Watcher has not polled yet | Wait up to `RECOTEM_WATCH_INTERVAL` seconds (default 5; tutorial sets 10). Check `/v1/health`. |
-| Path B: artifact written to wrong directory | Recipe `output.path` is CWD-relative | Run `recotem train` from the repo root (or edit `output.path` to an absolute path). |
+| Path B: artifact written to wrong directory | Recipe `output.path` is CWD-relative | Run `recotem train` from `recotem-tutorial/` (or edit `output.path` to an absolute path). |
+| Path B: `Invalid value for 'RECIPE': Path 'examples/…' does not exist` | `pip install recotem` ships the package, not the repository — there is no `examples/` on disk | Write the recipe as in step 1, or clone the repo if you want the other examples too. |
 | `recotem: command not found` after pip install | `pip` installed to a venv not on `PATH` | Use `python -m recotem ...`, or activate the venv (`uv run recotem ...`). |
 
 ## Next steps

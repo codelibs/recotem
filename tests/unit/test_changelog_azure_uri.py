@@ -107,6 +107,68 @@ def _azure_entry() -> str:
     return section[start:end]
 
 
+# The clause that states the rule, as opposed to the paragraph that names the
+# topic.  Anchored and uniqueness-checked (R9-P5): if this phrase stops being
+# unique the extractor refuses rather than silently picking the first match.
+_RULE_ANCHOR = "The three schemes now share one rule:"
+
+
+def _rule_clauses() -> list[str]:
+    """The verdict clauses, whitespace-flattened so a reflow cannot decide."""
+    entry = " ".join(_azure_entry().split())
+    assert entry.count(_RULE_ANCHOR) == 1, (
+        f"{_RULE_ANCHOR!r} appears {entry.count(_RULE_ANCHOR)} times in the "
+        "Azure entry; the anchor is no longer unique, so a scoped assertion "
+        "cannot be trusted."
+    )
+    rule = entry.split(_RULE_ANCHOR, 1)[1].split(".")[0]
+    return [clause.strip() for clause in rule.split(";") if clause.strip()]
+
+
+def test_the_entry_states_which_form_is_accepted_and_which_is_refused() -> None:
+    """R9-P8's negation probe: pin the verdict, not the topic.
+
+    Every assertion in the sibling test below survives the entry being rewritten
+    to say the exact opposite of what the loader does. Measured -- rewriting
+
+        `container@account` is addressing syntax and is accepted; a real
+        `user:pass@` pair is refused on all three.
+
+    to
+
+        `container@account` is treated as userinfo and is refused; a real
+        `user:pass@` pair is accepted on all three.
+
+    left `2 passed`. Every needle those tests pin -- the three scheme names,
+    `container@account`, `user:pass@`, the "behaviour change" marker -- names
+    the *topic*, and a topic survives its own negation intact.
+
+    That is worse than the entry being deleted. Deleted, the reader gets
+    nothing; negated, they get the reverse of the truth from the release notes
+    of the very release that changed it, and act on it -- putting a credential
+    into a URI that is now refused, and avoiding the form that now works.
+
+    So this pins the half of the sentence that would have to change for the
+    entry to become wrong: which form gets which verdict.
+    """
+    clauses = _rule_clauses()
+
+    addressing = [c for c in clauses if "container@account" in c]
+    userinfo = [c for c in clauses if "user:pass@" in c]
+    assert len(addressing) == 1 and len(userinfo) == 1, (
+        f"the rule no longer states the two forms in separate clauses: {clauses}"
+    )
+
+    assert "accepted" in addressing[0] and "refused" not in addressing[0], (
+        "the release notes say the canonical `container@account` form is "
+        f"refused. The loader accepts it: {addressing[0]!r}"
+    )
+    assert "refused" in userinfo[0] and "accepted" not in userinfo[0], (
+        "the release notes say a real `user:pass@` pair is accepted. The "
+        f"loader refuses it on all three schemes: {userinfo[0]!r}"
+    )
+
+
 def test_release_notes_record_both_halves_of_the_azure_uri_change() -> None:
     """Naming the fix is not enough; the breaking half has to be there too."""
     entry = _azure_entry()

@@ -51,6 +51,23 @@ _BACKEND_RECOMMENDED_DSN = {
 # `postgresql://` DSN died at DBAPI-import time with a bare ModuleNotFoundError
 # naming neither the module nor the fix.  The same held for `mysql://` and
 # `mariadb://`, which default to `mysqldb`, not the `pymysql` the extra ships.
+#
+# This table is a CLOSED ALLOW-LIST, and membership is tested before the value
+# is used.  ``get_driver_name()`` returns the ``+suffix`` from the DSN verbatim
+# and ``make_url`` accepts any suffix at all, so a DSN of
+# ``postgresql+<name>://`` would otherwise reach ``__import__(<name>)`` and run
+# that module's top-level code.  Nothing untrusted supplies a DSN today -- it
+# comes from an operator-set ``RECOTEM_RECIPE_*`` variable -- so this is a
+# fail-closed convention rather than a patched vulnerability, matching the FQCN
+# allow-list, the path-scheme allow-list and the SSRF guards, which all
+# enumerate what is permitted and refuse the rest.  A lookup whose fallback is
+# "import whatever string the DSN supplied" is the opposite shape.
+#
+# ``None`` means "known driver, nothing to import" (the stdlib sqlite3 module).
+# It must NOT be reachable for an unknown driver: collapsing "known, no probe
+# needed" into "unrecognised" would silently skip the preflight, which is the
+# same silent-no-op shape as a statement timeout that sets no variable.  The
+# membership test at the call site is what keeps the two apart.
 _DRIVER_MODULE = {
     "psycopg": "psycopg",
     "psycopg2": "psycopg2",
@@ -275,7 +292,18 @@ class SQLSource:
         # does not resolve" -- in CI and offline dev, which is exactly where a
         # missing extra is met.
         driver = url.get_driver_name()
-        driver_mod = _DRIVER_MODULE.get(driver, driver)
+        if driver not in _DRIVER_MODULE:
+            # Refuse rather than import a DSN-supplied name.  Membership is
+            # tested first so an unrecognised driver can never reach the
+            # ``None`` ("stdlib, no probe") branch below.
+            raise DataSourceError(
+                f"unknown SQL driver {driver!r} in the DSN for dialect "
+                f"{backend!r}. recotem probes a fixed set of drivers and will "
+                f"not import a name supplied by the DSN. Known drivers: "
+                f"{sorted(_DRIVER_MODULE)}. Write the DSN as "
+                f"{_BACKEND_RECOMMENDED_DSN[backend]} instead."
+            )
+        driver_mod = _DRIVER_MODULE[driver]
         if driver_mod is not None:
             try:
                 __import__(driver_mod)

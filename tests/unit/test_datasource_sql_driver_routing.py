@@ -197,3 +197,109 @@ def test_every_supported_backend_has_a_recommended_dsn() -> None:
     from recotem.datasource.sql import _BACKEND_RECOMMENDED_DSN, _DIALECT_TO_EXTRA
 
     assert set(_DIALECT_TO_EXTRA) <= set(_BACKEND_RECOMMENDED_DSN)
+
+
+# ---------------------------------------------------------------------------
+# The driver name comes from the DSN, so the probe must not import it blindly.
+# ---------------------------------------------------------------------------
+
+
+def _write_marker_module(tmp_path, monkeypatch, name: str):
+    """Put an importable module on sys.path that records having been imported.
+
+    Importing it is the observable event: if the preflight reaches
+    ``__import__`` with a DSN-supplied name, this file's top-level code runs
+    and the marker appears.  Checking for a raised exception alone would not
+    distinguish "refused" from "imported, then failed later".
+    """
+    marker = tmp_path / "marker.txt"
+    (tmp_path / f"{name}.py").write_text(
+        f"import pathlib\npathlib.Path({str(marker)!r}).write_text('imported')\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    sys.modules.pop(name, None)
+    return marker
+
+
+def test_dsn_supplied_driver_name_is_not_imported(tmp_path, monkeypatch) -> None:
+    """``postgresql+<anything>://`` must not import ``<anything>``.
+
+    ``make_url`` accepts any ``+suffix`` and ``get_driver_name()`` returns it
+    verbatim, so the preflight is the only thing standing between a DSN string
+    and ``__import__``.
+    """
+    name = "recotem_r8p6_driver_marker"
+    marker = _write_marker_module(tmp_path, monkeypatch, name)
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", f"postgresql+{name}://u:p@h/db")
+
+    with pytest.raises(DataSourceError) as excinfo:
+        SQLSource(_cfg())
+
+    assert not marker.exists(), (
+        "the preflight imported a module named by the DSN; its top-level code ran"
+    )
+    assert name not in sys.modules
+    message = str(excinfo.value)
+    assert "unknown SQL driver" in message
+    assert name in message, "the refusal must name the driver that was asked for"
+    assert "psycopg" in message, "the refusal must list the drivers recotem knows"
+    assert "postgresql+psycopg://" in message, "and give a spelling that works"
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "postgresql+os://u:p@h/db",
+        "mysql+subprocess://u:p@h/db",
+        "sqlite+antigravity:///tmp/x.db",
+        "mariadb+webbrowser://u:p@h/db",
+    ],
+)
+def test_unknown_drivers_are_refused_across_every_backend(dsn, monkeypatch) -> None:
+    """Real importable stdlib modules, refused on every dialect.
+
+    These names all import cleanly, so a probe that imported them would raise
+    nothing at all and let the DSN through -- the failure would be silent.
+    """
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", dsn)
+    with pytest.raises(DataSourceError, match="unknown SQL driver"):
+        SQLSource(_cfg())
+
+
+def test_unknown_driver_does_not_take_the_stdlib_no_probe_branch() -> None:
+    """``None`` means "known, nothing to import" and must not catch unknowns.
+
+    ``_DRIVER_MODULE.get(name)`` returns ``None`` both for ``pysqlite`` (known,
+    stdlib) and for any unrecognised driver.  If the call site branched on that
+    value alone the two would collapse and an unknown driver would skip the
+    preflight entirely -- passing silently rather than being refused.
+    """
+    from recotem.datasource.sql import _DRIVER_MODULE  # noqa: PLC0415
+
+    assert _DRIVER_MODULE["pysqlite"] is None
+    assert _DRIVER_MODULE.get("definitely_not_a_driver") is None
+    # The two are indistinguishable by value, so membership is what separates
+    # them -- this is the property the call site must rely on.
+    assert "pysqlite" in _DRIVER_MODULE
+    assert "definitely_not_a_driver" not in _DRIVER_MODULE
+
+
+def test_known_drivers_still_reach_the_import_probe(monkeypatch) -> None:
+    """The refusal must not swallow the case the fix exists for.
+
+    ``psycopg2`` is a known driver that is not installed, so it must still
+    produce the "cannot load" diagnostic, NOT "unknown SQL driver".
+    """
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg2://u:p@h/db")
+    with pytest.raises(DataSourceError) as excinfo:
+        SQLSource(_cfg())
+    message = str(excinfo.value)
+    assert "cannot load the 'psycopg2' driver" in message
+    assert "unknown SQL driver" not in message
+
+
+def test_installed_driver_still_constructs(monkeypatch) -> None:
+    """Positive control: the allow-list must not refuse a working DSN."""
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://u:p@h/db")
+    SQLSource(_cfg())  # must not raise
+    assert make_url("postgresql+psycopg://u:p@h/db").get_driver_name() == "psycopg"

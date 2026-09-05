@@ -511,6 +511,32 @@ exit 8.
 
 ### Fixed
 
+- **The canonical Azure `container@account` URI was refused as an embedded
+  credential, and an `az://` URI that carried a real one was not.** `az://`,
+  `abfs://`
+  and `abfss://` are three protocol aliases for one adlfs filesystem, and all
+  three accept `<container>@<account>.dfs.core.windows.net` (`.blob.` for Blob
+  storage) — the form Azure's own documentation uses, where the `@` separates
+  the container from the storage account rather than carrying a secret. The
+  userinfo check listed `abfs` and `abfss` but not `az`, so it was inverted on
+  both halves. An `abfss://cont@acct.dfs.core.windows.net/x` in `source.path`,
+  `item_metadata.path` or `output.path` failed with `'source.path' contains
+  embedded credentials in the URI` (exit 2), blaming the operator for a
+  credential they had not written, while an `az://` URI carrying a real
+  `user:pass@` pair — which does embed one — loaded without complaint. Only
+  `abfs` and `abfss` were on the reject list; `az` skipped the check
+  entirely. The three schemes now share one rule: a bare
+  `container@account` is addressing syntax and is accepted; a real
+  `user:pass@` pair is refused on all three. `s3://`, `http(s)://` and
+  `ftp(s)://` are unchanged, and `gs://project@bucket/key` — a gcsfs billing
+  project, not a credential — stays permitted. See
+  [Path schemes](docs/data-sources/csv.md#path-schemes).
+
+  **This is a behaviour change against 2.0.0 in both directions.** A recipe
+  whose `az://` path embeds `user:pass@` loaded under 2.0.0 and now exits 2.
+  Move the secret out of the URI: `AZURE_STORAGE_ACCOUNT_NAME` /
+  `AZURE_STORAGE_ACCOUNT_KEY`, a connection string, or a managed identity.
+
 - **An over-cap model was reported as a damaged file when `recotem serve`
   started, and as `size_cap` when the same file arrived by hot-swap.** The
   classifier that resolves an `ArtifactError` to a `reason` label lives in

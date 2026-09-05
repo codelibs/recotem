@@ -29,30 +29,59 @@
 # when deciding whether a fix is in a version.
 #
 # ---------------------------------------------------------------------------
-# Ancestry is only half the question, and this repository contains the other
-# half right now.
+# Ancestry answers ONE of the three ways a milestone's claim goes wrong, and
+# this repository contains a live instance of each of the other two.
 #
-# "Is the merge commit an ancestor?" detects a PR that NEVER REACHED main.  It
-# is structurally blind to a PR that REACHED MAIN AND WAS TAKEN BACK OUT,
-# because a reverted PR's merge commit stays an ancestor forever.  Both end in
-# the same place -- the milestone says the release contains a change the tree
-# does not have -- and only one of them was being checked.
+# The claim is always the same: "the release contains this PR's change".  It
+# fails in three shapes, and only the first is an ancestry question:
 #
-# The live instance: PR #276 reverted #259 (`90c96f0`) and #261 (`d0118fc`).
-# Both merge commits are still ancestors of main, so the ancestry test reports
-# them LANDED, while `is-ancestor|not on main` in check-release-tag.sh goes
-# from 3 hits at 90c96f0 to 0 in the tree, and `mariadb` in search.py from 5 at
-# d0118fc to 0.  Both carry milestone 2.2.0, so the 2.1.0 release is unaffected
-# -- but on the day 2.2.0 is cut, this gate would green-light a release missing
-# exactly the content it was written to catch.  That is #245's failure one turn
-# of the crank later.
+#   class                              instance   ancestry alone
+#   ---------------------------------  ---------  --------------------------
+#   merged, never reached main         #245       CATCHES
+#   reached main, then reverted        #259 #261  blind: reports LANDED
+#   merges cleanly, moves no bytes     #277       blind: VOUCHES for it
 #
-# So each ancestor is also checked for a revert that still stands, using the
-# canonical `This reverts commit <sha>` trailer that `git revert` and GitHub's
-# Revert button both write.  A reverted PR is not "stranded" and does not get
-# the stranded remedy: the fix is either to re-land it (recorded in
-# relanded-prs.tsv, as for a stranded PR) or to move it off the milestone,
-# which for a deliberate revert is the honest record and the usual answer.
+# Reverted: a reverted PR's merge commit stays an ancestor forever.  #276
+# reverted #259 (`90c96f0`) and #261 (`d0118fc`); both are still ancestors, so
+# the ancestry test reports them LANDED while `is-ancestor|not on main` in
+# check-release-tag.sh goes from 3 hits at 90c96f0 to 0 in the tree, and
+# `mariadb` in search.py from 5 at d0118fc to 0.
+#
+# No-op: PR #277 is titled "re-land of #259" and is stacked on #276, so its
+# branch reverts #259, reverts #261, then restores #259 -- and the first and
+# third cancel.  Merging it into main is clean and its net diff is EMPTY.  It
+# is the sharper of the two, because after merging the gate does not merely
+# fail to notice: it ASSERTS the milestone is complete on the strength of a PR
+# that carried nothing, and a relanded-prs.tsv row naming it would clear the
+# original it was recorded against.
+#
+# Both new classes carry milestone 2.2.0, so 2.1.0 is unaffected -- but on the
+# day 2.2.0 is cut, this gate would green-light a release missing exactly the
+# content it was written to catch.  That is #245's failure one turn of the
+# crank later.
+#
+# A reverted PR is not "stranded" and a no-op PR is neither; each gets its own
+# remedy, because being told to cherry-pick a change someone deliberately
+# backed out, or to re-land one that was never absent, is the wrong
+# instruction.
+#
+# WHAT THIS GATE STILL DOES NOT CHECK, deliberately.
+# ---------------------------------------------------------
+# A fourth shape exists: a later commit removes the change with no revert
+# trailer -- a rewrite, a refactor, a hand-edit.  That is a CONTENT question,
+# and content is materially harder than reachability.  The cheap forms do not
+# survive contact with a real repository: re-applying each PR's diff to see
+# whether it is a no-op flags every file another PR has legitimately touched
+# since, and hunk-grepping flags every reformat.  A gate that cries wolf on
+# ordinary refactoring is a gate someone switches off, which costs more than
+# the case it would catch.  So it is not attempted, and the success message
+# says so out loud rather than letting a reader infer completeness.
+#
+# The two classes added here were taken precisely because they are exact:
+# "is there a revert trailer naming this commit" and "is this commit's diff
+# empty" are both decidable with no heuristic.  Measured on this repository's
+# real history rather than predicted: over all 329 first-parent commits on
+# main, the number that would be flagged as an empty no-op is ZERO.
 # ---------------------------------------------------------------------------
 #
 # A re-land is normally a cherry-pick, which produces a NEW commit — the
@@ -223,6 +252,35 @@ pr_merge_oid() {
     gh pr view "$1" --json mergeCommit --jq '.mergeCommit.oid // ""' 2>/dev/null || true
 }
 
+# contributes_nothing <commit> -> 0 when the commit's diff against its first
+# parent is empty, i.e. it moved no bytes into the tree.
+#
+# A PR can merge cleanly and change nothing.  The live shape: PR #277 is titled
+# "re-land of #259" and is stacked on #276, which reverted #259 -- so its branch
+# reverts #259, reverts #261, then restores #259, and the first and third cancel.
+# Merging it into main is clean and its net diff is EMPTY: `check-release-tag.sh`
+# stays at 305 lines instead of returning to #259's 555, and the `not on main`
+# logic stays at 0 occurrences.  A PR that delivers nothing then becomes an
+# ancestor, and without this the gate would VOUCH for it -- a false green on the
+# very PR meant to close this problem, and, worse, a relanded-prs.tsv row naming
+# it would clear the original it was recorded against.
+#
+# False-positive rate measured on this repository's real history rather than
+# predicted: over all 329 first-parent commits on main (4 of them true merges,
+# 1 root), the number whose diff against their first parent is empty is ZERO.
+# Nothing legitimate in this history looks like this.
+#
+# The first parent is the right comparison for every commit shape here: for a
+# squash merge it is "what did this add to main", and for a true merge commit it
+# is the same question asked of the mainline.
+contributes_nothing() {
+    local parent
+    parent="$(git rev-list --parents -n 1 "$1" | cut -d' ' -f2)"
+    # A root commit has no parent and always contributes its whole tree.
+    [ -n "${parent}" ] && [ "${parent}" != "$1" ] || return 1
+    git diff --quiet "${parent}" "$1" 2>/dev/null
+}
+
 # reverts_of <commit> -> the commits in <commit>..HEAD that revert it, one per
 # line, newest first.  Empty when nothing reverts it.
 #
@@ -270,6 +328,8 @@ MISSING_COMMIT=()
 MISSING_COUNT=0
 REVERTED=()
 REVERTED_COUNT=0
+NOOP=()
+NOOP_COUNT=0
 UNKNOWN=()
 RELANDED=()
 CHECKED=0
@@ -293,7 +353,8 @@ clear_by_reland() {
     if [ -n "${repl_oid}" ] \
         && git cat-file -e "${repl_oid}^{commit}" 2>/dev/null \
         && git merge-base --is-ancestor "${repl_oid}" "${HEAD_SHA}" \
-        && [ -z "$(revert_that_stands "${repl_oid}")" ]; then
+        && [ -z "$(revert_that_stands "${repl_oid}")" ] \
+        && ! contributes_nothing "${repl_oid}"; then
         RELAND_NOTE="#${number} -> re-landed by #${replacement} (${repl_oid})"
         return 0
     fi
@@ -342,16 +403,28 @@ while IFS=$'\t' read -r NUMBER OID TITLE; do
         # line has since been removed -- "reached main and was taken back out"
         # is structurally invisible to it.  See the header.
         REVERT="$(revert_that_stands "${OID}")"
-        if [ -z "${REVERT}" ]; then
-            continue
-        fi
-        if clear_by_reland "${NUMBER}"; then
-            RELANDED+=("${RELAND_NOTE}")
-            continue
-        fi
-        REVERTED+=("#${NUMBER}  ${OID}  ${TITLE}"$'\n'\
+        if [ -n "${REVERT}" ]; then
+            if clear_by_reland "${NUMBER}"; then
+                RELANDED+=("${RELAND_NOTE}")
+                continue
+            fi
+            REVERTED+=("#${NUMBER}  ${OID}  ${TITLE}"$'\n'\
 "       reverted by ${REVERT}${RELAND_NOTE:+$'\n'${RELAND_NOTE}}")
-        REVERTED_COUNT=$((REVERTED_COUNT + 1))
+            REVERTED_COUNT=$((REVERTED_COUNT + 1))
+            continue
+        fi
+        # Ancestor, not reverted -- and still possibly a no-op.  Checked last
+        # because it is the cheapest to describe and the easiest to misread as
+        # the others: this PR did not fail to arrive and was not taken back
+        # out, it simply carried nothing.
+        if contributes_nothing "${OID}"; then
+            if clear_by_reland "${NUMBER}"; then
+                RELANDED+=("${RELAND_NOTE}")
+                continue
+            fi
+            NOOP+=("#${NUMBER}  ${OID}  ${TITLE}${RELAND_NOTE:+$'\n'${RELAND_NOTE}}")
+            NOOP_COUNT=$((NOOP_COUNT + 1))
+        fi
         continue
     fi
 
@@ -399,6 +472,34 @@ if [ ${#MISSING_COMMIT[@]} -gt 0 ]; then
         echo "    git fetch origin '+refs/pull/<n>/merge:refs/remotes/pr/<n>'"
         echo "  or, if the change was re-landed, record it in"
         echo "  .github/relanded-prs.tsv naming the PR that did land."
+    } >&2
+    exit 1
+fi
+
+if [ ${#NOOP[@]} -gt 0 ]; then
+    {
+        echo "::error::${NOOP_COUNT} PR(s) in milestone '${MILESTONE}' merged but moved"
+        echo "  no bytes, so ${TAG} would publish without them:"
+        for line in "${NOOP[@]}"; do
+            echo "    ${line}"
+        done
+        echo ""
+        echo "  Each merge commit above has an EMPTY diff against its first"
+        echo "  parent. It is an ancestor and nothing reverted it, so both checks"
+        echo "  above pass -- but the change it claims to deliver is not in the"
+        echo "  tree, because it was never added. The usual cause is a re-land"
+        echo "  stacked on the revert it undoes: the branch reverts a change and"
+        echo "  then restores it, the two cancel, and the merge is a no-op."
+        echo ""
+        echo "  To fix, for each PR listed, pick one:"
+        echo "    - rebuild it onto main so its diff is the change it describes,"
+        echo "      then re-merge"
+        echo "    - if another PR really delivered the change, record that one in"
+        echo "      .github/relanded-prs.tsv (it must not be a no-op either)"
+        echo "    - if it should not ship, move it off milestone '${MILESTONE}'"
+        echo ""
+        echo "  To confirm by hand:"
+        echo "    git diff --quiet <merge-commit>^ <merge-commit> && echo no-op"
     } >&2
     exit 1
 fi
@@ -459,5 +560,15 @@ if [ ${#STRANDED[@]} -gt 0 ]; then
     exit 1
 fi
 
-echo "OK: every merged PR in milestone '${MILESTONE}' is an ancestor of" \
-     "${HEAD_SHA} and none has been reverted."
+# Say what was checked AND what was not.  The old success line was a bare "is
+# an ancestor", which reads as "the milestone is complete" and is a stronger
+# claim than the gate can make.  A gate that announces its own boundary is
+# worth more than one a reader infers completeness from.
+echo "OK: every merged PR in milestone '${MILESTONE}' is in the tree at ${HEAD_SHA}."
+echo "  Checked, per PR: the merge commit is an ancestor; no revert of it still"
+echo "  stands; the merge is not an empty no-op."
+echo "  NOT checked: whether a later commit removed the change WITHOUT a"
+echo "  'This reverts commit' trailer -- a rewrite or a refactor that drops a"
+echo "  change silently is invisible here. Verifying content presence is a"
+echo "  materially harder question than reachability and no cheap form of it"
+echo "  survives contact with legitimate later refactoring; see the header."

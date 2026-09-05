@@ -645,3 +645,168 @@ def test_the_shipped_script_catches_the_live_reverted_prs(tmp_path: Path) -> Non
     assert "REVERTED" in proc.stderr
     assert "#259" in proc.stderr and "#261" in proc.stderr
     assert _LIVE_REVERT[:12] in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# No-op merges: the third class, and the one where ancestry does not merely
+# fail to notice but actively vouches.
+#
+# A PR can merge cleanly and move no bytes.  The live shape is PR #277, titled
+# "re-land of #259" and stacked on #276 which reverted #259: the branch reverts
+# #259, reverts #261, then restores #259, and the first and third cancel.
+# Merging it into main is clean and its net diff is empty.
+#
+# Measured on this repository before the check was written: of all 329
+# first-parent commits on main, ZERO have an empty diff against their first
+# parent.  The false-positive rate is not predicted here, it is counted.
+# ---------------------------------------------------------------------------
+
+
+def _empty_commit(repo: Path, message: str) -> str:
+    _git(repo, "commit", "--allow-empty", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _reland_that_cancels_itself(repo: Path, sha: str) -> str:
+    """The #277 shape: revert *sha*, then restore it, and merge the pair.
+
+    The branch's net contribution to main is nothing, but it merges cleanly and
+    its merge commit becomes an ancestor.
+    """
+    _git(repo, "checkout", "-q", "-b", "reland", sha)
+    _git(repo, "revert", "--no-edit", sha)
+    _git(repo, "revert", "--no-edit", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "re-land that cancels itself", "reland")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+@requires_bash
+def test_a_no_op_merge_is_refused(repo: Path) -> None:
+    """The case ancestry vouches for rather than merely missing."""
+    noop = _empty_commit(repo, "PR that changed nothing")
+    _set_prs(repo, f"277\t{noop}\tfix(release): re-land of #259")
+
+    proc = _run(repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "moved" in proc.stderr and "no bytes" in proc.stderr
+    assert "#277" in proc.stderr
+    # It is neither stranded nor reverted, and must not get either remedy.
+    assert "stacked on a branch" not in proc.stderr
+    assert "reverted by" not in proc.stderr
+    assert "rebuild it onto main" in proc.stderr
+
+
+@requires_bash
+def test_the_reland_that_cancels_itself_is_refused(repo: Path) -> None:
+    """#277's actual shape, built rather than asserted: revert then restore."""
+    landed = _sha(repo, "landed")
+    merge = _reland_that_cancels_itself(repo, landed)
+
+    assert (
+        subprocess.run(["git", "diff", "--quiet", f"{merge}^", merge], cwd=repo)
+    ).returncode == 0, "fixture is wrong: the merge was supposed to be a no-op"
+    assert (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", merge, "main"], cwd=repo
+        ).returncode
+        == 0
+    ), "fixture is wrong: a no-op merge is still an ancestor"
+
+    _set_prs(repo, f"277\t{merge}\tre-land of #259")
+    proc = _run(repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "#277" in proc.stderr and "no bytes" in proc.stderr
+
+
+@requires_bash
+def test_a_no_op_reland_record_does_not_clear_the_original(repo: Path) -> None:
+    """The hole a no-op opens in the waiver, which is the worst of the three.
+
+    Recording a no-op as the re-land of a reverted PR would clear the original
+    on the strength of a PR that restored nothing -- the gate would not just
+    miss the gap, it would certify it closed.
+    """
+    landed = _sha(repo, "landed")
+    _revert(repo, landed)
+    noop = _empty_commit(repo, "re-land that restored nothing")
+    _set_prs(repo, f"259\t{landed}\tbacked out")
+    _set_replacement(repo, 277, noop)
+    _reland(repo, "259\t277\tre-landed for 2.2.0\n")
+
+    proc = _run(repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "#259" in proc.stderr
+    assert "re-landed by #277" not in proc.stdout, (
+        "a no-op cleared the PR it was recorded against"
+    )
+
+
+@requires_bash
+def test_an_ordinary_pr_is_not_flagged_as_a_no_op(repo: Path) -> None:
+    """Negative control: a real change must stay green."""
+    real = _commit(repo, "a real change", "root\nside\nreal\n")
+    _set_prs(repo, f"300\t{real}\tan ordinary change")
+
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@requires_bash
+def test_success_message_states_what_is_not_checked(repo: Path) -> None:
+    """A gate that lets a reader infer completeness is worse than a loud one.
+
+    Three exact questions are asked; a fourth -- did a later commit remove the
+    change with no revert trailer -- is not, because no cheap form of it
+    survives legitimate refactoring. The output has to say that itself.
+    """
+    _set_prs(repo, f"1\t{_sha(repo, 'landed')}\ta landed change")
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "NOT checked" in proc.stdout, proc.stdout
+    assert "This reverts commit" in proc.stdout
+    assert "no-op" in proc.stdout
+
+
+@requires_bash
+@requires_live_history
+def test_no_commit_in_this_repositorys_history_is_a_false_positive() -> None:
+    """The false-positive rate, counted rather than predicted.
+
+    A check that flags ordinary work gets switched off, which costs more than
+    the case it catches. This pins the measurement the design rests on, so a
+    future change that starts flagging real commits fails here rather than in
+    a release.
+    """
+    shas = subprocess.run(
+        ["git", "rev-list", "--first-parent", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert len(shas) > 300, "history looks truncated; the measurement is not meaningful"
+
+    flagged = []
+    for sha in shas:
+        parents = subprocess.run(
+            ["git", "rev-list", "--parents", "-n", "1", sha],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()[1:]
+        if not parents:
+            continue
+        if (
+            subprocess.run(
+                ["git", "diff", "--quiet", parents[0], sha], cwd=REPO_ROOT
+            ).returncode
+            == 0
+        ):
+            flagged.append(sha)
+
+    assert not flagged, (
+        "the no-op check would flag real commits in this repository's history, "
+        f"so it is not the exact test it claims to be: {flagged}"
+    )

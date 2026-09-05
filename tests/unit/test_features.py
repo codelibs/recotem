@@ -18,6 +18,7 @@ import json
 import math
 from decimal import Decimal
 from fractions import Fraction
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -1498,6 +1499,29 @@ def test_dimension_cap_message_matches_the_measured_scaling(
     assert "cubic in this number" not in message
     assert "dim^2.4" in message
     assert "quadratic" in message
+
+
+def test_no_shipped_prose_still_calls_the_feature_cost_cubic() -> None:
+    """The correction must reach every file that states the cost, not just one.
+
+    #208 corrected `docs/operations.md` and the runtime message, and added the
+    test above to keep those two in step. `CLAUDE.md` states the same cost in
+    its `RECOTEM_MAX_FEATURE_DIM` row and was not covered, so it kept saying
+    "cubic" through a release. Checking the whole shipped prose surface is what
+    stops the next file from drifting the same way.
+    """
+    root = Path(__file__).resolve().parents[2]
+    sources = [root / "CLAUDE.md", *sorted((root / "docs").rglob("*.md"))]
+    offenders = [
+        f"{path.relative_to(root)}:{n}"
+        for path in sources
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "cubic in this number" in line
+    ]
+    assert not offenders, (
+        "these lines still describe the feature-dimension cost as cubic; the "
+        f"measured growth is dim^2.4: {offenders}"
+    )
 
 
 def test_missing_source_column_raises(df: pd.DataFrame) -> None:

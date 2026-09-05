@@ -256,3 +256,106 @@ def test_transient_remote_write_errors_are_still_unclassified() -> None:
     """A 5xx / timeout is not a config error and must keep exiting 1."""
     assert _classify(TimeoutError("read timed out"), "s3://b/m") is None
     assert _classify(ConnectionResetError("reset by peer"), "s3://b/m") is None
+
+
+# ---------------------------------------------------------------------------
+# R8-P3 — the shapes the *real* services raise
+# ---------------------------------------------------------------------------
+#
+# The block above was built against MinIO / fake-gcs-server / Azurite.  Run
+# against real AWS S3, real Google Cloud Storage and real Azure Blob Storage,
+# three more failure shapes appeared that no emulator produced, and all three
+# reached the operator as exit 1 after the model had already been trained:
+#
+#   gs  no credentials resolve      gcsfs.retry.HttpError, .code == 401
+#   gs  authenticated, no permission  plain OSError("Forbidden: ...")
+#   az  AAD identity, no data-plane role
+#                                   RuntimeError <- HttpResponseError, 403
+#
+# gcsfs.retry.validate_response translates 404 to FileNotFoundError but leaves
+# 401 as an HttpError (which does not even subclass OSError) and 403 as a bare
+# OSError, so neither the isinstance test nor the class-name lists matched.
+# The stand-ins below reproduce the attribute shape rather than importing the
+# SDKs, which are optional dependencies.
+
+
+class _GcsHttpError(Exception):
+    """Shape of ``gcsfs.retry.HttpError``: status on ``.code``, plain Exception."""
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class _AzureHttpResponseError(Exception):
+    """Shape of ``azure.core.exceptions.HttpResponseError``: ``.status_code``."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def test_gcs_unauthenticated_write_is_a_config_error() -> None:
+    """gcsfs raises HttpError(401) when no credentials resolve — exit 8, not 1."""
+    exc = _GcsHttpError(
+        401,
+        "Anonymous caller does not have storage.objects.create access to the "
+        "Google Cloud Storage object.",
+    )
+    err = _classify(exc, "gs://some-bucket/out/model.recotem")
+    assert err is not None, "the GCS 401 write was left unclassified (exit 1)"
+    assert err.code == "artifact_write_credentials"
+    assert _map_exception_to_exit(err) == _EXIT_CONFIG
+
+
+def test_gcs_forbidden_write_is_a_config_error() -> None:
+    """gcsfs raises a *bare* OSError for 403 — the commonest GCS mistake."""
+    exc = OSError(
+        "Forbidden: https://storage.googleapis.com/upload/storage/v1/b/bucket/o\n"
+        "sa@project.iam.gserviceaccount.com does not have "
+        "storage.objects.create access to the Google Cloud Storage object."
+    )
+    err = _classify(exc, "gs://some-bucket/out/model.recotem")
+    assert err is not None, "the GCS 403 write was left unclassified (exit 1)"
+    assert err.code == "artifact_write_destination"
+    assert _map_exception_to_exit(err) == _EXIT_CONFIG
+
+
+def test_azure_missing_data_plane_role_is_a_config_error() -> None:
+    """An AAD identity with the control-plane role but no data-plane one."""
+    inner = _AzureHttpResponseError(
+        403,
+        "This request is not authorized to perform this operation using this "
+        "permission.\nErrorCode:AuthorizationPermissionMismatch",
+    )
+    wrapper = RuntimeError("Failed to upload block: This request is not authorized")
+    wrapper.__cause__ = inner
+    err = _classify(wrapper, "az://some-container/out/model.recotem")
+    assert err is not None, "the Azure 403 write was left unclassified (exit 1)"
+    assert err.code == "artifact_write_destination"
+    assert _map_exception_to_exit(err) == _EXIT_CONFIG
+
+
+def test_server_side_and_throttling_errors_still_exit_one() -> None:
+    """5xx / 429 are transient: they must NOT be relabelled as config errors."""
+    for status in (429, 500, 503):
+        assert _classify(_GcsHttpError(status, "try again"), "gs://b/m") is None, (
+            f"a {status} must stay unclassified so a retry still looks transient"
+        )
+        assert (
+            _classify(_AzureHttpResponseError(status, "server busy"), "az://c/m")
+            is None
+        )
+
+
+def test_transient_oserror_subclasses_are_not_caught_by_the_forbidden_match() -> None:
+    """Only a bare OSError whose message starts with 'Forbidden:' is a 403."""
+    assert _classify(OSError("Input/output error"), "gs://b/m") is None
+    assert _classify(ConnectionError("Forbidden: not really"), "gs://b/m") is None
+
+
+def test_real_service_http_statuses_are_scoped_to_remote_paths() -> None:
+    """A local output.path keeps its existing classification (exit 8 via lock)."""
+    assert _classify(_GcsHttpError(403, "forbidden"), "/var/lib/out.recotem") is None
+    assert _classify(OSError("Forbidden: x"), "/var/lib/out.recotem") is None

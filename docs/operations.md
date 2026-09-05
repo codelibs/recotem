@@ -329,7 +329,8 @@ Defaults:
 For multi-process Optuna search (parallelism on a single host or a
 distributed cluster), set `training.storage_path` in the recipe. Accepted
 forms: a bare path → SQLite, or a URL beginning with `sqlite://`,
-`postgresql+psycopg://`, or `mysql+pymysql://`. The `+driver` suffix is
+`postgresql+psycopg://`, `mysql+pymysql://`, or `mariadb+pymysql://`.
+The `+driver` suffix is
 required: this URL is handed straight to Optuna's `RDBStorage`, which has no
 driver preflight, so a bare `postgresql://` (which routes to the uninstalled
 `psycopg2`) fails inside Optuna with `ImportError: Failed to import DB access

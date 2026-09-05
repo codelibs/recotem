@@ -21,6 +21,10 @@ jobs:
   guard:
     name: release tag guard
     runs-on: ubuntu-24.04
+    # Reading the release milestone's pull requests needs one extra scope.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Assert tag trigger
         run: |
@@ -29,12 +33,29 @@ jobs:
             *) echo "::error::publish.yml requires a v* tag ref, got '${GITHUB_REF}'"; exit 1 ;;
           esac
 
+      # fetch-depth: 0 — the milestone check below asks an ancestry question,
+      # which a shallow clone cannot answer.  It refuses rather than guessing,
+      # so this is load-bearing rather than defensive.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       # Also runnable locally before tagging:
       #   bash .github/scripts/check-release-tag.sh v2.1.0
       - name: Tag is a final release and matches pyproject.toml + version.py + Chart.yaml
         run: bash .github/scripts/check-release-tag.sh
+
+      # A PR can read MERGED on GitHub and still not be in main — see the
+      # script's header for the case that happened.  Nothing else in the repo
+      # asks this: check-release-tag.sh compares file contents and makes no git
+      # or API call.
+      #
+      # Also runnable locally before tagging:
+      #   bash .github/scripts/check-milestone-landed.sh v2.1.0
+      - name: Every merged PR in the release milestone is actually in this tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/check-milestone-landed.sh
 
   # ---------------------------------------------------------------------------
   # Gate 2: the code.

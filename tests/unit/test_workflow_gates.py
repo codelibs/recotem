@@ -167,3 +167,101 @@ def test_pypi_publish_action_is_pinned_to_a_commit(workflow_file: str) -> None:
             "action runs in the job holding `id-token: write` and a PyPI "
             "filename can never be reused"
         )
+
+
+# ---------------------------------------------------------------------------
+# The milestone-landed gate.
+#
+# A PR can read MERGED on GitHub and still not be in main (a stacked PR whose
+# base was squash-merged first lands on an orphan).  Nothing else in the repo
+# asks the question: check-release-tag.sh compares file contents and executes
+# no git or API call, and no workflow ran `git merge-base`.  These tests pin
+# the three things the gate needs in order to work at all — each is silently
+# satisfiable-looking and would make the gate pass without checking anything.
+# ---------------------------------------------------------------------------
+
+_MILESTONE_SCRIPT = "check-milestone-landed.sh"
+
+
+def _guard_job() -> dict[str, Any]:
+    return _load("publish.yml")["jobs"]["guard"]
+
+
+def _step_running(job: dict[str, Any], script: str) -> dict[str, Any] | None:
+    for step in job.get("steps", []):
+        if script in str(step.get("run", "")):
+            return step
+    return None
+
+
+def test_release_runs_the_milestone_landed_check() -> None:
+    """Removing the step is the obvious way to lose the gate."""
+    assert _step_running(_guard_job(), _MILESTONE_SCRIPT) is not None, (
+        "publish.yml no longer runs the milestone-landed check, so a PR marked "
+        "MERGED but absent from the tree would ship unnoticed again"
+    )
+
+
+def test_the_milestone_check_script_is_executable_and_present() -> None:
+    script = REPO_ROOT / ".github" / "scripts" / _MILESTONE_SCRIPT
+    assert script.is_file(), f"{_MILESTONE_SCRIPT} is missing"
+    text = script.read_text()
+    assert "merge-base --is-ancestor" in text, (
+        "the ancestry test is the whole check; without it the script reports "
+        "success for a question it never asked"
+    )
+
+
+def test_the_guard_job_checks_out_full_history() -> None:
+    """A shallow clone cannot answer an ancestry question.
+
+    The script refuses rather than guessing, so losing `fetch-depth: 0` turns
+    the gate into a hard failure rather than a silent pass — but it still stops
+    releases, so pin it here where the reason is written down.
+    """
+    checkout = next(
+        (s for s in _guard_job()["steps"] if "actions/checkout" in str(s.get("uses"))),
+        None,
+    )
+    assert checkout is not None
+    assert (checkout.get("with") or {}).get("fetch-depth") == 0, (
+        "the milestone check needs full history; a shallow checkout cannot "
+        "resolve merge commits or answer merge-base --is-ancestor"
+    )
+
+
+def test_the_guard_job_can_read_pull_requests() -> None:
+    """Reading the milestone needs a scope the workflow default does not grant.
+
+    publish.yml's workflow-level default is `contents: read` only, so without a
+    job-level block the gh call 404s and the gate cannot run.
+    """
+    workflow = _load("publish.yml")
+    perms = _effective_permissions(workflow, workflow["jobs"]["guard"])
+    assert perms is not _NO_BLOCK, "the guard job declares no permissions block"
+    assert perms.get("pull-requests") == "read", (  # type: ignore[union-attr]
+        "the guard job cannot read the release milestone's pull requests"
+    )
+    assert perms.get("contents") == "read", (  # type: ignore[union-attr]
+        "the guard job still needs contents: read to check out the repository"
+    )
+
+
+def test_reland_record_rows_are_well_formed() -> None:
+    """A malformed row is silently ignored by the script, so pin the shape.
+
+    Each non-comment row must be three tab-separated fields whose first two are
+    PR numbers — the script skips anything else, which would quietly turn a
+    recorded re-land back into an unexplained absence.
+    """
+    record = REPO_ROOT / ".github" / "relanded-prs.tsv"
+    if not record.is_file():
+        pytest.skip("no re-land record in this tree")
+    for lineno, line in enumerate(record.read_text().splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fields = line.split("\t")
+        assert len(fields) >= 3, f"{record.name}:{lineno} is not tab-separated"
+        assert fields[0].strip().isdigit(), f"{record.name}:{lineno} bad original PR"
+        assert fields[1].strip().isdigit(), f"{record.name}:{lineno} bad replacement PR"
+        assert fields[2].strip(), f"{record.name}:{lineno} has no reason"

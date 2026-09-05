@@ -178,6 +178,13 @@ _NUMERICAL_STD_RELATIVE_FLOOR = 1e-8
 # ignore. One row in five losing its signal is not a tail -- it is the column.
 _PRUNED_ROWS_WARN_RATIO = 0.2
 
+# Share of a `numerical` column's rows that must be present-but-unparseable
+# before `_warn_if_numerical_unparseable` fires. A handful of bad cells in a
+# large catalog is ordinary data noise the mean absorbs; one row in five is a
+# malformed export, and the fitted mean/std then describe a different column
+# from the one the operator thinks they supplied.
+_UNPARSEABLE_ROWS_WARN_RATIO = 0.2
+
 # The encoded matrices are float32 (`encode` / `encode_one` both build with
 # `dtype=np.float32`). A standardized value finite as float64 whose magnitude
 # exceeds float32's max becomes +-inf on the cast, so it must be caught on the
@@ -567,6 +574,47 @@ def _warn_if_vocabulary_pruned(
     )
 
 
+def _warn_if_numerical_unparseable(
+    col: FeatureColumn, *, n_rows: int, n_unparseable: int
+) -> None:
+    """Warn when a material share of a numerical column did not parse.
+
+    ``feature_zero_variance_column`` fires only when a column has NO finite
+    value at all. A column that is, say, one fifth unparseable text is fit
+    silently from the rest, and the offending rows then standardize to 0.0 --
+    which is exactly what a row sitting at the column mean encodes to, and what
+    a legitimately *missing* cell encodes to. After the fit there is nothing
+    left to distinguish "no price" from "price we could not read", so the count
+    has to be taken here.
+
+    This is the numerical counterpart of the vocabulary encodings' pruning
+    warning: the same failure -- a subset of rows quietly losing their signal
+    while the column as a whole still looks healthy -- reached through a
+    different mechanism.
+
+    Missing cells are deliberately NOT counted. Encoding them to the mean is
+    documented behaviour, not a defect; the signal worth raising is a value the
+    operator believes they supplied and recotem could not read.
+    """
+    if n_rows <= 0 or n_unparseable <= 0:
+        return
+    if n_unparseable < _UNPARSEABLE_ROWS_WARN_RATIO * n_rows:
+        return
+    _logger.warning(
+        "feature_numerical_unparseable_column",
+        column=col.name,
+        n_unparseable=n_unparseable,
+        n_rows=n_rows,
+        detail=(
+            f"{n_unparseable} of {n_rows} supplied values could not be parsed "
+            f"as numbers; the column was standardized from the rest and those "
+            f"rows encode to the mean, indistinguishable from a missing value. "
+            f"Check the column's export format (thousands separators, currency "
+            f"symbols, and placeholder text such as 'N/A' are the usual causes)."
+        ),
+    )
+
+
 def build_encoder_state(
     df: pd.DataFrame,
     columns: Sequence[FeatureColumn],
@@ -692,6 +740,16 @@ def build_encoder_state(
                 # `notna()` gave before.
                 finite = numeric[np.isfinite(numeric)]
                 has_finite = bool(finite.size)
+                # Cells that WERE supplied but did not survive coercion. A
+                # genuinely absent cell is a documented case (it encodes to the
+                # mean); a present-but-unparseable one is a data bug that looks
+                # exactly the same afterwards, so it has to be counted here or
+                # it is never visible at all.
+                _warn_if_numerical_unparseable(
+                    col,
+                    n_rows=len(series),
+                    n_unparseable=int((series.notna() & ~np.isfinite(numeric)).sum()),
+                )
                 # The `float()` coercions are load-bearing plainness guards,
                 # not cosmetic -- see the module docstring. `mean()` / `std()`
                 # return `np.float64` scalars that would otherwise leak into the

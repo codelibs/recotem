@@ -19,7 +19,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from recotem.training.pipeline import _build_final_matrix
+from recotem.training.pipeline import _build_final_matrix, _train_final
 
 
 def _repeat_heavy_frame() -> pd.DataFrame:
@@ -72,3 +72,30 @@ def test_deduplicated_frame_is_untouched() -> None:
     X, _, _ = _build_final_matrix(df, "user_id", "item_id")
     assert raw.data.max() == 1
     assert (X.data == raw.data).all()
+
+
+def test_the_model_that_gets_shipped_is_trained_on_the_binary_matrix() -> None:
+    """The helper is only a fix while ``_train_final`` actually calls it.
+
+    Every test above exercises ``_build_final_matrix`` in isolation, so all of
+    them stay green if the one line that uses it is reverted to ``df_to_sparse``
+    -- the helper is left in place, unused, and the shipped model goes back to
+    being refit on counts.  Measured on the whole suite: that one-line revert
+    passed 2694 tests and ``ruff check``, while a ``dedup: none`` training run
+    produced a refit matrix with ``max=7.0, mean=4.04`` again.
+
+    This goes through ``_train_final`` and reads the matrix off the recommender
+    it returns, which is the object that gets pickled into the artifact, so the
+    assertion holds on the surface the fix is about.
+    """
+    recommender = _train_final(
+        _repeat_heavy_frame(), "user_id", "item_id", "TopPopRecommender", {}
+    ).recommender
+    X = recommender.X_train_all
+    assert X.nnz, "expected a non-empty training matrix"
+    assert X.data.max() == 1, (
+        "the final refit trained on a matrix with duplicate (user, item) pairs "
+        "summed into confidence weights, while the search scored 0/1 -- "
+        "_train_final is no longer building its matrix through "
+        "_build_final_matrix"
+    )

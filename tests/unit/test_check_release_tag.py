@@ -54,6 +54,7 @@ def _make_tree(
     example_pin: str | None = "2.1.0",
     docs_pin: str | None = "2.1.0",
     version_label: str | None = "2.1.0",
+    changelog_heading: str | None = "## [2.1.0] - 2026-01-01",
 ) -> Path:
     """Build a minimal tree the script can read, and return its script path.
 
@@ -115,6 +116,14 @@ def _make_tree(
     if docs_pin is not None:
         docs += f"          image: ghcr.io/codelibs/recotem:{docs_pin}\n"
     (root / "docs" / "deployment" / "k8s.md").write_text(docs, encoding="utf-8")
+
+    # The GitHub Release notes are derived from this section, so the release
+    # heading is a release artifact like any other.  `None` omits the file.
+    if changelog_heading is not None:
+        (root / "CHANGELOG.md").write_text(
+            f"# Changelog\n\n{changelog_heading}\n\n### Added\n\n- a thing\n",
+            encoding="utf-8",
+        )
 
     return script
 
@@ -636,3 +645,116 @@ def test_stale_pins_and_stale_versions_are_reported_in_one_run(
         "src/recotem/version.py (2.0.0)",
     ):
         assert expected in proc.stdout, f"{expected!r} missing from:\n{proc.stdout}"
+
+
+# ---------------------------------------------------------------------------
+# The CHANGELOG section for the release
+#
+# The GitHub Release notes are derived from it (see the release procedure's
+# references/release-notes.md), and entries accumulate during the cycle under a
+# heading marked `Unreleased` which the release renames to a date.  Nothing
+# verified that rename: `grep -ci changelog` over the script returned 0, so a
+# tag could publish notes drawn from a section still headed "Unreleased" -- and
+# the CHANGELOG at the tagged commit would say so permanently.
+# ---------------------------------------------------------------------------
+
+
+def test_changelog_still_marked_unreleased_is_refused(tmp_path: Path) -> None:
+    """The exact state `main` is in during a dev cycle."""
+    script = _make_tree(tmp_path, changelog_heading="## [2.1.0] - Unreleased")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "still marked Unreleased" in proc.stdout
+    assert "## [2.1.0] - Unreleased" in proc.stdout
+
+
+def test_changelog_without_a_section_for_the_release_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A release whose notes are derived from a section that does not exist."""
+    script = _make_tree(tmp_path, changelog_heading="## [2.0.0] - 2026-06-27")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "no CHANGELOG.md section" in proc.stdout
+
+
+def test_missing_changelog_is_refused(tmp_path: Path) -> None:
+    script = _make_tree(tmp_path, changelog_heading=None)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "CHANGELOG.md is missing" in proc.stdout
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "## [2.1.0] - 2026-01-01",
+        '## [2.1.0] - 2026-01-01 "Codename"',
+        "## [2.1.0]",
+    ],
+)
+def test_a_dated_or_bare_release_heading_passes(tmp_path: Path, heading: str) -> None:
+    """Only the word "Unreleased" is refused, not a particular date format.
+
+    The procedure's template is `## [X.Y.Z] - YYYY-MM-DD`, but pinning the exact
+    shape would refuse a heading that is perfectly clear about being released.
+    """
+    script = _make_tree(tmp_path, changelog_heading=heading)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_an_unreleased_section_for_a_different_version_is_ignored(
+    tmp_path: Path,
+) -> None:
+    """A dev cycle opened for the *next* version must not fail this release.
+
+    Immediately after a release the procedure opens `## [X.Y+1.0] - Unreleased`.
+    That heading is correct and must not be mistaken for this release's.
+    """
+    script = _make_tree(tmp_path, changelog_heading="## [2.2.0] - Unreleased")
+    tmp_path.joinpath("CHANGELOG.md").write_text(
+        "# Changelog\n\n## [2.2.0] - Unreleased\n\n### Added\n\n- next cycle\n\n"
+        "## [2.1.0] - 2026-01-01\n\n### Added\n\n- this release\n",
+        encoding="utf-8",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_changelog_and_version_problems_are_reported_in_one_run(
+    tmp_path: Path,
+) -> None:
+    """Third class of failure, same single-run contract as the other two."""
+    script = _make_tree(
+        tmp_path,
+        pyproject="2.0.0",
+        example_pin="2.0.0",
+        changelog_heading="## [2.1.0] - Unreleased",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1
+    for expected in (
+        "examples/k8s/serve-deployment.yaml",
+        "pyproject.toml (2.0.0)",
+        "still marked Unreleased",
+    ):
+        assert expected in proc.stdout, f"{expected!r} missing from:\n{proc.stdout}"
+
+
+def test_the_repository_changelog_has_a_section_for_its_own_version() -> None:
+    """The shipped CHANGELOG keeps the shape the script parses.
+
+    Asserts the heading exists, not that it is dated: during a dev cycle it is
+    deliberately `Unreleased`, which is exactly what the release renames.
+    """
+    version = (REPO_ROOT / "src" / "recotem" / "version.py").read_text(encoding="utf-8")
+    match = re.search(r'__version__\s*=\s*"([^"]+)"', version)
+    assert match is not None
+    base = match.group(1).split(".dev")[0].split("a")[0].split("rc")[0]
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert re.search(rf"^## \[{re.escape(base)}\]", changelog, re.M), (
+        f"CHANGELOG.md has no '## [{base}]' heading; the release procedure "
+        "renames that section rather than creating one, and the guard in "
+        "check-release-tag.sh refuses a tag without it."
+    )

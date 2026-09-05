@@ -328,7 +328,53 @@ while IFS= read -r hit; do classify "${hit}" label; done < <(printf '%s\n' "${LA
          "check.  Refused rather than skipped, for the same reason as the image pins."
 
 # ---------------------------------------------------------------------------
-# 5. Report -- both classes of failure in a single run
+# 5. The CHANGELOG must announce this version as released
+# ---------------------------------------------------------------------------
+# The GitHub Release notes are derived from the CHANGELOG section for the
+# version (references/release-notes.md), and entries accumulate during the cycle
+# under a heading marked `Unreleased`.  Renaming that heading to the release
+# date is step 3 of the release procedure -- and nothing verified it: a
+# `grep -ci changelog` over this script returned 0, so a tag could publish
+# release notes drawn from a section still headed "Unreleased", permanently, at
+# the tagged commit.
+#
+# Checked with grep for the same reason the chart is read with awk: the guard
+# jobs run this straight after `actions/checkout` with nothing installed.
+CHANGELOG="${REPO_ROOT}/CHANGELOG.md"
+EXPECTED_RE="$(printf '%s' "${EXPECTED}" | sed 's/\./\\./g')"
+CHANGELOG_PROBLEM=""
+CHANGELOG_DETAIL=()
+
+if [ ! -f "${CHANGELOG}" ]; then
+    CHANGELOG_PROBLEM="has no CHANGELOG.md"
+    CHANGELOG_DETAIL=("CHANGELOG.md is missing.  The GitHub Release notes are derived from it.")
+else
+    CHANGELOG_HEADING="$(grep -m1 -E "^## \[${EXPECTED_RE}\]" "${CHANGELOG}" || true)"
+    if [ -z "${CHANGELOG_HEADING}" ]; then
+        CHANGELOG_PROBLEM="has no CHANGELOG.md section"
+        CHANGELOG_DETAIL=(
+            "CHANGELOG.md has no '## [${EXPECTED}]' heading." \
+            "The GitHub Release notes are derived from that section, so a release without" \
+            "one ships no notes at all.  Add the section (see the release procedure), or" \
+            "rename the existing Unreleased heading if the entries are already there:" \
+            "  grep -n '^## \\[' CHANGELOG.md"
+        )
+    elif printf '%s' "${CHANGELOG_HEADING}" | grep -qi 'unreleased'; then
+        CHANGELOG_PROBLEM="has a CHANGELOG.md section still marked Unreleased"
+        CHANGELOG_DETAIL=(
+            "CHANGELOG.md still reads:" \
+            "  ${CHANGELOG_HEADING}" \
+            "" \
+            "Entries accumulate under an 'Unreleased' heading during the cycle; releasing" \
+            "renames it to the date.  Left as-is, the published release notes announce" \
+            "${EXPECTED} as unreleased, and the CHANGELOG at the tagged commit says so" \
+            "permanently.  Set the heading to '## [${EXPECTED}] - YYYY-MM-DD'."
+        )
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Report -- every class of failure in a single run
 # ---------------------------------------------------------------------------
 # Section 3 compares every version declaration before reporting so that one run
 # names every file that did not move.  The pin scan used to defeat that: it
@@ -362,15 +408,26 @@ if [ -n "${MISMATCH}" ]; then
              "ships a chart whose manifests deploy some other image tag." \
              "")
 fi
+if [ -n "${CHANGELOG_PROBLEM}" ]; then
+    REPORT+=("${CHANGELOG_DETAIL[@]}" "")
+fi
 
 if [ "${#REPORT[@]}" -gt 0 ]; then
-    HEADLINE="Tag '${TAG}'"
-    if [ "${#STALE_PINS[@]}" -gt 0 ]; then
-        HEADLINE="${HEADLINE} does not match every deployment pin"
-        [ -z "${MISMATCH}" ] || HEADLINE="${HEADLINE}, and"
-    fi
+    # Clauses joined rather than concatenated by hand, so adding a fourth class
+    # of failure later does not require rewriting the sentence.
+    CLAUSES=()
+    [ "${#STALE_PINS[@]}" -eq 0 ] || \
+        CLAUSES+=("does not match every deployment pin")
     [ -z "${MISMATCH}" ] || \
-        HEADLINE="${HEADLINE} does not match the project version: ${MISMATCH}"
+        CLAUSES+=("does not match the project version: ${MISMATCH}")
+    [ -z "${CHANGELOG_PROBLEM}" ] || \
+        CLAUSES+=("${CHANGELOG_PROBLEM}")
+    HEADLINE="Tag '${TAG}'"
+    SEPARATOR=" "
+    for clause in "${CLAUSES[@]}"; do
+        HEADLINE="${HEADLINE}${SEPARATOR}${clause}"
+        SEPARATOR=", and "
+    done
     fail "${HEADLINE}." \
          "${REPORT[@]}" \
          "To fix:" \
@@ -386,6 +443,7 @@ fi
 echo "OK: ${TAG} is a final release and matches pyproject.toml,"
 echo "    src/recotem/version.py, helm/recotem/Chart.yaml, helm/recotem/values.yaml,"
 echo "    and every pinned image reference under examples/ and docs/."
+echo "    CHANGELOG.md declares ${EXPECTED} released."
 echo "    Not checked here: uv.lock (run 'uv lock --check'), and version strings"
 echo "    outside those files — see the verification block in"
 echo "    .claude/skills/release-recotem/references/version-locations.md."

@@ -166,8 +166,14 @@ def test_version_locations_names_the_three_unchecked_strings() -> None:
         assert needed in text, f"{needed!r} missing from version-locations.md"
 
 
-def test_the_runbook_does_not_understate_the_scripts_scope() -> None:
-    """Post-#248 the script also scans the pins under examples/ and docs/."""
+def test_the_runbook_no_longer_claims_step_3_is_the_only_check() -> None:
+    """Named for the one sentence it asserts, not for the general property.
+
+    "Does not understate the scope" would be a claim about the whole document;
+    what this checks is that one specific false sentence is gone. The general
+    property is covered behaviourally by the two parametrized tests above,
+    which run the real script.
+    """
     text = VERSION_LOCATIONS.read_text(encoding="utf-8")
     assert (
         "The rest of the table is verified by step 3 of the block below" not in text

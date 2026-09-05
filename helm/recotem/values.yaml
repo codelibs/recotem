@@ -204,11 +204,11 @@ artifacts:
 # ── train CronJob ─────────────────────────────────────────────────────────────
 #
 # FIRST INSTALL: the serve Deployment cannot become Ready until an artifact
-# exists for every recipe — /v1/health answers 503 ("degraded") and the
-# startup probe restarts the container until one appears.  The chart does not
-# train at install time, and this CronJob's default schedule is 02:00 UTC, so
-# a fresh install crash-loops until the first scheduled run unless you seed
-# the store yourself:
+# exists for at least one recipe — /v1/health/ready answers 503 ("unready")
+# and the startup probe restarts the container until one appears.  The chart
+# does not train at install time, and this CronJob's default schedule is
+# 02:00 UTC, so a fresh install crash-loops until the first scheduled run
+# unless you seed the store yourself:
 #
 #   helm upgrade --install ... --set train.enabled=true     # no --wait
 #   kubectl -n <ns> create job bootstrap-0 --from=cronjob/<release>-train

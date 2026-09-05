@@ -154,9 +154,19 @@ spec:
           # startupProbe guards cold starts where a large artifact is being
           # loaded. Liveness/readiness only take over after startup succeeds.
           # failureThreshold * periodSeconds = 12 * 10s = 120s max startup window.
+          #
+          # It asks readiness' question, not /v1/health's stricter "is every
+          # recipe present?".  A failing startupProbe RESTARTS the container
+          # rather than merely withholding traffic, so on /v1/health a single
+          # untrained recipe put every NEW pod into a restart loop -- a rolling
+          # update or an HPA scale-out could never converge, while the already
+          # running replicas kept serving.  /v1/health/ready still answers 503
+          # when nothing is loaded, so the first-install guarantee below (serve
+          # must not enter the Service before train has produced an artifact)
+          # is unchanged.
           startupProbe:
             httpGet:
-              path: /v1/health
+              path: /v1/health/ready
               port: http
               httpHeaders:
                 - name: Host

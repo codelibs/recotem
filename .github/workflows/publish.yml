@@ -29,7 +29,14 @@ jobs:
             *) echo "::error::publish.yml requires a v* tag ref, got '${GITHUB_REF}'"; exit 1 ;;
           esac
 
+      # fetch-depth: 0 because check-release-tag.sh asserts the tagged commit is
+      # an ancestor of main, and the default depth-1 checkout fetches only the
+      # tagged commit -- measured: origin/main does not resolve at all there.
+      # The script refuses that state rather than skipping, so removing this
+      # line fails the guard loudly instead of making the check vacuous.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       # Also runnable locally before tagging:
       #   bash .github/scripts/check-release-tag.sh v2.1.0

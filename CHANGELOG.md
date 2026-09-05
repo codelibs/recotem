@@ -328,6 +328,19 @@ exit 8.
   advice now names the kNN, says why popularity is insufficient, and gives the
   five lines of linear algebra needed to build it.
 
+  **On a recency-driven catalogue popularity is not a low bar but no bar.**
+  Measured on a synthetic news catalogue — 2,500 users, ~1,170 articles
+  published across 60 days with a five-day popularity half-life, split by time
+  so the holdout is the last 20% of the timeline — popularity scored
+  **ndcg@10 = 0.0000 on all four runs**, because none of the ten most-popular
+  training articles survives into the holdout. "Require the model to win" is
+  then vacuously true for anything that returns any items at all, while over
+  the same four runs the shipped model landed between **39% below and 1% above**
+  the same 30-line kNN (and between 56% below and 8% above at a higher trial
+  budget). The zero was verified against a non-recency control run through the
+  identical evaluator, where the top-10 popular training items overlap the
+  holdout 10 of 10. The advice now covers this case explicitly.
+
 - **`docs/operations.md` now says what `best_score` is and is not.** It is the
   winning trial's score on recotem's own internal validation split, over the
   same trained item set. It is not an estimate of quality on your task, and the

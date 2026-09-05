@@ -1180,6 +1180,19 @@ What to do:
    popularity by more than 11× and **all four lost to the kNN**. Popularity
    would have called every one of them a success.
 
+   **On a recency-driven catalogue popularity does not merely set a low bar —
+   it sets no bar at all.** Measured on a synthetic news catalogue (2,500 users,
+   ~1,170 articles published across 60 days with a five-day popularity
+   half-life, split by time so the holdout is the last 20% of the timeline),
+   popularity scored **ndcg@10 = 0.0000 on all four runs**: none of the ten
+   most-popular training articles appears anywhere in the holdout, because by
+   then they are stale. Any model returning any items at all "beats" that, by
+   an undefined margin — while the shipped model over the same four runs landed
+   between **39% below and 1% above** the same 30-line kNN. If your catalogue
+   turns over — news, feeds, deals, listings, anything perishable — a passing
+   popularity comparison carries no information whatsoever, and the kNN
+   comparison is the only one of the two worth running.
+
    The baseline worth the twenty minutes is an item-item cosine kNN: binarise
    the user × item matrix, normalise the columns, take `Sᵢⱼ = cos(i, j)` with a
    zero diagonal, keep each item's top ~200 neighbours, score a user as

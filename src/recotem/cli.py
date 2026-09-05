@@ -770,6 +770,35 @@ def validate(
         _exit(code, f"Algorithm check failed: {exc}")
     typer.echo(f"Algorithms: OK ({', '.join(resolved_algorithms)})")
 
+    # ``training.storage_path`` for the same reason as ``algorithms`` above:
+    # ``train`` only reaches it in ``run_search``, which runs *after* the
+    # dataset has been fetched, cleansed and split — so an unopenable study
+    # backend costs a full data pull, and on a BigQuery- or SQL-backed recipe a
+    # billed scan, before it surfaces.  ``validate`` is the documented
+    # pre-flight gate, so it asks the same question here by calling the same
+    # function, which is what keeps the message and the exit code from drifting
+    # apart.  The check is a pure local import probe: no connection is opened,
+    # so this stays as cheap as the other pre-source checks.
+    def _check_storage_path() -> str:
+        from recotem.training._storage_url import (
+            describe_storage_path,
+            validate_storage_path,
+        )
+
+        path = loaded_recipe.training.storage_path
+        validate_storage_path(path)
+        # Never echo the value itself: a study URL may carry userinfo, and
+        # ``validate`` writes to stdout.  ``describe_storage_path`` returns the
+        # dialect and driver only.
+        return describe_storage_path(path)
+
+    try:
+        storage_desc = _check_storage_path()
+    except Exception as exc:
+        code = _map_exception_to_exit(exc)
+        _exit(code, f"Storage path check failed: {exc}")
+    typer.echo(f"Optuna storage: OK ({storage_desc})")
+
     def _probe_source(source_cfg: Any, where: str) -> tuple[Any, str]:
         from recotem.datasource.registry import get_source_class
 

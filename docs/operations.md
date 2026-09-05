@@ -330,11 +330,17 @@ For multi-process Optuna search (parallelism on a single host or a
 distributed cluster), set `training.storage_path` in the recipe. Accepted
 forms: a bare path → SQLite, or a URL beginning with `sqlite://`,
 `postgresql+psycopg://`, or `mysql+pymysql://`. The `+driver` suffix is
-required: this URL is handed straight to Optuna's `RDBStorage`, which has no
-driver preflight, so a bare `postgresql://` (which routes to the uninstalled
-`psycopg2`) fails inside Optuna with `ImportError: Failed to import DB access
-module for the specified storage URL`, and `postgres://` — a dialect
-SQLAlchemy 2.x removed — with `NoSuchModuleError`. Recotem opens the study
+required: a bare `postgresql://` routes to the uninstalled `psycopg2`, and
+`postgres://` is a dialect SQLAlchemy 2.x removed. Recotem pre-flights the
+value — dialect, then the DBAPI the URL actually routes to — and refuses an
+unusable one with **exit 8** (`storage_path_unusable`), naming the spelling
+that works. `recotem validate` runs the identical check and prints
+`Optuna storage: OK (<dialect>, driver '<driver>')`, so a broken study
+backend is caught before the dataset is fetched. Without that pre-flight the
+failure surfaced from inside Optuna in `run_search`, which runs *after* fetch,
+cleansing and split — on a BigQuery- or SQL-backed recipe the scan was already
+billed — and reached the shell as an unmapped **exit 1**, which supervisor and
+CronJob retry logic reads as an unknown crash worth retrying. Recotem opens the study
 with `load_if_exists=True` so multiple `recotem train` invocations against
 the same recipe converge on a shared trial pool rather than duplicating
 work.

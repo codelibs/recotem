@@ -5,8 +5,21 @@ they are consistent.
 
 Throughout, set both variables first and use them — **never paste `X.Y.Z`
 literally**. An unsubstituted placeholder writes `tag: "X.Y.Z"` and
-`version: X.Y.Z` (invalid SemVer) into the manifests, and no CI job lints the
-Helm chart, so only a human reading the diff would catch it.
+`version: X.Y.Z` (invalid SemVer) into the manifests. CI does catch that one:
+`.github/workflows/manifests.yml` runs `.github/scripts/validate-manifests.sh`
+on every PR touching `helm/**`, and `helm lint --strict` refuses it —
+
+```
+[ERROR] Chart.yaml: version 'X.Y.Z' is not a valid SemVer
+[ERROR] : unable to load chart
+Error: 1 chart(s) linted, 1 chart(s) failed
+```
+
+— so `validate-manifests.sh` exits 1. Do not rely on that as the only check
+though: it fires on the *shape* of the string, so a placeholder is caught while
+a wrong-but-well-formed version (`2.0.0` left behind, or `2.2.0` typed by
+mistake) lints clean. That is what `check-release-tag.sh` and step 3 below are
+for.
 
 ```bash
 PREV=2.0.0     # the currently-pinned released version — check it, don't assume
@@ -49,7 +62,7 @@ that forgot `uv lock`.
 These pin a *published* Docker image, so they only ever move to a real released
 version. During Phase 5 (dev bump) leave them on the last released tag.
 
-Only the first two rows are machine-checked: `check-release-tag.sh` reads
+Most of this table is machine-checked. `check-release-tag.sh` reads
 `Chart.yaml`'s `version:` and `appVersion:` **and `values.yaml`'s `image.tag`**,
 and refuses a tag any of them disagree with, so a chart left behind — or bumped
 early, to an image tag that was never built — cannot reach the tag. `image.tag`
@@ -57,9 +70,20 @@ is the row that decides what a cluster actually pulls (`recotem.image` renders
 `.Values.image.tag | default .Chart.AppVersion`, and values.yaml always sets
 it, so `appVersion` is a fallback that never fires); it was added to the guard
 after a tagged release was shown to pass with it left on the previous version.
-The rest of the table is verified by step 3 of the block below and by nothing
-else, which is why that step must be run — and why the script's success message
-now names the four files it checked instead of claiming to cover every pin.
+
+The script also scans the deployment pins outside the chart: every
+`ghcr.io/codelibs/recotem:X.Y.Z` under `examples/` and `docs/`, and every
+`app.kubernetes.io/version` label under `examples/`. So rows 3–5 below are
+covered in full, and row 6 is covered for its image tags.
+
+Three version strings are still checked by **step 3 of the block below and by
+nothing else** — the script does not see them, so that step is not optional:
+
+| Not machine-checked | Why the script misses it |
+|---|---|
+| `docs/deployment/k8s.md` `app.kubernetes.io/version: "X.Y.Z"` | the label scan covers `examples/` only, not `docs/` |
+| `docs/deployment/k8s.md` the `values.yaml` excerpt (`tag: "X.Y.Z"`) | the pin scan matches `ghcr.io/...` references, not a bare `tag:` key inside a fenced block |
+| `docs/deployment/docker.md` the "already pin `X.Y.Z`" sentence | prose, matching no pattern the script scans for |
 
 | File | What to change |
 |------|----------------|
@@ -138,13 +162,17 @@ manifests on the last released version, and this block would flag them.
 
 ```bash
 # 1. every package-version location agrees.
-#    check-release-tag.sh is authoritative for pyproject.toml, version.py and
-#    helm/recotem/Chart.yaml: it is the same script the `guard` job of both
-#    publish.yml and docker.yml runs at the tag, it fails closed, and it checks
-#    all four declarations against the tag *together* — so it catches a partial
-#    bump (pyproject.toml moved, version.py not; or the package moved and the
-#    chart did not) that greps read by eye do not. uv.lock is not in its scope;
-#    `uv lock --check` covers that.
+#    check-release-tag.sh is authoritative for pyproject.toml, version.py,
+#    helm/recotem/Chart.yaml (version: and appVersion:) and
+#    helm/recotem/values.yaml (image.tag), plus the ghcr.io pins under
+#    examples/ and docs/ and the app.kubernetes.io/version label under
+#    examples/: it is the same script the `guard` job of both publish.yml and
+#    docker.yml runs at the tag, it fails closed, and it checks every one of
+#    them against the tag *together* — so it catches a partial bump
+#    (pyproject.toml moved, version.py not; or the package moved and the chart
+#    did not) that greps read by eye do not. uv.lock is not in its scope;
+#    `uv lock --check` covers that.  Step 3 is still required: see the
+#    "not machine-checked" table above for the three strings it alone catches.
 bash .github/scripts/check-release-tag.sh "v$NEW"   # MUST print "OK: ..."
 uv lock --check                                     # MUST exit 0
 

@@ -1,0 +1,77 @@
+name: recotem / merge-sanity
+
+# Catch a pull request that GitHub reports as merged but whose commit never
+# reached main.  #245 was one: it targeted a feature branch that had already
+# been merged into main, so merging into it afterwards landed nowhere, and 350
+# lines were absent from the release while the PR showed as merged and green.
+#
+# Triggers on push to main rather than on a schedule alone.  The honest bound:
+# #245 merged into a side branch, so no push to main happened at that instant
+# and this job would not have fired then — it fires on the next merge to main,
+# which in that round would have been minutes later, not a release cycle.  A
+# schedule-only job would also work but can be silently dead for a whole cycle,
+# so push is the primary trigger and the schedule is a backstop for a quiet
+# main.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      milestone:
+        description: "Milestone to check (defaults to the version in pyproject.toml)"
+        required: false
+        type: string
+  schedule:
+    # Backstop only: a main with no merges for a day still gets checked.
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: merge-sanity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  merged-prs-landed:
+    name: merged PRs are reachable from main
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # merge-base needs real history; a shallow clone resolves nothing and
+          # the check would fail for the wrong reason.
+          fetch-depth: 0
+
+      - name: Resolve the milestone to check
+        id: milestone
+        # The dispatch input reaches the shell through the environment, never
+        # through `${{ }}` interpolation into the script body: expansion would
+        # splice the value into the command itself.
+        env:
+          INPUT_MILESTONE: ${{ inputs.milestone }}
+        run: |
+          milestone="${INPUT_MILESTONE:-}"
+          if [ -z "${milestone}" ]; then
+            # 2.1.0.dev0 -> 2.1.0.  The in-progress milestone is the one whose
+            # PRs are still arriving, so it is the one worth checking.
+            version="$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)"
+            milestone="$(printf '%s' "${version}" \
+              | sed -E 's/\.dev[0-9]+$//; s/(a|b|rc)[0-9]+$//')"
+          fi
+          [ -n "${milestone}" ] || {
+            echo "::error::could not resolve a milestone from pyproject.toml"
+            exit 1
+          }
+          echo "milestone=${milestone}" >> "${GITHUB_OUTPUT}"
+          echo "Checking milestone ${milestone}"
+
+      - name: Every merged PR's commit is reachable from main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MILESTONE: ${{ steps.milestone.outputs.milestone }}
+        run: |
+          git fetch --quiet origin main
+          .github/scripts/check-merged-prs-landed.sh "${MILESTONE}" origin/main

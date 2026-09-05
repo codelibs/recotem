@@ -1,0 +1,21 @@
+# Pull requests that GitHub reports as merged, whose merge commit is not
+# reachable from main, and whose content has been re-landed under a different
+# PR.  Read by .github/scripts/check-merged-prs-landed.sh.
+#
+#   <stranded PR number> relanded-by <replacement PR number>
+#
+# This is NOT a mute.  The replacement is held to the same reachability test as
+# everything else, so a line here only stops the alarm once the replacement is
+# genuinely on main.  A waiver naming a PR that has not landed leaves the
+# original reported, and says so.
+#
+# Re-landing is the repair; a waiver only records it.  Do not add a line here
+# to quieten a PR whose content is still missing.
+
+# #245 targeted `fix/probe-guard-contradicts-shipped-chart` instead of main and
+# merged into it at 05:57:03Z, five minutes after #250 had merged that same
+# branch into main at 05:51:54Z.  The branch stayed alive but was no longer a
+# path to main, so 350 lines — including tests/unit/test_datasource_sql_driver_routing.py,
+# 199 lines that exist nowhere on main — were absent from the release while the
+# PR showed as merged and green.  Re-landed as a clean cherry-pick of 26a8c3b7.
+245 relanded-by 256

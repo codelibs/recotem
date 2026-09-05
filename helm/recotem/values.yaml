@@ -105,7 +105,14 @@ env:
   RECOTEM_WATCH_INTERVAL: "10"
   RECOTEM_LOG_FORMAT: "json"
   RECOTEM_ENV: "production"
+  # Size caps. Lowering EITHER of these on serve alone makes the train
+  # CronJob unable to warn you: `recotem train` compares the artifact it
+  # just wrote against the caps resolved in ITS OWN environment, so a
+  # train job still on the defaults writes an over-cap artifact, exits 0
+  # silently, and serve refuses it (`reason: size_cap`, /v1/health/ready
+  # 503). Set the same value under `train.env` below.
   RECOTEM_MAX_ARTIFACT_BYTES: ""        # empty = default 2 GiB
+  RECOTEM_MAX_PAYLOAD_BYTES: ""         # empty = default 512 MiB
   RECOTEM_ALLOWED_ORIGINS: ""           # empty = deny CORS
   # RECOTEM_ALLOWED_HOSTS gates TrustedHostMiddleware.  Leave empty when
   # ingress.enabled=true: the chart auto-derives the value from
@@ -264,8 +271,16 @@ train:
   recipeFiles: []
 
   # Additional environment variables for the train job (non-secret).
+  #
+  # This map is rendered into the CronJob; the top-level `env` map is
+  # rendered into the serve Deployment. They are separate, so a size cap
+  # set in only one place is enforced in only one place -- and the half
+  # that matters is train, because that is where the warning comes from.
+  # Keep the two `RECOTEM_MAX_*` values below in sync with `env` above.
   env:
     RECOTEM_LOG_FORMAT: "json"
+    RECOTEM_MAX_ARTIFACT_BYTES: ""      # keep equal to env.RECOTEM_MAX_ARTIFACT_BYTES
+    RECOTEM_MAX_PAYLOAD_BYTES: ""       # keep equal to env.RECOTEM_MAX_PAYLOAD_BYTES
 
   resources:
     requests:

@@ -517,6 +517,17 @@ Note on multiple replicas: each pod holds its own in-memory copy of every model 
 
 The chart's default `limits.memory: 4Gi` therefore covers **one** recipe whose artifact is up to roughly 800 MiB, or a handful of small ones — not ten models at the artifact caps. Raise the limit, lower `RECOTEM_MAX_PAYLOAD_BYTES`, or shard recipes across `serve` processes.
 
+**If you lower a cap, lower it on `train` too.** The chart renders
+`.Values.env` into the serve Deployment and `.Values.train.env` into the
+train CronJob — two separate maps. `recotem train` compares the artifact it
+has just written against the caps resolved in **its own** environment and
+warns (`artifact_payload_exceeds_serve_cap`, naming the variable) when the
+file is one that `serve` will refuse. Lower the cap on serve alone and the
+train job is still on the default: it writes an over-cap artifact, exits 0
+with no warning, and the next `serve` rollout refuses it with
+`reason: size_cap` and never becomes ready. Set the same value in both
+`env` and `train.env`.
+
 ### Pod security context
 
 The Helm chart applies a hardened security context by default:

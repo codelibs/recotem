@@ -511,6 +511,34 @@ exit 8.
 
 ### Fixed
 
+- **Lowering a size cap in the Helm chart reached `serve` but not `train`, so
+  nothing warned before the deploy broke.** The chart renders `.Values.env`
+  into the serve Deployment (`deployment.yaml:118`) and `.Values.train.env`
+  into the train CronJob (`cronjob-train.yaml:145`) — two separate maps — and
+  only `env` carried a `RECOTEM_MAX_*` key (`RECOTEM_MAX_ARTIFACT_BYTES`).
+  `RECOTEM_MAX_PAYLOAD_BYTES` was not in the chart at all, while
+  `docs/deployment/k8s.md` advises *"Raise the limit, lower
+  `RECOTEM_MAX_PAYLOAD_BYTES`, or shard recipes"*.
+
+  `recotem train` compares the artifact it has just written against the caps
+  resolved in **its own** environment, and warns
+  (`artifact_payload_exceeds_serve_cap`, naming the variable) when the file is
+  one that `serve` will refuse. An operator following that advice sets the cap
+  where the chart offers it — on serve — so the train job stays on the default,
+  writes an over-cap artifact, exits 0 **silently**, and the next serve rollout
+  refuses it with `reason: size_cap` and never becomes ready. This is the one
+  path where the product does not warn first; every other route to an over-cap
+  artifact is caught at train time.
+
+  Reproduced with `helm template`: with
+  `env.RECOTEM_MAX_ARTIFACT_BYTES=268435456` the Deployment renders the cap and
+  the CronJob renders **none**.
+
+  Both caps are now offered in both maps, shipped empty so the process defaults
+  are unchanged (both templates skip empty values, verified by render), with
+  comments in `values.yaml` and a new paragraph in `docs/deployment/k8s.md`
+  explaining why the pairing matters.
+
 - **An over-cap model was reported as a damaged file when `recotem serve`
   started, and as `size_cap` when the same file arrived by hot-swap.** The
   classifier that resolves an `ArtifactError` to a `reason` label lives in

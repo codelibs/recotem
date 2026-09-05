@@ -348,22 +348,12 @@ class ServeConfig:
         cfg.signing_keys_raw = os.environ.get("RECOTEM_SIGNING_KEYS", "").strip()
 
         # RECOTEM_MAX_ARTIFACT_BYTES (clamped to [1 MiB, 16 GiB])
-        cfg.max_artifact_bytes = _clamped_int_env(
-            "RECOTEM_MAX_ARTIFACT_BYTES",
-            _DEFAULT_MAX_ARTIFACT_BYTES,
-            _MIN_ARTIFACT_BYTES,
-            _MAX_ARTIFACT_BYTES,
-        )
+        cfg.max_artifact_bytes = get_max_artifact_bytes()
 
         # RECOTEM_MAX_PAYLOAD_BYTES (clamped to [1 MiB, 16 GiB])
         # Per-payload cap (post-HMAC-verify) for serve-side deserialization.
         # Smaller than max_artifact_bytes to bound deserialization memory expansion.
-        cfg.max_payload_bytes = _clamped_int_env(
-            "RECOTEM_MAX_PAYLOAD_BYTES",
-            _DEFAULT_MAX_PAYLOAD_BYTES,
-            _MIN_PAYLOAD_BYTES,
-            _MAX_PAYLOAD_BYTES,
-        )
+        cfg.max_payload_bytes = get_max_payload_bytes()
 
         cfg.allowed_origins = _split_csv_env("RECOTEM_ALLOWED_ORIGINS", [])
         cfg.allowed_hosts = _split_csv_env(
@@ -490,6 +480,34 @@ _MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
 DEFAULT_HTTP_TIMEOUT_SECONDS = 30
 _MIN_HTTP_TIMEOUT_SECONDS = 1
 _MAX_HTTP_TIMEOUT_SECONDS = 600
+
+
+def get_max_artifact_bytes() -> int:
+    """Return RECOTEM_MAX_ARTIFACT_BYTES, clamped to [1 MiB, 16 GiB].
+
+    Also read on the **train** side (``artifact/io.py``) so a run can warn that
+    the artifact it just produced is one ``recotem serve`` will refuse.
+    """
+    return _clamped_int_env(
+        "RECOTEM_MAX_ARTIFACT_BYTES",
+        _DEFAULT_MAX_ARTIFACT_BYTES,
+        _MIN_ARTIFACT_BYTES,
+        _MAX_ARTIFACT_BYTES,
+    )
+
+
+def get_max_payload_bytes() -> int:
+    """Return RECOTEM_MAX_PAYLOAD_BYTES, clamped to [1 MiB, 16 GiB].
+
+    Also read on the **train** side (``artifact/io.py``) so a run can warn that
+    the payload it just produced is one ``recotem serve`` will refuse.
+    """
+    return _clamped_int_env(
+        "RECOTEM_MAX_PAYLOAD_BYTES",
+        _DEFAULT_MAX_PAYLOAD_BYTES,
+        _MIN_PAYLOAD_BYTES,
+        _MAX_PAYLOAD_BYTES,
+    )
 
 
 def get_max_download_bytes() -> int:

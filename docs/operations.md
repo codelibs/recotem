@@ -628,20 +628,26 @@ pip install "recotem[metrics]"
 
 The `/v1/metrics` endpoint is opt-in and off by default (a bare `/metrics` returns `404` — the route is mounted under the `/v1` router prefix). Set `RECOTEM_METRICS_ENABLED` to a truthy value (`1`, `true`, `yes`, `on`) to activate.
 
-> **Network exposure.** `/v1/health` is unauthenticated by design — the
-> posture Kubernetes liveness/readiness probes expect. `/v1/metrics` is
-> **not**: it carries `Depends(_require_auth)` like every other `/v1` route,
-> so a scrape without a valid `X-API-Key` gets `401`. Configure Prometheus
-> with the key (e.g. `http_headers` in the scrape config), or run the server
-> in its unauthenticated posture (no `RECOTEM_API_KEYS`, which forces the
-> loopback-only bind). The endpoints surface recipe names,
-> kid IDs, load-error strings, model-load timestamps, and per-verb
-> latency histograms.
+> **Network exposure.** Three endpoints are unauthenticated by design — the
+> posture Kubernetes probes expect: `/v1/health` (startup), `/v1/health/ready`
+> (readiness) and `/v1/health/live` (liveness). The first two return
+> `{status, total, loaded}` and so disclose the recipe count and how many
+> loaded, without naming any recipe; `/v1/health/live` returns
+> `{"status": "alive"}` and reads no state at all. `/v1/metrics` is
+> **not**: it carries `Depends(_require_auth)`, like every `/v1` route outside
+> that list of three, so a scrape without a valid `X-API-Key` gets `401`.
+> Configure Prometheus with the key (e.g. `http_headers` in the scrape
+> config), or run the server in its unauthenticated posture (no
+> `RECOTEM_API_KEYS`, which forces the loopback-only bind). `/v1/metrics` and
+> `/v1/health/details` surface recipe names, kid IDs, load-error strings,
+> model-load timestamps, and per-verb latency histograms.
 > **Restrict them with the cluster's NetworkPolicy** (`/v1/metrics` to
-> the Prometheus namespace, `/v1/health` to kubelet probes) rather than
-> relying on the API-key middleware. The `helm/recotem` chart's
-> NetworkPolicy template ships with a deny-all baseline; allow only the
-> scrapers and probes you actually need.
+> the Prometheus namespace, the three probe paths to kubelet probes) rather
+> than relying on the API-key middleware — and note that the shipped chart
+> probes `/v1/health/ready` and `/v1/health/live`, not only `/v1/health`, so a
+> rule written around the single path predates the probe split. The
+> `helm/recotem` chart's NetworkPolicy template ships with a deny-all
+> baseline; allow only the scrapers and probes you actually need.
 
 Available metrics:
 

@@ -1,0 +1,14 @@
+# Pull requests GitHub reports as MERGED whose commit is deliberately not on
+# main, one per line: "<pr-number> <reason>".
+#
+# A PR lands here only when it was merged into a base branch that never itself
+# reached main, AND its content has been re-landed by another PR that did.
+# Re-landing creates a new commit; the original merge commit stays unreachable
+# forever, so without this list the check would go permanently red the moment it
+# succeeded at its job.
+#
+# Two rules keep the list from rotting into a blanket suppression:
+#   - an entry with no reason is rejected;
+#   - an entry for a PR that IS on main is rejected as stale.
+
+245 merged into fix/probe-guard-contradicts-shipped-chart five minutes after #250 squash-merged that branch to main; re-landed as #256

@@ -1,0 +1,58 @@
+# Catch a pull request that GitHub reports as MERGED whose commit never reached
+# main.  See .github/scripts/check-merged-prs-landed.sh for the failure mode.
+#
+# Not a `pull_request` trigger: the question is about commits already on main,
+# and a PR's own merge commit does not exist yet while it is open.  It runs on
+# push to main so a stranding is visible within minutes of the merge that caused
+# it, daily so a repository that is quiet still gets checked, and on demand.
+name: merged-prs-landed
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  landed:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Ancestry needs real history and every branch: a shallow or
+          # single-branch checkout cannot tell "not an ancestor" from "not
+          # fetched", and the script fails rather than guess.
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Fetch all branches
+        run: git fetch --no-tags origin "+refs/heads/*:refs/remotes/origin/*"
+
+      - name: Check that every merged PR is on main
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/check-merged-prs-landed.sh --limit 100
+
+      # The check above can only report a clean repository if it actually ran.
+      # A monitor whose setup fails looks exactly like a monitor with nothing to
+      # report, and this repository has already lost a release cycle to that:
+      # recotem-docs' drift job died at `actions/setup-python` and never once
+      # executed its comparison. Assert execution separately from the result.
+      - name: Assert the check executed
+        if: always()
+        env:
+          OUTCOME: ${{ steps.check.outcome }}
+        run: |
+          if [ "${OUTCOME}" != "success" ] && [ "${OUTCOME}" != "failure" ]; then
+            echo "::error::the ancestry check never executed (outcome='${OUTCOME}')."
+            echo "This is an infrastructure failure in this workflow, NOT a"
+            echo "stranded pull request -- fix the job, do not go looking for one."
+            exit 1
+          fi
+          echo "ancestry check executed (outcome=${OUTCOME})"

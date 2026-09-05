@@ -511,6 +511,33 @@ exit 8.
 
 ### Fixed
 
+- **Five example READMEs printed a run procedure that exits 8 on its first
+  command.** `recotem train` refuses to write an unsigned artifact: with no
+  `RECOTEM_SIGNING_KEYS` in the environment it exits 8 (`_EXIT_CONFIG`,
+  `code=signing_key_missing`) before the first Optuna trial. `quickstart`,
+  `sql-sqlite` and `feature-aware` generate a signing key as an explicit
+  numbered step; `csv-local`, `tutorial-purchase-log`, `plugins/`,
+  `plugins/echo-source` and `ga4-bigquery` did not, while still presenting
+  their "Run" block as self-contained ("From the repository root:"). Verified
+  by running each README verbatim in a shell with `RECOTEM_SIGNING_KEYS`
+  unset: `csv-local`, `tutorial-purchase-log` and `plugins/echo-source` each
+  exited 8 on the documented command.
+
+  The error message is good — it names the variable, the `recotem keygen`
+  command that produces it, and the `--dev-allow-unsigned` alternative — so
+  nobody is stranded. But this is the adoption front door, and the four
+  affected READMEs are the ones a reader reaches from `examples/` without
+  passing through `docs/getting-started.md`, which is where the key step
+  otherwise lives. Each now generates and exports the key before the train
+  command, in the style already used by `sql-sqlite`.
+
+  `tests/unit/test_example_readme_prerequisites.py` scans every
+  `examples/**/README.md` unconditionally — there is no exemption list — so a
+  new example that omits the step fails the day it lands. Two further tests
+  assert the scan found the corpus and that its detector still recognises a
+  `recotem train` line, so neither a directory rename nor a regex drift can
+  leave the scan passing vacuously over zero files.
+
 - **An over-cap model was reported as a damaged file when `recotem serve`
   started, and as `size_cap` when the same file arrived by hot-swap.** The
   classifier that resolves an `ArtifactError` to a `reason` label lives in

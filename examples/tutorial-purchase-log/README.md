@@ -11,6 +11,12 @@ recommender against it.
 Run from the repository root:
 
 ```bash
+# 1. Generate a signing key (once per machine) and export it.
+#    `recotem train` refuses to write an unsigned artifact: without this it
+#    exits 8 with `RECOTEM_SIGNING_KEYS is not set`.
+export $(uv run recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
+
+# 2. Train.
 mkdir -p artifacts
 uv run recotem train examples/tutorial-purchase-log/recipe.yaml
 ```

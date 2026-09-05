@@ -763,9 +763,42 @@ def test_success_message_states_what_is_not_checked(repo: Path) -> None:
     _set_prs(repo, f"1\t{_sha(repo, 'landed')}\ta landed change")
     proc = _run(repo)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "NOT checked" in proc.stdout, proc.stdout
+    # Asserted by their distinguishing markers, not by the shared "NOT checked"
+    # prefix: with two disclaimers present, a bare substring test for the prefix
+    # is satisfied by either one, so deleting the first would leave this green.
+    # (Measured -- an earlier version of this test did exactly that.)
+    assert "NOT checked, 1 of 2" in proc.stdout, proc.stdout
+    assert "NOT checked, 2 of 2" in proc.stdout, proc.stdout
     assert "This reverts commit" in proc.stdout
     assert "no-op" in proc.stdout
+
+
+@requires_bash
+def test_success_message_does_not_present_head_as_main(repo: Path) -> None:
+    """R9-P3's class: every question here is asked of HEAD, not of main.
+
+    "Every milestone PR is an ancestor of HEAD" stays true when HEAD is main
+    plus a commit no PR explains, and P3 demonstrated the consequence on a real
+    off-main commit: the script exited 0 and printed the smuggled SHA in its own
+    success line as though it were the release. The claim is true and narrower
+    than it reads.
+
+    The rule is deliberately not enforced here -- check-release-tag.sh runs on
+    the tag and owns it, and this script is documented as a local pre-flight run
+    from a branch, which a hard "HEAD must be on main" check would break. So the
+    output has to disclaim it instead, and name the owner.
+    """
+    _set_prs(repo, f"1\t{_sha(repo, 'landed')}\ta landed change")
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "is on main" in proc.stdout, (
+        "the success message does not disclaim that HEAD is main, so a reader "
+        "takes it as a statement about the release tree"
+    )
+    assert "check-release-tag.sh" in proc.stdout, (
+        "the disclaimer must name the check that owns the rule, or it reads as "
+        "'nobody checks this' rather than 'someone else does'"
+    )
 
 
 @requires_bash

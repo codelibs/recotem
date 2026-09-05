@@ -82,6 +82,33 @@
 # empty" are both decidable with no heuristic.  Measured on this repository's
 # real history rather than predicted: over all 329 first-parent commits on
 # main, the number that would be flagged as an empty no-op is ZERO.
+#
+# AND THIS GATE DOES NOT ESTABLISH THAT THE TREE IT VERIFIED IS MAIN.
+# ---------------------------------------------------------------------------
+# Every question here is asked of `git rev-parse HEAD`.  "Every milestone PR is
+# an ancestor of HEAD" stays true when HEAD is main plus something smuggled on
+# top: the extra commit is not any PR's merge commit, and nothing here looks
+# for commits that no PR explains.  Demonstrated by R9-P3 on a real off-main
+# commit carrying a marker: this script exited 0 and printed the smuggled SHA
+# in its own success line as though it were the release.  The claim it makes is
+# true and narrower than it reads.
+#
+# That rule is NOT added here, deliberately, for two reasons:
+#
+#   1. It belongs to the tag guard.  check-release-tag.sh runs on the tag, where
+#      HEAD is always the tagged commit, and PR #259 implemented it there --
+#      shallow-clone refusal, origin/main then refs/heads/main, and
+#      `merge-base --is-ancestor HEAD <main>`.  Two owners for one rule is how a
+#      rule ends up with none.
+#   2. This script is documented as a LOCAL PRE-FLIGHT, run from a branch before
+#      tagging (see Usage above).  A hard "HEAD must be on main" check would
+#      make its own documented workflow fail.
+#
+# Note for whoever reads this next: #259's implementation is NOT on main.  #276
+# reverted it and #277's re-land is one of the no-ops described above, so today
+# NEITHER script checks that the released commit is on main.  The rule returns
+# with #277's rebuild.  Until then this is an open hole, named here rather than
+# left for a reader to infer from a success message.
 # ---------------------------------------------------------------------------
 #
 # A re-land is normally a cherry-pick, which produces a NEW commit — the
@@ -567,8 +594,14 @@ fi
 echo "OK: every merged PR in milestone '${MILESTONE}' is in the tree at ${HEAD_SHA}."
 echo "  Checked, per PR: the merge commit is an ancestor; no revert of it still"
 echo "  stands; the merge is not an empty no-op."
-echo "  NOT checked: whether a later commit removed the change WITHOUT a"
+echo "  NOT checked, 1 of 2: whether a later commit removed the change WITHOUT a"
 echo "  'This reverts commit' trailer -- a rewrite or a refactor that drops a"
 echo "  change silently is invisible here. Verifying content presence is a"
 echo "  materially harder question than reachability and no cheap form of it"
 echo "  survives contact with legitimate later refactoring; see the header."
+echo "  NOT checked, 2 of 2: that ${HEAD_SHA} is on main. Everything above is"
+echo "  asked of HEAD, and 'every milestone PR is an ancestor of HEAD' stays"
+echo "  true when HEAD is main plus a commit no PR explains. This line is not"
+echo "  a statement that the release is main. check-release-tag.sh owns that"
+echo "  rule -- and it is NOT on main today: #259 added it, #276 reverted it,"
+echo "  and #277's re-land is an empty no-op. It returns with #277's rebuild."

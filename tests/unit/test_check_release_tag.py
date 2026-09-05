@@ -54,7 +54,12 @@ def _make_tree(
     example_pin: str | None = "2.1.0",
     docs_pin: str | None = "2.1.0",
     version_label: str | None = "2.1.0",
+    docs_version_label: str | None = "2.1.0",
+    docs_values_tag: str | None = "2.1.0",
     changelog_heading: str | None = "## [2.1.0] - 2026-01-01",
+    changelog_link: str | None = (
+        "[2.1.0]: https://github.com/codelibs/recotem/releases/tag/v2.1.0"
+    ),
 ) -> Path:
     """Build a minimal tree the script can read, and return its script path.
 
@@ -115,15 +120,23 @@ def _make_tree(
     docs += "    docker run --rm ghcr.io/codelibs/recotem:latest --help\n\n"
     if docs_pin is not None:
         docs += f"          image: ghcr.io/codelibs/recotem:{docs_pin}\n"
+    # The deployment doc carries two more version declarations the release
+    # bumps and the gate used not to read: a copy of the k8s version label,
+    # and a copy-pasteable values.yaml excerpt.
+    if docs_version_label is not None:
+        docs += f'    app.kubernetes.io/version: "{docs_version_label}"\n'
+    if docs_values_tag is not None:
+        docs += "\n```yaml\nimage:\n  repository: ghcr.io/codelibs/recotem\n"
+        docs += f'  tag: "{docs_values_tag}"\n```\n'
     (root / "docs" / "deployment" / "k8s.md").write_text(docs, encoding="utf-8")
 
     # The GitHub Release notes are derived from this section, so the release
     # heading is a release artifact like any other.  `None` omits the file.
     if changelog_heading is not None:
-        (root / "CHANGELOG.md").write_text(
-            f"# Changelog\n\n{changelog_heading}\n\n### Added\n\n- a thing\n",
-            encoding="utf-8",
-        )
+        body = f"# Changelog\n\n{changelog_heading}\n\n### Added\n\n- a thing\n"
+        if changelog_link is not None:
+            body += f"\n{changelog_link}\n"
+        (root / "CHANGELOG.md").write_text(body, encoding="utf-8")
 
     return script
 
@@ -617,8 +630,9 @@ def test_no_version_label_anywhere_is_refused_rather_than_passed(
 
     Deleting every `app.kubernetes.io/version` label reduced that half of the
     check to nothing while the script still reported OK for the release.
+    The scan now covers `docs/` as well as `examples/`, so "every" means both.
     """
-    script = _make_tree(tmp_path, version_label=None)
+    script = _make_tree(tmp_path, version_label=None, docs_version_label=None)
     proc = _run(script, "v2.1.0")
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "app.kubernetes.io/version" in proc.stdout
@@ -715,7 +729,8 @@ def test_an_unreleased_section_for_a_different_version_is_ignored(
     script = _make_tree(tmp_path, changelog_heading="## [2.2.0] - Unreleased")
     tmp_path.joinpath("CHANGELOG.md").write_text(
         "# Changelog\n\n## [2.2.0] - Unreleased\n\n### Added\n\n- next cycle\n\n"
-        "## [2.1.0] - 2026-01-01\n\n### Added\n\n- this release\n",
+        "## [2.1.0] - 2026-01-01\n\n### Added\n\n- this release\n\n"
+        "[2.1.0]: https://github.com/codelibs/recotem/releases/tag/v2.1.0\n",
         encoding="utf-8",
     )
     proc = _run(script, "v2.1.0")
@@ -858,8 +873,10 @@ def test_outside_a_git_work_tree_the_success_message_says_so(
     script = _make_tree(tmp_path)
     proc = _run(script, "v2.1.0")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "NOT checked: whether the tagged commit is on main" in proc.stdout
+    assert "NOT a git work tree" in proc.stdout
+    assert "tagged commit is on main was NOT checked" in proc.stdout
     assert "The tagged commit is on main." not in proc.stdout
+    assert "Those files are committed" not in proc.stdout
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
@@ -959,3 +976,218 @@ def test_a_shallow_clone_is_refused_rather_than_answered_wrongly(
     assert "fetch-depth: 0" in proc.stdout
     # It must NOT claim the commit is off main -- that is the wrong reason.
     assert "is on a commit that is not on main" not in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# Holes that survived #259 as well, closed here
+# ---------------------------------------------------------------------------
+
+
+def test_a_v_prefixed_pin_is_a_version_pin_not_a_moving_reference(
+    tmp_path: Path,
+) -> None:
+    """`recotem:v2.0.0` is a stale pin, not a floating tag like `latest`.
+
+    `is_version_pin` keyed on a leading digit, so the one spelling this check
+    could not see was the spelling the git *tag* uses -- which is the spelling
+    a hand-written pin is most likely to acquire. Measured before the fix: with
+    every other location bumped and one pin left at `recotem:v2.0.0`, the
+    script exited 0.
+    """
+    script = _make_tree(tmp_path, example_pin="v2.0.0")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "recotem:v2.0.0" in proc.stdout, proc.stdout
+
+
+def test_a_v_prefixed_pin_matching_the_release_is_accepted(tmp_path: Path) -> None:
+    """The comparison ignores the leading `v`; it does not demand one."""
+    script = _make_tree(tmp_path, example_pin="v2.1.0")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_moving_references_are_still_exempt(tmp_path: Path) -> None:
+    """Widening `is_version_pin` must not sweep in `latest` / `main` / `sha-`.
+
+    Without this, accepting a `v` prefix could be "fixed" by accepting
+    everything, which would fail the release on the `:latest` references
+    compose.yaml and the getting-started docs carry on purpose.
+    """
+    script = _make_tree(tmp_path)
+    docs = tmp_path / "docs" / "deployment" / "k8s.md"
+    docs.write_text(
+        docs.read_text(encoding="utf-8")
+        + "    ghcr.io/codelibs/recotem:main\n"
+        + "    ghcr.io/codelibs/recotem:sha-abc1234\n",
+        encoding="utf-8",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_a_stale_version_label_under_docs_is_refused(tmp_path: Path) -> None:
+    """The label scan read `examples` while the pin scan read `examples docs`.
+
+    `docs/deployment/k8s.md` carries its own copy of the k8s version label, so
+    that asymmetry meant the script could exit 0 while the deployment doc still
+    declared the previous release -- with a success message claiming coverage
+    "under examples/ and docs/".
+    """
+    script = _make_tree(tmp_path, docs_version_label="2.0.0")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "k8s.md" in proc.stdout, proc.stdout
+    assert '"2.0.0"' in proc.stdout, proc.stdout
+
+
+def test_a_stale_values_excerpt_under_docs_is_refused(tmp_path: Path) -> None:
+    """The second unread location in the same file.
+
+    `docs/deployment/k8s.md` also carries a copy-pasteable `values.yaml`
+    excerpt. The `image.tag` reader in section 3 is hard-wired to
+    `helm/recotem/values.yaml`, and the excerpt has no `ghcr.io/` prefix for
+    the pin scan to match, so nothing read it.
+    """
+    script = _make_tree(tmp_path, docs_values_tag="2.0.0")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "k8s.md" in proc.stdout, proc.stdout
+
+
+def test_no_values_excerpt_anywhere_is_refused_rather_than_passed(
+    tmp_path: Path,
+) -> None:
+    """The excerpt scan gets the same vacuity guard as the other two."""
+    script = _make_tree(tmp_path, docs_values_tag=None)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "values.yaml excerpt" in proc.stdout, proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# The tree this script reads must be the tree the tag would publish
+# ---------------------------------------------------------------------------
+# Sections 3-5 read the working tree; section 6 reports a fact about HEAD.
+# Before this check they shared one success message. Measured at 7871f9f, whose
+# committed pyproject.toml says 2.1.0.dev0 and whose CHANGELOG says Unreleased:
+# editing only the working tree made the script print `pyproject.toml version =
+# 2.1.0`, `CHANGELOG.md declares 2.1.0 released.` and `The tagged commit is on
+# main.` together, and exit 0.
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.email=tests@recotem.invalid",
+            "-c",
+            "user.name=recotem tests",
+            *args,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _commit_everything(root: Path) -> None:
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "synthetic release tree")
+
+
+requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+
+
+@requires_git
+def test_a_committed_release_tree_passes_and_says_which_tree_it_read(
+    tmp_path: Path,
+) -> None:
+    script = _make_tree(tmp_path)
+    _commit_everything(tmp_path)
+
+    proc = _run(script, "v2.1.0")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Those files are committed" in proc.stdout, proc.stdout
+    assert "The tagged commit is on main." in proc.stdout, proc.stdout
+
+
+@requires_git
+def test_an_uncommitted_edit_to_a_checked_file_is_refused(tmp_path: Path) -> None:
+    """The exact shape that used to pass: commit stale, edit the work tree."""
+    script = _make_tree(
+        tmp_path,
+        pyproject="2.0.0",
+        chart_version="2.0.0",
+        changelog_heading="## [2.1.0] - Unreleased",
+    )
+    _commit_everything(tmp_path)
+
+    # Fix only the working tree. A tag here would publish 2.0.0 and a CHANGELOG
+    # that calls 2.1.0 unreleased.
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "recotem"\nversion = "2.1.0"\n', encoding="utf-8"
+    )
+    (tmp_path / "helm" / "recotem" / "Chart.yaml").write_text(
+        "apiVersion: v2\nname: recotem\ntype: application\n"
+        'version: 2.1.0\nappVersion: "2.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## [2.1.0] - 2026-01-01\n\n### Added\n\n- a thing\n",
+        encoding="utf-8",
+    )
+
+    proc = _run(script, "v2.1.0")
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    combined = proc.stdout + proc.stderr
+    assert "differ from the commit" in combined, combined
+    assert "pyproject.toml" in combined, combined
+    assert "CHANGELOG.md" in combined, combined
+    # None of the worktree-derived claims may be printed: emitting them is how
+    # the old behaviour looked correct.
+    assert "OK:" not in combined, combined
+    assert "The tagged commit is on main." not in combined, combined
+
+
+@requires_git
+def test_an_untracked_file_outside_the_checked_paths_does_not_block(
+    tmp_path: Path,
+) -> None:
+    """Only the files this script reads matter.
+
+    Refusing on an unrelated scratch file would make the gate fire on releases
+    it has nothing to say about, which is how operators learn to look past it.
+    """
+    script = _make_tree(tmp_path)
+    _commit_everything(tmp_path)
+    (tmp_path / "release-notes-draft.md").write_text("scratch\n", encoding="utf-8")
+
+    proc = _run(script, "v2.1.0")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_a_changelog_heading_without_its_link_definition_is_refused(
+    tmp_path: Path,
+) -> None:
+    """`## [X.Y.Z]` is a reference link; without the definition it is plain text.
+
+    Only the newest heading is affected -- every earlier release still has its
+    definition and still renders as a link -- so the page looks correct unless
+    you scroll to the one that matters. Measured at 7871f9f:
+    `grep -nE '^\\[[0-9]' CHANGELOG.md` returns 2.0.0 and 1.0.0 and no 2.1.0.
+    The release procedure says to add it; nothing checked that it was.
+    """
+    script = _make_tree(tmp_path, changelog_link=None)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    combined = proc.stdout + proc.stderr
+    assert "link definition" in combined, combined
+    assert "releases/tag/v2.1.0" in combined, combined

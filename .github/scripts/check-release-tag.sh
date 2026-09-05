@@ -110,6 +110,74 @@ fi
 EXPECTED="${TAG#v}"
 
 # ---------------------------------------------------------------------------
+# 2b. The files this script is about to read must match the commit
+# ---------------------------------------------------------------------------
+# Sections 3-5 read the WORKING TREE.  A tag names a COMMIT.  When the two
+# differ, every line this script prints -- and its "OK" -- describes a tree
+# nobody is about to publish.  Section 6 makes this sharper rather than milder:
+# it reports "The tagged commit is on main", a fact about HEAD, in the same
+# success block as five worktree-derived version lines and a CHANGELOG line.
+# One message, two different objects.
+#
+# Measured at 7871f9f, whose committed pyproject.toml says 2.1.0.dev0, whose
+# chart says 2.0.0 and whose CHANGELOG says "## [2.1.0] - Unreleased".  Edit
+# only the working tree to the release-ready values, commit nothing:
+#
+#   $ bash .github/scripts/check-release-tag.sh v2.1.0
+#   pyproject.toml       version = 2.1.0
+#   OK: ... CHANGELOG.md declares 2.1.0 released.
+#           The tagged commit is on main.                        # exit 0
+#
+# The release procedure has an adjacent `git status --porcelain  # MUST be
+# empty` step (release-recotem, Phase 3 step 1), and it works -- but the same
+# procedure calls THIS script the authoritative check, and an authoritative
+# check that quietly reads different bytes from the ones being tagged is the
+# shape a gate is supposed to remove.  In CI the checkout is clean and this is
+# a no-op; the local pre-tag rehearsal is where it earns its place, which is
+# precisely the run the procedure tells an operator to trust.
+#
+# Scoped to the paths this script reads, not to the whole tree: an untracked
+# scratch file elsewhere cannot change the verdict, and refusing on one would
+# train operators to look past this gate.
+#
+# GIT_TOPLEVEL is computed once here and reused by section 6.  Skipped outside
+# a git work tree, and when the enclosing repository is not this tree -- the
+# unit tests build synthetic trees in tmp dirs, which may sit inside some
+# unrelated checkout.
+GIT_TOPLEVEL="$(git -C "${REPO_ROOT}" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "${GIT_TOPLEVEL}" ] && [ "${GIT_TOPLEVEL}" = "${REPO_ROOT}" ]; then
+    DIRTY="$(
+        git -C "${REPO_ROOT}" status --porcelain -- \
+            pyproject.toml \
+            src/recotem/version.py \
+            helm/recotem/Chart.yaml \
+            helm/recotem/values.yaml \
+            CHANGELOG.md \
+            examples \
+            docs \
+            2>/dev/null || true
+    )"
+    if [ -n "${DIRTY}" ]; then
+        DIRTY_LINES=()
+        while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            DIRTY_LINES+=("  ${line}")
+        done <<< "${DIRTY}"
+        fail "Refusing to verify '${TAG}': files this check reads differ from the commit." \
+             "${DIRTY_LINES[@]}" \
+             "" \
+             "This script reads the working tree; a tag names a commit.  With these" \
+             "uncommitted, everything below would describe a tree that is not the one" \
+             "being tagged — including the 'OK' line and its claim about main." \
+             "" \
+             "To fix: commit the release changes (they belong in the release PR), then" \
+             "re-run against the merge commit you are about to tag:" \
+             "  git status --porcelain" \
+             "  bash $0 ${TAG}"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # 3. Every in-tree version declaration must equal the tag
 # ---------------------------------------------------------------------------
 PYPROJECT_VERSION="$(
@@ -258,11 +326,31 @@ add_mismatch() {
 # for a pin reading `recotem:2.1.0-alpine` or `recotem:2.1.0rc1`, which then
 # compared equal to the tag and passed -- a pin naming an image that was never
 # published.  Matching the whole tag and classifying it below closes that.
+#
+# The label scan reads `examples docs`, not `examples`.  It used to read only
+# `examples` while the pin scan next to it read both -- so `docs/deployment/
+# k8s.md:318` could sit at `app.kubernetes.io/version: "2.0.0"` through a whole
+# release with this script exiting 0 and its success message claiming coverage
+# "under examples/ and docs/".  Measured on a tree with every location the
+# script reads bumped to 2.1.0 and that one line left behind: rc=0.  The
+# release runbook's own `perl` block does bump that file, so this is a check
+# that reported OK about a location it never read, not a stale label that was
+# certain to ship -- but the point of the check is to be the thing that notices.
+#
+# `EXCERPT_RE` is the third form: `docs/deployment/k8s.md` carries a
+# copy-pasteable `values.yaml` excerpt whose `tag:` the runbook bumps as well.
+# The `image.tag` reader in section 3 is hard-wired to helm/recotem/values.yaml,
+# and this one has no `ghcr.io/` prefix for PIN_RE to match, so it was the
+# second location in the same file that nothing verified.  Anchored to the line
+# start so a `tag:` nested under some other key is not swept in; today it
+# matches exactly one line in the whole of examples/ and docs/.
 PIN_RE='ghcr\.io/codelibs/recotem:[A-Za-z0-9_][A-Za-z0-9_.-]*'
 LABEL_RE='app\.kubernetes\.io/version: *"[^"]*"'
+EXCERPT_RE='^[[:space:]]+tag: *"[^"]*"'
 
 PIN_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${PIN_RE}" examples docs 2>/dev/null || true)"
-LABEL_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${LABEL_RE}" examples 2>/dev/null || true)"
+LABEL_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${LABEL_RE}" examples docs 2>/dev/null || true)"
+EXCERPT_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${EXCERPT_RE}" examples docs 2>/dev/null || true)"
 
 # Both hit shapes end in the tag, one after a ':' and one inside quotes:
 #   examples/k8s/cronjob.yaml:60:ghcr.io/codelibs/recotem:2.0.0
@@ -277,35 +365,52 @@ pin_version() {
 # Anything else -- `latest`, `main`, `sha-abc1234` -- is a deliberately moving
 # reference and is left alone; `:latest` in compose.yaml and the getting-started
 # docs is the reason that exemption exists.
+#
+# `vX.Y.Z` counts too.  Keying only on a leading digit read `recotem:v2.0.0` as
+# a moving reference and skipped it -- so a stale pin written the way the git
+# TAG is written was the one spelling this check could not see, which is the
+# spelling a release is most likely to produce by hand.  Measured: with every
+# other location bumped and one pin left at `recotem:v2.0.0`, the script exited
+# 0.  A bare `v` followed by a digit is never a moving tag in this repository;
+# `latest`, `main` and `sha-abc1234` all still fall through.
 is_version_pin() {
     case "$1" in
-        [0-9]*) return 0 ;;
-        *)      return 1 ;;
+        [0-9]*)   return 0 ;;
+        v[0-9]*)  return 0 ;;
+        *)        return 1 ;;
     esac
+}
+
+# Compare tags after dropping a leading `v`, so `v2.1.0` and `2.1.0` are the
+# same version.  The pin is still reported verbatim, so the fix is obvious.
+pin_matches_expected() {
+    [ "${1#v}" = "${EXPECTED}" ]
 }
 
 # Count the hits that are actually subject to the comparison, so the vacuity
 # guards below test what they claim to.
 VERSION_PIN_COUNT=0
 VERSION_LABEL_COUNT=0
+VERSION_EXCERPT_COUNT=0
 STALE_PINS=()
 classify() {
     local hit="$1" kind="$2" tag
     [ -n "${hit}" ] || return 0
     tag="$(pin_version "${hit}")"
     is_version_pin "${tag}" || return 0
-    if [ "${kind}" = label ]; then
-        VERSION_LABEL_COUNT=$((VERSION_LABEL_COUNT + 1))
-    else
-        VERSION_PIN_COUNT=$((VERSION_PIN_COUNT + 1))
-    fi
+    case "${kind}" in
+        label)   VERSION_LABEL_COUNT=$((VERSION_LABEL_COUNT + 1)) ;;
+        excerpt) VERSION_EXCERPT_COUNT=$((VERSION_EXCERPT_COUNT + 1)) ;;
+        *)       VERSION_PIN_COUNT=$((VERSION_PIN_COUNT + 1)) ;;
+    esac
     # Collected as array elements, not as one newline-joined string, so `fail`
     # indents every line the same way rather than only the first.
-    [ "${tag}" = "${EXPECTED}" ] || STALE_PINS+=("  ${hit}")
+    pin_matches_expected "${tag}" || STALE_PINS+=("  ${hit}")
 }
 
 while IFS= read -r hit; do classify "${hit}" pin; done   < <(printf '%s\n' "${PIN_HITS}")
 while IFS= read -r hit; do classify "${hit}" label; done < <(printf '%s\n' "${LABEL_HITS}")
+while IFS= read -r hit; do classify "${hit}" excerpt; done < <(printf '%s\n' "${EXCERPT_HITS}")
 
 # A scan that finds nothing is refused rather than passed.  The release
 # procedure bumps these pins, so zero hits means the pattern stopped matching,
@@ -322,10 +427,17 @@ while IFS= read -r hit; do classify "${hit}" label; done < <(printf '%s\n' "${LA
 # `app.kubernetes.io/version` label from examples/k8s/ silently reduced that
 # half of the check to nothing while the script still reported OK.
 [ "${VERSION_LABEL_COUNT}" -gt 0 ] || \
-    fail "No 'app.kubernetes.io/version: \"X.Y.Z\"' label found under examples/." \
+    fail "No 'app.kubernetes.io/version: \"X.Y.Z\"' label found under examples/ or docs/." \
          "It is a version declaration the release procedure bumps, so finding none" \
          "means this check stopped matching rather than that there is nothing to" \
          "check.  Refused rather than skipped, for the same reason as the image pins."
+
+# And the same guard again for the values.yaml excerpt in the deployment docs.
+[ "${VERSION_EXCERPT_COUNT}" -gt 0 ] || \
+    fail "No 'tag: \"X.Y.Z\"' values.yaml excerpt found under examples/ or docs/." \
+         "docs/deployment/k8s.md carries a copy-pasteable values.yaml block whose" \
+         "tag the release procedure bumps; finding none means this check stopped" \
+         "matching rather than that there is nothing to check."
 
 # ---------------------------------------------------------------------------
 # 5. The CHANGELOG must announce this version as released
@@ -370,6 +482,27 @@ else
             "${EXPECTED} as unreleased, and the CHANGELOG at the tagged commit says so" \
             "permanently.  Set the heading to '## [${EXPECTED}] - YYYY-MM-DD'."
         )
+    elif ! grep -qE "^\[${EXPECTED_RE}\]:" "${CHANGELOG}"; then
+        # The heading is a Markdown reference link.  Without the matching
+        # definition at the tail it renders as the literal text `[X.Y.Z]`
+        # instead of a link to the release, and only that release's heading is
+        # affected -- every earlier one still resolves, so the page looks fine
+        # unless you scroll to the one that matters.  Measured at 7871f9f:
+        # `grep -nE '^\[[0-9]' CHANGELOG.md` returns definitions for 2.0.0 and
+        # 1.0.0 and none for 2.1.0.  The release procedure says to add it
+        # (references/release-notes.md, "Then add the link ref at the bottom of
+        # the file"); nothing checked that it was.
+        CHANGELOG_PROBLEM="has no CHANGELOG.md link definition for ${EXPECTED}"
+        CHANGELOG_DETAIL=(
+            "CHANGELOG.md heading '## [${EXPECTED}]' is a reference link with no" \
+            "definition, so it renders as the literal text '[${EXPECTED}]'." \
+            "" \
+            "Add it at the bottom of the file, above the previous release's:" \
+            "  [${EXPECTED}]: https://github.com/codelibs/recotem/releases/tag/${TAG}" \
+            "" \
+            "To see what is there now:" \
+            "  grep -nE '^\\[[0-9]' CHANGELOG.md"
+        )
     fi
 fi
 
@@ -403,7 +536,7 @@ BRANCH_PROBLEM=""
 BRANCH_DETAIL=()
 BRANCH_CHECKED=0
 
-GIT_TOPLEVEL="$(git -C "${REPO_ROOT}" rev-parse --show-toplevel 2>/dev/null || true)"
+# GIT_TOPLEVEL was resolved in section 2b, which needed the same answer.
 if [ -n "${GIT_TOPLEVEL}" ] && [ "${GIT_TOPLEVEL}" = "${REPO_ROOT}" ]; then
     BRANCH_CHECKED=1
 
@@ -493,7 +626,8 @@ if [ "${#STALE_PINS[@]}" -gt 0 ]; then
              "" \
              "To fix, set every reference above to ${EXPECTED} (or pick another number):" \
              "  git grep -nE 'ghcr[.]io/codelibs/recotem:[0-9]+[.][0-9]+[.][0-9]+' examples docs" \
-             "  git grep -n  'app.kubernetes.io/version' examples" \
+             "  git grep -n  'app.kubernetes.io/version' examples docs" \
+             "  git grep -nE '^ +tag: \"[0-9]' examples docs" \
              "")
 fi
 if [ -n "${MISMATCH}" ]; then
@@ -545,10 +679,17 @@ echo "OK: ${TAG} is a final release and matches pyproject.toml,"
 echo "    src/recotem/version.py, helm/recotem/Chart.yaml, helm/recotem/values.yaml,"
 echo "    and every pinned image reference under examples/ and docs/."
 echo "    CHANGELOG.md declares ${EXPECTED} released."
+# Say which tree the lines above describe.  Without this the success message
+# reads the same whether it inspected the commit or an uncommitted edit of it —
+# and the next line makes a claim about HEAD, so the two must not be confused.
 if [ "${BRANCH_CHECKED}" -eq 1 ]; then
+    echo "    Those files are committed, so the lines above describe the tree"
+    echo "    ${TAG} would publish."
     echo "    The tagged commit is on main."
 else
-    echo "    NOT checked: whether the tagged commit is on main (not a git work tree)."
+    echo "    NOT a git work tree: the lines above describe the files on disk,"
+    echo "    which may not be the ones ${TAG} would publish, and whether the"
+    echo "    tagged commit is on main was NOT checked."
 fi
 echo "    Not checked here: uv.lock (run 'uv lock --check'), and version strings"
 echo "    outside those files — see the verification block in"

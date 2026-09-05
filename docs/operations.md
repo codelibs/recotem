@@ -454,6 +454,13 @@ entry, the same four runs span **5.03 to 10.11** — a factor of two, set by how
 many interactions sit behind each factor entry, not by anything in the header's
 `best_params`.
 
+That single number is really `4 + 12r`, where
+`r = n_rows / ((n_users + n_items) × n_components)` measures how many
+interactions each factor entry carries. It is close to 4 on a sparse,
+high-dimension model and rises without bound as the catalogue gets denser or
+the search picks a smaller `n_components` — which is why it cannot be quoted as
+a constant.
+
 `n_components` is an Optuna-searched parameter over irspack's `[4, 300]`, so it
 is a property of the run rather than of the recipe: the same recipe on the same
 data can produce a materially different artifact size on the next train. But a

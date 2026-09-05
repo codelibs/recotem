@@ -537,6 +537,16 @@ exit 8.
   measured points, and says a small `n_components` is not a guarantee of a
   small artifact.
 
+  This does not contradict Round 8's `4.97 B/entry` — it contains it. Bytes per
+  entry is exactly `4 + 12r`, where
+  `r = n_rows / ((n_users + n_items) × n_components)`, and 4.97 corresponds to
+  `r = 0.0808`; the 150,000 × 20,000 / 3.0M-row point above sits independently
+  at `r = 0.0809` and measures 5.03. Round 8's own table already showed the
+  constant moving on a *fixed* dataset as `n_components` changed between runs
+  (`grocery` 5.042–6.372, `media` 4.755–5.071), which a real constant cannot
+  do; inverted, the two-term law recovers a consistent row count from either
+  end of both ranges to within 0.1%.
+
   Separately verified and left unchanged: the serve-RSS rule
   `RSS ≈ 4.8 × artifact + 0.22 GiB` reproduces on three fresh points spanning
   3 MiB to 178 MiB of artifact (worst error −6.7%, and conservative in the

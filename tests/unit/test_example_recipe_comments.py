@@ -67,3 +67,28 @@ def test_at_least_one_example_carries_an_algorithm_choices_comment() -> None:
     """Guards the parser: a silent zero-match would make the check vacuous."""
     total = sum(len(_algorithm_choice_lines(p.read_text())) for p in EXAMPLE_RECIPES)
     assert total >= 4, f"expected the shipped examples to list choices, found {total}"
+
+
+def test_examples_never_offer_the_extra_gated_algorithm() -> None:
+    """No example may offer BPRFM -- it needs the `bprfm` extra to construct.
+
+    ``test_choices_comment_names_only_constructible_algorithms`` above checks
+    against ``constructible_class_names()`` on *this* host, which is the right
+    question when the host is a default ``pip install recotem``. But CI now
+    installs ``--extra bprfm`` on the only job that runs pytest, so on that host
+    BPRFM *is* constructible and the check above would green-light an example
+    offering it -- while every reader on a default install gets exit 4. BPRFM is
+    the sole algorithm gated behind an optional dependency (see
+    ``test_constructible_class_names_reflects_lightfm``), so a targeted,
+    install-independent assertion closes that gap: it fails whether or not the
+    extra is installed. The examples deliberately describe a default install.
+    """
+    for recipe_path in EXAMPLE_RECIPES:
+        for line in _algorithm_choice_lines(recipe_path.read_text()):
+            for alias in (n.strip() for n in line.split(",")):
+                assert alias.casefold() != "bprfm", (
+                    f"{recipe_path.name} offers 'BPRFM' in its `# Choices:` "
+                    "comment. BPRFM needs the `bprfm` extra, so a reader on a "
+                    "default `pip install recotem` gets exit 4 -- and CI, which "
+                    "installs the extra, would not catch it."
+                )

@@ -1010,3 +1010,61 @@ def test_object_store_init_container_security_context_is_operator_overridable() 
         assert security.get("capabilities", {}).get("drop") == ["ALL"], (
             "the operator override dropped the chart's restricted-profile floor"
         )
+
+
+# ---------------------------------------------------------------------------
+# Service-link environment variables
+#
+# Kubernetes injects one legacy Docker-link variable per Service in the
+# namespace, named <SERVICE>_PORT and valued `tcp://<clusterIP>:<port>`.  The
+# chart's Service is `recotem` by default (docs/deployment/k8s.md installs the
+# release under that name), so every pod created after it inherits
+# `RECOTEM_PORT=tcp://10.96.139.23:8080`.  RECOTEM_PORT is fatal when it does
+# not parse, so measured in that namespace:
+#
+#   $ kubectl -n recotem run dbg --image=ghcr.io/codelibs/recotem -- recotem inspect ...
+#   Configuration error: RECOTEM_PORT must be an integer, got
+#   'tcp://10.96.139.23:8080': invalid literal for int() with base 10
+#
+# ...naming a variable the operator never set.  `recotem serve` fails the same
+# way.  The serve container escapes it only because `.Values.env.RECOTEM_PORT`
+# defaults to "8080"; the env loop skips empty values, so blanking it renders
+# no RECOTEM_PORT at all and re-opens the hole.
+# ---------------------------------------------------------------------------
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "set_args",
+    [
+        ("train.enabled=true",),
+        ("train.enabled=true", "env.RECOTEM_PORT="),
+    ],
+    ids=["default-port", "blanked-port"],
+)
+def test_chart_pod_specs_disable_service_links(set_args: tuple[str, ...]) -> None:
+    docs = _load_all_strict(_helm_template(*set_args))
+    specs = _pod_specs_in(docs)
+    assert specs, "expected the chart to render at least one pod spec"
+    for label, spec in specs:
+        assert spec.get("enableServiceLinks") is False, (
+            f"{label}: Kubernetes would inject RECOTEM_PORT=tcp://<ip>:<port> "
+            "from the chart's own Service and every recotem command that reads "
+            "it would exit 8"
+        )
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    ["serve-deployment.yaml", "cronjob.yaml", "bootstrap-job.yaml"],
+)
+def test_example_pod_specs_disable_service_links(manifest: str) -> None:
+    docs = _load_all_strict((K8S_EXAMPLES / manifest).read_text())
+    specs = _pod_specs_in(docs)
+    assert specs, f"{manifest}: expected a pod spec"
+    for label, spec in specs:
+        assert spec.get("enableServiceLinks") is False, (
+            f"{manifest} {label}: the sibling Service is named recotem-serve, "
+            "so RECOTEM_SERVE_PORT is injected here; keep the flag off so a "
+            "rename to `recotem` cannot poison RECOTEM_PORT"
+        )

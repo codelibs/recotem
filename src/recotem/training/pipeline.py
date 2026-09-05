@@ -722,6 +722,55 @@ _DESTINATION_ERROR_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# HTTP statuses that mean the write will never succeed as configured: the
+# destination is absent (404), or the request was refused because the caller is
+# unauthenticated (401) or authenticated-but-not-permitted (403).
+#
+# Class-name and ``isinstance`` matching alone miss these.  Measured against the
+# real services, ``gs://`` and ``az://`` surface auth failures as generic
+# transport exceptions that carry the status as an attribute and nothing else
+# distinguishing: ``gcsfs.retry.HttpError`` (``.code``) for a 401 and
+# ``azure.core.exceptions.HttpResponseError`` (``.status_code``) for the 403 an
+# AAD identity gets when it holds the control-plane role but not a data-plane
+# one.  Neither is a ``FileNotFoundError`` / ``PermissionError`` — ``HttpError``
+# does not even subclass ``OSError`` — so both used to reach exit 1.
+#
+# 5xx and 429 are deliberately excluded: those are transient and must keep
+# falling through so a retry still looks like a retry.
+_WRITE_CONFIG_HTTP_STATUSES: frozenset[int] = frozenset({401, 403, 404})
+
+
+def _http_status_of(exc: BaseException) -> int | None:
+    """Return the HTTP status an object-store SDK exception carries, if any.
+
+    The SDKs spell it differently — ``status_code`` (azure.core, requests),
+    ``code`` (gcsfs) — and are optional dependencies, so the attribute is read
+    structurally rather than by importing anything.  The range check keeps an
+    unrelated integer ``code`` (SQLAlchemy stores a string there, but a
+    third-party class could use an int) from being read as a status.
+    """
+    for attr in ("status_code", "code", "status"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int) and 100 <= value <= 599:
+            return value
+    return None
+
+
+def _is_gcs_forbidden_oserror(exc: BaseException) -> bool:
+    """True for gcsfs's bare ``OSError('Forbidden: ...')`` — a 403 with no status.
+
+    ``gcsfs.retry.validate_response`` maps 404 to ``FileNotFoundError`` but 403
+    to a *plain* ``OSError`` carrying no status attribute at all, so the single
+    most ordinary GCS deployment mistake — a service account that authenticates
+    but lacks ``storage.objects.create`` — is indistinguishable by class from a
+    transient I/O error.  The message prefix is the only signal gcsfs leaves.
+
+    The type is compared exactly rather than with ``isinstance`` so that the
+    ``OSError`` subclasses which *are* transient (``ConnectionError``,
+    ``TimeoutError``) keep falling through to their existing classification.
+    """
+    return type(exc) is OSError and str(exc).startswith("Forbidden:")
+
 
 def _artifact_write_credentials_error(
     exc: BaseException, output_path: str
@@ -752,6 +801,10 @@ def _artifact_write_credentials_error(
     | bucket does not exist (gs) | ``FileNotFoundError`` |
     | container does not exist (az) | ``RuntimeError`` <- ``ResourceNotFoundError`` |
     | key rejected / no PutObject (s3) | ``PermissionError`` |
+    | no credentials resolve (gs) | ``gcsfs.retry.HttpError`` (``.code`` 401) |
+    | authenticated, no permission (gs) | plain ``OSError('Forbidden: ...')`` |
+    | wrong shared key (az) | ``RuntimeError`` <- ``ClientAuthenticationError`` |
+    | AAD identity, no data-plane role (az) | ``RuntimeError`` <- ``HttpResponseError`` (``.status_code`` 403) |
 
     None of those is a credential-*resolution* failure, so all four used to
     fall through to exit 1 with the SDK's own message — for a rotated key or a
@@ -779,9 +832,20 @@ def _artifact_write_credentials_error(
                 "credentials for the destination and re-run.",
                 code="artifact_write_credentials",
             )
+        status = _http_status_of(cur)
+        if remote and status == 401:
+            return TrainingError(
+                f"could not authenticate to write the artifact to "
+                f"{output_path!r}: {type(cur).__name__}: {cur}.  Training "
+                "succeeded but the model was not persisted — configure "
+                "credentials for the destination and re-run.",
+                code="artifact_write_credentials",
+            )
         if remote and (
             isinstance(cur, FileNotFoundError | PermissionError)
             or type(cur).__name__ in _DESTINATION_ERROR_NAMES
+            or status in _WRITE_CONFIG_HTTP_STATUSES
+            or _is_gcs_forbidden_oserror(cur)
         ):
             return TrainingError(
                 f"could not write the artifact to {output_path!r}: "

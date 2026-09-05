@@ -83,9 +83,10 @@ services:
       RECOTEM_ALLOWED_HOSTS:     "localhost,myapp.example.com"
       RECOTEM_ALLOWED_ORIGINS:   "https://myapp.example.com"
     healthcheck:
+      # /v1/health/ready, not /v1/health — see "Image-level HEALTHCHECK" below.
       test:
         - "CMD-SHELL"
-        - "python -c \"import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/v1/health', timeout=5).status == 200 else 1)\""
+        - "python -c \"import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/v1/health/ready', timeout=5).status == 200 else 1)\""
       interval: 30s
       timeout: 10s
       retries: 3
@@ -122,7 +123,18 @@ mkdir -p ./artifacts && chown 1000:1000 ./artifacts
 
 Named Docker volumes (as in `compose.yaml`) are pre-created with the right ownership and need no chown. The container also has `readOnlyRootFilesystem` semantics in mind — `/tmp` is the only writable location outside mounted volumes.
 
-**Image-level HEALTHCHECK.** The Dockerfile declares its own `HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3` that probes the public `/v1/health` endpoint with `urllib.request.urlopen(f'http://127.0.0.1:{RECOTEM_PORT}/v1/health', timeout=3)` (so it picks up an overridden `RECOTEM_PORT`). For one-shot `train` containers this fires after the process has already exited and causes no spurious failures. The Compose-level healthcheck shown in the annotated example also targets `/v1/health` (with a slightly looser `timeout=5` inside the Python probe) and overrides the image default for the `serve` service — orchestrators should rely on the HTTP 200 response from `/v1/health`. Note the `/v1` prefix: the API router is mounted there, so a probe pointed at bare `/health` gets a 404 and the container never reports healthy.
+**Image-level HEALTHCHECK.** The Dockerfile declares its own `HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3` that probes `/v1/health/ready` with `urllib.request.urlopen(f'http://127.0.0.1:{RECOTEM_PORT}/v1/health/ready', timeout=3)` (so it picks up an overridden `RECOTEM_PORT`). For one-shot `train` containers this fires after the process has already exited and causes no spurious failures. The Compose-level healthcheck shown in the annotated example targets the same endpoint (with a slightly looser `timeout=5` inside the Python probe) and overrides the image default for the `serve` service — orchestrators should rely on the HTTP 200 response from `/v1/health/ready`. Note the `/v1` prefix: the API router is mounted there, so a probe pointed at bare `/health` gets a 404 and the container never reports healthy.
+
+**Why the healthcheck is not on `/v1/health`.** A container has exactly one healthcheck, and every orchestrator that acts on it — Swarm, ECS, `docker compose up --wait`, another service's `depends_on: condition: service_healthy` — reads it as "should this container receive traffic, or be replaced?". That is the readiness question. `/v1/health` answers a stricter one: *is every recipe present?* Adding one untrained recipe to the mounted recipes directory — the routine "1 YAML = 1 model" onboarding — makes it return 503 at the next watcher poll while every already-loaded model still answers `:recommend` with 200:
+
+```console
+$ curl -s localhost:8080/v1/health          # 3 loaded, 1 just added, not yet trained
+{"status":"degraded","total":4,"loaded":3}  # HTTP 503  -> container unhealthy
+$ curl -s localhost:8080/v1/health/ready
+{"status":"ready","total":4,"loaded":3}     # HTTP 200  -> container stays healthy
+```
+
+The replacement container reads the same recipes directory and the same artifact store, so it fails the same way and the condition never self-heals. `/v1/health/ready` is 200 while at least one recipe is loaded and 503 only when none is, so a cold server still never becomes healthy — the first-install guarantee is kept, without one untrained recipe taking the loaded models with it. On Kubernetes the same reasoning is expressed with three separate probes instead of one; see [Kubernetes](k8s.md).
 
 **Bind port only on localhost on the host if you put a reverse proxy in front:**
 
@@ -199,8 +211,23 @@ curl http://localhost:8080/v1/health
 
 `status` is `degraded` — and the response code is **503** — whenever any recipe
 failed to load (`loaded < total`); otherwise it is `ok` with **200**. A serve
-process with no recipes at all reports `ok`. A Kubernetes readiness probe should
-check HTTP 200 from `/v1/health`.
+process with no recipes at all reports `ok`.
+
+Because it is count-based, `/v1/health` belongs on a **startup** gate, not on a
+readiness or liveness probe: one untrained recipe among many trips it while
+every loaded model still serves. Two sibling endpoints answer the other two
+questions, both unauthenticated like `/v1/health`:
+
+| Endpoint | Answers | 200 when |
+|---|---|---|
+| `/v1/health` | is every recipe present? | `loaded == total` (or no recipes at all) |
+| `/v1/health/ready` | can this replica serve? | at least one recipe is loaded |
+| `/v1/health/live` | is the process usable? | always, while it can answer |
+
+A Kubernetes readiness probe should check HTTP 200 from `/v1/health/ready`, and
+liveness `/v1/health/live`; keep `/v1/health` on the `startupProbe`. That is
+what the shipped chart and `examples/k8s/` do — see
+[Kubernetes](k8s.md).
 
 For per-recipe diagnostics use `/v1/health/details`, which requires an API key
 and likewise answers 503 when degraded:

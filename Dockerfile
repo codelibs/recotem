@@ -190,14 +190,29 @@ USER appuser
 
 WORKDIR /workspace
 
-# Default HEALTHCHECK probes the /v1/health endpoint of the serve process.
+# Default HEALTHCHECK probes /v1/health/ready, not /v1/health.
 # The API router is mounted under the /v1 prefix, so bare /health is a 404.
-# This makes sense for the primary serve mode. For one-shot train jobs the
-# container exits before any healthcheck fires, so the probe does not cause
-# spurious failures. Operators can override with --no-healthcheck or a custom
-# HEALTHCHECK in their compose service / k8s liveness probe.
+#
+# A container has ONE healthcheck, and orchestrators that act on it (Swarm,
+# ECS, `docker compose up --wait`, `depends_on: condition: service_healthy`)
+# read it as "should this container receive traffic / be replaced?".  That is
+# the readiness question.  `/v1/health` answers a different one -- "is EVERY
+# recipe present?" -- so a single untrained recipe dropped into the mounted
+# recipes directory turned an otherwise healthy server, still serving every
+# model it had loaded, into an unhealthy container.  The replacement container
+# reads the same recipes directory and the same artifact store and fails the
+# same way, so it never self-heals.  /v1/health/ready is 200 while at least
+# one recipe is loaded and 503 only when none is, which keeps the first-install
+# gate (a cold server does not enter a `service_healthy` dependency or an ECS
+# target group) without letting one untrained recipe take the rest down.
+#
+# For one-shot train jobs the container exits before any healthcheck fires, so
+# the probe does not cause spurious failures. Operators can override with
+# --no-healthcheck or a custom HEALTHCHECK in their compose service; on
+# Kubernetes use the chart's three-probe split (startup /v1/health, readiness
+# /v1/health/ready, liveness /v1/health/live) instead of this single check.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD ["python", "-c", "import os,sys,urllib.request; port=os.environ.get('RECOTEM_PORT','8080'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/v1/health',timeout=3).status==200 else 1)"]
+    CMD ["python", "-c", "import os,sys,urllib.request; port=os.environ.get('RECOTEM_PORT','8080'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/v1/health/ready',timeout=3).status==200 else 1)"]
 
 ENTRYPOINT ["recotem"]
 CMD ["--help"]

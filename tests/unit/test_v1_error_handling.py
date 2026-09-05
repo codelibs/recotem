@@ -1152,3 +1152,73 @@ def test_build_v1_app_registers_all_three_exception_handlers() -> None:
         f"Exception handler missing — 500s will fall back to plain text. "
         f"got {list(handlers.keys())!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 12. Algorithms that cannot score a cold user (BPRFM)
+# ---------------------------------------------------------------------------
+
+
+def _bprfm_like_entry(name: str = "demo") -> ModelEntry:
+    """A loaded entry whose recommender behaves like a BPRFM artifact.
+
+    ``BPRFMRecommender`` is the one supported algorithm that does not override
+    ``get_score_cold_user``, so irspack's ``BaseRecommender`` raises
+    ``NotImplementedError`` the moment ``:recommend-related`` asks it to score
+    the synthetic user built from ``seed_items``.  Everything else about the
+    model works, including ``:recommend``.
+    """
+    rec = MagicMock()
+    rec.get_recommendation_for_known_user_id.return_value = [("i1", 0.9)]
+    rec._mapper.item_id_to_index = {"i1": 0, "i2": 1}
+    rec.get_recommendation_for_new_user.side_effect = NotImplementedError(
+        "get_score_cold_user is not implemented for BPRFMRecommender!"
+    )
+    entry = _loaded_entry(rec, name=name)
+    entry.header["best_class"] = "BPRFMRecommender"
+    return entry
+
+
+def test_recommend_related_on_cold_incapable_model_is_501_not_500() -> None:
+    """Regression: a BPRFM recipe answered ``:recommend-related`` with an
+    unhandled 500 ``INTERNAL_ERROR``.
+
+    The condition is a permanent property of the trained algorithm, not a
+    server fault, so it must be reported as such -- with a code the operator
+    can act on and a message naming the algorithm.
+    """
+    client = _client_with(_bprfm_like_entry())
+
+    r = client.post("/v1/recipes/demo:recommend-related", json={"seed_items": ["i1"]})
+
+    assert r.status_code == 501, r.text
+    body = r.json()
+    assert body["code"] == "RELATED_NOT_SUPPORTED"
+    assert "BPRFMRecommender" in body["detail"]
+
+
+def test_recommend_still_works_on_a_cold_incapable_model() -> None:
+    """Only the ``related`` verbs are affected; ``:recommend`` is unimpaired."""
+    client = _client_with(_bprfm_like_entry())
+
+    r = client.post("/v1/recipes/demo:recommend", json={"user_id": "u1", "limit": 1})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["item_id"] == "i1"
+
+
+def test_batch_recommend_related_element_reports_related_not_supported() -> None:
+    """The batch verb must report the same condition per element rather than
+    turning every element into ``INTERNAL_ERROR``."""
+    client = _client_with(_bprfm_like_entry())
+
+    r = client.post(
+        "/v1/recipes/demo:batch-recommend-related",
+        json={"requests": [{"seed_items": ["i1"]}]},
+    )
+
+    assert r.status_code == 200, r.text
+    result = r.json()["results"][0]
+    assert result["status"] == "error"
+    assert result["error"]["code"] == "RELATED_NOT_SUPPORTED"
+    assert "BPRFMRecommender" in result["error"]["message"]

@@ -522,7 +522,16 @@ exit 8.
   INFO in the log (`recipes_directory_loaded_lenient ok=0 errors=0`, then
   `startup_artifact_load_complete total_recipes=0`). A ConfigMap whose keys are
   not `*.yaml` and an empty PVC produce the same fleet, and so does a directory
-  in which every recipe file failed to parse (those are excluded from `total`).
+  in which every recipe file failed to *load* (those are excluded from `total`)
+  -- for instance a DataSource plugin whose `type_name` collides with a
+  builtin, which makes every recipe using that type fail with
+  `recipe_load_error_skipped` and leaves
+  `recipes_directory_loaded_lenient ok=0 errors=1` while the process keeps
+  answering health checks. Two unrelated causes, one end state, which is why
+  the predicate is `loaded > 0` rather than "are there recipe files". The
+  lenient loading itself is correct and unchanged: one malformed recipe must
+  not take down a server hosting nine good ones. What was wrong is that
+  readiness could not tell 9-of-10 from 0-of-10.
 
   The short-circuit was there on the theory that an empty registry is the
   boot-time state before the watcher's first poll, and that answering 503 would
@@ -535,7 +544,12 @@ exit 8.
   same answer a cold artifact store already gave, and startup emits a
   `recipes_directory_empty` **warning** naming the directory. `/v1/health` is
   unchanged: it answers "is every registered recipe present?" and keeps its
-  count-based contract.
+  count-based contract. Unready is deliberately not a refusal to start: the
+  watcher still picks up a recipe that appears after startup, and the replica
+  becomes ready the moment one loads -- measured end to end, 503 on an empty
+  directory, then 200 and a serving `:recommend` within one poll of a recipe
+  being dropped in, with no restart. **Alert on the loaded count, not on
+  liveness:** both routes into this state pass every liveness check.
 
 - **An over-cap model was reported as a damaged file when `recotem serve`
   started, and as `size_cap` when the same file arrived by hot-swap.** The

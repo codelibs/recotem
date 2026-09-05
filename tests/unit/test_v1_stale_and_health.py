@@ -214,9 +214,22 @@ def test_ready_returns_503_when_registry_empty() -> None:
 def test_ready_returns_503_when_every_recipe_file_was_unparseable() -> None:
     """Skipped files are excluded from `total`, so this is the empty case too.
 
-    A recipes directory in which every YAML fails to parse leaves `total == 0`
+    A recipes directory in which every recipe fails to LOAD leaves `total == 0`
     with `skipped > 0`.  That replica has no model either, so it must not be
-    Ready — and under the old `total == 0` short-circuit it was.
+    Ready -- and under the old `total == 0` short-circuit it was.
+
+    This is a second, independent route into the same state, and it is why the
+    predicate is `loaded > 0` rather than "are there recipe files".  Measured
+    on 7871f9f: install a DataSource plugin whose `type_name` collides with a
+    builtin and every recipe using that type fails to load with
+    `recipe_load_error_skipped`, leaving
+    `recipes_directory_loaded_lenient ok=0 errors=1` -- files present, synced
+    correctly, nothing loaded, `/v1/health/ready` 200.  Fixing the delivery
+    side alone would not have closed it.
+
+    The leniency itself is correct and must stay: one malformed recipe must not
+    take down a server hosting nine good ones.  What was wrong is that
+    readiness could not tell 9-of-10 from 0-of-10.
     """
     registry = ModelRegistry()
     broken = _stub_entry("broken")

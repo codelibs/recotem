@@ -511,6 +511,62 @@ exit 8.
 
 ### Fixed
 
+- **A `serve` replica that found no recipe files at all reported itself
+  Ready.** `/v1/health/ready` computed `ready = total == 0 or loaded_count > 0`,
+  so a recipes directory holding no `*.yaml` file passed readiness on the
+  `total == 0` half — the pod joined the Service and answered `404
+  RECIPE_NOT_FOUND` to every request. Measured on a 3-node cluster with the
+  shipped chart and `recipes.source: objectStore` whose sync container exited 0
+  having copied nothing: both replicas `1/1` Ready, both in the Service's
+  endpoints with `ready=true`, `restartCount 0`, no event, and nothing above
+  INFO in the log (`recipes_directory_loaded_lenient ok=0 errors=0`, then
+  `startup_artifact_load_complete total_recipes=0`). A ConfigMap whose keys are
+  not `*.yaml` and an empty PVC produce the same fleet, and so does a directory
+  in which every recipe file failed to *load* (those are excluded from `total`)
+  -- for instance a DataSource plugin whose `type_name` collides with a
+  builtin, which makes every recipe using that type fail with
+  `recipe_load_error_skipped` and leaves
+  `recipes_directory_loaded_lenient ok=0 errors=1` while the process keeps
+  answering health checks. Two unrelated causes, one end state, which is why
+  the predicate is `loaded > 0` rather than "are there recipe files". The
+  lenient loading itself is correct and unchanged: one malformed recipe must
+  not take down a server hosting nine good ones. What was wrong is that
+  readiness could not tell 9-of-10 from 0-of-10.
+
+  The short-circuit was there on the theory that an empty registry is the
+  boot-time state before the watcher's first poll, and that answering 503 would
+  deadlock startup against registration. Neither holds: `create_app` reads the
+  recipes directory synchronously before uvicorn accepts a connection, so an
+  empty registry means the directory really is empty; and registration needs no
+  traffic, which is exactly why the documented first-install flow works — 503,
+  `train` writes the artifact, the watcher picks it up, the probe passes. An
+  empty registry is now `503 {"status":"unready","total":0,"loaded":0}`, the
+  same answer a cold artifact store already gave, and startup emits a
+  `recipes_directory_empty` **warning** naming the directory. `/v1/health` is
+  unchanged: it answers "is every registered recipe present?" and keeps its
+  count-based contract. Unready is deliberately not a refusal to start: the
+  watcher still picks up a recipe that appears after startup, and the replica
+  becomes ready the moment one loads -- measured end to end, 503 on an empty
+  directory, then 200 and a serving `:recommend` within one poll of a recipe
+  being dropped in, with no restart.
+
+  **What this deliberately does not change, because readiness is the wrong
+  instrument for it.** A replica that loads *some* of its recipes stays Ready,
+  and it should: pulling a pod out of the Service because one recipe of ten is
+  broken serves nobody. But that partial case is quieter than it looks. A
+  recipe that loads and has no artifact is counted in `total`, so `loaded <
+  total` and `/v1/health` answers **503 `degraded`**. A recipe that fails to
+  *load* is excluded from `total` instead, so `loaded == total` and
+  `/v1/health` answers **200 `ok`** — measured, with one good recipe and one
+  unloadable one: `200 {"status":"ok","total":1,"loaded":1,"skipped":1}`, the
+  good recipe serving `200` and the broken one `404` forever. Liveness,
+  readiness, the `/v1/health` status line and the `loaded` count are all green
+  there. **The signal for that case is `skipped > 0`** (equivalently `errors`
+  in `recipes_directory_loaded_lenient`, and the `recipe_load_error_skipped`
+  warning), and it needs no product change — `skipped` is already in the
+  `/v1/health` body. So: **`loaded == 0` is a readiness question and is now
+  answered as one; `skipped > 0` is an alerting question and stays one.**
+
 - **An over-cap model was reported as a damaged file when `recotem serve`
   started, and as `size_cap` when the same file arrived by hot-swap.** The
   classifier that resolves an `ArtifactError` to a `reason` label lives in

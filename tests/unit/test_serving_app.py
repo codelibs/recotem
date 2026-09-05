@@ -2515,3 +2515,59 @@ def test_request_id_replaced_when_client_supplies_empty_value(
     assert response.status_code == 200
     returned = response.headers.get("x-request-id", "")
     assert returned, "Empty X-Request-ID must be replaced by a server-generated value"
+
+
+# ---------------------------------------------------------------------------
+# An empty recipes directory is a delivery mistake, and must say so
+# ---------------------------------------------------------------------------
+
+
+def test_empty_recipes_directory_logs_a_warning(tmp_path: Path) -> None:
+    """`create_app` WARNs, naming the directory, when it finds no *.yaml.
+
+    Before this, the only trace was `recipes_directory_loaded_lenient
+    ok=0 errors=0` and `startup_artifact_load_complete total_recipes=0`, both
+    INFO and neither saying anything is wrong -- so a ConfigMap whose keys are
+    not `*.yaml`, an objectStore sync that copied nothing, or an empty PVC
+    produced a server that 404'd every request with nothing in the log.
+    """
+    import structlog
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)  # points at an empty recipes dir
+    (Path(cfg.recipes_dir) / "notes.txt").write_text("not a recipe", encoding="utf-8")
+
+    with structlog.testing.capture_logs() as cap:
+        create_app(cfg)
+
+    empty = [e for e in cap if e.get("event") == "recipes_directory_empty"]
+    assert empty, (
+        "an empty recipes directory must WARN; events seen: "
+        f"{sorted({e.get('event') for e in cap})}"
+    )
+    assert empty[0]["log_level"] == "warning"
+    assert str(Path(cfg.recipes_dir)) in empty[0]["recipes_dir"]
+
+
+def test_empty_recipes_directory_serves_unready(tmp_path: Path) -> None:
+    """End to end: a serve app over a recipe-less directory answers 503.
+
+    This is the whole-app companion to
+    `test_ready_returns_503_when_registry_empty`: it exercises the real
+    `create_app` path a pod runs, not a hand-built registry.
+    """
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        r = client.get("/v1/health/ready")
+
+    assert r.status_code == 503, f"got {r.status_code} {r.text}"
+    body = r.json()
+    assert body["status"] == "unready"
+    assert body["total"] == 0
+    assert body["loaded"] == 0

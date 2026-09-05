@@ -157,10 +157,12 @@ def test_health_returns_200_when_all_loaded() -> None:
 def test_health_returns_200_when_registry_empty() -> None:
     """No recipes is "ok" — there is no failure to be degraded by.
 
-    This is the boot-time state before the watcher's first successful
-    poll on an empty recipes directory.  K8s should mark the pod Ready so
-    traffic can route to it; serving 503 on an empty registry would
-    create a deadlock between startup and registration.
+    `/v1/health` answers "is every registered recipe present?", and with
+    nothing registered the answer is vacuously yes.  This is deliberately NOT
+    the readiness answer: whether the Service should route to this replica is
+    a different question, and for an empty registry it is no — see
+    `test_ready_returns_503_when_registry_empty`.  No probe in the shipped
+    chart reads `/v1/health`; it is for alerting.
     """
     registry = ModelRegistry()
     client = TestClient(build_v1_app(registry))
@@ -169,3 +171,62 @@ def test_health_returns_200_when_registry_empty() -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# An EMPTY recipes directory must not be Ready
+#
+# `/v1/health` above answers "is every registered recipe present?" and has
+# nothing to be degraded by when nothing is registered.  `/v1/health/ready`
+# answers a different question -- "should the Service send traffic here?" --
+# and for an empty registry the answer is no: the replica can serve nothing,
+# and every request to it returns 404 RECIPE_NOT_FOUND.
+#
+# Measured on a 3-node cluster with the shipped chart: `recipes.source:
+# objectStore` whose sync container exited 0 having copied nothing left both
+# replicas 1/1 Ready, in the Service's endpoints, restartCount 0, no event and
+# no WARN in the log -- while 100% of traffic 404'd.  A ConfigMap whose keys
+# are not `*.yaml` and an empty PVC produce the same fleet.  The train CronJob
+# guards the identical case explicitly ("no recipe files found under
+# /recipes", exit 1); serve did not.
+# ---------------------------------------------------------------------------
+
+
+def test_ready_returns_503_when_registry_empty() -> None:
+    """An empty registry is a cold fleet: 503, not 200.
+
+    Dies if `health_ready` regains its `total == 0 or ...` short-circuit.
+    """
+    registry = ModelRegistry()
+    client = TestClient(build_v1_app(registry))
+
+    r = client.get("/v1/health/ready")
+    assert r.status_code == 503, (
+        "a replica with zero recipes can serve nothing and must stay out of "
+        f"the Service; got {r.status_code} {r.text}"
+    )
+    body = r.json()
+    assert body["status"] == "unready"
+    assert body["total"] == 0
+    assert body["loaded"] == 0
+
+
+def test_ready_returns_503_when_every_recipe_file_was_unparseable() -> None:
+    """Skipped files are excluded from `total`, so this is the empty case too.
+
+    A recipes directory in which every YAML fails to parse leaves `total == 0`
+    with `skipped > 0`.  That replica has no model either, so it must not be
+    Ready — and under the old `total == 0` short-circuit it was.
+    """
+    registry = ModelRegistry()
+    broken = _stub_entry("broken")
+    broken.skipped = True
+    registry.replace("broken", broken)
+    assert registry.health_counts() == (0, 0, 1)
+    client = TestClient(build_v1_app(registry))
+
+    r = client.get("/v1/health/ready")
+    assert r.status_code == 503, f"got {r.status_code} {r.text}"
+    body = r.json()
+    assert body["status"] == "unready"
+    assert body["skipped"] == 1

@@ -73,6 +73,22 @@ startup probe that reads it restarts the container, so one untrained recipe
 stops every new pod — a rolling update or an HPA scale-out never converges.
 Use `/v1/health` for alerting, not for probes.
 
+**No recipe files at all is a different failure, and it looks like this
+one.** If the recipes directory holds no `*.yaml` file — a ConfigMap whose
+keys are not `*.yaml`, an `objectStore` init container that exited 0 having
+copied nothing, an empty PVC — `serve` has nothing to register.
+`/v1/health/ready` answers **503** `{"status":"unready","total":0,"loaded":0}`
+for that, exactly as it does for an untrained artifact store, and startup logs
+a `recipes_directory_empty` **warning** naming the directory. So a crash loop
+on a fresh install has two causes, and the log line separates them: a
+`recipes_directory_empty` warning means the delivery is wrong (fix the
+ConfigMap / sync / PVC), and its absence means the store is simply cold (run
+train). Check the mount before re-running train:
+
+```bash
+kubectl -n recotem exec deploy/recotem -- ls -la /recipes
+```
+
 > **Why no post-install hook in the chart?** Training is an unbounded
 > operation — the CronJob allows it an hour (`activeDeadlineSeconds: 3600`).
 > Wiring it into `helm install` would make every first install block on it and

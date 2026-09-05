@@ -511,6 +511,32 @@ exit 8.
 
 ### Fixed
 
+- **A `serve` replica that found no recipe files at all reported itself
+  Ready.** `/v1/health/ready` computed `ready = total == 0 or loaded_count > 0`,
+  so a recipes directory holding no `*.yaml` file passed readiness on the
+  `total == 0` half — the pod joined the Service and answered `404
+  RECIPE_NOT_FOUND` to every request. Measured on a 3-node cluster with the
+  shipped chart and `recipes.source: objectStore` whose sync container exited 0
+  having copied nothing: both replicas `1/1` Ready, both in the Service's
+  endpoints with `ready=true`, `restartCount 0`, no event, and nothing above
+  INFO in the log (`recipes_directory_loaded_lenient ok=0 errors=0`, then
+  `startup_artifact_load_complete total_recipes=0`). A ConfigMap whose keys are
+  not `*.yaml` and an empty PVC produce the same fleet, and so does a directory
+  in which every recipe file failed to parse (those are excluded from `total`).
+
+  The short-circuit was there on the theory that an empty registry is the
+  boot-time state before the watcher's first poll, and that answering 503 would
+  deadlock startup against registration. Neither holds: `create_app` reads the
+  recipes directory synchronously before uvicorn accepts a connection, so an
+  empty registry means the directory really is empty; and registration needs no
+  traffic, which is exactly why the documented first-install flow works — 503,
+  `train` writes the artifact, the watcher picks it up, the probe passes. An
+  empty registry is now `503 {"status":"unready","total":0,"loaded":0}`, the
+  same answer a cold artifact store already gave, and startup emits a
+  `recipes_directory_empty` **warning** naming the directory. `/v1/health` is
+  unchanged: it answers "is every registered recipe present?" and keeps its
+  count-based contract.
+
 - **An over-cap model was reported as a damaged file when `recotem serve`
   started, and as `size_cap` when the same file arrived by hot-swap.** The
   classifier that resolves an `ArtifactError` to a `reason` label lives in

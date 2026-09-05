@@ -209,7 +209,7 @@ WORKDIR /workspace
 # For one-shot train jobs the container exits before any healthcheck fires, so
 # the probe does not cause spurious failures. Operators can override with
 # --no-healthcheck or a custom HEALTHCHECK in their compose service; on
-# Kubernetes use the chart's three-probe split (startup /v1/health, readiness
+# Kubernetes use the chart's three-probe split (startup and readiness
 # /v1/health/ready, liveness /v1/health/live) instead of this single check.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD ["python", "-c", "import os,sys,urllib.request; port=os.environ.get('RECOTEM_PORT','8080'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/v1/health/ready',timeout=3).status==200 else 1)"]

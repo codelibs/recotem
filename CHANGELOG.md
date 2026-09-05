@@ -55,27 +55,33 @@ irspack versions, and the remedy. Requests to that recipe return `503`
 `recotem_artifact_load_failures_total{reason="version_skew"}` increments, and
 `/v1/health/details` reports `"status": "degraded"`.
 
-**On Kubernetes the blast radius is the whole pod, not one recipe.**
-`/v1/health` is count-based: it returns `degraded` with HTTP **503** whenever
-`loaded < total` — that is, whenever *any* recipe failed to load. The shipped
-Helm chart points its **startupProbe** at `/v1/health`, and that is the probe a
-refused IALS artifact meets first: a new pod never finishes starting (12
-failures × 10 s = a 120 s window), readiness and liveness never take over, the
-pod is never added to the Service, and the kubelet restarts the container —
-while the recipes that would have served fine never receive traffic. "Other
-recipes keep serving" is true of the process, not of a pod that is still
-starting. Retrain before rolling serve.
+**On Kubernetes the blast radius depends on which probes you run.** `/v1/health`
+is count-based: it returns `degraded` with HTTP **503** whenever `loaded <
+total` — that is, whenever *any* recipe failed to load. **No probe in the 2.1.0
+chart reads it.** Startup and readiness both read `/v1/health/ready`, which is
+`200` while at least one recipe is loaded, so a refused IALS artifact alongside
+healthy recipes lets the pod start, join the Service, and serve everything else;
+only the skewed recipe returns `503`. If the skewed recipe is the *only* recipe,
+nothing loads, `/v1/health/ready` stays `503`, and the startupProbe restarts the
+container (12 failures × 10 s = a 120 s window) until you retrain.
 
-Readiness and liveness are a different matter in 2.1.0. This release moves them
-off the count-based endpoint onto `/v1/health/ready` and `/v1/health/live` (see
-**Added**), and the chart, `examples/k8s/` and `docs/deployment/k8s.md` all
+**If your own manifests point any probe at `/v1/health`, the blast radius is the
+whole pod instead.** A failing startupProbe restarts the container rather than
+withholding traffic, so on the count-based endpoint one refused artifact keeps
+every new pod from ever starting, while the recipes that would have served fine
+never receive traffic. Retrain before rolling serve.
+
+2.1.0 moves all three probes off the count-based endpoint — startup and
+readiness onto `/v1/health/ready`, liveness onto `/v1/health/live` (see
+**Added**) — and the chart, `examples/k8s/` and `docs/deployment/k8s.md` all
 point them there. An *already-started* replica that later loses one recipe
-therefore stays Ready and keeps serving the rest — but that does not rescue a
-pod which has not passed startup yet, which is what a skewed IALS artifact
-gives you. **If your own manifests were copied from the 2.0.0 chart, all three
-of your probes are still on `/v1/health`.** Move readiness and liveness before
-you upgrade, or one refused artifact will take every replica out of the Service
-and then CrashLoop them.
+stays Ready and keeps serving the rest, and a *new* pod now finishes starting
+as long as one recipe loads.
+
+**If your own manifests were copied from the 2.0.0 chart, all three of your
+probes are still on `/v1/health`.** Move all three before you upgrade, or one
+refused artifact will take every replica out of the Service and then CrashLoop
+them.
 
 **That is the picture at startup only. A hot-swap fails silently instead.** When
 a skewed artifact lands in an *already-running* server, the previously loaded

@@ -178,6 +178,24 @@ file is opened. Set `RECOTEM_MAX_DOWNLOAD_BYTES` large enough to accommodate
 your training data, or leave it at the default 256 MiB if all sources are
 reasonably sized.
 
+Be concrete about what "reasonably sized" means in rows, because the default is
+reached sooner than it looks. A three-column interaction export is 26–70 bytes
+per row depending on how long the identifiers are, so the 256 MiB default is
+exhausted between roughly **4M and 10M rows**:
+
+| identifier shape | bytes/row | rows that fit in 256 MiB |
+|---|---|---|
+| short synthetic ids + epoch timestamp | 26 | ~10.3M |
+| int64 user + int64 item + epoch | 28 | ~9.6M |
+| email user + 12-char item + ISO-8601 | 59 | ~4.6M |
+| UUID user + 10-char SKU + ISO-8601 | 69 | ~3.9M |
+
+A refusal is not a data problem — the message names the variable and the two
+byte counts, and raising the cap is the whole fix. Raise it deliberately though:
+the cap is on raw I/O, and the resulting DataFrame is a separate cost (measured
+at ~37 bytes/row for a three-column frame with short string ids, so 10M rows is
+~350 MiB of DataFrame on top of the file).
+
 Symlinks at `source.path` are followed implicitly (no resolution check;
 the symlink-escape guard applies only to `output.path` under
 `RECOTEM_ARTIFACT_ROOT`). If the underlying file is replaced between
@@ -218,7 +236,8 @@ Exit 7 covers the HTTP/HTTPS fetch pipeline only. The same checks applied to a l
 | Embedded credentials | 2 | `RecipeError: 'source.path' contains embedded credentials in the URI. Use environment-based authentication instead.` |
 | sha256 mismatch on an `http://` / `https://` path | 7 | `HttpFetchError: sha256 mismatch: got <8 hex>…, expected <8 hex>…` |
 | sha256 mismatch on a local or object-store path | 3 | `DataSourceError: sha256 mismatch: got <8 hex>…, expected <8 hex>…` |
-| Download cap exceeded | 7 | `HttpFetchError: Download size cap exceeded fetching <url>: > <bytes> bytes (RECOTEM_MAX_DOWNLOAD_BYTES).` |
+| Download cap exceeded on an `http://` / `https://` path | 7 | `HttpFetchError: Download size cap exceeded fetching <url>: > <bytes> bytes (RECOTEM_MAX_DOWNLOAD_BYTES).` |
+| Download cap exceeded on a local or object-store path | 3 | `DataSourceError: CSV file '<path>' is <n> bytes which exceeds the <cap>-byte cap set by RECOTEM_MAX_DOWNLOAD_BYTES. Raise the limit or downsample the source data.` |
 | HTTP redirect to disallowed scheme | 7 | `HttpFetchError: Refusing redirect from <url> to disallowed scheme '<scheme>://'` |
 | HTTP redirect loop / over cap | 7 | `HttpFetchError: Redirect loop detected …` / `Too many redirects (>5) …` |
 

@@ -426,7 +426,9 @@ which has no preStop hook: `RECOTEM_DRAIN_SECONDS` (30) plus a 5 s buffer. The
 bundled Helm chart adds a 5 s `preStop` sleep (`preStopSleepSeconds`), so its
 default is 5 + 30 + 5 = 40.
 
-Note on multiple replicas: each pod holds its own in-memory copy of every model and runs its own watcher thread. This is intentional — there is no shared cache. With 2 GiB max artifact size and 10 recipes, plan for up to 20 GiB per pod before allocating replicas.
+Note on multiple replicas: each pod holds its own in-memory copy of every model and runs its own watcher thread. This is intentional — there is no shared cache. Budget roughly **4.8× the artifact size** per recipe, not 1×: loading holds the file bytes and the payload slice of them at the same time, and the deserialized model on top. A 644.5 MiB artifact measured 3,292 MiB resident. So 10 recipes at the 512 MiB `RECOTEM_MAX_PAYLOAD_BYTES` default is on the order of 25 GiB per pod, and 10 recipes allowed to reach the 2 GiB `RECOTEM_MAX_ARTIFACT_BYTES` default is on the order of 96 GiB — before allocating replicas. See [Sizing `recotem serve` memory](../operations.md#sizing-recotem-serve-memory) for the measurements.
+
+The chart's default `limits.memory: 4Gi` therefore covers **one** recipe whose artifact is up to roughly 800 MiB, or a handful of small ones — not ten models at the artifact caps. Raise the limit, lower `RECOTEM_MAX_PAYLOAD_BYTES`, or shard recipes across `serve` processes.
 
 ### Pod security context
 

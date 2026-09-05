@@ -191,13 +191,23 @@ def test_helm_chart_splits_the_three_probes() -> None:
     only, and no other test or ``validate-manifests.sh`` check looks at the
     probe paths, so reverting the chart's readiness and liveness back to
     ``/v1/health`` left the whole suite and the manifest gate green.
+
+    This test is the one that actually runs in the ``pytest`` job. Its sibling
+    in ``tests/unit/test_k8s_manifests.py`` renders with ``helm template`` and
+    is therefore ``@requires_helm``-skipped there, so the line scan below is
+    the only chart probe assertion that executes on a source PR -- which is
+    why the expectations here have to be kept in step with that file by hand.
     """
     paths = _template_probe_paths(
         (_ROOT / "helm" / "recotem" / "templates" / "deployment.yaml").read_text()
     )
-    assert paths.get("startupProbe") == _COUNT_BASED, (
-        "the chart's startup gate keeps the strict count-based endpoint, so a "
-        "NEW pod does not enter the Service before every recipe has an artifact"
+    assert paths.get("startupProbe") == _READY, (
+        "a failing startupProbe RESTARTS the container, it does not withhold "
+        "traffic -- so the strict count-based endpoint there puts every newly "
+        "created pod into a restart loop while one recipe is untrained, "
+        "stalling rollouts and scale-outs (#241, measured on a live cluster). "
+        "/v1/health/ready still 503s on a cold store, which is the "
+        "first-install guarantee this endpoint was chosen for"
     )
     assert paths.get("readinessProbe") == _READY, (
         "readiness on the count-based endpoint takes every replica out of the "
@@ -207,6 +217,13 @@ def test_helm_chart_splits_the_three_probes() -> None:
     assert paths.get("livenessProbe") == _LIVE, (
         "a restart cannot fix a missing artifact; liveness on the count-based "
         "endpoint CrashLoops the pod and drops the models that did load"
+    )
+    # The invariant the three assertions above are each an instance of: the
+    # strict endpoint answers "is EVERY recipe present?", and every probe
+    # reacts to a 503 by removing a pod that is serving the recipes it does
+    # have. It is an alerting endpoint, not a probe endpoint.
+    assert _COUNT_BASED not in paths.values(), (
+        f"a chart probe reads the strict count-based {_COUNT_BASED}: {paths}"
     )
 
 

@@ -533,10 +533,20 @@ exit 8.
 
   `tests/unit/test_example_readme_prerequisites.py` scans every
   `examples/**/README.md` unconditionally — there is no exemption list — so a
-  new example that omits the step fails the day it lands. Two further tests
-  assert the scan found the corpus and that its detector still recognises a
-  `recotem train` line, so neither a directory rename nor a regex drift can
-  leave the scan passing vacuously over zero files.
+  new example that omits the step fails the day it lands. It asserts that an
+  **actionable** key step (`recotem keygen --type signing`, or an export or
+  assignment of the variable) appears **before** the first `recotem train` /
+  `serve` command in the file. Two weaker forms were tried first and both
+  admitted a README that still exits 8 for a reader working top to bottom:
+  asserting the variable is *mentioned* anywhere admitted one carrying it only
+  in a trailing footnote, and asserting the first *mention* precedes the
+  command admitted one whose `export` sits below the command while prose above
+  names the variable. Every shipped README names `RECOTEM_SIGNING_KEYS` in
+  prose as well as in a command — 2 to 3 matches each — so the first mention is
+  not a usable anchor. Two further tests assert the scan found the corpus and
+  that its detector still recognises a `recotem train` line, so neither a
+  directory rename nor a regex drift can leave the scan passing vacuously over
+  zero files.
 
 - **An over-cap model was reported as a damaged file when `recotem serve`
   started, and as `size_cap` when the same file arrived by hot-swap.** The

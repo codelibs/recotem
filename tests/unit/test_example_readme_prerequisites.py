@@ -27,9 +27,21 @@ _EXAMPLES = _REPO_ROOT / "examples"
 # A shell invocation of the CLI: bare, under `uv run`, or under `docker run ...`.
 _RUNS_CLI = re.compile(r"(?m)^\s*(?:\$\s*)?(?:uv run\s+)?recotem\s+(?:train|serve)\b")
 
-# Either half of the fix is acceptable: the keygen command itself, or a
-# reference to the variable it produces (some READMEs export it from a Secret).
-_NAMES_SIGNING_KEY = re.compile(r"keygen\s+--type\s+signing|RECOTEM_SIGNING_KEYS")
+# An ACTIONABLE step, not a mention. Either the command that produces the key,
+# or an assignment/export of the variable it produces.
+#
+# Deliberately NOT a bare `RECOTEM_SIGNING_KEYS`: every fixed README names the
+# variable in prose too ("without this it exits 8 with `RECOTEM_SIGNING_KEYS is
+# not set`"), and the anchor is not unique in any of them -- 2 to 3 matches
+# each. Anchoring on the first *mention* let a README pass with its `export`
+# moved BELOW the train command, which still exits 8 for a reader working top
+# to bottom. Verified by building exactly that file; see the test below.
+_ACTIONABLE_KEY_STEP = re.compile(
+    r"keygen\s+--type\s+signing"  # the command that generates one
+    r"|export\s+RECOTEM_SIGNING_KEYS"  # an explicit export
+    r"|^\s*RECOTEM_SIGNING_KEYS\s*=",  # or a bare assignment
+    re.MULTILINE,
+)
 
 
 def _example_readmes() -> list[Path]:
@@ -77,17 +89,56 @@ def test_readme_names_the_signing_key_before_it_runs_the_cli(readme: Path) -> No
     if not first_cli:
         pytest.skip("does not invoke `recotem train` / `recotem serve`")
 
-    key = _NAMES_SIGNING_KEY.search(text)
+    key = _ACTIONABLE_KEY_STEP.search(text)
     rel = readme.relative_to(_REPO_ROOT)
     assert key, (
-        f"{rel} tells the reader to run the recotem CLI but never mentions "
-        "`recotem keygen --type signing` or RECOTEM_SIGNING_KEYS. Without a "
-        "signing key `recotem train` exits 8 (signing_key_missing) on the "
-        "first command of the example."
+        f"{rel} tells the reader to run the recotem CLI but never gives them a "
+        "step that produces a signing key -- no `recotem keygen --type "
+        "signing`, no export or assignment of RECOTEM_SIGNING_KEYS. Without "
+        "one, `recotem train` exits 8 (signing_key_missing) on the first "
+        "command of the example."
     )
     assert key.start() < first_cli.start(), (
-        f"{rel} mentions the signing key only at offset {key.start()}, AFTER "
-        f"its first `recotem train`/`serve` command at offset "
-        f"{first_cli.start()}. A reader following the file top to bottom still "
-        "hits exit 8. Move the keygen step above the first CLI invocation."
+        f"{rel} gives the signing-key step at offset {key.start()}, AFTER its "
+        f"first `recotem train`/`serve` command at offset {first_cli.start()}. "
+        "A reader following the file top to bottom still hits exit 8. Move the "
+        "keygen step above the first CLI invocation. (Naming the variable in "
+        "prose earlier does not count -- the reader needs the command.)"
+    )
+
+
+def test_a_prose_mention_before_the_command_does_not_satisfy_the_guard() -> None:
+    """An early mention of the variable must not stand in for the actual step.
+
+    The first version of this guard asserted only that the file *mentions*
+    ``RECOTEM_SIGNING_KEYS`` somewhere; the second asserted that the mention
+    precedes the first CLI command. Both passed the README below, which still
+    exits 8 on its first command -- the key anchor is not unique in any shipped
+    README (2-3 matches each), so anchoring on the first *mention* anchors on
+    prose. The assertion is now on the actionable step.
+    """
+    broken = (
+        "# Run\n"
+        "```bash\n"
+        "# 1. Train. (`recotem train` refuses to write an unsigned artifact:\n"
+        "#    without a signing key it exits 8 with `RECOTEM_SIGNING_KEYS is\n"
+        "#    not set`.)\n"
+        "uv run recotem train examples/demo/recipe.yaml\n"
+        "\n"
+        "# 2. If that failed, generate a signing key, then retry.\n"
+        "export $(uv run recotem keygen --type signing | grep '^env_entry=')\n"
+        "```\n"
+    )
+    first_cli = _RUNS_CLI.search(broken)
+    assert first_cli, "fixture must contain a train command"
+
+    # The weak anchor (any mention) is satisfied early -- this is the trap.
+    assert re.search(r"RECOTEM_SIGNING_KEYS", broken).start() < first_cli.start()
+
+    # The real one is not.
+    step = _ACTIONABLE_KEY_STEP.search(broken)
+    assert step is not None, "fixture must contain a keygen command"
+    assert step.start() > first_cli.start(), (
+        "the guard must reject a README whose actionable signing-key step "
+        "comes after the command that needs it"
     )

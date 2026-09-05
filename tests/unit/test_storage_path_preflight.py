@@ -252,3 +252,64 @@ def test_describe_never_echoes_credentials() -> None:
 )
 def test_describe_storage_path(path: str, expected: str) -> None:
     assert describe_storage_path(path) == expected
+
+
+# ---------------------------------------------------------------------------
+# Exit 8 must mean "retrying can never succeed".
+# ---------------------------------------------------------------------------
+
+# Well-formed URLs naming a supported dialect and an installed driver, whose
+# backend merely happens to be unreachable right now.  Every one of these is
+# RECOVERABLE, so the pre-flight must let it through and leave the failure on
+# the retryable path.  Converting them to _EXIT_CONFIG would tell a supervisor
+# that a transient outage is a permanent misconfiguration and stop it retrying.
+TRANSIENT = [
+    "postgresql+psycopg://192.0.2.1:5432/db",  # TEST-NET-1, unroutable
+    "postgresql+psycopg://127.0.0.1:19599/db",  # nothing listening
+    "mysql+pymysql://127.0.0.1:19599/db",  # nothing listening
+    "postgresql+psycopg://does-not-resolve.invalid/db",  # DNS failure
+    "sqlite:////nonexistent-mount/optuna.db",  # network FS outage, cf. #274
+    "/nonexistent-mount/optuna.db",  # same, as a bare path
+]
+
+
+@pytest.mark.parametrize("path", TRANSIENT)
+def test_transient_backend_failures_are_not_converted_to_exit_8(path: str) -> None:
+    """A backend that is merely *down* is not a configuration error.
+
+    The discriminator for ``_EXIT_CONFIG`` is "can retrying ever succeed?", not
+    "is this about storage".  A scheme no version of the software can parse is
+    permanently broken; an unreachable host or a stalled network mount is not,
+    and must keep whatever exit code the real failure produces so retry logic
+    still fires.
+    """
+    validate_storage_path(path)
+
+
+def test_preflight_opens_no_network_connection() -> None:
+    """The pre-flight is a pure local check: parse plus ``__import__``.
+
+    This is what makes it safe to run in ``recotem validate`` before any source
+    is touched, and it is also what keeps the previous test true — a check that
+    dialled the server would turn every outage into a pre-flight failure.
+    """
+    import socket
+
+    real_socket = socket.socket
+
+    class _NoConnect(real_socket):  # type: ignore[misc, valid-type]
+        def connect(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+            raise AssertionError("storage_path pre-flight opened a connection")
+
+        def connect_ex(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+            raise AssertionError("storage_path pre-flight opened a connection")
+
+    socket.socket = _NoConnect  # type: ignore[misc]
+    try:
+        for path in [*TRANSIENT, *ACCEPTED, *(p for p, _ in REFUSED)]:
+            try:
+                validate_storage_path(path)
+            except TrainingError:
+                pass  # refusals are fine; opening a socket is not
+    finally:
+        socket.socket = real_socket  # type: ignore[misc]

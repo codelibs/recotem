@@ -260,7 +260,9 @@ as the basis for SLO and alerting rules.
 | `search_started` | tuning | `algorithms`, `n_trials` |
 | `search_done` | tuning | `best_class`, `best_score`, `n_completed` |
 | `training_final_model` / `final_model_trained` | refit | `recommender` |
-| `artifact_written` | persist | `versioning`, `artifact`, `pointer` (append_sha), `kid` |
+| `artifact_written` | persist | `versioning`, `artifact`, `pointer` (append_sha), `kid`, `payload_bytes`, `artifact_bytes` |
+| `artifact_payload_exceeds_serve_cap` | persist | WARN. `payload_bytes`, `max_payload_bytes`, `env_var`. The artifact was written, but its payload is larger than `RECOTEM_MAX_PAYLOAD_BYTES` **as resolved on the training host**, so a `recotem serve` configured the same way will refuse it (`ArtifactError`, exit 5) and never become ready. See [Sizing `recotem serve` memory](#sizing-recotem-serve-memory). |
+| `artifact_size_exceeds_serve_cap` | persist | WARN. `artifact_bytes`, `max_artifact_bytes`, `env_var`. Same, for the outer container against `RECOTEM_MAX_ARTIFACT_BYTES`. |
 | `train_done` | end | `name`, `run_id`, `exit_code`, `artifact`, `best_class`, `best_score`, `trials`, `n_orphaned`, `trained_at`, `kid`, `recipe_hash`, `n_rows`, `n_users`, `n_items` |
 | `train_error` | failure | `error`, `code` (`internal_error` for non-domain exceptions), `recipe`, `run_id`, `exit_code`, `trained_at`; additionally `n_rows`, `n_users`, `n_items`, `min_rows`, `min_users`, `min_items` when `code=min_data_violation` |
 | `recipe_lock_contended_skipping` | start | `recipe`, `run_id` (default `--fail-on-busy=False` exits 0) |

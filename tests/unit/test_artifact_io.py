@@ -865,3 +865,100 @@ def test_header_len_is_outside_the_hmac_scope_and_caught_one_layer_later(
     # The corruption surfaces at the next layer, not at verify.
     with pytest.raises(json.JSONDecodeError):
         json.loads(header.header_data)
+
+
+# ---------------------------------------------------------------------------
+# Serve-side cap visibility on the write path
+# ---------------------------------------------------------------------------
+
+
+def _write_and_capture(
+    tmp_path: Path, payload_obj: object, versioning: str = "always_overwrite"
+) -> list[dict]:
+    """write_artifact once, returning the structlog events it emitted."""
+    import structlog.testing
+
+    kr = _make_keyring()
+    with structlog.testing.capture_logs() as cap:
+        write_artifact(
+            payload_obj=payload_obj,
+            header_dict={"recipe_name": "sizecap"},
+            key_ring=kr,
+            fs_path=str(tmp_path / "m.recotem"),
+            versioning=versioning,  # type: ignore[arg-type]
+        )
+    return cap
+
+
+@pytest.mark.parametrize("versioning", ["always_overwrite", "append_sha"])
+def test_artifact_written_reports_its_byte_sizes(
+    tmp_path: Path, versioning: str
+) -> None:
+    """``artifact_written`` must carry the sizes, in both versioning modes.
+
+    A 10M-interaction run produced a 644 MiB artifact -- over the 512 MiB
+    ``RECOTEM_MAX_PAYLOAD_BYTES`` default, so ``recotem serve`` refused it and
+    ``recotem inspect`` exited 5.  The train log named neither number, so the
+    only way to learn the size was to stat the file by hand.  Both counts are
+    on the success event so a CronJob log records them for every run.
+    """
+    events = _write_and_capture(tmp_path, {"blob": "x" * 4096}, versioning)
+    written = [e for e in events if e["event"] == "artifact_written"]
+    assert len(written) == 1, events
+    assert written[0]["payload_bytes"] > 4096
+    assert written[0]["artifact_bytes"] > written[0]["payload_bytes"]
+
+
+def test_write_warns_when_payload_exceeds_the_serve_payload_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Producing an artifact serve will refuse must say so at train time.
+
+    Before this warning, train exited 0 and the mismatch surfaced only at
+    deploy time, as a ``recotem serve`` that never became ready:
+    ``payload size 675762204 exceeds cap 536870912; refusing to load`` and a
+    permanent ``/v1/health/ready`` 503.  The warning names the env var so the
+    operator can act without reading source.
+    """
+    # 1 MiB is the floor RECOTEM_MAX_PAYLOAD_BYTES clamps to.
+    monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", "1")
+    events = _write_and_capture(tmp_path, {"blob": "x" * (2 * 1024 * 1024)})
+
+    warned = [e for e in events if e["event"] == "artifact_payload_exceeds_serve_cap"]
+    assert len(warned) == 1, events
+    assert warned[0]["log_level"] == "warning"
+    assert warned[0]["env_var"] == "RECOTEM_MAX_PAYLOAD_BYTES"
+    assert warned[0]["max_payload_bytes"] == 1024 * 1024
+    assert warned[0]["payload_bytes"] > 1024 * 1024
+
+
+def test_write_warns_when_artifact_exceeds_the_serve_artifact_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The outer container cap gets the same train-time warning as the payload.
+
+    ``RECOTEM_MAX_ARTIFACT_BYTES`` is the cap ``recotem serve`` applies to the
+    file before it parses anything, so an artifact over it is refused even
+    earlier than one over the payload cap.
+    """
+    monkeypatch.setenv("RECOTEM_MAX_ARTIFACT_BYTES", "1")
+    monkeypatch.setenv("RECOTEM_MAX_PAYLOAD_BYTES", str(16 * 1024 * 1024 * 1024))
+    events = _write_and_capture(tmp_path, {"blob": "x" * (2 * 1024 * 1024)})
+
+    warned = [e for e in events if e["event"] == "artifact_size_exceeds_serve_cap"]
+    assert len(warned) == 1, events
+    assert warned[0]["log_level"] == "warning"
+    assert warned[0]["env_var"] == "RECOTEM_MAX_ARTIFACT_BYTES"
+    assert warned[0]["max_artifact_bytes"] == 1024 * 1024
+
+
+def test_write_is_silent_when_the_artifact_fits_the_serve_caps(
+    tmp_path: Path,
+) -> None:
+    """The warning must not fire on the ordinary case.
+
+    Every artifact this project's own test suite writes is a few KiB; a
+    warning on those would train operators to ignore it.
+    """
+    events = _write_and_capture(tmp_path, {"blob": "x" * 4096})
+    assert not [e for e in events if e["event"].endswith("_exceeds_serve_cap")]

@@ -48,8 +48,45 @@ from recotem.artifact.format import (
     parse_header_from_bytes,
 )
 from recotem.artifact.signing import KeyRing, compute_hmac, verify_hmac
+from recotem.config import get_max_artifact_bytes, get_max_payload_bytes
 
 logger = structlog.get_logger(__name__)
+
+
+def _warn_if_over_serve_caps(payload_len: int, artifact_len: int) -> None:
+    """Warn when the artifact just built is one ``recotem serve`` will refuse.
+
+    The write path never consulted the serve-side caps, so a training run could
+    succeed (exit 0) and still produce a file that ``recotem serve`` and
+    ``recotem inspect`` both refuse with ``ArtifactError`` (exit 5).  The size
+    is set by ``(n_users + n_items) x n_components``, and ``n_components`` is
+    an Optuna-searched parameter with an upper bound of 300, so the same recipe
+    on the same data can land under the 512 MiB payload default on one run and
+    over it on the next.  Nothing before this point told the operator either
+    number, and the failure surfaced only at deploy time as a permanent
+    ``/v1/health/ready`` 503.
+
+    Warn rather than raise: train and serve may run on different hosts with
+    different caps, so this host's environment is a good guess and not a fact.
+    ``artifact_written`` always carries the byte counts, so the sizing decision
+    is visible even when the caps here do not match the serving fleet's.
+    """
+    max_payload = get_max_payload_bytes()
+    if payload_len > max_payload:
+        logger.warning(
+            "artifact_payload_exceeds_serve_cap",
+            payload_bytes=payload_len,
+            max_payload_bytes=max_payload,
+            env_var="RECOTEM_MAX_PAYLOAD_BYTES",
+        )
+    max_artifact = get_max_artifact_bytes()
+    if artifact_len > max_artifact:
+        logger.warning(
+            "artifact_size_exceeds_serve_cap",
+            artifact_bytes=artifact_len,
+            max_artifact_bytes=max_artifact,
+            env_var="RECOTEM_MAX_ARTIFACT_BYTES",
+        )
 
 
 def _assert_output_root_containment(dest: str) -> None:
@@ -170,6 +207,7 @@ def write_artifact(
 
     # 4. Assemble artifact bytes
     artifact_bytes = build_artifact_bytes(kid, digest, header_json, payload)
+    _warn_if_over_serve_caps(len(payload), len(artifact_bytes))
 
     # 5. Determine filesystem and write strategy
     fs, resolved_path = fsspec.core.url_to_fs(fs_path)
@@ -183,6 +221,8 @@ def write_artifact(
             versioning="always_overwrite",
             artifact=resolved_path,
             kid=kid,
+            payload_bytes=len(payload),
+            artifact_bytes=len(artifact_bytes),
         )
         return final_path
 
@@ -208,6 +248,8 @@ def write_artifact(
         artifact=sha_path,
         pointer=resolved_path,
         kid=kid,
+        payload_bytes=len(payload),
+        artifact_bytes=len(artifact_bytes),
     )
     return sha_path
 

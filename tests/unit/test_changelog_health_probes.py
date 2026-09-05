@@ -181,6 +181,57 @@ def _sentences(text: str) -> list[str]:
     return [s for s in " ".join(text.split()).split(".") if s]
 
 
+def _flat_section() -> str:
+    """The release section with whitespace flattened.
+
+    Flattened because a claim routinely spans two wrapped lines, and R9-P5
+    measured a guard whose outcome depended on where a paragraph happened to
+    wrap. A prose reflow must not decide whether a claim is pinned.
+    """
+    return " ".join(_unreleased_section().split())
+
+
+def test_the_notes_assert_the_topology_rather_than_naming_it() -> None:
+    """R9-P8's negation probe: pin the verdict, not the topic.
+
+    Both guards below survive the section being rewritten to state the reverse.
+    Measured -- "**No probe in the 2.1.0 chart reads it.**" flipped to "**Every
+    probe in the 2.1.0 chart reads it.**" left `5 passed`, and inverting the
+    consequence ("a failing startupProbe restarts the container instead of
+    withholding traffic" -> "withholds traffic instead of restarting the
+    container") also left `5 passed`. Neither touches a `<kind>Probe` token or a
+    `/v1/...` path, so every needle survived and the direction of the claim was
+    not pinned by anything.
+
+    The second inversion is the dangerous one: "a failing startupProbe restarts
+    the container" is the entire reason `/v1/health` is the wrong endpoint for
+    a startupProbe. Reversed, the notes state the rationale for the design #241
+    reversed, and an operator who believes it puts the probe back where it
+    CrashLoops.
+
+    Both assertions are conditioned on the chart, so if a future chart really
+    does poll `/v1/health`, the first relaxes on its own.
+    """
+    chart_paths = set(_probe_paths(_CHART_DEPLOYMENT).values())
+    section = _flat_section()
+
+    if "/v1/health" not in chart_paths:
+        assert "No probe in the 2.1.0 chart reads it" in section, (
+            "no probe in the shipped chart reads `/v1/health` "
+            f"(it polls {sorted(chart_paths)}), but the release notes no longer "
+            "say so. Naming the endpoint is not asserting who reads it -- every "
+            "other check here passes with this sentence reversed."
+        )
+
+    assert "a failing startupProbe restarts the container" in section, (
+        "the notes no longer state that a failing startupProbe RESTARTS the "
+        "container rather than withholding traffic. That is the whole reason "
+        "the count-based endpoint is wrong for a startupProbe; without it the "
+        "section names a topology without saying why it matters, and reads "
+        "equally well reversed."
+    )
+
+
 def test_release_notes_never_tie_a_probe_to_the_count_based_endpoint() -> None:
     """No sentence may name a probe and `/v1/health` together.
 

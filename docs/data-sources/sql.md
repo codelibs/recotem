@@ -175,6 +175,7 @@ source:
 | Absolute-path host refused | 3 | `DataSourceError: DSN host is an absolute path (libpq Unix-socket form); this bypasses the network SSRF guard. Set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
 | Network DSN with no host refused | 3 | `DataSourceError: DSN for dialect 'postgresql' does not specify a host; the driver would default to the local socket / 127.0.0.1 which is rejected by the SSRF guard. Specify a host explicitly or set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
 | sqlalchemy not installed | 3 | `DataSourceError: sqlalchemy is required for SQLSource. Install one of: recotem[postgres], recotem[mysql], recotem[sqlite].` |
+| `mariadb+*` DSN pointed at a MySQL server | 3 | `DataSourceError: probe failed for dialect 'mariadb': InvalidRequestError: MySQL version 8.4.11 is not a MariaDB variant.` — the reverse of the row above does **not** hold: `mysql+pymysql://` reaches a MariaDB server, but `mariadb+pymysql://` is refused by a MySQL one. Use `mysql+pymysql://` when the server may be either. |
 | Query returned no rows | 3 | `DataSourceError: source 'sql' returned no rows for recipe '<name>'; the query or file matched no data. ...` |
 | Column missing after query | 3 | `DataSourceError: schema column(s) ['ts'] not found in the fetched data for recipe '<name>'; available columns: [...]` |
 

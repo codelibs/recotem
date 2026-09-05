@@ -6,7 +6,12 @@ pip (everything in your venv).
 
 ## Prerequisites
 
-- Either Docker (with the Compose plugin) **or** Python 3.12+
+- **Path A** — Docker, with the Compose plugin.
+- **Path B** — Python 3.12+ and `pip` (or `uv`).
+- **Both paths** — `curl` and `jq`. Every step below checks its result with
+  `curl …` and prints it with `| jq .`, so without them the walkthrough has no
+  way to tell you whether it worked. A bare `python:3.12-slim` container has
+  neither (`apt-get install -y curl jq`); most desktops already have `curl`.
 - ~50 MB of disk
 - Network access to fetch a small CSV from `raw.githubusercontent.com`
 
@@ -237,6 +242,10 @@ recotem train recipes/purchase_log.yaml
 ```
 
 ### 4. Serve
+
+`serve` runs in the foreground until you stop it — there is no pip equivalent
+of Path A's `docker compose up -d`. Start it in a second terminal (or append
+`&`) and run step 5 from another shell:
 
 ```bash
 recotem serve --recipes recipes/

@@ -2187,3 +2187,82 @@ def test_read_only_failure_message_carries_the_driver_error_class(
     assert "_Programming" in message
     assert "_Syntax" in message
     assert "s3cret" not in message
+
+
+# ---------------------------------------------------------------------------
+# The query path must name the driver error, not just the outermost wrapper
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_error_names_the_driver_class_through_the_pandas_wrapper(
+    monkeypatch, tmp_path
+) -> None:
+    """``fetch`` failures must identify the driver error.
+
+    ``pandas.read_sql`` wraps the SQLAlchemy error in
+    ``pandas.errors.DatabaseError``, whose class name is the same for a missing
+    table, a syntax error, a denied grant, a statement timeout and a divide by
+    zero.  Reporting only that name leaves an operator with nothing to act on,
+    which is the exact gap ``_error_label`` was added to close on the
+    session-setup path -- the query path is where operators actually land.
+
+    SQLite reaches the identical wrapper shape, so no server is needed: CI has
+    no PostgreSQL to fail against.
+    """
+    from recotem.datasource.base import DataSourceError
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_RECIPE_DB_DSN", "sqlite:///:memory:")
+    src = SQLSource(_make_cfg(query="SELEKT 1"))
+
+    with pytest.raises(DataSourceError) as excinfo:
+        src.fetch(_ctx())
+
+    message = str(excinfo.value)
+    assert "sqlite3.OperationalError" in message, (
+        "the driver exception class is what distinguishes a syntax error from "
+        f"a denied grant; got only: {message!r}"
+    )
+
+
+def test_error_label_walks_the_cause_chain_and_adds_sqlstate() -> None:
+    """The DBAPI error is one link below a pandas-style wrapper.
+
+    Also pins that SQLSTATE -- five fixed characters from the SQL standard, the
+    one token that separates ``42P01`` (undefined table) from ``42501``
+    (insufficient privilege) -- is reported, and that neither the driver's
+    ``__str__`` nor a non-conforming ``sqlstate`` can reach the message.
+    """
+    from recotem.datasource.sql import _error_label
+
+    class _Driver(Exception):
+        sqlstate = "42P01"
+
+        def __str__(self) -> str:  # pragma: no cover - must never be called
+            return "postgresql://alice:s3cret@db.example/orders"
+
+    class _Alchemy(Exception):
+        def __init__(self) -> None:
+            self.orig = _Driver()
+
+    # What pandas builds: a wrapper with no ``orig`` of its own, chained to the
+    # SQLAlchemy error that has one.
+    pandas_wrapper = RuntimeError("Execution failed on sql")
+    pandas_wrapper.__cause__ = _Alchemy()
+
+    label = _error_label(pandas_wrapper)
+    assert "_Driver" in label
+    assert "SQLSTATE 42P01" in label
+    assert "s3cret" not in label and "alice" not in label
+
+    # A driver whose ``sqlstate`` is free text must not reach the message.
+    class _Sneaky(Exception):
+        sqlstate = "postgresql://alice:s3cret@db.example/orders"
+
+    class _Wrap(Exception):
+        def __init__(self) -> None:
+            self.orig = _Sneaky()
+
+    sneaky = _error_label(_Wrap())
+    assert "_Sneaky" in sneaky
+    assert "s3cret" not in sneaky

@@ -4,8 +4,16 @@ Authoritative reference for the v1 HTTP surface mounted under `/v1`.
 
 ## Authentication
 
-All endpoints except `/v1/health` require the `X-API-Key` header.  See
-`docs/security.md` for key rotation procedures.
+Three endpoints are unauthenticated, and they are the three probe endpoints:
+
+- `GET /v1/health`
+- `GET /v1/health/ready`
+- `GET /v1/health/live`
+
+Every other endpoint requires the `X-API-Key` header — including
+`GET /v1/health/details` and, when enabled, `GET /v1/metrics`. See
+`docs/security.md` for key rotation procedures and for what the unauthenticated
+endpoints expose.
 
 ## Endpoints
 

@@ -13,7 +13,13 @@
                         │  binds to RECOTEM_HOST:RECOTEM_PORT        │
   API clients           │                                            │
   (authenticated) ─────►│  POST /v1/recipes/{name}:*  X-API-Key      │
-                        │  GET  /v1/health                           │
+                        │  GET  /v1/recipes[/{name}]  X-API-Key      │
+                        │  GET  /v1/health/details    X-API-Key      │
+                        │  GET  /v1/metrics           X-API-Key      │
+  Probes                │                                            │
+  (unauthenticated) ───►│  GET  /v1/health                           │
+                        │  GET  /v1/health/ready                     │
+                        │  GET  /v1/health/live                      │
                         └──────────────┬────────────────────────────┘
                                        │ reads (signed)
                         ┌──────────────▼────────────────────────────┐

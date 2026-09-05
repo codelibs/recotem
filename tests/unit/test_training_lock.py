@@ -536,7 +536,19 @@ def test_LockTimeoutError_is_LockContestedError_subclass() -> None:
 def test_recipe_lock_timeout_raises_LockTimeoutError(tmp_path: Path) -> None:
     """When timeout > 0 and the lock cannot be acquired within the deadline,
     recipe_lock must raise LockTimeoutError (not the base LockContestedError)
-    and the waited_seconds attribute must reflect the actual wait time."""
+    and the waited_seconds attribute must reflect the actual wait time.
+
+    The assertions below are deliberately about *behaviour*, not about a
+    wall-clock margin.  ``waited_seconds`` is the elapsed time of a polling
+    loop that sleeps 0.05s between attempts, so its overshoot past the deadline
+    is bounded by scheduler latency, not by anything the code controls.  An
+    upper margin like ``approx(0.1, abs=0.05)`` therefore fails on a busy
+    machine purely because the machine is busy — observed at 0.16s against a
+    0.15s ceiling on an 8-lane host, which is the load profile of a normal CI
+    runner.  A suite that reddens under load teaches contributors to re-run
+    rather than read, which is what makes the next genuinely-red check easy to
+    wave through.
+    """
     import fcntl
     import os
 
@@ -560,13 +572,29 @@ def test_recipe_lock_timeout_raises_LockTimeoutError(tmp_path: Path) -> None:
     p.start()
     ready.wait(timeout=3.0)
 
+    timeout = 0.1
+    # Generous ceiling: the holder releases only after 5s, so a regression that
+    # ignored `timeout` and blocked would land near 5s.  Anything below that
+    # still proves the deadline was honoured, while leaving ~30x headroom over
+    # `timeout` so load can never decide the outcome.
+    blocked_forever = 3.0
+
     try:
         with pytest.raises(LockTimeoutError) as exc_info:
-            with recipe_lock(output_path, timeout=0.1, fail_on_busy=True):
+            with recipe_lock(output_path, timeout=timeout, fail_on_busy=True):
                 pass  # pragma: no cover
-        assert exc_info.value.waited_seconds == pytest.approx(0.1, abs=0.05), (
-            f"waited_seconds should be ~0.1 ± 0.05, "
-            f"got {exc_info.value.waited_seconds:.3f}"
+        waited = exc_info.value.waited_seconds
+        # Lower bound holds by construction, not by timing luck: the loop reads
+        # time.monotonic() and raises only once it has passed start + timeout,
+        # so waited >= timeout up to float rounding in the subtraction.  This is
+        # the assertion with teeth — it fails if waited_seconds is ever zero,
+        # hardcoded, or reported before the deadline actually elapsed.
+        assert waited >= timeout - 1e-6, (
+            f"waited_seconds must be at least the {timeout}s deadline, got {waited:.3f}"
+        )
+        assert waited < blocked_forever, (
+            f"waited_seconds {waited:.3f} suggests the timeout was ignored and "
+            f"the acquire blocked until the holder released"
         )
     finally:
         release.set()

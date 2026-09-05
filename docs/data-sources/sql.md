@@ -30,10 +30,11 @@ source:
   query: |
     SELECT user_id, product_id, purchased_at
     FROM orders
-    WHERE purchased_at >= :since
+    WHERE purchased_at >= CAST(:since AS timestamp)
       AND status = 'paid'
   query_parameters:
-    since: ${RECOTEM_RECIPE_SINCE}
+    # Literal, not ${...}: query_parameters is on the no-expand list.
+    since: "2026-01-01"
   connect_timeout_seconds: 10
   statement_timeout_seconds: 300
 ```
@@ -58,20 +59,34 @@ source:
 ## Parameter binding
 
 Use SQLAlchemy named bind parameters (`:name`) for any value that varies between runs.
-Do **not** use Python string formatting or `${...}` expansion in `query` — the latter is
-explicitly blocked to foreclose SQL injection.
+Do **not** use Python string formatting or `${...}` expansion in `query` or in
+`query_parameters` — both are on the loader's no-expand list, so a `${...}` there is sent
+to the database as a literal string rather than being substituted.
+
+### Binding a date or timestamp
+
+`query_parameters` values are typed `str | int | float | bool`, so a date or timestamp is
+always bound as a **string**. Comparing a string bind against a date/timestamp column is
+dialect-specific, and there is no portable spelling — use the form for your dialect:
+
+| Dialect | Form | If you use the wrong one |
+|---|---|---|
+| PostgreSQL | `WHERE ts >= CAST(:since AS timestamp)` | Without the cast: `operator does not exist: timestamp without time zone >= character varying` (exit 3). |
+| MySQL / MariaDB | `WHERE ts >= CAST(:since AS DATETIME)` | `CAST(... AS timestamp)` is a **syntax error** on MySQL (`SQLSTATE 42000`). The bare form also fails under strict mode. |
+| SQLite | `WHERE ts >= :since` (no cast) | **Do not cast on SQLite.** `CAST('2026-06-01' AS timestamp)` evaluates to the integer `2026`, so the comparison silently matches every row instead of failing. Store timestamps as ISO-8601 text, which compares correctly as a string. |
 
 ```yaml
 source:
   type: sql
   dsn_env: RECOTEM_RECIPE_DB_DSN
   query: |
+    -- PostgreSQL spelling of the date bind; see the table above for MySQL and SQLite.
     SELECT user_id, item_id, ts
     FROM events
-    WHERE ts >= :since
+    WHERE ts >= CAST(:since AS timestamp)
       AND event_type = :event_type
   query_parameters:
-    since: ${RECOTEM_RECIPE_SINCE}
+    since: "2026-01-01"
     event_type: purchase
 ```
 
@@ -183,8 +198,10 @@ configuration decision, not a transient network condition.
   the cap or the query columns if you need a memory bound, not just a row bound.  Server-
   side streaming via `stream_results=True` controls only the **wire-level** cursor;
   the row cap is the right knob for the consumer-side bound.
-- `source.query` and `source.dsn_env` are unconditionally exempt from `${...}` expansion
-  regardless of variable name; only `query_parameters` values are expanded.
+- `source.query`, `source.query_parameters` and `source.dsn_env` are all exempt from
+  `${...}` expansion, unconditionally and regardless of variable name. A `${...}` written
+  in any of them reaches the database as those literal characters. Bind values must be
+  written literally in the recipe.
 - SQLite `statement_timeout_seconds` is accepted by the recipe schema but is **not
   enforced** at the server level — SQLite has no equivalent of Postgres'
   `statement_timeout` or MySQL's `MAX_EXECUTION_TIME`. A `sql_statement_timeout_unsupported_on_sqlite`

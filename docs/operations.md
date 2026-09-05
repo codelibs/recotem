@@ -375,17 +375,60 @@ Each model replica holds every loaded model in RAM. Plan accordingly.
 | `RECOTEM_MAX_ARTIFACT_BYTES` | Hard cap per artifact file (default 2 GiB, clamped [1 MiB, 16 GiB]). Reduce this if you have many small models. |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | Cap on the deserialised payload per artifact (default 512 MiB, post-HMAC-verify). Must be ≤ `RECOTEM_MAX_ARTIFACT_BYTES`; if not, `recotem serve` fails at startup with `ConfigError` (exit 8). Reduces the memory spike from deserialization relative to the raw file size. |
 | `RECOTEM_MAX_BODY_BYTES` | Hard cap on each HTTP **request** body (default 128 MiB, clamped [1 MiB, 2 GiB]). A `413 PAYLOAD_TOO_LARGE` is returned before Starlette buffers/parses the body, so **no single request** can make the process allocate more than the cap. It bounds one request, not the process: nothing limits how many such requests are in flight at once, so one authenticated client sending them concurrently can still reach multiple GB — see [Concurrent request bodies are unbounded](#concurrent-request-bodies-are-unbounded) below. The default clears the largest single-verb request — `:recommend-related` tops out near 52 MiB with maximal cold-start feature mappings — with headroom. It deliberately does **not** clear the largest schema-valid *batch* body: once `user_features` / `item_features` are filled to their per-field caps, `:batch-recommend` tops out near 196 MiB and `:batch-recommend-related` near 13 GiB, the latter beyond even the 2 GiB clamp. Such bodies are refused with `413`; raise the cap if you genuinely send batches that large. Reduce it if your legitimate batch sizes are small and you want a tighter bound; the cap applies both to a declared `Content-Length` and to chunked bodies with no length header. |
-| Number of recipes | Each recipe loads one model. 10 recipes × 500 MiB = 5 GiB baseline. |
+| Number of recipes | Each recipe loads one model. 10 recipes × 500 MiB of **artifact** is ~24 GiB resident, not 5 GiB — see the multiplier below. |
 | Number of replicas | Each replica is independent. 2 replicas = 2× memory. |
 | Item metadata | DataFrame in-memory per recipe. Size ≈ rows × columns × 8 bytes. |
 
 Rough formula:
 
 ```
-RAM per pod ≈ (avg_artifact_size_GiB × n_recipes) + (avg_metadata_size_GiB × n_recipes) + 1 GiB OS overhead
+RAM per pod ≈ (4.8 × avg_artifact_size_GiB × n_recipes) + (avg_metadata_size_GiB × n_recipes) + 0.25 GiB process baseline
 ```
 
-For large models (IALS with many components, large item sets), use `recotem inspect` to read `data_stats` and `best_params` from the header before committing to a host size.
+**A loaded artifact costs several times its size on disk, not its size on disk.**
+An earlier revision of this page counted it at 1× and added a flat 1 GiB, which
+is conservative only while the models are small enough for that constant to
+dominate. Measured, one recipe, no item metadata, `RECOTEM_MAX_PAYLOAD_BYTES`
+raised where needed:
+
+| interactions | users × items | artifact on disk | serve RSS once ready | old formula |
+|---|---|---|---|---|
+| 100k | 5,000 × 1,000 | 1.4 MiB | 228 MiB | 1,025 MiB |
+| 1M | 50,000 × 5,000 | 55.9 MiB | 488 MiB | 1,080 MiB |
+| 10M | 500,000 × 50,000 | 644.5 MiB | 3,292 MiB | 1,668 MiB |
+
+The three points fit `RSS ≈ 4.8 × artifact + 0.22 GiB`. The old formula crosses
+from over- to under-estimating at roughly a **213 MiB** artifact, and at 644 MiB
+it predicts half the true figure — a direction that shows up in production as an
+OOMKill during startup, not as a slow response.
+
+Where the multiplier comes from, measured in-process on the 644.5 MiB artifact
+above:
+
+| after | RSS |
+|---|---|
+| interpreter + imports | 39 MB |
+| `read_artifact` returns | 1,328 MB |
+| payload deserialized | 2,793 MB |
+
+`read_artifact` holds the whole file *and* the payload slice of it at once
+(`payload = resolved_data[header.payload_offset:]` copies), so the raw bytes are
+resident twice — 2 × 645 MB is the entire step from 39 to 1,328 MB. The
+deserialized model is then a third copy's worth on top. Dropping the payload
+bytes afterwards does not return the memory to the OS in the same process, so
+**size the container on this figure, not on a steady state you hope to settle
+into**.
+
+`RECOTEM_MAX_PAYLOAD_BYTES` bounds this, which is what it is for — but it bounds
+it at ~4.8× the cap, not at the cap. At the 512 MiB default, plan for roughly
+2.5 GiB of resident memory per recipe that actually reaches the cap.
+
+For large models (IALS with many components, large item sets), use `recotem inspect` to read `data_stats` and `best_params` from the header before committing to a host size. Note that `n_components` — the term that dominates artifact size, since the factor matrices are `(n_users + n_items) × n_components × 4` bytes — is an Optuna-searched parameter over irspack's `[4, 300]`, so it is a property of the run rather than of the recipe: the same recipe on the same data can produce a materially different artifact size on the next train. `recotem train` logs `artifact_bytes` on `artifact_written` for every run.
+
+> Measured on macOS/arm64 (16 cores, 128 GB). The double-resident raw bytes are
+> arithmetic and hold on any platform; whether a freed buffer is returned to the
+> OS is allocator-specific, so on Linux the settling behaviour may differ. The
+> peak is the same either way.
 
 `recotem serve` is sized for ≤ 100 recipes per process. Beyond that, shard recipes across multiple `serve` processes (separate `--recipes` directories, separate ports, load-balance at the proxy layer).
 

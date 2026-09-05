@@ -118,6 +118,7 @@ def validate_storage_path(storage_path: str) -> None:
 
     from recotem.datasource.sql import (  # noqa: PLC0415
         _BACKEND_RECOMMENDED_DSN,
+        _DIALECT_TO_EXTRA,
         _DRIVER_MODULE,
         _REMOVED_DIALECT_ALIASES,
     )
@@ -155,8 +156,10 @@ def validate_storage_path(storage_path: str) -> None:
         raise _fail(
             f"training.storage_path uses unsupported dialect {backend!r}. "
             "Supported study backends are a bare filesystem path (SQLite) or "
-            f"one of: {sorted(_BACKEND_RECOMMENDED_DSN.values())}. Note that "
-            "an unsupported scheme is NOT treated as a filename."
+            f"one of: {sorted(_BACKEND_RECOMMENDED_DSN.values())} — each of "
+            "which needs its driver extra installed "
+            "(recotem[postgres] / recotem[mysql]). Note that an unsupported "
+            "scheme is NOT treated as a filename."
         )
 
     driver = url.get_driver_name()
@@ -185,9 +188,15 @@ def validate_storage_path(storage_path: str) -> None:
                 "which recotem does not install"
             )
         )
+        extra = _DIALECT_TO_EXTRA.get(backend)
+        remedy = (
+            f"pip install 'recotem[{extra}]' provides it"
+            if extra
+            else f"install {driver_mod!r} yourself"
+        )
         raise _fail(
             f"cannot load the {driver!r} driver for training.storage_path "
             f"dialect {backend!r}: {detail}. Write it as "
-            f"{_BACKEND_RECOMMENDED_DSN[backend]}, or install {driver_mod!r} "
-            "yourself."
+            f"{_BACKEND_RECOMMENDED_DSN[backend]} and install the driver — "
+            f"{remedy}."
         ) from exc

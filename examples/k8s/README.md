@@ -41,8 +41,21 @@ uses, so the workloads never race ahead of it.
   `ReadWriteOnce` — a hard `DoNotSchedule` spread and an RWO volume are
   mutually exclusive, and the pair leaves the second replica Pending
   indefinitely. **`ReadWriteOnce` therefore gives you two replicas but not
-  node-failure tolerance.** For real availability use `ReadWriteMany` and
+  node-failure tolerance.** It also makes planned node maintenance
+  impossible once a PodDisruptionBudget is in play: draining the node evicts
+  one replica, its replacement cannot bind the RWO volume on any other node
+  and stays `Pending`, allowed disruptions falls to 0, and `kubectl drain`
+  retries `Cannot evict pod as it would violate the pod's disruption budget`
+  until you interrupt it. For real availability use `ReadWriteMany` and
   change the constraint to `DoNotSchedule`.
+
+  `DoNotSchedule` has its own precondition: with `maxSkew: 1`, topology
+  spreading counts **every** node as a domain, including cordoned and tainted
+  ones (`nodeTaintsPolicy` defaults to `Ignore`). A cluster whose only other
+  domain is an unschedulable control-plane node therefore leaves the third
+  replica `Pending` with `didn't match pod topology spread constraints`.
+  Set `nodeTaintsPolicy: Honor` (Kubernetes 1.26+) alongside it, or keep
+  `ScheduleAnyway`.
 - A `ConfigMap` named `recotem-recipes` supplying recipe YAML files at
   `/recipes/`. Both `serve-deployment.yaml` and `cronjob.yaml` mount this
   ConfigMap, so it must exist before applying the manifests. Create it with:

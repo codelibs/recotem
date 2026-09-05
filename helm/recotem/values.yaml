@@ -39,6 +39,16 @@ service:
 ingress:
   enabled: false
   className: ""
+  # Ingress controllers cap the request body far below RECOTEM_MAX_BODY_BYTES
+  # (default 128 MiB).  ingress-nginx defaults to 1 MiB, so a schema-valid
+  # `:batch-recommend` body is refused by the controller with an HTML 413 that
+  # never reaches recotem -- measured: a 6.46 MB body returned 413 through the
+  # Ingress and 200 straight to the Service.  Raise the controller's own cap
+  # when you use the batch verbs, e.g. for ingress-nginx:
+  #   annotations:
+  #     nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+  # (Traefik, HAProxy and the gateway implementations each spell this
+  # differently; consult your controller.)
   annotations: {}
   hosts:
     - host: recotem.example.com
@@ -293,6 +303,19 @@ serviceAccount:
 # computed over the pods its selector matches, so counting the train CronJob's
 # pods would let a training run inflate the budget and lend serve a disruption
 # it cannot afford.
+#
+# pdb.enabled with a ReadWriteOnce artifacts PVC makes node maintenance
+# impossible.  RWO binds every replica to one node; drain that node and the
+# first eviction succeeds, its replacement cannot bind the volume anywhere
+# else and stays Pending, ALLOWED DISRUPTIONS falls to 0, and every further
+# eviction is refused:
+#
+#   error when evicting pods/"recotem-..." (will retry after 5s):
+#   Cannot evict pod as it would violate the pod's disruption budget.
+#
+# `kubectl drain` retries that forever unless it was given --timeout.
+# Measured; with a ReadWriteMany PVC the same drain finished in 31 s.  Pair
+# pdb.enabled with RWX (or with artifacts in object storage).
 pdb:
   enabled: false
   minAvailable: 1
@@ -318,12 +341,20 @@ networkPolicy:
   # that opens the probe port (service.targetPort) to any source (from: []).
   # This is required because kubelet health checks originate from the node
   # network, not from a pod, so podSelector-based rules cannot match them.
-  # Without this, readiness/liveness probes are silently dropped by the
-  # NetworkPolicy and pods are eventually killed or removed from Endpoints.
   #
-  # Set to false only if you have a separate NetworkPolicy or admission
-  # mechanism that already allows node-originating probe traffic, or if you
-  # restrict probe origins via kubeletCIDRs below.
+  # Setting it to false with ingressFromPodSelector empty renders a true
+  # `ingress: []` deny-all.  Measured on a live cluster whose CNI enforces
+  # NetworkPolicy, that combination is a TOTAL, SILENT OUTAGE: every replica
+  # stays 1/1 Ready with restartCount 0 and stays in the Service's endpoints
+  # (many CNIs, kind's included, exempt node-originating traffic from pod
+  # policies, so the probes keep passing), while 100% of client requests --
+  # in-cluster and through an Ingress alike -- time out.  Nothing in pod
+  # status, endpoints or events points at the policy.
+  #
+  # Set to false only if a separate NetworkPolicy already admits BOTH
+  # node-originating probe traffic AND your clients.  kubeletCIDRs below does
+  # not substitute for it: the template reads that list only while
+  # allowKubeletProbes is true.
   allowKubeletProbes: true
 
   # kubeletCIDRs: optional list of node CIDRs from which kubelet probes

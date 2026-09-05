@@ -417,6 +417,21 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
 
     n_yaml_failed = len(yaml_failed_stubs)
     if n_recipes == 0:
+        if n_yaml_failed == 0:
+            # No recipe file at all was found.  This is a delivery mistake --
+            # a ConfigMap whose keys are not ``*.yaml``, an objectStore sync
+            # container that exited 0 having copied nothing, an empty PVC --
+            # and it is otherwise invisible: every request answers 404 while
+            # nothing in the log says why.  ``/v1/health/ready`` answers 503
+            # for the same reason, which keeps the pod out of the Service.
+            logger.warning(
+                "recipes_directory_empty",
+                recipes_dir=str(recipes_dir),
+                detail=(
+                    "no *.yaml recipe files found; serve has nothing to "
+                    "register and will report unready"
+                ),
+            )
         # Nothing to load; emit the summary immediately.
         logger.info(
             "startup_artifact_load_complete",

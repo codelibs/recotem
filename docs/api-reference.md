@@ -156,6 +156,29 @@ Service Unavailable** when degraded — so K8s readiness probes pointing
 at this endpoint mark the pod NotReady whenever any recipe is
 unloaded.
 
+### `GET /v1/health/live`
+Unauthenticated. Always `200 {"status": "alive"}` while the process can answer.
+
+**Liveness only.** It never reads artifact state, because a restart cannot fix a
+missing or unloadable artifact: the replacement pod reads the same recipes
+directory and the same artifact store and fails identically, while dropping the
+models that *had* loaded. Point `livenessProbe` here, never at `/v1/health`.
+
+### `GET /v1/health/ready`
+Unauthenticated. `200` when at least one recipe is loaded, `503` when none is.
+Body is `{status, total, loaded}` (plus `skipped` when non-zero).
+
+**Readiness.** "Should the Service send traffic here?" is a different question
+from `/v1/health`'s "is every recipe present?". A replica holding 13 of 14
+models can serve 13 of them, and every replica reads the same recipes
+directory — so failing readiness on one untrained recipe takes the whole
+fleet out of the Service at once. A cold fleet (nothing loaded) still fails,
+which preserves the first-install guarantee.
+
+Use the three together as the shipped chart does: `startupProbe` on
+`/v1/health` (a **new** pod waits for every recipe), `readinessProbe` on
+`/v1/health/ready`, `livenessProbe` on `/v1/health/live`.
+
 ### `GET /v1/health/details`
 Authenticated.  Returns `{status, recipes: {name: health}}`.  Same 200
 / 503 status-code rule as `/v1/health`.

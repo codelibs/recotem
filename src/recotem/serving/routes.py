@@ -620,6 +620,57 @@ def make_router(
             body["skipped"] = skipped_count
         return body
 
+    @router.get("/health/live", summary="Liveness: is this process usable?")
+    def health_live() -> dict[str, Any]:
+        """Always 200 while the process can answer. Never reads artifact state.
+
+        A liveness probe answers "would a restart help?".  For a missing or
+        unloadable artifact the answer is always no: the replacement pod reads
+        the same recipes directory and the same artifact store, fails the same
+        way, and is killed again.  Pointing liveness at the count-based
+        ``/health`` therefore turns one untrained recipe into a CrashLoopBackOff
+        that cannot self-heal -- and each restart drops the models that *were*
+        loaded.
+
+        Deliberately does not take the registry lock: a probe that can block
+        behind a hot-swap would report a healthy process as dead.
+        """
+        return {"status": "alive"}
+
+    @router.get("/health/ready", summary="Readiness: can this replica serve?")
+    def health_ready(response: Response) -> dict[str, Any]:
+        """200 when at least one recipe is loaded; 503 when none is.
+
+        Readiness answers "should the Service send traffic here?", which is a
+        different question from ``/health``'s "is every recipe present?".  A
+        replica holding 13 of 14 models can serve 13 of them; taking it out of
+        the Service serves nobody, and in the shipped topology it takes every
+        replica out at once, because they all read the same recipes directory.
+
+        ``/health`` already applies this reasoning to unparseable files -- they
+        are excluded from ``total`` "so one typo does not fail readiness for
+        every other recipe".  A valid recipe whose artifact has not been trained
+        yet is the same situation and gets the same treatment here.
+
+        A cold fleet (nothing loaded) still fails, which is what keeps the
+        documented first-install guarantee: ``serve`` does not enter the Service
+        before ``train`` has produced something.  Keep the startupProbe on
+        ``/health`` if you want the stricter "every recipe present" gate to hold
+        before a *new* pod receives traffic; that is what the shipped chart does.
+        """
+        loaded_count, total, skipped_count = registry.health_counts()
+        ready = total == 0 or loaded_count > 0
+        if not ready:
+            response.status_code = 503
+        body: dict[str, Any] = {
+            "status": "ready" if ready else "unready",
+            "total": total,
+            "loaded": loaded_count,
+        }
+        if skipped_count:
+            body["skipped"] = skipped_count
+        return body
+
     @router.get(
         "/health/details",
         summary="Per-recipe health detail (authenticated)",

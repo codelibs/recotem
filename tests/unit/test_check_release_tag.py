@@ -54,6 +54,7 @@ def _make_tree(
     example_pin: str | None = "2.1.0",
     docs_pin: str | None = "2.1.0",
     version_label: str | None = "2.1.0",
+    changelog_heading: str | None = "## [2.1.0] - 2026-01-01",
 ) -> Path:
     """Build a minimal tree the script can read, and return its script path.
 
@@ -115,6 +116,14 @@ def _make_tree(
     if docs_pin is not None:
         docs += f"          image: ghcr.io/codelibs/recotem:{docs_pin}\n"
     (root / "docs" / "deployment" / "k8s.md").write_text(docs, encoding="utf-8")
+
+    # The GitHub Release notes are derived from this section, so the release
+    # heading is a release artifact like any other.  `None` omits the file.
+    if changelog_heading is not None:
+        (root / "CHANGELOG.md").write_text(
+            f"# Changelog\n\n{changelog_heading}\n\n### Added\n\n- a thing\n",
+            encoding="utf-8",
+        )
 
     return script
 
@@ -520,3 +529,433 @@ def test_repo_deployment_pins_are_where_the_script_looks(tmp_path: Path) -> None
         "examples/ or docs/. The script refuses this case at release time; if "
         "the pins genuinely moved, teach the script where they went."
     )
+
+
+# ---------------------------------------------------------------------------
+# Ways the gate used to pass a release it should have refused
+#
+# Each case below made the script print "OK" on a tree that would have shipped
+# a stale or non-existent version.  They are grouped because they share one
+# shape: the value the script reads is not the value that reaches a user.
+# ---------------------------------------------------------------------------
+
+
+def test_nested_version_key_does_not_shadow_the_chart_version(
+    tmp_path: Path,
+) -> None:
+    """`chart_key` must read a top-level key, not the first one at any depth.
+
+    awk's `$1` is the first *field*, so an indented `version:` matched the same
+    test as a top-level one and awk stopped there.  A `dependencies:` block is
+    the ordinary way a Helm chart acquires exactly that shape.
+    """
+    script = _make_tree(tmp_path, chart_version="2.0.0")
+    chart = tmp_path / "helm" / "recotem" / "Chart.yaml"
+    chart.write_text(
+        "apiVersion: v2\nname: recotem\ntype: application\n"
+        "dependencies:\n  - name: redis\n    version: 2.1.0\n"
+        "version: 2.0.0\n"
+        'appVersion: "2.1.0"\n',
+        encoding="utf-8",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "helm/recotem/Chart.yaml version: (2.0.0)" in proc.stdout
+
+
+def test_last_version_assignment_wins_as_python_reads_it(tmp_path: Path) -> None:
+    """The guard must read the string `import recotem` reports.
+
+    Stopping at the first `__version__` assignment read a different value from
+    the one Python binds, which is the last.  A file carrying both would have
+    passed the gate while the wheel reported the stale version.
+    """
+    script = _make_tree(tmp_path)
+    version_py = tmp_path / "src" / "recotem" / "version.py"
+    version_py.write_text(
+        '__version__ = "2.1.0"\n__version__ = "2.0.0"\n', encoding="utf-8"
+    )
+    # What Python itself binds, so the assertion is anchored to real semantics.
+    namespace: dict[str, str] = {}
+    exec(version_py.read_text(encoding="utf-8"), namespace)  # noqa: S102
+    assert namespace["__version__"] == "2.0.0"
+
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "src/recotem/version.py (2.0.0)" in proc.stdout
+
+
+@pytest.mark.parametrize("pin", ["2.1.0-alpine", "2.1.0rc1", "2.1.0.1"])
+def test_a_pin_whose_tag_merely_starts_with_the_version_is_refused(
+    tmp_path: Path, pin: str
+) -> None:
+    """The comparison is against the whole tag, not a three-segment prefix.
+
+    `grep -o` with a prefix pattern returned `recotem:2.1.0` for a pin reading
+    `recotem:2.1.0-alpine`, which compared equal to the tag and passed --
+    vouching for an image tag that was never published.
+    """
+    script = _make_tree(tmp_path, example_pin=pin)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "does not match every deployment pin" in proc.stdout
+    assert pin in proc.stdout
+
+
+def test_a_version_label_with_a_suffix_is_refused(tmp_path: Path) -> None:
+    """Same hole on the label side, where the old pattern simply missed it."""
+    script = _make_tree(tmp_path, version_label="2.1.0-rc1")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "2.1.0-rc1" in proc.stdout
+
+
+def test_no_version_label_anywhere_is_refused_rather_than_passed(
+    tmp_path: Path,
+) -> None:
+    """The label scan gets the vacuity guard the pin scan already had.
+
+    Deleting every `app.kubernetes.io/version` label reduced that half of the
+    check to nothing while the script still reported OK for the release.
+    """
+    script = _make_tree(tmp_path, version_label=None)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "app.kubernetes.io/version" in proc.stdout
+
+
+def test_stale_pins_and_stale_versions_are_reported_in_one_run(
+    tmp_path: Path,
+) -> None:
+    """Both classes of failure in a single run -- the contract section 3 claims.
+
+    The pin scan used to `fail` (which exits) before the version mismatches
+    were printed, so a tree stale in both ways -- the normal state at the start
+    of a release -- reported only the pins.  On the tag-triggered release path
+    each extra round trip costs a tag delete, a re-tag and a re-push.
+    """
+    script = _make_tree(
+        tmp_path, pyproject="2.0.0", version_py="2.0.0", example_pin="2.0.0"
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    for expected in (
+        "examples/k8s/serve-deployment.yaml",
+        "pyproject.toml (2.0.0)",
+        "src/recotem/version.py (2.0.0)",
+    ):
+        assert expected in proc.stdout, f"{expected!r} missing from:\n{proc.stdout}"
+
+
+# ---------------------------------------------------------------------------
+# The CHANGELOG section for the release
+#
+# The GitHub Release notes are derived from it (see the release procedure's
+# references/release-notes.md), and entries accumulate during the cycle under a
+# heading marked `Unreleased` which the release renames to a date.  Nothing
+# verified that rename: `grep -ci changelog` over the script returned 0, so a
+# tag could publish notes drawn from a section still headed "Unreleased" -- and
+# the CHANGELOG at the tagged commit would say so permanently.
+# ---------------------------------------------------------------------------
+
+
+def test_changelog_still_marked_unreleased_is_refused(tmp_path: Path) -> None:
+    """The exact state `main` is in during a dev cycle."""
+    script = _make_tree(tmp_path, changelog_heading="## [2.1.0] - Unreleased")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "still marked Unreleased" in proc.stdout
+    assert "## [2.1.0] - Unreleased" in proc.stdout
+
+
+def test_changelog_without_a_section_for_the_release_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A release whose notes are derived from a section that does not exist."""
+    script = _make_tree(tmp_path, changelog_heading="## [2.0.0] - 2026-06-27")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "no CHANGELOG.md section" in proc.stdout
+
+
+def test_missing_changelog_is_refused(tmp_path: Path) -> None:
+    script = _make_tree(tmp_path, changelog_heading=None)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "CHANGELOG.md is missing" in proc.stdout
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "## [2.1.0] - 2026-01-01",
+        '## [2.1.0] - 2026-01-01 "Codename"',
+        "## [2.1.0]",
+    ],
+)
+def test_a_dated_or_bare_release_heading_passes(tmp_path: Path, heading: str) -> None:
+    """Only the word "Unreleased" is refused, not a particular date format.
+
+    The procedure's template is `## [X.Y.Z] - YYYY-MM-DD`, but pinning the exact
+    shape would refuse a heading that is perfectly clear about being released.
+    """
+    script = _make_tree(tmp_path, changelog_heading=heading)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_an_unreleased_section_for_a_different_version_is_ignored(
+    tmp_path: Path,
+) -> None:
+    """A dev cycle opened for the *next* version must not fail this release.
+
+    Immediately after a release the procedure opens `## [X.Y+1.0] - Unreleased`.
+    That heading is correct and must not be mistaken for this release's.
+    """
+    script = _make_tree(tmp_path, changelog_heading="## [2.2.0] - Unreleased")
+    tmp_path.joinpath("CHANGELOG.md").write_text(
+        "# Changelog\n\n## [2.2.0] - Unreleased\n\n### Added\n\n- next cycle\n\n"
+        "## [2.1.0] - 2026-01-01\n\n### Added\n\n- this release\n",
+        encoding="utf-8",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_changelog_and_version_problems_are_reported_in_one_run(
+    tmp_path: Path,
+) -> None:
+    """Third class of failure, same single-run contract as the other two."""
+    script = _make_tree(
+        tmp_path,
+        pyproject="2.0.0",
+        example_pin="2.0.0",
+        changelog_heading="## [2.1.0] - Unreleased",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1
+    for expected in (
+        "examples/k8s/serve-deployment.yaml",
+        "pyproject.toml (2.0.0)",
+        "still marked Unreleased",
+    ):
+        assert expected in proc.stdout, f"{expected!r} missing from:\n{proc.stdout}"
+
+
+def test_the_repository_changelog_has_a_section_for_its_own_version() -> None:
+    """The shipped CHANGELOG keeps the shape the script parses.
+
+    Asserts the heading exists, not that it is dated: during a dev cycle it is
+    deliberately `Unreleased`, which is exactly what the release renames.
+    """
+    version = (REPO_ROOT / "src" / "recotem" / "version.py").read_text(encoding="utf-8")
+    match = re.search(r'__version__\s*=\s*"([^"]+)"', version)
+    assert match is not None
+    base = match.group(1).split(".dev")[0].split("a")[0].split("rc")[0]
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert re.search(rf"^## \[{re.escape(base)}\]", changelog, re.M), (
+        f"CHANGELOG.md has no '## [{base}]' heading; the release procedure "
+        "renames that section rather than creating one, and the guard in "
+        "check-release-tag.sh refuses a tag without it."
+    )
+
+
+# ---------------------------------------------------------------------------
+# The tagged commit must be on main
+#
+# Everything above reads files, so it describes the *tree* and says nothing
+# about where that tree sits in history.  PR #245 is the worked example: merged
+# against milestone 2.1.0, shown as merged on GitHub, and its merge commit is
+# not an ancestor of main -- `get_driver_name` appears 0 times in
+# `origin/main:src/recotem/datasource/sql.py`.  A tag on such a commit carries a
+# perfectly consistent set of version strings.
+# ---------------------------------------------------------------------------
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+        },
+    )
+
+
+def _make_repo(root: Path, *, with_main: bool = True) -> Path:
+    """Turn a synthetic tree into a real git repo whose toplevel is `root`."""
+    script = _make_tree(root)
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "-qm", "base")
+    if not with_main:
+        # A work tree with no main ref at all -- what actions/checkout's default
+        # fetch-depth: 1 produces on a tag build.
+        _git(root, "checkout", "-q", "-b", "detached-from-main")
+        _git(root, "branch", "-q", "-D", "main")
+    return script
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+def test_a_commit_on_main_passes(tmp_path: Path) -> None:
+    """Control: without it, the two failure cases below prove nothing."""
+    script = _make_repo(tmp_path)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "The tagged commit is on main." in proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+def test_a_commit_that_never_reached_main_is_refused(tmp_path: Path) -> None:
+    """The #245 shape: a consistent tree on a commit main does not contain."""
+    script = _make_repo(tmp_path)
+    _git(tmp_path, "checkout", "-q", "-b", "stranded")
+    (tmp_path / "extra.txt").write_text("only on the branch\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(
+        tmp_path,
+        "-c",
+        "user.email=a@b.c",
+        "-c",
+        "user.name=a",
+        "commit",
+        "-qm",
+        "never merged",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "is on a commit that is not on main" in proc.stdout
+    assert "is not an" in proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+def test_a_work_tree_without_a_main_ref_is_refused_not_skipped(
+    tmp_path: Path,
+) -> None:
+    """A shallow CI checkout must fail loudly rather than skip.
+
+    `actions/checkout`'s default `fetch-depth: 1` yields a work tree in which
+    `origin/main` does not resolve.  Skipping there would make the check
+    vacuous exactly where it matters, so the guard jobs set `fetch-depth: 0`
+    and this state is refused -- which is what makes that setting
+    self-enforcing.
+    """
+    script = _make_repo(tmp_path, with_main=False)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "cannot be checked against main" in proc.stdout
+    assert "fetch-depth" in proc.stdout
+
+
+def test_outside_a_git_work_tree_the_success_message_says_so(
+    tmp_path: Path,
+) -> None:
+    """Not a repo: nothing to check, and the script must not imply otherwise."""
+    script = _make_tree(tmp_path)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "NOT checked: whether the tagged commit is on main" in proc.stdout
+    assert "The tagged commit is on main." not in proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+def test_branch_and_version_problems_are_reported_in_one_run(
+    tmp_path: Path,
+) -> None:
+    """Fourth class of failure, same single-run contract as the other three."""
+    script = _make_repo(tmp_path)
+    _git(tmp_path, "checkout", "-q", "-b", "stranded")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "recotem"\nversion = "2.0.0"\n', encoding="utf-8"
+    )
+    _git(tmp_path, "add", "-A")
+    _git(
+        tmp_path,
+        "-c",
+        "user.email=a@b.c",
+        "-c",
+        "user.name=a",
+        "commit",
+        "-qm",
+        "stale and stranded",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1
+    for expected in ("pyproject.toml (2.0.0)", "is on a commit that is not on main"):
+        assert expected in proc.stdout, f"{expected!r} missing from:\n{proc.stdout}"
+
+
+@pytest.mark.parametrize("workflow", ["publish.yml", "docker.yml"])
+def test_guard_jobs_check_out_full_history(workflow: str) -> None:
+    """The workflow half of the check.
+
+    Without `fetch-depth: 0` the guard's checkout has no main ref and the
+    script refuses -- so this asserts the setting that keeps the guard green
+    for the right reason rather than red for the wrong one.
+    """
+    import yaml
+
+    spec = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
+    )
+    checkouts = [
+        step
+        for step in spec["jobs"]["guard"]["steps"]
+        if "actions/checkout" in str(step.get("uses", ""))
+    ]
+    assert checkouts, f"{workflow} guard job has no checkout step"
+    for step in checkouts:
+        assert (step.get("with") or {}).get("fetch-depth") == 0, (
+            f"{workflow} guard job checks out shallow; check-release-tag.sh "
+            "needs main to verify the tagged commit is on it, and refuses "
+            "rather than skipping when it cannot."
+        )
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+def test_a_shallow_clone_is_refused_rather_than_answered_wrongly(
+    tmp_path: Path,
+) -> None:
+    """Shallowness poisons the answer, and git gives no hint that it has.
+
+    A missing object makes `merge-base --is-ancestor` exit 128, which is loud.
+    A *shallow* repository is worse: the tip object is present, the connecting
+    history is not, and git returns a confident "not an ancestor" for a commit
+    that is on main.  Measured on the fixture below -- exit 0 in the full
+    clone, exit 1 in the depth-1 clone of the same repository.  Unguarded, that
+    would fail a legitimate release and name the wrong reason.
+    """
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _git(upstream, "init", "-q", "-b", "main")
+    author = ("-c", "user.email=a@b.c", "-c", "user.name=a")
+    _git(upstream, *author, "commit", "-q", "--allow-empty", "-m", "c1")
+    for i in range(2, 6):
+        _git(upstream, *author, "commit", "-q", "--allow-empty", "-m", f"c{i}")
+
+    work = tmp_path / "work"
+    # `--depth` is silently ignored for a local *path* clone (git hardlinks the
+    # object store), so the URL has to be file:// for this to be shallow at all.
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{upstream}", str(work)],
+        check=True,
+        capture_output=True,
+    )
+    assert (
+        _git(work, "rev-parse", "--is-shallow-repository").stdout.strip() == "true"
+    ), "fixture is not shallow; the case under test was not created"
+
+    script = _make_tree(work)
+    _git(work, "add", "-A")
+    _git(work, *author, "commit", "-qm", "release tree")
+
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "shallow clone" in proc.stdout
+    assert "fetch-depth: 0" in proc.stdout
+    # It must NOT claim the commit is off main -- that is the wrong reason.
+    assert "is on a commit that is not on main" not in proc.stdout

@@ -60,7 +60,24 @@ fail() {
 # ---------------------------------------------------------------------------
 # 1. Determine the tag, and from it the milestone title
 # ---------------------------------------------------------------------------
-TAG="${1:-}"
+TAG=""
+PR_LIST_FILE=""
+RELAND_OVERRIDE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        # Read the milestone's PRs from a file instead of calling `gh`, as
+        # `<number>\t<merge-oid>\t<title>` rows.  This is what lets the test
+        # suite drive this script against a real git repository with no
+        # network: the property under test is git reachability, and a test
+        # that mocked the ancestry check would only assert that the mock
+        # behaves.  Replacement PRs are resolved from this list too when it is
+        # given, so a whole scenario is one file.
+        --pr-list)      PR_LIST_FILE="$2"; shift 2 ;;
+        --reland-file)  RELAND_OVERRIDE="$2"; shift 2 ;;
+        -*)             fail "unknown option '$1'" ;;
+        *)              TAG="$1"; shift ;;
+    esac
+done
 if [ -z "${TAG}" ]; then
     REF="${GITHUB_REF:-}"
     case "${REF}" in
@@ -82,9 +99,11 @@ echo "Milestone:   ${MILESTONE}"
 # it reports success for a question it never asked.  That is the same shape as
 # the defect this script exists to catch, so every precondition below fails
 # loudly.
-command -v gh >/dev/null 2>&1 || fail \
-    "gh is not installed, so the milestone cannot be read." \
-    "Install GitHub CLI, or run this check from CI where gh is preinstalled."
+if [ -z "${PR_LIST_FILE}" ]; then
+    command -v gh >/dev/null 2>&1 || fail \
+        "gh is not installed, so the milestone cannot be read." \
+        "Install GitHub CLI, or run this check from CI where gh is preinstalled."
+fi
 
 if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
     fail "the checkout is shallow, so ancestry cannot be determined." \
@@ -97,27 +116,47 @@ echo "Verifying against: ${HEAD_SHA}"
 # ---------------------------------------------------------------------------
 # 3. Read the milestone's merged PRs
 # ---------------------------------------------------------------------------
-# `gh pr list --search` is used rather than --milestone so that a milestone
-# with no PRs is distinguishable from one that does not exist (checked next).
-MILESTONE_EXISTS="$(
-    gh api "repos/{owner}/{repo}/milestones?state=all&per_page=100" \
-        --jq "[.[] | select(.title == \"${MILESTONE}\")] | length"
-)"
-if [ "${MILESTONE_EXISTS}" = "0" ]; then
-    # Not a failure: milestones are optional in this project's process, and a
-    # release made without one is a choice, not a lost commit.  Said out loud
-    # so the log never implies a check happened when it did not.
-    echo "::notice::No milestone titled '${MILESTONE}' exists; nothing to verify."
-    echo "  This check verifies merged PRs *in the release milestone*."
-    echo "  Create a milestone named '${MILESTONE}' to have the release gated on it."
-    exit 0
-fi
+if [ -n "${PR_LIST_FILE}" ]; then
+    [ -f "${PR_LIST_FILE}" ] || fail "--pr-list file not found: ${PR_LIST_FILE}"
+    PRS="$(grep -v '^[[:space:]]*#' "${PR_LIST_FILE}" | grep -v '^[[:space:]]*$' || true)"
+    echo "PR list: ${PR_LIST_FILE} (offline mode)"
+else
+    # `gh pr list --search` is used rather than --milestone so that a milestone
+    # with no PRs is distinguishable from one that does not exist (checked
+    # next).
+    MILESTONE_EXISTS="$(
+        gh api "repos/{owner}/{repo}/milestones?state=all&per_page=100" \
+            --jq "[.[] | select(.title == \"${MILESTONE}\")] | length"
+    )"
+    if [ "${MILESTONE_EXISTS}" = "0" ]; then
+        # Fail, do not pass.  A missing milestone is the one way this gate
+        # could report success for a question it never asked: rename the
+        # milestone, or forget to create it, and the check silently becomes a
+        # no-op forever while still printing a green tick.  That is precisely
+        # the "a monitor whose setup fails looks like a monitor with nothing to
+        # report" shape, so it is fatal, with a documented opt-out for a
+        # deliberate release that has no milestone.
+        if [ "${RECOTEM_ALLOW_NO_MILESTONE:-}" = "1" ]; then
+            echo "::notice::No milestone '${MILESTONE}'; skipped via" \
+                 "RECOTEM_ALLOW_NO_MILESTONE=1."
+            exit 0
+        fi
+        fail "no milestone titled '${MILESTONE}' exists, so this release cannot be verified." \
+             "This gate answers 'is every PR the milestone calls MERGED actually in" \
+             "this tree?'.  With no milestone there is nothing to check against, and" \
+             "passing would report success for a question that was never asked." \
+             "" \
+             "To fix, either:" \
+             "  - create a milestone named '${MILESTONE}' and assign the release's PRs, or" \
+             "  - set RECOTEM_ALLOW_NO_MILESTONE=1 to release without one deliberately."
+    fi
 
-PRS="$(
-    gh pr list --state merged --search "milestone:${MILESTONE}" \
-        --limit 200 --json number,title,mergeCommit \
-        --jq '.[] | "\(.number)\t\(.mergeCommit.oid // "none")\t\(.title)"'
-)"
+    PRS="$(
+        gh pr list --state merged --search "milestone:${MILESTONE}" \
+            --limit 200 --json number,title,mergeCommit \
+            --jq '.[] | "\(.number)\t\(.mergeCommit.oid // "none")\t\(.title)"'
+    )"
+fi
 
 if [ -z "${PRS}" ]; then
     echo "Milestone '${MILESTONE}' has no merged pull requests. Nothing to verify."
@@ -127,7 +166,7 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Every merge commit must be an ancestor of HEAD
 # ---------------------------------------------------------------------------
-RELAND_FILE="${REPO_ROOT}/.github/relanded-prs.tsv"
+RELAND_FILE="${RELAND_OVERRIDE:-${REPO_ROOT}/.github/relanded-prs.tsv}"
 
 # reland_replacement <pr-number> -> replacement PR number, or empty.
 reland_replacement() {
@@ -136,6 +175,19 @@ reland_replacement() {
         /^[[:space:]]*#/ { next }
         NF >= 2 && $1 == n { print $2; exit }
     ' "${RELAND_FILE}"
+}
+
+# pr_merge_oid <pr-number> -> its merge commit, or empty.  Resolved from the
+# PR list first so an offline run is self-contained, then from the API.
+pr_merge_oid() {
+    local found
+    found="$(printf '%s\n' "${PRS}" | awk -F'\t' -v n="$1" '$1 == n { print $2; exit }')"
+    if [ -n "${found}" ] && [ "${found}" != "none" ]; then
+        printf '%s' "${found}"
+        return 0
+    fi
+    [ -n "${PR_LIST_FILE}" ] && return 0
+    gh pr view "$1" --json mergeCommit --jq '.mergeCommit.oid // ""' 2>/dev/null || true
 }
 
 # PR titles are author-controlled text and this script echoes them into a log
@@ -187,10 +239,7 @@ while IFS=$'\t' read -r NUMBER OID TITLE; do
         *[!0-9]*) REPLACEMENT="" ;;  # not a PR number; ignore the row
     esac
     if [ -n "${REPLACEMENT}" ]; then
-        REPL_OID="$(
-            gh pr view "${REPLACEMENT}" --json mergeCommit \
-                --jq '.mergeCommit.oid // ""' 2>/dev/null || true
-        )"
+        REPL_OID="$(pr_merge_oid "${REPLACEMENT}")"
         if [ -n "${REPL_OID}" ] \
             && git cat-file -e "${REPL_OID}^{commit}" 2>/dev/null \
             && git merge-base --is-ancestor "${REPL_OID}" "${HEAD_SHA}"; then

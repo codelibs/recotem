@@ -3437,7 +3437,10 @@ def test_validate_exits_4_on_an_algorithm_irspack_does_not_export(
     out = result.stdout + result.stderr
 
     assert result.exit_code == 4, f"expected exit 4, got {result.exit_code}: {out}"
-    assert "irspack does not know recommender class 'BPRFMRecommender'" in out, out
+    # BPRFM is one of recotem's own extras-gated algorithms, so `validate` must
+    # hand back the packaging remedy rather than blaming irspack for a state
+    # one `pip install` fixes.  See test_algorithms_missing_extra.py.
+    assert "recotem[bprfm]" in out, out
 
 
 @pytest.mark.parametrize(

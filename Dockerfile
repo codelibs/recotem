@@ -126,6 +126,22 @@ RUN apt-get update \
 #
 # OpenMP is still compiled in (setup.py enables it on every non-Darwin
 # platform), so BPRFM training remains multi-threaded in the image.
+#
+# `--locked`, not `--frozen`.  Both install from uv.lock without re-resolving,
+# but `--frozen` never compares the lockfile to pyproject.toml -- so a
+# dependency declared in pyproject.toml and absent from uv.lock is silently
+# skipped and the image ships built against the older dependency set.  Measured
+# on this Dockerfile with `cowsay>=6` added to [project].dependencies and
+# uv.lock left alone:
+#
+#   --frozen  -> build exits 0; `import cowsay` in the image raises
+#                ModuleNotFoundError.  Nothing warns.
+#   --locked  -> build exits 1: "The lockfile at `uv.lock` needs to be updated"
+#
+# pyproject.toml carries security pins (see the starlette CVE-2025-62727 note
+# there); one added without `uv lock` would not reach the image under --frozen.
+# The check is local and costs nothing measurable -- it resolved in 2ms here --
+# and it does not need the source tree, which is copied after this layer.
 RUN LIGHTFM_NO_CFLAGS=1 \
     UV_NO_BINARY_PACKAGE=lightfm-next \
     uv sync \
@@ -135,7 +151,7 @@ RUN LIGHTFM_NO_CFLAGS=1 \
         --extra gcs \
         --extra metrics \
         --extra bprfm \
-        --frozen
+        --locked
 
 # Copy source tree.
 COPY src/ ./src/

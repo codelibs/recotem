@@ -39,8 +39,10 @@ static version), so they will not self-sync. A mismatch between them nearly
 shipped in 2.0.0 — always change both, and prove it with
 `.github/scripts/check-release-tag.sh` rather than by eye (see the verification
 block below). `uv.lock` is outside that script's scope: `uv lock --check` covers
-it locally, and `uv sync --frozen` in `publish.yml`'s pre-publish test gate
-catches a stale lockfile at the tag.
+it locally, and `uv sync --locked` in `publish.yml`'s pre-publish test gate
+catches a stale lockfile at the tag. `--frozen` does not — it installs from the
+lockfile without validating it against `pyproject.toml` and exits 0 on a bump
+that forgot `uv lock`.
 
 ## Deployment image tags — bump at release, NOT for dev cycles
 

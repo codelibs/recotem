@@ -39,8 +39,21 @@ jobs:
         with:
           enable-cache: true
 
+      # Explicit, and first, because it is the one failure whose message an
+      # operator needs verbatim.  `uv sync --locked` below refuses the same
+      # condition, but this step names it as a lockfile problem rather than as
+      # an install failure, and it keeps the check present even if a future
+      # edit changes how dependencies are installed.
+      #
+      # What it catches that `--frozen` did not: a dependency declared in
+      # pyproject.toml and missing from uv.lock.  `--frozen` installs from the
+      # lockfile without ever comparing the two, so the dependency is silently
+      # absent and every job downstream goes green against the older set.
+      - name: uv.lock is in step with pyproject.toml
+        run: uv lock --check
+
       - name: Install dev dependencies
-        run: uv sync --frozen --dev
+        run: uv sync --locked --dev
 
       - name: ruff check
         run: uv run ruff check src/ tests/
@@ -76,7 +89,7 @@ jobs:
           cache-suffix: lightfm-portable-1
 
       - name: Install dependencies (all extras)
-        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite --extra bprfm
+        run: uv sync --locked --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite --extra bprfm
         env:
           # lightfm-next publishes a linux x86_64 wheel for cp312 only, and it is
           # compiled `-march=native` on the upstream project's runner -- so on
@@ -131,7 +144,7 @@ jobs:
           cache-suffix: lightfm-portable-1
 
       - name: Install dependencies
-        run: uv sync --frozen --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite --extra bprfm
+        run: uv sync --locked --dev --extra bigquery --extra s3 --extra gcs --extra metrics --extra postgres --extra mysql --extra sqlite --extra bprfm
         env:
           # lightfm-next publishes a linux x86_64 wheel for cp312 only, and it is
           # compiled `-march=native` on the upstream project's runner -- so on

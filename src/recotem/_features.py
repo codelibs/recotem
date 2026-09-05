@@ -823,8 +823,10 @@ def build_encoder_state(
             f"the whole feature table, so dimension scales with catalog "
             f"size, not interaction count. Raise min_frequency on "
             f"high-cardinality columns, drop a column, or raise the cap -- "
-            f"but note the per-trial cost grows super-linearly in this number "
-            f"(measured at roughly dim^2.4) and the memory quadratically."
+            f"but note the per-trial cost grows super-linearly in this number, "
+            f"and the exponent rises with it: a doubling measured 5.1x from "
+            f"5,000 to 10,000 and 7.5x from 10,000 to 20,000. Memory grows "
+            f"quadratically."
         )
 
     _logger.info(

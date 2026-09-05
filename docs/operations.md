@@ -500,10 +500,30 @@ fewer than 20% of rows is the intended use of the lever and is not reported.
 irspack forms a dense `Fᵀ F` Gram matrix per side and solves it by Cholesky
 decomposition. The two costs scale differently and are worth keeping apart
 when sizing a host: **time** grows **super-linearly** with the encoded
-dimension — measured at roughly `dim^2.4` on this project's fixtures (a
-doubling costs 5.1–5.8×, not the 8× a pure cubic would), because forming the
-Gram matrix and the memory traffic around it dilute the cubic decomposition —
-while **memory** grows **quadratically** —
+dimension, and — this is the part that trips up sizing — **the exponent itself
+rises with the dimension**, so no single power fits the whole range. Below the
+default 5,000 cap the feature work is not yet what the trial spends its time on
+and a doubling costs under 2×; from 5,000 upward the Gram matrix and its
+Cholesky take over and a doubling approaches the 8× of a pure cubic. Measured
+per doubling, one fixture, `parallelism: 1`, median of three alternating passes
+over the whole ladder:
+
+| doubling | cost | implied exponent |
+|---|---|---|
+| 1,251 → 2,501 | 1.74× | 0.80 |
+| 2,501 → 5,001 | 1.85× | 0.89 |
+| 5,001 → 10,001 | 5.07× | 2.34 |
+| 10,001 → 20,001 | **7.46×** | **2.90** |
+
+An earlier revision of this page summarised the whole range as a flat `dim^2.4`
+and put a doubling at 5.1–5.8×, explicitly ruling out the cubic case. That is
+right for the 5,000 → 10,000 step and wrong at both ends: it over-states the cost
+of raising a small cap and under-states the cost of raising the default one. The
+10,000 → 20,000 doubling measured 7.46× — effectively the cubic case — and that
+is precisely the step an operator takes when the default cap refuses their
+catalogue. Budget **two** doublings from 5,000 to 20,000 at ~38×, not ~30×.
+
+Memory has no such complication: it grows **quadratically** —
 the Gram matrix is `dim² × 8` bytes at float64. Treat that as a **floor, not an
 estimate**: it gives 200 MB / 800 MB / 3.2 GB where the measured peak-RSS
 increase over the same run without features is **287 MB / 960 MB / 3.5 GB**,
@@ -522,6 +542,14 @@ The time column is a range because it depends on the interaction data the
 trial also has to fit, not on the dimension alone; the low figures come from a
 small fixture and the high ones from a 100k-row one. Memory is stable across
 both, as the Gram formula predicts. Size on the upper figure.
+
+Both columns were re-measured independently on a different 100k-row fixture and
+held: 1.9 s / 9.5 s / 70.8 s per trial, and a peak-RSS increase over the same run
+without features of 272 MB / 922 MB / 3,290 MB against the Gram floor's 191 MB /
+763 MB / 3,052 MB — 42% / 21% / 8% low, again furthest off at the default cap,
+exactly as the paragraph above says. Note that the rising exponent is already
+visible in this table: 4.2/0.6 and 43/4.2 are 7.0× and 10.2× per doubling. The
+old `dim^2.4` summary narrowed its own table to the bottom of its range.
 
 At the **default** `RECOTEM_MAX_FEATURE_DIM` of 5,000, a features run on that
 100k-row fixture took 16.3 s against 4.3 s without features — a 3.8× increase

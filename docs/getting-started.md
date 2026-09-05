@@ -138,6 +138,15 @@ recotem validate examples/tutorial-purchase-log/recipe.yaml
 optional `probe()` (HTTP HEAD for the tutorial CSV) — a fast way to catch
 network or recipe problems before launching `train`.
 
+It never fetches an interaction source in full (a BigQuery scan is billed, a
+large CSV is slow), so `source` and `features.*.source` are checked for
+reachability and declared columns only. The one exception is `item_metadata:`,
+which **is** read in full: it is a serve-time join that `train` never touches,
+so a broken block would otherwise sail through `validate` and `train` — both
+exit 0, artifact signed — and first appear when `serve` starts. Metadata files
+are catalog-sized and capped by `RECOTEM_MAX_DOWNLOAD_BYTES`, so the cost is
+bounded.
+
 ### 1. Generate keys
 
 ```bash

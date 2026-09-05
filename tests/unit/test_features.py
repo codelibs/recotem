@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -1507,20 +1508,40 @@ def test_no_shipped_prose_still_calls_the_feature_cost_cubic() -> None:
     #208 corrected `docs/operations.md` and the runtime message, and added the
     test above to keep those two in step. `CLAUDE.md` states the same cost in
     its `RECOTEM_MAX_FEATURE_DIM` row and was not covered, so it kept saying
-    "cubic" through a release. Checking the whole shipped prose surface is what
-    stops the next file from drifting the same way.
+    "cubic" through a release. #220 corrected `CLAUDE.md` and widened this
+    check to `docs/`, and the same sentence survived in two more places the
+    list still did not name: `CHANGELOG.md`'s 2.1.0 section -- the release
+    notes for the release that ships the correction, 359 lines above the entry
+    announcing it -- and `get_max_feature_dim`'s own docstring in
+    `src/recotem/config.py`, next to the variable it describes.
+
+    So the list is now the whole surface a reader can reach: the top-level
+    prose files, every file under `docs/`, and the product source. The match is
+    a pattern rather than one literal string, so a reworded restatement of the
+    same wrong claim is caught too -- while the correct sentences that *use*
+    the word (``"not the 8x a pure cubic would"``, ``"dilute the cubic
+    decomposition"``) are not, because they do not say the cost *is* cubic in
+    anything.
     """
     root = Path(__file__).resolve().parents[2]
-    sources = [root / "CLAUDE.md", *sorted((root / "docs").rglob("*.md"))]
+    sources = [
+        root / "CLAUDE.md",
+        root / "README.md",
+        root / "CHANGELOG.md",
+        *sorted((root / "docs").rglob("*.md")),
+        *sorted((root / "src").rglob("*.py")),
+    ]
+    pattern = re.compile(r"cubic in\b", re.IGNORECASE)
     offenders = [
-        f"{path.relative_to(root)}:{n}"
+        f"{path.relative_to(root)}:{n}: {line.strip()}"
         for path in sources
+        if path.exists()
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-        if "cubic in this number" in line
+        if pattern.search(line)
     ]
     assert not offenders, (
         "these lines still describe the feature-dimension cost as cubic; the "
-        f"measured growth is dim^2.4: {offenders}"
+        f"measured growth is dim^2.4 (a doubling costs 5.1-5.8x): {offenders}"
     )
 
 

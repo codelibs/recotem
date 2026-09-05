@@ -548,10 +548,14 @@ _MAX_FEATURE_DIM = 100_000
 def get_max_feature_dim() -> int:
     """Return RECOTEM_MAX_FEATURE_DIM, clamped to [16, 100000].
 
-    irspack forms a dense ``F.T @ F`` and solves it by Cholesky, so cost is
-    cubic in the feature dimension and it never errors -- it only degrades.
-    Measured per trial: 5k -> 0.6 s / 200 MB; 10k -> 4.2 s / 771 MB;
-    20k -> 43 s / 3 GB.  Multiplies with training.parallelism.
+    irspack forms a dense ``F.T @ F`` and solves it by Cholesky, and never
+    errors from either cost -- it only degrades.  Time grows at roughly
+    ``dim^2.4`` (measured: a doubling costs 5.1-5.8x, not the 8x the Cholesky
+    suggests, because forming the Gram matrix dilutes the decomposition) and
+    memory quadratically.  Measured per trial on a 100k-row fixture:
+    5k -> 2.4 s / 200 MB; 10k -> 12 s / 771 MB; 20k -> 70 s / 3 GB; the lower
+    times in docs/operations.md's table come from a small fixture.  Both
+    multiply with training.parallelism.
     """
     return _clamped_int_env(
         "RECOTEM_MAX_FEATURE_DIM",

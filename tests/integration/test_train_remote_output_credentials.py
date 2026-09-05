@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 from typer.testing import CliRunner
 
-from recotem._exit_codes import _EXIT_CONFIG
+from recotem._exit_codes import _EXIT_CONFIG, _map_exception_to_exit
 from recotem.cli import app
 
 pytest.importorskip("s3fs", reason="s3:// output requires the s3fs backend")
@@ -168,3 +168,91 @@ def test_train_error_event_carries_recotem_code(
     assert kwargs.get("exc_info") is False, (
         "a known deployment mistake must not attach the SDK traceback"
     )
+
+
+# ---------------------------------------------------------------------------
+# R7-P3 — the destination itself, not only the credential resolution
+# ---------------------------------------------------------------------------
+#
+# Measured against MinIO / fake-gcs-server / Azurite, every one of these
+# reached the operator as exit 1 with the SDK's own message, after the model
+# had already been trained:
+#
+#   s3 missing bucket      FileNotFoundError <- botocore NoSuchBucket
+#   gs missing bucket      FileNotFoundError
+#   az missing container   RuntimeError <- azure.core ResourceNotFoundError
+#   s3 rejected key        PermissionError
+
+
+def _classify(exc: BaseException, path: str):
+    from recotem.training.pipeline import _artifact_write_credentials_error
+
+    return _artifact_write_credentials_error(exc, path)
+
+
+@pytest.mark.parametrize(
+    ("exc", "label"),
+    [
+        (FileNotFoundError("The specified bucket does not exist"), "s3 no bucket"),
+        (
+            FileNotFoundError("https://storage.googleapis.com/upload/..."),
+            "gs no bucket",
+        ),
+        (
+            PermissionError("The request signature we calculated does not match"),
+            "s3 403",
+        ),
+    ],
+)
+def test_remote_write_destination_failure_is_a_config_error(exc, label) -> None:
+    """A remote destination that cannot be written to must exit 8, not 1."""
+    err = _classify(exc, "s3://some-bucket/out/model.recotem")
+    assert err is not None, f"{label} was left unclassified (exit 1)"
+    assert err.code == "artifact_write_destination"
+    assert _map_exception_to_exit(err) == _EXIT_CONFIG
+
+
+def test_remote_write_destination_failure_walks_the_cause_chain() -> None:
+    """adlfs wraps the Azure error in a bare RuntimeError — follow the cause."""
+
+    class ResourceNotFoundError(Exception):
+        pass
+
+    wrapper = RuntimeError("Failed to upload block: The specified container ...")
+    wrapper.__cause__ = ResourceNotFoundError("container not found")
+    err = _classify(wrapper, "az://some-container/out/model.recotem")
+    assert err is not None, "the Azure missing-container write was unclassified"
+    assert err.code == "artifact_write_destination"
+    assert _map_exception_to_exit(err) == _EXIT_CONFIG
+
+
+def test_local_write_failures_keep_their_existing_classification() -> None:
+    """Scoped to remote paths: a local path must not be relabelled.
+
+    A local ``output.path`` already answers exit 8 through the per-recipe
+    lock's ``LockPermissionError``; re-classifying it here would move where
+    that answer comes from for no benefit.
+    """
+    for path in ("/var/lib/recotem/model.recotem", "file:///tmp/model.recotem"):
+        assert _classify(FileNotFoundError("no such file"), path) is None, (
+            f"a local path ({path}) must keep its existing classification"
+        )
+
+
+def test_credential_resolution_failures_keep_their_own_code() -> None:
+    """The pre-existing credential code must not be swallowed by the new one."""
+
+    class NoCredentialsError(Exception):
+        pass
+
+    err = _classify(NoCredentialsError("Unable to locate credentials"), "s3://b/m")
+    assert err is not None
+    assert err.code == "artifact_write_credentials", (
+        "a credential-resolution failure must keep its more specific code"
+    )
+
+
+def test_transient_remote_write_errors_are_still_unclassified() -> None:
+    """A 5xx / timeout is not a config error and must keep exiting 1."""
+    assert _classify(TimeoutError("read timed out"), "s3://b/m") is None
+    assert _classify(ConnectionResetError("reset by peer"), "s3://b/m") is None

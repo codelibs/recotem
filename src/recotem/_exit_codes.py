@@ -67,9 +67,13 @@ def _map_exception_to_exit(exc: BaseException) -> int:  # noqa: C901
     as a transient network error and retried forever.
     """
     # --- configuration errors (TrainingError carrying a config-shaped code) ---
-    # ``artifact_write_credentials`` joins ``signing_key_missing`` here: both
-    # are deployment misconfigurations that happen to be discovered inside
-    # run_training, and neither is fixed by retrying the training job.
+    # ``artifact_write_credentials`` and ``artifact_write_destination`` join
+    # ``signing_key_missing`` here: all three are deployment misconfigurations
+    # that happen to be discovered inside run_training, and none of them is
+    # fixed by retrying the training job.  The destination code covers a
+    # remote ``output.path`` whose bucket/container is absent or whose
+    # credentials were resolved and then refused — a rotated key, a typo in a
+    # bucket name — which used to reach the operator as an unmapped exit 1.
     try:
         from recotem.training.errors import (
             TrainingError as _TrainingError,  # noqa: PLC0415
@@ -78,6 +82,7 @@ def _map_exception_to_exit(exc: BaseException) -> int:  # noqa: C901
         if isinstance(exc, _TrainingError) and getattr(exc, "code", "") in (
             "signing_key_missing",
             "artifact_write_credentials",
+            "artifact_write_destination",
         ):
             return _EXIT_CONFIG
     except (ImportError, AttributeError):

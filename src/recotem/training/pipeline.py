@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import urllib.parse
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -707,6 +708,20 @@ _CREDENTIAL_ERROR_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# Destination failures: the bucket/container is absent, or the credentials
+# resolved fine and were then refused.  Matched the same way and for the same
+# reason as ``_CREDENTIAL_ERROR_NAMES``; the stdlib ``FileNotFoundError`` /
+# ``PermissionError`` that fsspec raises for the same conditions are matched by
+# ``isinstance`` at the call site rather than listed here.
+_DESTINATION_ERROR_NAMES: frozenset[str] = frozenset(
+    {
+        "NoSuchBucket",  # botocore — s3://
+        "ResourceNotFoundError",  # azure.core — az:// / abfs://
+        "AccessDenied",  # botocore — s3://
+        "Forbidden",  # google.api_core / azure.core
+    }
+)
+
 
 def _artifact_write_credentials_error(
     exc: BaseException, output_path: str
@@ -727,11 +742,33 @@ def _artifact_write_credentials_error(
     ``_map_exception_to_exit`` reports exit 8 and the ``train_error`` event
     carries a recotem code instead of ``internal_error``.
 
+    Credentials that are *absent* are only half the problem.  Measured against
+    real object-store endpoints, the writes an operator is far more likely to
+    get wrong land elsewhere:
+
+    | remote write failure | exception the SDK raises |
+    |---|---|
+    | bucket does not exist (s3) | ``FileNotFoundError`` <- ``NoSuchBucket`` |
+    | bucket does not exist (gs) | ``FileNotFoundError`` |
+    | container does not exist (az) | ``RuntimeError`` <- ``ResourceNotFoundError`` |
+    | key rejected / no PutObject (s3) | ``PermissionError`` |
+
+    None of those is a credential-*resolution* failure, so all four used to
+    fall through to exit 1 with the SDK's own message — for a rotated key or a
+    bucket name typo, the two most ordinary deployment mistakes there are, and
+    after the model was already trained.  They are classified here too, under
+    ``artifact_write_destination``, which routes to the same exit 8.  A local
+    ``output.path`` keeps its existing answer: it is unreachable here because
+    ``_write_atomic`` creates missing parents and the lock already refused an
+    unwritable directory, and the classification is scoped to remote paths so a
+    local surprise is not silently relabelled.
+
     Returns ``None`` for every other write failure, which keeps its current
     classification — a transient object-store error is not a config error.
     """
     seen: set[int] = set()
     cur: BaseException | None = exc
+    remote = _is_remote_output(output_path)
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
         if type(cur).__name__ in _CREDENTIAL_ERROR_NAMES:
@@ -742,8 +779,29 @@ def _artifact_write_credentials_error(
                 "credentials for the destination and re-run.",
                 code="artifact_write_credentials",
             )
+        if remote and (
+            isinstance(cur, FileNotFoundError | PermissionError)
+            or type(cur).__name__ in _DESTINATION_ERROR_NAMES
+        ):
+            return TrainingError(
+                f"could not write the artifact to {output_path!r}: "
+                f"{type(cur).__name__}: {cur}.  Training succeeded but the "
+                "model was not persisted — check that the bucket or container "
+                "exists and that the credentials may write to it, then re-run.",
+                code="artifact_write_destination",
+            )
         cur = cur.__cause__ or cur.__context__
     return None
+
+
+def _is_remote_output(output_path: str) -> bool:
+    """Return True when *output_path* names an object store rather than disk.
+
+    ``""`` and ``file`` are the two local forms the recipe path validator
+    admits; a single-letter scheme is a Windows drive letter, not a protocol.
+    """
+    scheme = urllib.parse.urlparse(str(output_path)).scheme.lower()
+    return len(scheme) > 1 and scheme != "file"
 
 
 def _normalize_paths_for_hash(obj: Any) -> Any:

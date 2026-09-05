@@ -89,13 +89,94 @@ def test_release_notes_do_not_attribute_a_wrong_path_to_a_chart_probe() -> None:
     """
     section = _unreleased_section()
     for probe, path in sorted(_probe_paths(_CHART_DEPLOYMENT).items()):
-        for m in re.finditer(
-            rf"{probe}Probe\**[^.\n]{{0,80}}?at\s+`?(/v1/[A-Za-z0-9/_-]+)`?",
-            section,
-            re.IGNORECASE,
-        ):
+        matches = list(
+            re.finditer(
+                rf"{probe}Probe`?\**[^.\n]{{0,80}}?(?:at|to|onto|on)\s+"
+                rf"`?(/v1/[A-Za-z0-9/_-]+)`?",
+                section,
+                re.IGNORECASE,
+            )
+        )
+        # Without this the loop below is a no-op whenever the notes are
+        # reworded, and the test goes green over an empty scan -- which is what
+        # it did for every probe from #263 until this assertion was added.
+        assert matches, (
+            f"the release notes never say where the chart points its "
+            f"{probe}Probe, so this guard inspected nothing for it. Write the "
+            f"attribution as '{probe}Probe at `{path}`' (the phrasing an "
+            "operator copying probes into their own manifests reads), or "
+            "delete this test rather than leaving it green over an empty scan."
+        )
+        for m in matches:
             assert m.group(1) == path, (
                 f"the release notes say the chart points its {probe}Probe at "
                 f"{m.group(1)}; helm/recotem/templates/deployment.yaml points "
                 f"it at {path}."
             )
+
+
+# The count-based endpoint.  Matched exactly -- `/v1/health/ready` and
+# `/v1/health/live` must not be read as mentions of it.
+_COUNT_BASED = re.compile(r"`/v1/health`")
+_PROBE_TOKEN = re.compile(r"\b(?:startup|readiness|liveness)Probe\b", re.IGNORECASE)
+
+
+def _sentences(text: str) -> list[str]:
+    """Split on '.' with newlines flattened.
+
+    These are wrapped Markdown paragraphs, so a claim routinely spans two
+    lines; the 80-character same-line window the check above uses cannot see
+    those, which is half of why the third stale claim survived #263.
+    """
+    return [s for s in " ".join(text.split()).split(".") if s]
+
+
+def test_release_notes_never_tie_a_probe_to_the_count_based_endpoint() -> None:
+    """No sentence may name a probe and `/v1/health` together.
+
+    #241 moved the startupProbe onto `/v1/health/ready`; #263 then corrected
+    two places that still described the old topology and missed a third, in
+    **Added**::
+
+        `/v1/health` itself is unchanged -- still `503` whenever
+        `loaded < total` -- and stays the startupProbe path, where "every
+        recipe present" is the right gate for a *new* pod.
+
+    Both guards above were blind to it: the path comes *before* the probe name
+    there, so no "<probe>Probe ... at <path>" attribution exists to check, and
+    every path the chart polls is named elsewhere in the section.  The claim
+    also contradicted the corrected paragraph 250 lines earlier ("No probe in
+    the 2.1.0 chart reads it") and carried the rationale for the design #241
+    reversed, so a reader writing manifests from **Added** would put their
+    startupProbe back on the count-based endpoint and get the CrashLoop the
+    release removed.
+
+    Order-independent by construction, and derived from the chart: if a future
+    chart really does poll `/v1/health` with a probe, this relaxes on its own.
+    Sentences that say "probes" rather than a `<kind>Probe` token are untouched,
+    which is what keeps the legitimate 2.0.0 paragraphs ("all three of your
+    probes are still on `/v1/health`") passing.
+    """
+    chart = _probe_paths(_CHART_DEPLOYMENT)
+    if any(p == "/v1/health" for p in chart.values()):
+        return  # A probe really does read it; the pairing would be true.
+
+    section = _unreleased_section()
+    assert _COUNT_BASED.search(section) and _PROBE_TOKEN.search(section), (
+        "the release section no longer mentions both `/v1/health` and a "
+        "<kind>Probe token, so this guard is watching nothing. Delete it "
+        "rather than leaving it green over an empty scan."
+    )
+
+    offenders = [
+        s.strip()
+        for s in _sentences(section)
+        if _COUNT_BASED.search(s) and _PROBE_TOKEN.search(s)
+    ]
+    assert not offenders, (
+        "these sentences tie a named probe to `/v1/health`, which no probe in "
+        f"the shipped chart reads (it polls {sorted(set(chart.values()))}). A "
+        "reader copying probes out of the notes would put one back on the "
+        "count-based endpoint, where a single unloadable recipe stops every "
+        "new pod from starting:\n  " + "\n  ".join(offenders)
+    )

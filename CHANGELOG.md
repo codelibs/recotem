@@ -314,11 +314,14 @@ exit 8.
   Cholesky failure) both land in the feature-aware path, which the new
   `features:` block *does* reach — recotem's search prunes the Optuna trial
   on that failure rather than aborting the run. They were verified not to
-  change the serialised model: for all six algorithms Recotem can build, an
-  identically-trained recommender pickles to a byte-identical payload under
-  0.5.0 and 0.5.2 (SHA-256 compared), `IALSModelConfig.__setstate__` keeps its
-  10-element arity, and artifacts interchange in both directions with
-  bit-exact recommendation scores. That comparison was run on
+  change the serialised model: for six of the seven algorithms Recotem can
+  build, an identically-trained recommender pickles to a byte-identical payload
+  under 0.5.0 and 0.5.2 (SHA-256 compared), `IALSModelConfig.__setstate__`
+  keeps its 10-element arity, and artifacts interchange in both directions with
+  bit-exact recommendation scores. `BPRFM` is the seventh and was not in that
+  comparison; it does not need to be, because no released Recotem could produce
+  a BPRFM artifact on 0.5.0 or 0.5.1 — the algorithm and the 0.5.2 pin ship
+  together in this release. That comparison was run on
   non-feature-carrying payloads only, so it does not by itself certify a
   0.5.0-trained *feature-aware* artifact on 0.5.2; train and serve on the same
   irspack minor, as the skew guard already requires. **No retrain is needed
@@ -1272,11 +1275,13 @@ exit 8.
   therefore inside `serve`'s artifact load. The HMAC verify was never bypassed,
   so this required a validly signed artifact; the allow-list is the layer
   documented to hold when the signing key does not, which is exactly the case
-  it failed to cover. `_is_allowed` now rejects any dotted name. All six
-  algorithms (`IALS`, `CosineKNN`, `TopPop`, `RP3beta`, `DenseSLIM`,
-  `TruncatedSVD`) were retrained and reloaded under the fix: legitimate
-  artifacts never use a dotted name, so nothing that used to load stops
-  loading.
+  it failed to cover. `_is_allowed` now rejects any dotted name. Six of the
+  seven algorithms Recotem can build (`IALS`, `CosineKNN`, `TopPop`, `RP3beta`,
+  `DenseSLIM`, `TruncatedSVD`) were retrained and reloaded under the fix:
+  legitimate artifacts never use a dotted name, so nothing that used to load
+  stops loading. `BPRFM` is the seventh and postdates this change, so it was
+  not in that set; the rule itself is a property of `find_class` rather than of
+  any algorithm.
 
 - **Two security claims did not match the code, both fail-closed.** The
   artifact HMAC covers `kid_bytes || header_json || payload` as one run of

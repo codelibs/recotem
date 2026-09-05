@@ -877,3 +877,44 @@ def test_allowed_hosts_stays_unset_when_neither_source_supplies_one() -> None:
         if env.get("name") == "RECOTEM_ALLOWED_HOSTS"
     ]
     assert rendered == [], f"expected the variable to be omitted, got {rendered}"
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "ingress_host",
+    ["recotem.example.com", "*.example.com"],
+    ids=["exact-host", "wildcard-host"],
+)
+def test_rendered_allowed_hosts_is_a_valid_trusted_host_pattern_list(
+    ingress_host: str,
+) -> None:
+    """What the chart renders must be something the product can actually load.
+
+    Nothing checked that these two layers agree. `TrustedHostMiddleware`
+    asserts at construction that every wildcard looks like `*.example.com`
+    (`ENFORCE_DOMAIN_WILDCARD`), so a chart that emitted a bare `*foo` would
+    crash serve on boot -- and a bare `*` would set `allow_any` and silently
+    disable host checking altogether. A Kubernetes Ingress may legitimately
+    carry a `*.foo.com` host, so this path is reachable from ordinary values.
+
+    Matching itself is exact (`host == pattern`), with `*.` as the only
+    widening form -- measured against the installed starlette:
+    `recotem.example.com` matches, while `arecotem.example.com`,
+    `recotem.example.com.attacker.net` and `evil-recotem.example.com.attacker.net`
+    do not. So the union in this chart cannot smuggle a host in as a suffix of
+    another.
+    """
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+    hosts = _allowed_hosts(
+        (
+            "ingress.enabled=true",
+            f"ingress.hosts[0].host={ingress_host}",
+            f"env.RECOTEM_ALLOWED_HOSTS={_SERVICE_DNS}",
+        )
+    )
+    assert "*" not in hosts, f"a bare '*' disables host checking entirely: {hosts}"
+    # Raises AssertionError on a malformed wildcard; that is the failure we
+    # want surfaced here rather than at container start.
+    middleware = TrustedHostMiddleware(app=None, allowed_hosts=hosts)
+    assert not middleware.allow_any, f"host checking would be disabled: {hosts}"

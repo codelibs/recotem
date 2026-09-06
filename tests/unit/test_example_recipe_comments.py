@@ -4,7 +4,7 @@ A reader copies the algorithm list out of `examples/quickstart/recipe.yaml`
 before they have read `docs/recipe-reference.md`. When that comment offered
 `BPRFM` -- gated behind `lightfm`, which has no Python 3.12 release, so irspack
 never exports it -- following the shipped example produced exit 4 while the
-CHANGELOG said the choice had been withdrawn.
+the release notes said the choice had been withdrawn.
 
 The comment is documentation the product ships, so it is checked against what
 the product can actually construct.

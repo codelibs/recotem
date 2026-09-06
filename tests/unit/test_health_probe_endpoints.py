@@ -240,7 +240,6 @@ def test_container_healthchecks_use_the_readiness_endpoint() -> None:
     sources = {
         "Dockerfile": _ROOT / "Dockerfile",
         "compose.yaml": _ROOT / "compose.yaml",
-        "docs/deployment/docker.md": _ROOT / "docs" / "deployment" / "docker.md",
     }
     seen = 0
     for label, path in sources.items():
@@ -254,7 +253,7 @@ def test_container_healthchecks_use_the_readiness_endpoint() -> None:
                 "that is still serving every loaded model unhealthy, and the "
                 f"replacement fails identically. Use {_READY}."
             )
-    assert seen >= 3, f"expected the shipped healthcheck probes, found {seen}"
+    assert seen >= 2, f"expected the shipped healthcheck probes, found {seen}"
 
 
 def test_shipped_allowed_hosts_example_keeps_localhost() -> None:
@@ -269,7 +268,6 @@ def test_shipped_allowed_hosts_example_keeps_localhost() -> None:
     """
     sources = [
         _ROOT / "examples" / "k8s" / "serve-deployment.yaml",
-        _ROOT / "docs" / "deployment" / "k8s.md",
     ]
     seen = 0
     for path in sources:
@@ -283,4 +281,4 @@ def test_shipped_allowed_hosts_example_keeps_localhost() -> None:
                 f"{path.name}: {line.strip()} omits localhost; copying it fails "
                 "every probe with HTTP 400 and CrashLoops the Deployment"
             )
-    assert seen >= 2, f"expected the shipped ALLOWED_HOSTS examples, found {seen}"
+    assert seen >= 1, f"expected the shipped ALLOWED_HOSTS examples, found {seen}"

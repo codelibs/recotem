@@ -158,6 +158,23 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
   prefix allow-list (with a deny-list for high-risk submodules) during load.
   See `docs/security.md`.
 
+## Documentation policy
+
+- **Documentation is managed as documentation.** Never write a test that reads a
+  markdown file (`docs/*.md`, `README.md`, `CLAUDE.md`, an example README, a
+  skill's `SKILL.md`) and asserts on its prose, headings, tables or phrasing.
+  When a change alters documented behaviour, fix the doc and stop there; test
+  the behaviour itself (an exit code, a response, a rendered manifest), never
+  the sentence describing it. Asserting that a *code-produced string* mentions a
+  doc path (e.g. an error message pointing at `plugin-authoring.md`) is fine —
+  that is a behaviour assertion.
+- **There is no `CHANGELOG.md`.** The change record is the
+  [GitHub Release](https://github.com/codelibs/recotem/releases) for each tag,
+  written at release time from `git log vPREV..main`. A PR does not add a
+  changelog entry.
+- Operator-facing upgrade steps go in `docs/upgrading.md` under a
+  `## <prev> → <this>` heading — that page outlives the release notes.
+
 ## Conventions
 
 - Python 3.12+, `uv` for dependency management. Never use `pip` / `python`
@@ -280,3 +297,4 @@ server running with a limit you did not choose.
 - Getting started: `docs/getting-started.md`
 - Operations runbook: `docs/operations.md`
 - Security model: `docs/security.md`
+- Upgrade paths: `docs/upgrading.md`

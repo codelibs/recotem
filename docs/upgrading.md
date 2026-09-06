@@ -114,8 +114,9 @@ az://account:key@container/interactions.csv
          Use environment-based authentication instead.
 ```
 
-`recotem validate` reports this without touching the network, so audit
-recipes with it before rolling serve or train forward. Move the credential to
+`recotem validate` reports this at recipe-load time — exit 2, before it probes
+the data source — so audit recipes with it before rolling serve or train
+forward. Move the credential to
 the environment — `AZURE_STORAGE_ACCOUNT_NAME` / `AZURE_STORAGE_ACCOUNT_KEY`,
 a connection string, or a managed identity — which is what fsspec reads
 anyway.
@@ -136,6 +137,32 @@ you can put them back.
 Nothing else about Azure changed: the schemes remain on the path allow-list,
 `output.path` still accepts them, and credentials are still supplied through
 the environment in every case.
+
+### Underscore schemes no longer bypass the path allow-list
+
+A path whose scheme contains an underscore — in practice `arrow_hdfs://` or
+`async_wrapper://`, the only two such protocols fsspec registers — was accepted
+by 2.0.0 and is refused now, on `source.path`, `item_metadata.path` and
+`output.path` alike:
+
+```
+arrow_hdfs://host:8020/interactions.csv
+  2.0.0: accepted, and fsspec routed it to a real remote backend
+  2.1.0: RecipeError, exit 2
+         'source.path' uses scheme 'arrow_hdfs://' which is not supported
+         for input paths.
+```
+
+This was a validation/execution differential, not a policy change. RFC 3986
+forbids `_` in a scheme, so `urlparse` reported an empty scheme and the path
+looked like a bare local one to the allow-list — while `fsspec.open`, which
+splits on the first `://`, routed it to the remote handler. The equivalent
+`hdfs://` form was refused throughout. `_effective_scheme()` now derives the
+scheme the way fsspec does, so both spellings are judged alike.
+
+If you were relying on either protocol, there is no in-recipe replacement:
+neither is on the allow-list under any spelling. Stage the data to a supported
+scheme.
 
 ### Upgrade procedure
 
@@ -174,9 +201,16 @@ rolled back at all** and must be retrained without the block to run on 2.0.0.
 ### Unchanged by this upgrade
 
 Signing keys and the key-rotation procedure; the artifact container itself
-(magic bytes, `FORMAT_VERSION` 1, and the header layout); and every existing
-recipe, which stays valid as written. Every recipe's `recipe_hash` does change,
-but nothing gates on it.
+(magic bytes, `FORMAT_VERSION` 1, and the header layout); and the recipe
+schema, which gains fields but removes none. Every recipe's `recipe_hash` does
+change, but nothing gates on it.
+
+**Two path forms are the exception**, and a recipe using either stops loading
+with `RecipeError` (exit 2) rather than degrading: an Azure URI carrying a
+password, and an underscore-scheme URI such as `arrow_hdfs://`. Both are
+described above. Run `recotem validate` across your recipe directory before
+upgrading: both are refused at recipe-load time, so they surface as exit 2
+before any data source is probed. Every other recipe stays valid as written.
 
 One thing in that area *did* change: a malformed `RECOTEM_SIGNING_KEYS` now
 exits **8** (`_EXIT_CONFIG`) where 2.0.0 exited **5** (`_EXIT_ARTIFACT`), on

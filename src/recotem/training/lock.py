@@ -45,6 +45,7 @@ import contextlib
 import errno
 import hashlib
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -153,7 +154,7 @@ def _lock_permission_error(lock_path: Path, exc: OSError) -> LockPermissionError
 
     logger.error(
         "recipe_lock_permission_denied",
-        lock_path=str(lock_path),
+        **_lock_path_fields(lock_path),
         errno=exc.errno,
         error=str(exc),
         advice=(
@@ -186,6 +187,45 @@ def _remote_lock_path(output_str: str) -> Path:
     base = Path(base_env) if base_env else Path(tempfile.gettempdir()) / "recotem-locks"
     digest = hashlib.sha256(output_str.encode("utf-8")).hexdigest()
     return base / f"{digest}.lock"
+
+
+# ``hexdigest()`` of a SHA-256: exactly what ``_remote_lock_path`` names the
+# file, and exactly the shape ``recotem.log_redaction`` scrubs on sight.
+_DIGEST_LOCK_NAME = re.compile(r"[0-9a-f]{64}")
+
+
+def _lock_path_fields(lock_path: Path) -> dict[str, str]:
+    """Log fields that let an operator find the lock file.
+
+    ``lock_path`` alone does not, for a remote ``output.path``.  The file is
+    named ``sha256(output_uri).hexdigest()`` — a 64-hex run — and the redaction
+    processor in ``recotem.log_redaction`` replaces *every* 64-hex run it sees
+    in a string value, because that is also the shape of a signing key rendered
+    as hex.  So the emitted record reads
+
+        "lock_path": "/var/lock/recotem/[REDACTED-HEX64].lock"
+
+    on every lock event, and the operator cannot tell which file to inspect or
+    remove.
+
+    Exempting the ``lock_path`` *key* would be the wrong repair: for a local
+    ``output.path`` the same key carries ``<output.path>.lock``, a real
+    filesystem path chosen by the recipe, and un-scrubbing that would let
+    arbitrary recipe text past the processor.  So the digest is published as a
+    separate, short field instead — 12 hex characters is below the redaction
+    threshold, unique enough to identify one file, and enough for
+
+        ls "$lock_dir"/<lock_id>*
+
+    ``lock_dir`` and ``lock_id`` are added only when the file name *is* a bare
+    digest, i.e. only for the remote-output path this problem applies to.
+    """
+    fields = {"lock_path": str(lock_path)}
+    stem = lock_path.name.removesuffix(".lock")
+    if _DIGEST_LOCK_NAME.fullmatch(stem):
+        fields["lock_dir"] = str(lock_path.parent)
+        fields["lock_id"] = stem[:12]
+    return fields
 
 
 @contextlib.contextmanager
@@ -259,7 +299,7 @@ def recipe_lock(
         _log_kwargs: dict[str, str] = {
             "scheme": scheme,
             "output_path": output_str,
-            "lock_path": _lock_path_str,
+            **_lock_path_fields(lock_path),
             "advice": (
                 "per-recipe flock is host-local; ensure single-writer via the "
                 "scheduler (CronJob concurrencyPolicy=Forbid, Argo mutex, etc.)"
@@ -321,7 +361,7 @@ def recipe_lock(
                 # error rather than chase a phantom contention bug.
                 logger.warning(
                     "recipe_lock_windows_unlock_failed",
-                    lock_path=str(lock_path),
+                    **_lock_path_fields(lock_path),
                     errno=_unlock_exc.errno,
                     error=str(_unlock_exc),
                 )
@@ -346,7 +386,7 @@ def recipe_lock(
         if _open_exc.errno == errno.ELOOP:
             logger.warning(
                 "recipe_lock_unsafe_symlink",
-                lock_path=str(lock_path),
+                **_lock_path_fields(lock_path),
                 advice=(
                     "Lock path is a symlink — potential symlink-swap attack. "
                     "Remove the symlink and retry."
@@ -395,7 +435,7 @@ def recipe_lock(
                             waited = now - start
                             logger.warning(
                                 "recipe_lock_timeout",
-                                lock_path=str(lock_path),
+                                **_lock_path_fields(lock_path),
                                 waited_seconds=round(waited, 3),
                                 timeout=timeout,
                             )
@@ -476,7 +516,7 @@ def _try_acquire_windows(lock_path: Path) -> int | None:
         if _open_exc.errno in (errno.EACCES, errno.EAGAIN):
             logger.warning(
                 "recipe_lock_windows_open_denied",
-                lock_path=str(lock_path),
+                **_lock_path_fields(lock_path),
                 errno=_open_exc.errno,
                 error=str(_open_exc),
                 advice=(
@@ -488,7 +528,7 @@ def _try_acquire_windows(lock_path: Path) -> int | None:
             return None
         logger.warning(
             "recipe_lock_windows_open_failed",
-            lock_path=str(lock_path),
+            **_lock_path_fields(lock_path),
             errno=_open_exc.errno,
             error=str(_open_exc),
         )

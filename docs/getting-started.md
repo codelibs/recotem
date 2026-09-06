@@ -7,6 +7,11 @@ pip (everything in your venv).
 ## Prerequisites
 
 - Either Docker (with the Compose plugin) **or** Python 3.12+
+- For Path B only, a platform `irspack` publishes a wheel for: Linux on
+  x86-64 or arm64 (glibc or musl), macOS on Apple Silicon, or Windows on
+  x86-64. `irspack` ships no source distribution, so `pip install recotem`
+  cannot complete on macOS on Intel or on Windows on arm64. Path A works on
+  all of them.
 - ~50 MB of disk
 - Network access to fetch a small CSV from `raw.githubusercontent.com`
 - `curl` and [`jq`](https://jqlang.github.io/jq/), used by the request steps in
@@ -319,6 +324,7 @@ See `docs/data-sources/sql.md` for PostgreSQL / MySQL recipes.
 | Path B: artifact written to wrong directory | Recipe `output.path` is CWD-relative | Run `recotem train` from `recotem-tutorial/` (or edit `output.path` to an absolute path). |
 | Path B: `Invalid value for 'RECIPE': Path 'examples/…' does not exist` | `pip install recotem` ships the package, not the repository — there is no `examples/` on disk | Write the recipe as in step 1, or clone the repo if you want the other examples too. |
 | `recotem: command not found` after pip install | `pip` installed to a venv not on `PATH` | Use `python -m recotem ...`, or activate the venv (`uv run recotem ...`). |
+| Path B: `ERROR: No matching distribution found for irspack==0.5.2` | This machine has no `irspack` wheel, and `irspack` publishes no source distribution — macOS on Intel and Windows on arm64 | Use Path A (Docker), or install on Linux, macOS on Apple Silicon, or Windows on x86-64. |
 
 ## Next steps
 

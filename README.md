@@ -74,7 +74,14 @@ pip install 'recotem[mysql]'        # MySQL/MariaDB via PyMySQL
 pip install 'recotem[sqlite]'       # SQLite (stdlib)
 ```
 
-Requires Python 3.12+. A multi-arch Docker image is published to
+Requires Python 3.12+, and a platform `irspack` publishes a wheel for:
+Linux on x86-64 or arm64 (glibc or musl), macOS on Apple Silicon, and
+Windows on x86-64. `irspack` ships no source distribution, so on **macOS
+on Intel** and **Windows on arm64** there is nothing for pip to install and
+`pip install recotem` stops with `No matching distribution found for
+irspack==0.5.2`. Use the Docker image on those two.
+
+A multi-arch Docker image (`linux/amd64`, `linux/arm64`) is published to
 `ghcr.io/codelibs/recotem`.
 
 ## Quickstart

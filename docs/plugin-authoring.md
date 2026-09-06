@@ -420,9 +420,10 @@ use `**kwargs: Any` if you want to be future-proof.
 The entry-point key in `[project.entry-points."recotem.datasources"]` is
 informational only (used in error messages); the discriminator is the
 class's `type_name`. If two installed plugins both declare
-`type_name = "csv"`, both `recotem train` and `recotem serve` exit 3 at
-startup with both fully-qualified class names — uninstall one or rename
-its `type_name`.
+`type_name = "csv"`, `recotem train` and `recotem validate` exit **2** with
+both fully-qualified class names, and `recotem serve` keeps running with the
+affected recipes skipped — uninstall one or rename its `type_name`. See
+[Exit codes a plugin can actually produce](#exit-codes-a-plugin-can-actually-produce).
 
 ## Validation in `recotem validate`
 

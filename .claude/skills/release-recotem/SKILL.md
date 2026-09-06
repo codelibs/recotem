@@ -105,9 +105,9 @@ is built. `docker.yml`'s tag filter `v[0-9]+.[0-9]+.[0-9]*` is a GitHub filter
 pattern, not a regex, so it still *fires* on `v2.0.0a0` — but the guard is
 upstream of everything that could publish: `smoke` is `needs: guard`, `trivy` is
 `needs: smoke`, and `build` — the only job that pushes — is
-`needs: [test, smoke, trivy]`. A pre-release tag now fails both workflows and reaches
-neither PyPI nor GHCR; not even a `sha-` tag is pushed. Verify locally rather
-than trusting the description:
+`needs: [test, smoke, trivy]`. A pre-release tag now fails both workflows
+and reaches neither PyPI nor GHCR; not even a `sha-` tag is pushed. Verify
+locally rather than trusting the description:
 
 ```bash
 bash .github/scripts/check-release-tag.sh v2.0.0a0   # rc=1, names the 'a' suffix
@@ -179,10 +179,10 @@ Branch (e.g. `release/vX.Y.Z`) from up-to-date `main`, then:
    bash .github/scripts/check-release-tag.sh vX.Y.Z   # MUST print "OK: ..."
    ```
 
-   It fails closed and reads all five declarations together — `pyproject.toml`,
-   `src/recotem/version.py`, `helm/recotem/Chart.yaml`'s `version:` and
-   `appVersion:`, and `helm/recotem/values.yaml`'s `image.tag` — so it
-   catches a partial bump (`pyproject.toml` moved,
+   It fails closed and reads all five declarations together —
+   `pyproject.toml`, `src/recotem/version.py`, `helm/recotem/Chart.yaml`'s
+   `version:` and `appVersion:`, and `helm/recotem/values.yaml`'s
+   `image.tag` — so it catches a partial bump (`pyproject.toml` moved,
    `version.py` not; or the package moved and the chart did not) that a grep for
    a single literal cannot. Because it reads the chart, run it **after** step 2 —
    between the two steps it will correctly name the chart, and that is a real
@@ -283,9 +283,10 @@ Commit, push, and open the PR with `gh pr create --base main`.
    ```
 
    `docker.yml` scans **before** it pushes: `trivy` is `needs: smoke` and
-   `build` is `needs: [test, smoke, trivy]`, so a red Trivy **blocks** the push. The
-   image never reached GHCR and there is nothing published to un-publish — do
-   not cut a patch release to "replace" it. Two remedies, in order:
+   `build` is `needs: [test, smoke, trivy]`, so a red Trivy **blocks** the
+   push. The image never reached GHCR and there is nothing published to
+   un-publish — do not cut a patch release to "replace" it. Two remedies, in
+   order:
 
    - The Dockerfile runs `apt-get upgrade`, so if Debian has published the fix
      since the run, a plain `gh run rerun --repo codelibs/recotem <docker-run-id> --failed`

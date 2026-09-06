@@ -82,6 +82,14 @@ def _map_exception_to_exit(exc: BaseException) -> int:  # noqa: C901
     # not — which is what puts it here rather than on _EXIT_RECIPE with
     # ``output.path``'s scheme and artifact-root violations.  It too used to
     # reach the operator as an unmapped exit 1, from inside Optuna.
+    #
+    # ``artifact_write_driver`` is that same environmental shape back on
+    # ``output.path``: a remote destination whose fsspec backend is not
+    # installed (``recotem[s3]`` / ``[gcs]`` / ``[azure]``).  It is *not*
+    # _EXIT_DATASOURCE even though the identical ImportError on ``source.path``
+    # is — that one is raised inside the CSV source and is a genuine
+    # ``DataSourceError``, while ``output.path`` is not a data source and every
+    # other configuration failure of this write already reports here.
     try:
         from recotem.training.errors import (
             TrainingError as _TrainingError,  # noqa: PLC0415
@@ -91,6 +99,7 @@ def _map_exception_to_exit(exc: BaseException) -> int:  # noqa: C901
             "signing_key_missing",
             "artifact_write_credentials",
             "artifact_write_destination",
+            "artifact_write_driver",
             "storage_path_unusable",
         ):
             return _EXIT_CONFIG

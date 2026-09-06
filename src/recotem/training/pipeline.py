@@ -609,6 +609,9 @@ def _run_training_locked(
         # The model is trained and about to be discarded, so the failure must
         # name its own cause rather than arriving as an unmapped exit 1 under
         # a stack of object-store SDK frames.
+        driver_error = _artifact_write_driver_error(exc, recipe.output.path)
+        if driver_error is not None:
+            raise driver_error from exc
         credentials_error = _artifact_write_credentials_error(exc, recipe.output.path)
         if credentials_error is not None:
             raise credentials_error from exc
@@ -773,6 +776,77 @@ def _is_gcs_forbidden_oserror(exc: BaseException) -> bool:
     ``TimeoutError``) keep falling through to their existing classification.
     """
     return type(exc) is OSError and str(exc).startswith("Forbidden:")
+
+
+# The recotem extra that installs the fsspec backend for each remote
+# ``output.path`` scheme.  The recipe path validator admits exactly these
+# remote schemes for ``output.path`` (plus the two local forms), so the map is
+# total over what can reach the write.
+_OUTPUT_SCHEME_EXTRAS: dict[str, str] = {
+    "s3": "s3",
+    "gs": "gcs",
+    "gcs": "gcs",
+    "az": "azure",
+    "abfs": "azure",
+    "abfss": "azure",
+}
+
+
+def _artifact_write_driver_error(
+    exc: BaseException, output_path: str
+) -> TrainingError | None:
+    """Return a config-coded ``TrainingError`` when the fsspec backend is absent.
+
+    ``write_artifact`` resolves ``output.path`` through
+    ``fsspec.core.url_to_fs``, and fsspec answers an unregistered protocol by
+    importing the backend and re-raising the failure as ``ImportError`` --
+    "Please install gcsfs to access Google Storage" and its s3fs / adlfs
+    equivalents.  That is a configuration mistake no retry will fix, and it is
+    the *first* thing the write does, yet it used to be the one remote-write
+    failure that stayed an unmapped exit 1: the credential and destination
+    classifiers below both answer ``None`` for it, because an ``ImportError``
+    is neither.
+
+    It is also the most expensive one to learn late.  The whole Optuna search
+    has run by the time the write is attempted, and for a ``bigquery`` source
+    the scan has already been billed -- so the operator pays for the run twice
+    to discover that an extra was missing from `pip install`.
+
+    Exit 8 rather than 3: the exit code follows the layer, not the exception
+    type.  The same ``ImportError`` raised while *reading* ``source.path`` is a
+    ``DataSourceError`` (exit 3) because it happens inside the CSV source;
+    ``output.path`` is not a data source, and every other way this write fails
+    for a configuration reason -- absent credentials, a missing bucket, an
+    unwritable local directory, a destination that is a directory -- already
+    reports 8 from this same handler.
+
+    Scoped to remote outputs by ``_is_remote_output``: a local write resolves
+    to the built-in ``LocalFileSystem`` and cannot raise ``ImportError`` here,
+    so a local surprise keeps its current classification.
+    """
+    if not _is_remote_output(output_path):
+        return None
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ImportError):
+            scheme = urllib.parse.urlparse(str(output_path)).scheme.lower()
+            extra = _OUTPUT_SCHEME_EXTRAS.get(scheme)
+            remedy = (
+                f'install it with `pip install "recotem[{extra}]"`'
+                if extra is not None
+                else f"install the fsspec backend for '{scheme}://'"
+            )
+            return TrainingError(
+                f"could not write the artifact to {output_path!r}: the fsspec "
+                f"backend for '{scheme}://' is not installed ({cur}).  "
+                f"Training succeeded but the model was not persisted — "
+                f"{remedy} and re-run.",
+                code="artifact_write_driver",
+            )
+        cur = cur.__cause__ or cur.__context__
+    return None
 
 
 def _artifact_write_credentials_error(

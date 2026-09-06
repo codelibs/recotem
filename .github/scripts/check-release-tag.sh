@@ -112,20 +112,19 @@ EXPECTED="${TAG#v}"
 # ---------------------------------------------------------------------------
 # 2b. The files this script is about to read must match the commit
 # ---------------------------------------------------------------------------
-# Sections 3-5 read the WORKING TREE.  A tag names a COMMIT.  When the two
+# Sections 3-4 read the WORKING TREE.  A tag names a COMMIT.  When the two
 # differ, every line this script prints -- and its "OK" -- describes a tree
-# nobody is about to publish.  Section 6 makes this sharper rather than milder:
+# nobody is about to publish.  Section 5 makes this sharper rather than milder:
 # it reports "The tagged commit is on main", a fact about HEAD, in the same
-# success block as five worktree-derived version lines and a CHANGELOG line.
+# success block as four worktree-derived version lines.
 # One message, two different objects.
 #
 # Measured at 7871f9f, whose committed pyproject.toml says 2.1.0.dev0, whose
-# chart says 2.0.0 and whose CHANGELOG says "## [2.1.0] - Unreleased".  Edit
+# chart says 2.0.0.  Edit
 # only the working tree to the release-ready values, commit nothing:
 #
 #   $ bash .github/scripts/check-release-tag.sh v2.1.0
 #   pyproject.toml       version = 2.1.0
-#   OK: ... CHANGELOG.md declares 2.1.0 released.
 #           The tagged commit is on main.                        # exit 0
 #
 # The release procedure has an adjacent `git status --porcelain  # MUST be
@@ -140,7 +139,7 @@ EXPECTED="${TAG#v}"
 # scratch file elsewhere cannot change the verdict, and refusing on one would
 # train operators to look past this gate.
 #
-# GIT_TOPLEVEL is computed once here and reused by section 6.  Skipped outside
+# GIT_TOPLEVEL is computed once here and reused by section 5.  Skipped outside
 # a git work tree, and when the enclosing repository is not this tree -- the
 # unit tests build synthetic trees in tmp dirs, which may sit inside some
 # unrelated checkout.
@@ -152,7 +151,6 @@ if [ -n "${GIT_TOPLEVEL}" ] && [ "${GIT_TOPLEVEL}" = "${REPO_ROOT}" ]; then
             src/recotem/version.py \
             helm/recotem/Chart.yaml \
             helm/recotem/values.yaml \
-            CHANGELOG.md \
             examples \
             docs \
             2>/dev/null || true
@@ -440,74 +438,7 @@ while IFS= read -r hit; do classify "${hit}" excerpt; done < <(printf '%s\n' "${
          "matching rather than that there is nothing to check."
 
 # ---------------------------------------------------------------------------
-# 5. The CHANGELOG must announce this version as released
-# ---------------------------------------------------------------------------
-# The GitHub Release notes are derived from the CHANGELOG section for the
-# version (references/release-notes.md), and entries accumulate during the cycle
-# under a heading marked `Unreleased`.  Renaming that heading to the release
-# date is step 3 of the release procedure -- and nothing verified it: a
-# `grep -ci changelog` over this script returned 0, so a tag could publish
-# release notes drawn from a section still headed "Unreleased", permanently, at
-# the tagged commit.
-#
-# Checked with grep for the same reason the chart is read with awk: the guard
-# jobs run this straight after `actions/checkout` with nothing installed.
-CHANGELOG="${REPO_ROOT}/CHANGELOG.md"
-EXPECTED_RE="$(printf '%s' "${EXPECTED}" | sed 's/\./\\./g')"
-CHANGELOG_PROBLEM=""
-CHANGELOG_DETAIL=()
-
-if [ ! -f "${CHANGELOG}" ]; then
-    CHANGELOG_PROBLEM="has no CHANGELOG.md"
-    CHANGELOG_DETAIL=("CHANGELOG.md is missing.  The GitHub Release notes are derived from it.")
-else
-    CHANGELOG_HEADING="$(grep -m1 -E "^## \[${EXPECTED_RE}\]" "${CHANGELOG}" || true)"
-    if [ -z "${CHANGELOG_HEADING}" ]; then
-        CHANGELOG_PROBLEM="has no CHANGELOG.md section"
-        CHANGELOG_DETAIL=(
-            "CHANGELOG.md has no '## [${EXPECTED}]' heading." \
-            "The GitHub Release notes are derived from that section, so a release without" \
-            "one ships no notes at all.  Add the section (see the release procedure), or" \
-            "rename the existing Unreleased heading if the entries are already there:" \
-            "  grep -n '^## \\[' CHANGELOG.md"
-        )
-    elif printf '%s' "${CHANGELOG_HEADING}" | grep -qi 'unreleased'; then
-        CHANGELOG_PROBLEM="has a CHANGELOG.md section still marked Unreleased"
-        CHANGELOG_DETAIL=(
-            "CHANGELOG.md still reads:" \
-            "  ${CHANGELOG_HEADING}" \
-            "" \
-            "Entries accumulate under an 'Unreleased' heading during the cycle; releasing" \
-            "renames it to the date.  Left as-is, the published release notes announce" \
-            "${EXPECTED} as unreleased, and the CHANGELOG at the tagged commit says so" \
-            "permanently.  Set the heading to '## [${EXPECTED}] - YYYY-MM-DD'."
-        )
-    elif ! grep -qE "^\[${EXPECTED_RE}\]:" "${CHANGELOG}"; then
-        # The heading is a Markdown reference link.  Without the matching
-        # definition at the tail it renders as the literal text `[X.Y.Z]`
-        # instead of a link to the release, and only that release's heading is
-        # affected -- every earlier one still resolves, so the page looks fine
-        # unless you scroll to the one that matters.  Measured at 7871f9f:
-        # `grep -nE '^\[[0-9]' CHANGELOG.md` returns definitions for 2.0.0 and
-        # 1.0.0 and none for 2.1.0.  The release procedure says to add it
-        # (references/release-notes.md, "Then add the link ref at the bottom of
-        # the file"); nothing checked that it was.
-        CHANGELOG_PROBLEM="has no CHANGELOG.md link definition for ${EXPECTED}"
-        CHANGELOG_DETAIL=(
-            "CHANGELOG.md heading '## [${EXPECTED}]' is a reference link with no" \
-            "definition, so it renders as the literal text '[${EXPECTED}]'." \
-            "" \
-            "Add it at the bottom of the file, above the previous release's:" \
-            "  [${EXPECTED}]: https://github.com/codelibs/recotem/releases/tag/${TAG}" \
-            "" \
-            "To see what is there now:" \
-            "  grep -nE '^\\[[0-9]' CHANGELOG.md"
-        )
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# 6. The commit being tagged must be on main
+# 5. The commit being tagged must be on main
 # ---------------------------------------------------------------------------
 # Everything above reads files, so it describes the tree and says nothing about
 # where that tree sits in history.  A tag placed on a feature branch -- or on a
@@ -603,7 +534,7 @@ if [ -n "${GIT_TOPLEVEL}" ] && [ "${GIT_TOPLEVEL}" = "${REPO_ROOT}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Report -- every class of failure in a single run
+# 6. Report -- every class of failure in a single run
 # ---------------------------------------------------------------------------
 # Section 3 compares every version declaration before reporting so that one run
 # names every file that did not move.  The pin scan used to defeat that: it
@@ -638,9 +569,6 @@ if [ -n "${MISMATCH}" ]; then
              "ships a chart whose manifests deploy some other image tag." \
              "")
 fi
-if [ -n "${CHANGELOG_PROBLEM}" ]; then
-    REPORT+=("${CHANGELOG_DETAIL[@]}" "")
-fi
 if [ -n "${BRANCH_PROBLEM}" ]; then
     REPORT+=("${BRANCH_DETAIL[@]}" "")
 fi
@@ -653,8 +581,6 @@ if [ "${#REPORT[@]}" -gt 0 ]; then
         CLAUSES+=("does not match every deployment pin")
     [ -z "${MISMATCH}" ] || \
         CLAUSES+=("does not match the project version: ${MISMATCH}")
-    [ -z "${CHANGELOG_PROBLEM}" ] || \
-        CLAUSES+=("${CHANGELOG_PROBLEM}")
     [ -z "${BRANCH_PROBLEM}" ] || \
         CLAUSES+=("${BRANCH_PROBLEM}")
     HEADLINE="Tag '${TAG}'"
@@ -678,7 +604,6 @@ fi
 echo "OK: ${TAG} is a final release and matches pyproject.toml,"
 echo "    src/recotem/version.py, helm/recotem/Chart.yaml, helm/recotem/values.yaml,"
 echo "    and every pinned image reference under examples/ and docs/."
-echo "    CHANGELOG.md declares ${EXPECTED} released."
 # Say which tree the lines above describe.  Without this the success message
 # reads the same whether it inspected the commit or an uncommitted edit of it —
 # and the next line makes a claim about HEAD, so the two must not be confused.

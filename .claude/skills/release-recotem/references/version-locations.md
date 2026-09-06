@@ -86,6 +86,12 @@ nothing else** — the script does not see it, so that step is not optional:
 |---|---|
 | `docs/deployment/docker.md` the "already pin `X.Y.Z`" sentence | prose, matching no pattern the script scans for |
 
+And one location is deliberately **not** bumped at all:
+
+| Never bumped | Why |
+|---|---|
+| `docs/upgrading.md` — `ghcr.io/codelibs/recotem:X.Y.Z` | its pins name the release being upgraded *from*. `check-release-tag.sh` skips this file for that reason; bumping it makes the page say the image it is warning about is the one you are shipping. |
+
 | File | What to change |
 |------|----------------|
 | `helm/recotem/Chart.yaml` | `version:` and `appVersion:` |
@@ -166,8 +172,9 @@ manifests on the last released version, and this block would flag them.
 #    check-release-tag.sh is authoritative for pyproject.toml, version.py,
 #    helm/recotem/Chart.yaml (version: and appVersion:) and
 #    helm/recotem/values.yaml (image.tag), plus the ghcr.io pins under
-#    examples/ and docs/ and the app.kubernetes.io/version label under
-#    examples/: it is the same script the `guard` job of both publish.yml and
+#    examples/ and docs/ (except docs/upgrading.md — see "Never bumped" above)
+#    and the app.kubernetes.io/version label under both of those trees, not
+#    just examples/: it is the same script the `guard` job of both publish.yml and
 #    docker.yml runs at the tag, it fails closed, and it checks every one of
 #    them against the tag *together* — so it catches a partial bump
 #    (pyproject.toml moved, version.py not; or the package moved and the chart

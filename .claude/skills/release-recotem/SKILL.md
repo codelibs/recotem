@@ -467,6 +467,39 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    excludes every `X.Y/` directory, and that the root front page still renders
    the hero rather than a preview banner.
 
+   **Then check the version button the reader actually sees.** Step 6's two
+   greps are path-only *by design* — they match `2.1/` with a trailing slash,
+   because after the promote the bare string `2.1` legitimately survives as
+   `currentVersion` and as a menu label. So neither of them, and not the build
+   either, can see a `currentVersion` ternary whose stable arm was left on the
+   outgoing version. That mutation renders **`2.0`** on every page of the tree
+   that just became stable, in both languages, with all three checks green:
+
+   ```
+   currentVersion stable arm left on '2.0'   grep 2.1/ : pass   grep 2.0/ : pass   build: 0   rendered: 2.0
+   ternary arms rotated (all tokens kept)    grep 2.1/ : pass   grep 2.0/ : pass   build: 0   rendered: 2.0
+   isJa left on '2.1/ja/'                    grep 2.1/ : FAIL   grep 2.0/ : pass   build: 0   rendered: 2.1
+   ```
+
+   The third row is the case step 6 warns about, and its grep does catch it.
+   The first two are the label, which nothing was watching. Assert the rendered
+   string, on one page per locale:
+
+   ```bash
+   MM=${NEW%.*}          # 2.1.0 -> 2.1
+   BAD=""
+   for f in docs/security.html ja/docs/operations.html; do
+     grep -oE 'class="version-button"[^>]*>[^<]*' ".vitepress/dist/$f" \
+       | grep -qE ">[[:space:]]*${MM}[[:space:]]*$" || BAD="$BAD $f"
+   done
+   [ -z "$BAD" ] || { echo "FAIL: version switcher does not read $MM on:$BAD"; exit 1; }
+   echo "OK: the promoted tree's version button reads $MM"
+   ```
+
+   Both locales, because `isJa` decides which link set the switcher uses and a
+   JA-only regression is exactly the one step 6 calls "the one that gets
+   missed".
+
 ### Phase 4B — Bump the version pins
 
 The docs repo carries its own copies of the deployment docs, whose version pins

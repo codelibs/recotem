@@ -140,7 +140,7 @@ class EchoSource:
    no `recipe.schema` columns to satisfy at all (see
    [recipe-reference.md](recipe-reference.md#features)).
 
-6. **`fetch()` must raise `DataSourceError`** for any external or transient failure (auth errors, network errors, query errors, empty results). `DataSourceError` is mapped to exit code 3. Any other exception surfaces as exit code 1. Wrap third-party exceptions explicitly:
+6. **`fetch()` must raise `DataSourceError`** for any external or transient failure (auth errors, network errors, query errors, empty results). `DataSourceError` is mapped to exit code 3. Any other exception raised from `__init__`, `probe()` or `fetch()` is wrapped by Recotem and **also** reported as exit code 3 — by `train` (as `Data fetch failed: <exc>`) and by `validate` (as `DataSource probe failed [source]: <exc>`) alike, so the two commands agree on the same failure. Wrapping is therefore about the *message*, not the exit code: an unwrapped exception reaches the operator as the third-party library's own wording, which names neither the extra nor the credential that is missing. Wrap third-party exceptions explicitly:
 
    ```python
    def fetch(self, ctx: FetchContext) -> pd.DataFrame:
@@ -164,7 +164,7 @@ class EchoSource:
        self.config = config
    ```
 
-   This ensures missing extras produce a clear `DataSourceError` mentioning the required extra by name, rather than an `ImportError` with exit code 1.
+   This ensures missing extras produce a clear `DataSourceError` mentioning the required extra by name. An unwrapped `ImportError` reports the same exit code 3, but reaches the operator as `No module named 'my_optional_dep'` — which names neither the extra nor the fix.
 
 ## Package structure
 

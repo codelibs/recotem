@@ -183,8 +183,8 @@ each with its own `recotem.datasources` entry point — into a bare
 | `type_name` collides with another installed plugin | 2 | 2 |
 | `__init__` raises `DataSourceError` | 3 | 3 |
 | `__init__` raises any other exception | 3 | 3 |
-| `probe()` raises any exception | 3 | 3 |
-| `probe()` raises `HttpFetchError` (or wraps one) | 7 | 7 |
+| `probe()` raises any exception | 0 ‡ | 3 |
+| `probe()` raises `HttpFetchError` (or wraps one) | 0 ‡ | 7 |
 | `fetch()` raises `DataSourceError` | 3 | 0 † |
 | `fetch()` raises any other exception | 3 | 0 † |
 | `fetch()` returns something that is not a DataFrame | 3 | 0 † |
@@ -194,7 +194,14 @@ each with its own `recotem.datasources` entry point — into a bare
 `probe_columns()` hooks, so a plugin that defines neither validates clean and
 fails at train time. That is the argument for implementing `probe()`.
 
-Three things follow that are easy to get wrong:
+‡ `train` never calls `probe()` — there is no `.probe(` call anywhere in
+`src/recotem/training/`. A plugin whose `probe()` raises but whose `fetch()`
+works therefore *trains successfully and writes a signed artifact*, while
+`validate` on the identical recipe reports 3 (or 7). The two hooks are checked
+by different commands, so a failure that only one of them can reach is
+expected, not a Recotem bug.
+
+Four things follow that are easy to get wrong:
 
 * **Every contract violation is exit 2, not 3.** Plugin discovery runs inside
   recipe loading, so the registry's `DataSourceError` is re-raised as a
@@ -205,8 +212,14 @@ Three things follow that are easy to get wrong:
   the 2/3 split upward is 7, which a `HttpFetchError` keeps through the
   `__cause__` chain — so an SSRF-guard refusal inside a plugin still reports 7
   rather than being flattened.
-* **`train` and `validate` agree on every row.** If you find a plugin failure
-  where they disagree, that is a Recotem bug, not a plugin bug.
+* **`train` and `validate` agree on every failure they can both reach.** The
+  rows they disagree on are exactly the rows one of them never executes: `†`
+  (`validate` skips `fetch()`) and `‡` (`train` skips `probe()`). Anywhere both
+  commands run the same code and report different exit codes, that *is* a
+  Recotem bug.
+* **`probe()` is not a gate on `train`.** Putting a check only in `probe()`
+  buys you a `validate` failure and nothing else. A precondition that must stop
+  a training run has to be enforced in `__init__` or `fetch()`.
 
 ### One broken plugin breaks every recipe on the host
 
@@ -420,9 +433,12 @@ use `**kwargs: Any` if you want to be future-proof.
 The entry-point key in `[project.entry-points."recotem.datasources"]` is
 informational only (used in error messages); the discriminator is the
 class's `type_name`. If two installed plugins both declare
-`type_name = "csv"`, both `recotem train` and `recotem serve` exit 3 at
-startup with both fully-qualified class names — uninstall one or rename
-its `type_name`.
+`type_name = "csv"`, `recotem train` and `recotem validate` exit **2** with
+both fully-qualified class names — discovery runs inside recipe loading, so
+the registry's `DataSourceError` arrives as a `RecipeError`. `recotem serve`
+does **not** exit: it logs the same error per recipe, then
+`recipes_directory_loaded_lenient` with `ok=0, errors=1`, and keeps running
+with those recipes unloaded. Uninstall one plugin or rename its `type_name`.
 
 ## Validation in `recotem validate`
 

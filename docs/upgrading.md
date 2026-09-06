@@ -59,7 +59,25 @@ recipe keeps serving.
 ### On Kubernetes, the blast radius depends on your probes
 
 `/v1/health` is count-based: it returns `degraded` with HTTP **503** whenever
-`loaded < total` — that is, whenever *any* recipe failed to load.
+`loaded < total`. That covers the version-skew case this page is about — a
+recipe whose *artifact* will not load is counted in `total`, so the endpoint
+fires.
+
+It is **not** the same as "any recipe failed". A recipe file that cannot be
+parsed at all is *skipped* rather than counted: it is excluded from both
+`total` and `loaded` and reported under a separate `skipped` count, so
+`/v1/health` stays **200 `ok`** and `/v1/health/details` stays `ok` too. Both
+failures leave that recipe's verbs unavailable, but only the artifact one is
+visible in the counts. Measured, one loaded recipe alongside one broken one:
+
+```
+artifact missing   /v1/health 503 degraded   {"total":2,"loaded":1}
+YAML unparseable   /v1/health 200 ok         {"total":1,"loaded":1,"skipped":1}
+```
+
+The `skipped` field is the signal in the second case — see
+[Unparseable recipe files](operations.md#unparseable-recipe-files), which also
+explains why the obvious alert (`recotem_model_loaded == 0`) fires on both.
 
 **No probe in the 2.1.0 chart reads it.** Startup and readiness both read
 `/v1/health/ready`, which is `200` while at least one recipe is loaded, so a
@@ -95,6 +113,114 @@ a node drain, an eviction, a scale-up — turns it into the startup case above,
 potentially long after the deploy that caused it. Alert on that counter and
 scrape `/v1/health/details`; a green `/v1/health` is not evidence the swap
 worked. [operations.md](operations.md) calls this "degraded now, down later".
+
+### Azure URIs changed in both directions
+
+2.1.0 rewrote how `source.path` and `item_metadata.path` treat an `@` in an
+Azure URI. Both halves are user-visible against 2.0.0, and one of them will
+stop a recipe that used to load. Measured through `load_recipe` at `v2.0.0`
+and at 2.1.0:
+
+| scheme | form | 2.0.0 | 2.1.0 |
+|---|---|---|---|
+| `abfss://` | `container@account…` (addressing) | rejected | **accepted** |
+| `abfs://` | `container@account…` (addressing) | rejected | **accepted** |
+| `az://` | `container@account…` (addressing) | accepted | accepted |
+| `abfss://` | `user:pass@…` (credentials) | rejected | rejected |
+| `abfs://` | `user:pass@…` (credentials) | rejected | rejected |
+| `az://` | `user:pass@…` (credentials) | **accepted** | **rejected** |
+| `s3://` | `user:pass@…` (credentials) | rejected | rejected |
+
+**The breaking row is `az://` with a real `user:pass@` pair.** `az` was absent
+from the credentials check at 2.0.0, so such a URI loaded silently. It now
+exits **2** (`RecipeError`, category `security`) with `'source.path' contains
+embedded credentials in the URI. Use environment-based authentication
+instead.`
+
+Grep your recipes for an `az://` path with a colon before the `@`. **If you
+find one, it needs two separate things, and the second is easy to skip.**
+
+1. **Fix the recipe.** Move the secret into the environment — the Azure fsspec
+   backends read credentials from `AZURE_STORAGE_*` or a connection string.
+   That is what stops the exit 2.
+2. **Treat that credential as disclosed: rotate the storage account key, and
+   purge or rotate the log archives that may hold it.** Under 2.0.0 the URI was
+   written to the logs *in the clear*, on every run. Measured on 2.0.0 with a
+   marked secret, one `recotem train` emitted it **four times** — once at INFO
+   in the source-fetch event, and again inside the error text. The redaction
+   helper that strips `user:pass@` from logged URLs only covered
+   `http`/`https`/`ftp`/`ftps`, and the structlog DSN scrubber behind it did not
+   list `az` either. The generic high-entropy scrubbers are shape-based, so
+   whether a given key was caught depended on the key: across ten secrets that
+   were not chosen to be catchable, seven went through — including every
+   human-chosen password, and about half of the genuine random account keys,
+   because standard base64's `+` and `/` break the 43-character run the pattern
+   looks for.
+
+   Moving the secret fixes the recipe going forward. It does nothing about logs
+   already shipped to an aggregator, so do not stop at step 1.
+
+Under 2.1.0 the same recipe never reaches a log line — it is refused at load,
+and the marked secret appears **zero** times in the output.
+
+This applies only if you actually had such a recipe. If your `az://` paths carry
+no colon before the `@`, they are the addressing form, nothing was logged, and
+there is nothing to rotate.
+
+The other two changed rows are a fix, and need no action: the canonical
+`container@account.dfs.core.windows.net` form that Azure's own documentation
+uses was being refused on `abfs://` / `abfss://` as if it were a credential.
+If you worked around that by rewriting those paths, you can now write them the
+documented way. The rule 2.1.0 applies to all three Azure aliases is: a bare
+`container@account` is addressing and is accepted; a real `user:pass@` pair is
+refused.
+
+### `split.scheme: random` with a `time_column` now splits differently
+
+This one needs no action, but it will move a number you may be watching.
+
+Under 2.0.0 the pipeline forwarded `schema.time_column` to the splitter for
+*any* recipe that declared one, and irspack switches to a per-user **recency**
+holdout the moment it receives a time column. So a recipe asking for `random`
+while also declaring a `time_column` silently got a `time_user` split. 2.1.0
+forces `time_column` to `None` under `random`, which is what the field is
+documented to do.
+
+Measured, with irspack held constant so the difference is recotem's and not
+irspack's — the within-user time rank of the held-out interactions, where 1.0
+is the user's most recent:
+
+| what the version passes to irspack | mean time rank | share in the user's last 20% |
+|---|---|---|
+| `time_column="ts"` — 2.0.0 | 0.925 | **100%** |
+| `time_column=None` — 2.1.0 | 0.51 – 0.54 | 18–21% (i.e. uniform) |
+
+Identical under irspack 0.4.2 and 0.5.2. Instrumenting the call site confirms
+the argument itself changed: for one recipe with `scheme: random` and
+`time_column: ts`, 2.0.0 passes `"ts"` and 2.1.0 passes `None`.
+
+**Nothing errors and no exit code changes.** The recipe stays valid, training
+succeeds, and the only visible effect is that the validation set the Optuna
+search scores against is a different set of interactions — so `best_score` can
+move on the first retrain after the upgrade with nothing in the recipe touched.
+**That is not a regression and not something to chase.** It is also not a
+like-for-like comparison: a `best_score` from before the upgrade and one from
+after were computed against different holdouts, so do not diff them. See
+[operations.md](operations.md#what-best_score-is-and-is-not).
+
+If you actually wanted the recency holdout, say so explicitly — set
+`split.scheme: time_user`, which is what 2.0.0 was giving you by accident.
+
+**One of the six shipped example recipes is affected:**
+`examples/sql-sqlite/recipe.yaml` has carried this exact pairing
+(`scheme: random` with `time_column: event_at`) unchanged since 2.0.0. Of the
+other five, two use `time_user`, one sets no scheme, and two use `random` with
+no time column at all — so they are genuinely unaffected.
+
+That matters because `sql-sqlite` is the example the SQL data-source
+documentation points at. If you started from it, you have a recipe whose
+`best_score` moves on the first retrain after upgrading, for a reason nothing
+in the recipe explains. Grep your own recipes for the same combination.
 
 ### Upgrade procedure
 
@@ -132,10 +258,32 @@ rolled back at all** and must be retrained without the block to run on 2.0.0.
 
 ### Unchanged by this upgrade
 
-Signing keys and the key-rotation procedure; the artifact container itself
-(magic bytes, `FORMAT_VERSION` 1, and the header layout); and every existing
-recipe, which stays valid as written. Every recipe's `recipe_hash` does change,
-but nothing gates on it.
+Signing keys and the key-rotation procedure; and the artifact container itself
+(magic bytes, `FORMAT_VERSION` 1, and the header layout). A 2.0.0-signed
+artifact verifies under 2.1.0 and a 2.1.0-signed one verifies under 2.0.0, with
+the same key. Every recipe's `recipe_hash` does change, but nothing gates on it.
+
+**Three recipes' worth of exceptions, and they need different things from you.**
+Two `path` forms that loaded under 2.0.0 are now refused with **exit 2** and
+must be fixed *before* you upgrade. A third recipe shape keeps working but
+changes what it measures — nothing to fix, but see
+[`split.scheme: random` with a `time_column`](#splitscheme-random-with-a-time_column-now-splits-differently)
+so the moved number does not read as a regression.
+
+Fix these two before upgrading:
+
+- **`az://` carrying a `user:pass@` pair** — see
+  [Azure URIs](#azure-uris-changed-in-both-directions) above. Move the secret
+  into the environment **and rotate it**: 2.0.0 logged that URI in the clear on
+  every run, so the key must be treated as disclosed.
+- **`arrow_hdfs://` and `async_wrapper://`** — the only two protocols fsspec
+  registers whose names contain an underscore. RFC 3986 forbids `_` in a
+  scheme, so `urlparse` reported no scheme at all and 2.0.0's allow-list read
+  these as bare local paths and let them through, while `fsspec.open` routed
+  them to a real remote backend. 2.1.0 derives the scheme the way fsspec does
+  and refuses them, as it always did for the equivalent `hdfs://` form. This
+  was an allow-list bypass, so the refusal is the point — but a recipe that
+  relied on it stops loading. Use a supported scheme.
 
 One thing in that area *did* change: a malformed `RECOTEM_SIGNING_KEYS` now
 exits **8** (`_EXIT_CONFIG`) where 2.0.0 exited **5** (`_EXIT_ARTIFACT`), on

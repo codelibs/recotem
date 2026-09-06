@@ -571,8 +571,49 @@ the readinessProbe passes (default `initialDelaySeconds: 10`). With many
 recipes or large artifacts, increase `initialDelaySeconds` and tune
 `maxSurge` / `maxUnavailable` so the rollout does not run below the
 desired-replica count. The watcher polls on a shared interval inside each
-pod — when `train` writes a new artifact, **all** replicas pick it up
-within `RECOTEM_WATCH_INTERVAL` seconds; no rollout is needed for hot-swap.
+pod, so a new artifact is picked up without a rollout.
+
+**`RECOTEM_WATCH_INTERVAL` does not bound when the *other* replicas see it.**
+The watcher decides by `stat`ing `output.path`, and on a network filesystem
+that answer comes from the client's attribute cache rather than from the
+server. Measured on a 3-node cluster with the shipped chart,
+`RECOTEM_WATCH_INTERVAL: "10"`, a 285 KB artifact whose load takes 7 ms, and
+the artifacts volume on an NFS-backed `ReadWriteMany` PVC with default mount
+options — time from the training job's `artifact_written` to each replica's
+`artifact_hot_swapped`, over two consecutive writes:
+
+| replica | swapped after `artifact_written` |
+|---|---|
+| on the node that ran `train` | 3.6 s, 4.0 s |
+| on any other node | 17.5 s, 22.9 s, 24.1 s, 25.5 s |
+
+The replica that shares a node with the writer sees the change immediately —
+that node's own NFS client invalidated the entry when it wrote. Every other
+node waits out its attribute cache first (`acregmin`…`acregmax` /
+`acdirmin`…`acdirmax`, 3–60 s on Linux defaults). Re-measured with the same
+chart, the same interval and the same write against a PV carrying
+`mountOptions: ["noac"]`, those off-node replicas swapped in **1.6 s and
+8.2 s** — inside the interval. The excess is the mount, not the watcher.
+
+**While the fleet is mid-swap it answers the same request two ways.** One
+`user_id` posted to `/v1/recipes/{name}:recommend` through the Service at
+~20 rps across 3 replicas got two *disjoint* top-3 lists for **21.8 s** after
+`artifact_written` — 398 requests in that window, 239 served by the old model
+and 159 by the new one, interleaved request by request as the Service
+round-robins over replicas that have swapped and replicas that have not.
+Nothing marks the transition except `model_version` in the response body (and
+the `X-Recotem-Model-Version` header), which does change per response.
+
+Consequences:
+
+- Do not derive an alert threshold or an SLO from `RECOTEM_WATCH_INTERVAL`
+  alone when the artifacts volume is a network filesystem. Either measure the
+  spread on your own mount, or mount that volume `noac` — the cost is one
+  uncached `stat` per poll per recipe, which is small next to the model load
+  it guards.
+- If a caller must not see two models inside one session, do not rely on
+  hot-swap for that guarantee: read `model_version` and pin, or roll the
+  Deployment on a new artifact instead.
 
 ### Secret rotation
 

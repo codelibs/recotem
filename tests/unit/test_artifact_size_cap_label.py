@@ -356,3 +356,112 @@ def test_size_cap_reaches_the_counter_as_its_own_label() -> None:
         "an unrecognised reason must still be coerced to 'unexpected' -- the "
         f"cardinality guard is gone. Rows: {rows}"
     )
+
+
+# ---------------------------------------------------------------------------
+# R10-P2: the startup path's reason must be the value the counter receives
+#
+# Everything above proves two things separately: `_try_load_artifact` returns
+# "size_cap", and `inc_artifact_load_failure` carries "size_cap" when handed it.
+# Nothing joined them.  Rewriting `serving/app.py`'s single call site from
+# `reason=load_reason` to `reason="unexpected"` -- one token, in the line that
+# decides the label an operator's Prometheus scrape receives -- left the entire
+# suite green (2986 passed) while the exposition regressed to exactly the
+# pre-#294 output:
+#
+#   recotem_artifact_load_failures_total{reason="unexpected",recipe="overcap"} 1.0
+#
+# The watcher's identical wiring is covered incidentally, by
+# test_serving_watcher.py::test_hot_swap_version_skewed_artifact_keeps_serving_old_model.
+# The startup path had no equivalent, and it is the path a fresh `recotem serve`
+# takes -- where an over-cap model is actually met.
+#
+# This reads the label off a rendered exposition after a real `create_app` over
+# a real over-cap artifact, so it fails for every reason the two halves above
+# cannot see: a broken hand-off, a coercion that stopped consulting the
+# allow-list, a route that stopped exporting the counter.
+# ---------------------------------------------------------------------------
+
+
+def _serve_config_over_a_recipes_dir(tmp_path: Path) -> ServeConfig:
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir(exist_ok=True)
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = "active:" + "aa" * 32
+    cfg.recipes_dir = str(recipes_dir)  # type: ignore[attr-defined]
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1", "*"]
+    cfg.metrics_enabled = True
+    return cfg
+
+
+def test_startup_size_cap_reaches_the_exposition_as_size_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real over-cap artifact at startup, read back off `/v1/metrics`."""
+    prometheus_client = pytest.importorskip("prometheus_client")
+    assert prometheus_client  # the metrics extra registers the counter
+
+    from fastapi.testclient import TestClient
+
+    import recotem.serving.metrics as metrics_mod
+    from recotem.serving.app import create_app
+
+    monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "1")
+    metrics_mod._ensure_initialized()
+    if metrics_mod._ARTIFACT_LOAD_FAILURES is None:
+        pytest.skip("metrics are not enabled in this environment")
+
+    artifact = tmp_path / "overcap.recotem"
+    write_artifact(
+        payload_obj={"blob": "x" * 200_000},
+        header_dict={"recipe_name": "overcap"},
+        key_ring=_keyring(),
+        fs_path=str(artifact),
+        versioning="always_overwrite",
+    )
+
+    cfg = _serve_config_over_a_recipes_dir(tmp_path)
+    (Path(cfg.recipes_dir) / "overcap.yaml").write_text(  # type: ignore[arg-type]
+        f"""\
+name: overcap
+source:
+  type: csv
+  path: {tmp_path / "data.csv"}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms:
+    - TopPop
+output:
+  path: {artifact}
+""",
+        encoding="utf-8",
+    )
+    # Well under the artifact's real size, so the payload cap refuses it.
+    cfg.max_artifact_bytes = 1 << 30
+    cfg.max_payload_bytes = 1024
+
+    with TestClient(create_app(cfg)) as client:
+        body = client.get("/v1/metrics").text
+
+    rows = [
+        line
+        for line in body.splitlines()
+        if line.startswith("recotem_artifact_load_failures_total")
+        and 'recipe="overcap"' in line
+    ]
+    assert rows, (
+        "the over-cap artifact produced no artifact_load_failures row at all; "
+        "this guard is watching nothing"
+    )
+    labels = {line.split('reason="', 1)[1].split('"', 1)[0] for line in rows}
+    assert labels == {"size_cap"}, (
+        "the startup load path's reason label did not reach the Prometheus "
+        f"exposition as 'size_cap'; the scrape carries {sorted(labels)}. "
+        "'unexpected' here means the classified reason is not what "
+        "inc_artifact_load_failure was handed -- per-reason alerting on an "
+        f"over-cap model is impossible. Rows: {rows}"
+    )

@@ -670,7 +670,7 @@ PVC, by scaling the NFS server to zero replicas mid-run:
 |---|---|---|
 | `serve`, already running | keeps answering `:recommend` (10/10 `200`), stays `1/1` Ready, 0 restarts, 2–3 millicores | `artifact_stat_timeout` (WARN, per recipe, one scan every ~20 s), then `artifact_stat_failed` naming `OSError [Errno 116] Stale file handle` |
 | `serve`, new pod | never starts | `FailedMount ... exit status 32` on the pod; the rollout stalls |
-| `train`, mid-run | **blocks in the artifact write for as long as the outage lasts** — measured 23 min 19 s at 1 millicore — then fails | nothing at all while blocked: the last log line is `final_model_trained`, no error, no progress. On recovery, `exit 1` |
+| `train`, mid-run | **blocks in the artifact write for as long as the outage lasts** — measured 23 min 19 s at 1 millicore, and 6 min 52 s in a second run — then completes when storage returns | nothing at all while blocked: the last log line is `final_model_trained`, no error, no progress |
 
 The asymmetry is deliberate on one side only. The watcher stats artifacts on a
 worker thread with a wall-clock timeout and reports the ones that hang
@@ -681,26 +681,38 @@ timeout rather than the process. The artifact write
 those blocks in the kernel, uninterruptibly, for as long as the server stays
 away.
 
-**And the run does not simply resume when storage comes back.** With the file
-server restored, the blocked `os.makedirs(dest_dir, exist_ok=True)` returned by
-raising, and the run ended like this:
+**What the run does when storage comes back depends on the mount, and used to
+decide the run.** If the file server returns with the same export identity the
+client's handle survives and the blocked write simply finishes. If it does not
+— the server was rebuilt, or failed over, so the export's `fsid` changed — the
+node's mount answers the next metadata call with `ESTALE`. That used to end the
+run:
 
 ```console
 Training failed: [Errno 17] File exists: '/artifacts'
 RECOTEM_EXIT=1
 ```
-```json
-{"code": "internal_error", "exit_code": 1,
- "error": "[Errno 17] File exists: '/artifacts'", "event": "train_error"}
-```
 
-`exist_ok=True` suppresses `FileExistsError` only when the `isdir` check that
-follows it succeeds; against a mount that has just come back that check does
-not, so the error is re-raised. It is then unmapped, so it lands on **exit 1**,
-which the table above calls "Unexpected error — Retry". Retrying is the right
-action, but the message an operator is left holding is a `FileExistsError` on a
-directory that plainly exists, with a traceback through `recotem/artifact/io.py`
-and nothing naming the file server.
+`os.makedirs(dir, exist_ok=True)` suppresses the `FileExistsError` from its
+`mkdir` only when the *single* `os.path.isdir()` call that follows returns
+True, and `os.path.isdir` reports False for any `OSError`. One stale `stat` was
+therefore enough to discard a completed training run — and because the artifact
+write is the first metadata access after minutes of pure-CPU tuning, that call
+is exactly where a handle idled through the search goes stale. The failure was
+also not a one-off at the moment of recovery: measured on a 3-node cluster
+25 minutes *after* the file server returned, `os.path.isdir('/artifacts')`
+answered False while `os.stat` on the same path succeeded with mode `0o42777`
+and the directory was readable throughout. With the chart's
+`restartPolicy: OnFailure` the Job retried, and each retry paid a full data
+fetch, Optuna search and final refit before dying on the same line: **five
+consecutive runs discarded.**
+
+Recotem now re-checks that path once before giving up, so a stale `stat` costs
+one syscall rather than a training run. A `dest_dir` that is genuinely not a
+directory still fails, because the re-check fails too. What remains is the
+stall: nothing in the process bounds it, and a write that returns a real I/O
+error still surfaces as `exit 1` (`internal_error`) with a traceback through
+`recotem/artifact/io.py` and nothing naming the file server.
 
 Consequences on the shipped chart:
 

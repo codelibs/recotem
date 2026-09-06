@@ -3446,6 +3446,17 @@ def test_output_path_rejects_chained_scheme_with_allow_listed_head() -> None:
     """
     from recotem.recipe.loader import _validate_input_path, _validate_output_path
 
+    # Anti-vacuity.  Every assertion below is inside a loop over this list, so
+    # emptying it leaves the test green with nothing exercised -- measured at
+    # 156 passed, guard otherwise intact.  This assert bounds that hole; it does
+    # not close it.  The list can still be *thinned* rather than switched off,
+    # and thinning is not caught here at all: a reverted output call site fails
+    # 3 tests with the list full and 2 with it empty, because two
+    # literal-string tests below catch the revert independently of this list.
+    assert CHAINED_WITH_ALLOWED_HEAD, (
+        "the chained-path list is empty; this guard is watching nothing"
+    )
+
     for path in CHAINED_WITH_ALLOWED_HEAD:
         with pytest.raises(RecipeError, match="chained scheme"):
             _validate_output_path(path, "output.path")

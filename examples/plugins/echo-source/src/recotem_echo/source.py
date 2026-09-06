@@ -14,7 +14,8 @@ Contract summary
 5. ``fetch(self, ctx: FetchContext) -> pd.DataFrame`` must return a DataFrame
    with at least the columns named in the recipe ``schema`` block.
 6. Raise ``recotem.datasource.base.DataSourceError`` for any external/transient
-   failure.  Other exceptions surface as exit 1.
+   failure.  Any other exception is wrapped by recotem and reports the same
+   exit 3 -- raising it yourself is what makes the message name the cause.
 7. Do NOT import optional dependencies at module top-level; defer imports to
    ``__init__`` so a missing extra yields a clear error message.
 

@@ -962,3 +962,70 @@ def test_write_is_silent_when_the_artifact_fits_the_serve_caps(
     """
     events = _write_and_capture(tmp_path, {"blob": "x" * 4096})
     assert not [e for e in events if e["event"].endswith("_exceeds_serve_cap")]
+
+
+# ---------------------------------------------------------------------------
+# A transient stat failure on the destination directory must not lose the write
+# ---------------------------------------------------------------------------
+
+
+def test_write_atomic_survives_one_stale_isdir_on_the_destination_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single failing ``isdir`` must not discard a completed training run.
+
+    ``os.makedirs(dir, exist_ok=True)`` re-raises the ``FileExistsError`` from
+    its ``mkdir`` whenever the one ``os.path.isdir`` call that follows returns
+    False, and ``os.path.isdir`` returns False for any ``OSError``.  On an
+    NFS-backed artifacts volume that call is the first metadata access after
+    minutes of pure-CPU tuning and can answer ``ESTALE`` once, so the write
+    that carries the trained model dies on a directory that is present and
+    readable.  Measured on a real cluster: five consecutive runs discarded.
+    """
+    import os as _os
+
+    from recotem.artifact.io import _write_atomic
+
+    dest_dir = tmp_path / "artifacts"
+    dest_dir.mkdir()
+    dest = str(dest_dir / "model.recotem")
+
+    real_isdir = _os.path.isdir
+    calls: list[str] = []
+
+    def _flaky_isdir(path: str) -> bool:
+        calls.append(str(path))
+        # Fail exactly once for the destination directory, as a stale NFS
+        # handle does, then answer correctly from the next call on.
+        if str(path) == str(dest_dir) and calls.count(str(dest_dir)) == 1:
+            return False
+        return real_isdir(path)
+
+    monkeypatch.setattr(_os.path, "isdir", _flaky_isdir)
+
+    _write_atomic(None, dest, b"payload", is_local=True)  # type: ignore[arg-type]
+
+    assert Path(dest).read_bytes() == b"payload"
+    # The tolerance path must actually have been exercised: makedirs asks once
+    # and is answered False, the re-check asks again.
+    assert calls.count(str(dest_dir)) >= 2, calls
+
+
+def test_makedirs_exist_ok_still_raises_when_the_path_is_not_a_directory(
+    tmp_path: Path,
+) -> None:
+    """The tolerance must not swallow a real collision.
+
+    Asserted against the helper rather than through ``_write_atomic``: a
+    ``dest_dir`` that is an ordinary file makes the *later* ``mkstemp`` raise
+    ``NotADirectoryError`` too, so a ``_write_atomic``-level assertion passes
+    even when the guard swallows everything.  This calls the guard directly so
+    the failure it is responsible for is the one being measured.
+    """
+    from recotem.artifact.io import _makedirs_exist_ok
+
+    collision = tmp_path / "artifacts"
+    collision.write_text("i am a file, not a directory")
+
+    with pytest.raises(FileExistsError):
+        _makedirs_exist_ok(str(collision))

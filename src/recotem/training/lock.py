@@ -52,6 +52,7 @@ from urllib.parse import urlparse
 
 import structlog
 
+from recotem._makedirs import makedirs_exist_ok
 from recotem.config import ConfigError, get_lock_dir
 
 logger = structlog.get_logger(__name__)
@@ -272,7 +273,16 @@ def recipe_lock(
     else:
         lock_path = Path(output_str + ".lock")
     try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        # Not ``lock_path.parent.mkdir(parents=True, exist_ok=True)``: that
+        # spelling re-raises its own ``FileExistsError`` whenever the single
+        # ``is_dir()`` check behind ``exist_ok`` answers False, and it answers
+        # False for any ``OSError``.  For a local ``output.path`` this
+        # directory is the artifacts directory, so on a network filesystem one
+        # transient ``stat`` used to end the run with
+        # ``[Errno 17] File exists: '/artifacts'`` — mapped to exit 1,
+        # ``_EXIT_UNKNOWN`` — on a directory that is present and readable.
+        # ``makedirs_exist_ok`` re-checks once; see its docstring.
+        makedirs_exist_ok(str(lock_path.parent))
     except OSError as _mkdir_exc:
         # Same misconfiguration as the unwritable-path open below, one step
         # earlier: a mistyped RECOTEM_LOCK_DIR or a read-only mount can make

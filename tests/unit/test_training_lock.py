@@ -998,14 +998,14 @@ def test_mkdir_erofs_raises_lock_permission_error(tmp_path: Path, monkeypatch) -
     """
     import errno as _errno
 
-    original_mkdir = Path.mkdir
+    original_makedirs = os.makedirs
 
-    def _fake_mkdir(self, *args, **kwargs):
-        if str(tmp_path) in str(self):
+    def _fake_makedirs(name, *args, **kwargs):
+        if str(tmp_path) in str(name):
             raise OSError(_errno.EROFS, os.strerror(_errno.EROFS))
-        return original_mkdir(self, *args, **kwargs)
+        return original_makedirs(name, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "mkdir", _fake_mkdir)
+    monkeypatch.setattr(os, "makedirs", _fake_makedirs)
 
     with pytest.raises(LockPermissionError) as exc_info:
         with recipe_lock(tmp_path / "sub" / "erofs_mkdir.recotem"):
@@ -1019,14 +1019,14 @@ def test_mkdir_enospc_still_propagates_as_oserror(tmp_path: Path, monkeypatch) -
     """The mkdir guard must stay errno-scoped, not swallow every OSError."""
     import errno as _errno
 
-    original_mkdir = Path.mkdir
+    original_makedirs = os.makedirs
 
-    def _fake_mkdir(self, *args, **kwargs):
-        if str(tmp_path) in str(self):
+    def _fake_makedirs(name, *args, **kwargs):
+        if str(tmp_path) in str(name):
             raise OSError(_errno.ENOSPC, "No space left on device")
-        return original_mkdir(self, *args, **kwargs)
+        return original_makedirs(name, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "mkdir", _fake_mkdir)
+    monkeypatch.setattr(os, "makedirs", _fake_makedirs)
 
     with pytest.raises(OSError) as exc_info:
         with recipe_lock(tmp_path / "sub" / "enospc_mkdir.recotem"):
@@ -1355,4 +1355,83 @@ def test_windows_open_eacces_returns_none(tmp_path: Path, monkeypatch) -> None:
     result = lock_mod._try_acquire_windows(tmp_path / "model.recotem.lock")
     assert result is None, (
         "EACCES must cause _try_acquire_windows to return None (treated as contention)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A transient stat failure on the lock directory must not end the run
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_lock_survives_one_stale_isdir_on_the_lock_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One failing ``isdir`` on the artifacts directory must not fail the run.
+
+    For a local ``output.path`` the lock lives at ``<output_path>.lock``, so
+    the directory created here is the artifacts directory itself.  Both
+    ``os.makedirs(..., exist_ok=True)`` and
+    ``Path.mkdir(parents=True, exist_ok=True)`` suppress the ``FileExistsError``
+    from their ``mkdir`` only while the *single* is-a-directory check that
+    follows returns True, and that check returns False for any ``OSError``.  On
+    a network filesystem one stale ``stat`` therefore used to end the run with
+    ``[Errno 17] File exists: '<artifacts dir>'`` — reported as exit 1,
+    ``_EXIT_UNKNOWN`` — on a directory that is present and readable.
+    """
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    output_path = artifacts / "model.recotem"
+
+    real_isdir = os.path.isdir
+    seen: list[str] = []
+
+    def _flaky_isdir(path):  # noqa: ANN001, ANN202
+        seen.append(str(path))
+        # Fail exactly once for the lock's directory, as a stale NFS handle
+        # does, then answer correctly from the next call on.
+        if str(path) == str(artifacts) and seen.count(str(artifacts)) == 1:
+            return False
+        return real_isdir(path)
+
+    monkeypatch.setattr(os.path, "isdir", _flaky_isdir)
+
+    with recipe_lock(output_path) as acquired:
+        assert acquired is True
+
+    assert (artifacts / "model.recotem.lock").exists()
+    # The tolerance path must actually have been exercised: makedirs asks once
+    # and is answered False, the re-check asks again.
+    assert seen.count(str(artifacts)) >= 2, seen
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_lock_still_fails_when_the_lock_directory_is_a_regular_file(
+    tmp_path: Path,
+) -> None:
+    """The tolerance must not swallow a real collision.
+
+    An ancestor of ``output.path`` that is an ordinary file is a genuine
+    system problem and keeps propagating, which is what the errno allow-list
+    around this call site already says.
+
+    The assertion is on the **exception type**, not merely on "something was
+    raised".  Asserting only ``OSError`` here is vacuous: if the re-check is
+    widened into an unconditional ``except FileExistsError: pass`` the
+    directory creation succeeds silently and the *later* ``os.open`` of the
+    sentinel raises ``NotADirectoryError`` instead — an ``OSError`` too, so a
+    type-agnostic assertion passes with the guard entirely removed.  Measured:
+    with ``except FileExistsError: pass`` this test passed until the
+    ``FileExistsError`` assertion was added.
+    """
+    collision = tmp_path / "artifacts"
+    collision.write_text("i am a file, not a directory")
+    output_path = collision / "model.recotem"
+
+    with pytest.raises(FileExistsError) as excinfo:
+        with recipe_lock(output_path):
+            pass  # pragma: no cover - the lock must not be acquired
+
+    assert not isinstance(excinfo.value, LockPermissionError), (
+        "a path collision is not a permission problem and must not be relabelled"
     )

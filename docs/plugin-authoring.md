@@ -140,7 +140,7 @@ class EchoSource:
    no `recipe.schema` columns to satisfy at all (see
    [recipe-reference.md](recipe-reference.md#features)).
 
-6. **`fetch()` must raise `DataSourceError`** for any external or transient failure (auth errors, network errors, query errors, empty results). `DataSourceError` is mapped to exit code 3. Any other exception raised from `__init__`, `probe()` or `fetch()` is wrapped by Recotem and **also** reported as exit code 3 — by `train` (as `Data fetch failed: <exc>`) and by `validate` (as `DataSource probe failed [source]: <exc>`) alike, so the two commands agree on the same failure. Wrapping is therefore about the *message*, not the exit code: an unwrapped exception reaches the operator as the third-party library's own wording, which names neither the extra nor the credential that is missing. Wrap third-party exceptions explicitly:
+6. **`fetch()` must raise `DataSourceError`** for any external or transient failure (auth errors, network errors, query errors, empty results). `DataSourceError` is mapped to exit code 3. Any other exception raised from `__init__` or `fetch()` is wrapped by Recotem and **also** reported as exit code 3 — by `train` as `Data fetch failed: <exc>` (construction happens inside the fetch step, so `__init__` reports under that wording too) and, for `__init__` only, by `validate` as `DataSource probe failed [source]: DataSource construction failed: <exc>`. `__init__` is the only hook both commands call: `validate` never calls `fetch()` and `train` never calls `probe()`, so a failure in either of those reaches one command and not the other — see [Exit codes a plugin can actually produce](#exit-codes-a-plugin-can-actually-produce). Wrapping is therefore about the *message*, not the exit code: an unwrapped exception reaches the operator as the third-party library's own wording, which names neither the extra nor the credential that is missing. Wrap third-party exceptions explicitly:
 
    ```python
    def fetch(self, ctx: FetchContext) -> pd.DataFrame:
@@ -183,18 +183,31 @@ each with its own `recotem.datasources` entry point — into a bare
 | `type_name` collides with another installed plugin | 2 | 2 |
 | `__init__` raises `DataSourceError` | 3 | 3 |
 | `__init__` raises any other exception | 3 | 3 |
-| `probe()` raises any exception | 3 | 3 |
-| `probe()` raises `HttpFetchError` (or wraps one) | 7 | 7 |
+| `probe()` raises any exception | 0 ‡ | 3 |
+| `probe()` raises `HttpFetchError` (or wraps one) | 0 ‡ | 7 |
 | `fetch()` raises `DataSourceError` | 3 | 0 † |
 | `fetch()` raises any other exception | 3 | 0 † |
 | `fetch()` returns something that is not a DataFrame | 3 | 0 † |
 | `fetch()` omits a column named in `schema:` | 3 | 0 † |
+| `fetch()` raises `HttpFetchError` (or wraps one) | 7 | 0 † |
 
 † `validate` never calls `fetch()`. It calls the optional `probe()` and
 `probe_columns()` hooks, so a plugin that defines neither validates clean and
 fails at train time. That is the argument for implementing `probe()`.
 
-Three things follow that are easy to get wrong:
+‡ `train` never calls `probe()`. It goes straight to `fetch()`, so a `probe()`
+that always raises does not stop a training run — if the fetch succeeds, the
+run succeeds and the artifact is written. Do not use `probe()` as a
+precondition check for training; put anything that must hold in `fetch()` too.
+
+**The two commands do not exercise the same code, so they do not agree on every
+row.** `validate` calls `__init__` + `probe()` + `probe_columns()`; `train`
+calls `__init__` + `fetch()`. Only `__init__` is common to both, which is why
+the `__init__` rows are the only ones where the columns match on a failure. A
+disagreement in either direction is the design, not a Recotem bug — the two
+footnotes name both directions.
+
+Two more things follow that are easy to get wrong:
 
 * **Every contract violation is exit 2, not 3.** Plugin discovery runs inside
   recipe loading, so the registry's `DataSourceError` is re-raised as a
@@ -204,9 +217,8 @@ Three things follow that are easy to get wrong:
   wrapped by Recotem on both commands and reports 3. The one code that escapes
   the 2/3 split upward is 7, which a `HttpFetchError` keeps through the
   `__cause__` chain — so an SSRF-guard refusal inside a plugin still reports 7
-  rather than being flattened.
-* **`train` and `validate` agree on every row.** If you find a plugin failure
-  where they disagree, that is a Recotem bug, not a plugin bug.
+  rather than being flattened, on whichever command reached the hook that
+  raised it.
 
 ### One broken plugin breaks every recipe on the host
 

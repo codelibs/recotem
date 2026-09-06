@@ -3418,3 +3418,95 @@ def test_output_allowlist_is_still_a_strict_subset_after_the_fix() -> None:
     # Chained protocols stay rejected on the input side.
     with pytest.raises(RecipeError, match="chained scheme"):
         _validate_input_path("simplecache::https://e/x", "source.path")
+
+
+# ---------------------------------------------------------------------------
+# R10-P2: the "strict subset" claim has to hold for chained schemes too
+# ---------------------------------------------------------------------------
+#
+# `_validate_input_path` refused fsspec protocol chaining; `_validate_output_path`
+# did not, so `output.path: "file::ftp://h/m.recotem"` passed recipe load while
+# the plain `ftp://h/m.recotem` was refused with exit 2.  Neither `urlparse` nor
+# `_effective_scheme` reads a chain's effective backend -- both take the leftmost
+# token -- and `fsspec.core.url_to_fs` resolved that value to the process's
+# CURRENT WORKING DIRECTORY with the URL body dropped.  Measured end to end on a
+# 1,500-row CSV: fetch, Optuna search and fit all completed, then the artifact
+# write failed with `IsADirectoryError: [Errno 21] Is a directory: '<cwd>'` and
+# the run exited **1** (`_EXIT_UNKNOWN`, "unhandled / unmapped exception"), which
+# supervisor and CronJob retry logic reads as a crash worth retrying.
+
+
+_CHAINED_OUTPUT_PATHS = [
+    "file::ftp://attacker.example.com/m.recotem",
+    "s3::hdfs://namenode:8020/m.recotem",
+    "s3::arrow_hdfs://namenode:8020/m.recotem",
+    "file::memory://m.recotem",
+    "file::file:///abs/m.recotem",
+    "simplecache::ftp://attacker.example.com/m.recotem",
+]
+
+
+@pytest.mark.parametrize("path", _CHAINED_OUTPUT_PATHS)
+def test_output_path_rejects_chained_schemes(path: str) -> None:
+    """A chained value must be refused at load, like its unchained spelling.
+
+    `simplecache::` was already refused, but only incidentally -- its leftmost
+    token is not an allowed scheme.  The five whose leftmost token *is* allowed
+    all passed.
+    """
+    from recotem.recipe.loader import _validate_output_path
+
+    with pytest.raises(RecipeError, match="chained scheme"):
+        _validate_output_path(path, "output.path")
+
+
+def test_output_rejects_every_chained_path_the_input_rejects() -> None:
+    """The documented subset relation, asserted rather than assumed.
+
+    `output.path` is documented as a strict subset of the input rules, so any
+    path the input validator refuses must also be refused on the output side.
+    Fails if the scan matches nothing, so a refactor cannot switch it off.
+    """
+    from recotem.recipe.loader import _validate_input_path, _validate_output_path
+
+    checked = 0
+    for path in _CHAINED_OUTPUT_PATHS + ["simplecache::https://e/x", "a::b://c/d"]:
+        with pytest.raises(RecipeError):
+            _validate_input_path(path, "source.path")
+        with pytest.raises(RecipeError):
+            _validate_output_path(path, "output.path")
+        checked += 1
+    assert checked == len(_CHAINED_OUTPUT_PATHS) + 2, (
+        "the chained-path list is empty or short; this guard is watching nothing"
+    )
+
+
+def test_chained_output_path_is_refused_by_load_recipe(tmp_path: Path) -> None:
+    """End to end: both spellings stop at recipe load, not mid-train.
+
+    The unchained `ftp://` form is the positive control -- it proves the
+    output allow-list is live on this path -- and the chained form must now
+    reach the operator the same way instead of surviving until the artifact
+    write.
+    """
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("user_id,item_id\nu1,i1\n", encoding="utf-8")
+
+    for out in ("ftp://attacker.example.com/m.recotem", _CHAINED_OUTPUT_PATHS[0]):
+        content = f"""\
+name: chained
+source:
+  type: csv
+  path: {csv_path}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: "{out}"
+"""
+        recipe_path = _write_recipe(tmp_path, content, filename="chained.yaml")
+        with pytest.raises(RecipeError):
+            load_recipe(recipe_path)

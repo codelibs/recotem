@@ -155,6 +155,32 @@ def _check_userinfo(path: str, field_name: str) -> None:
         )
 
 
+def _check_chained_scheme(path: str, field_name: str) -> None:
+    """Reject fsspec protocol chaining (``a::b://…``) on any path field.
+
+    Chained-scheme paths are rejected because neither ``urlparse`` nor
+    :func:`_effective_scheme` extracts the effective backend from them: both
+    read the *leftmost* token, while a chain's bytes land on whichever
+    protocol the chain resolves to.  They may also reference transient
+    caching protocols wrapping disallowed backends.
+
+    Applied to output paths as well as input ones.  ``output.path`` is
+    documented as a strict subset of the input rules, and it was not: the
+    check lived inside ``_validate_input_path`` only, so ``file::ftp://h/x``
+    passed recipe load, ``fsspec.core.url_to_fs`` resolved it to the process's
+    *current working directory* with the URL body dropped, and the run reached
+    the operator as ``IsADirectoryError`` -- an unmapped exit 1 -- at the end
+    of training, after fetch, search and fit had all been paid for.  The plain
+    ``ftp://h/x`` spelling is refused at load with exit 2.
+    """
+    if "::" in path:
+        raise RecipeError(
+            f"'{field_name}' uses a chained scheme (contains '::'). "
+            "Chained fsspec protocols are not permitted in recipes.",
+            category="security",
+        )
+
+
 def _validate_input_path(path: str, field_name: str) -> None:
     """Validate an input-side path (source.path, item_metadata.path).
 
@@ -162,15 +188,7 @@ def _validate_input_path(path: str, field_name: str) -> None:
     paths (e.g. ``simplecache::https://…``) which cannot be safely validated
     via ``urlparse``.
     """
-    # Chained-scheme paths (fsspec protocol chaining syntax) are rejected
-    # because urlparse cannot extract the effective scheme from them and they
-    # may reference transient caching protocols wrapping disallowed backends.
-    if "::" in path:
-        raise RecipeError(
-            f"'{field_name}' uses a chained scheme (contains '::'). "
-            "Chained fsspec protocols are not permitted in recipes.",
-            category="security",
-        )
+    _check_chained_scheme(path, field_name)
 
     _check_userinfo(path, field_name)
 
@@ -191,8 +209,11 @@ def _validate_output_path(path: str, field_name: str) -> None:
 
     Uses an allow-list of write-supported schemes so that novel or unknown
     schemes (e.g. ``data:``, ``javascript:``, vendor-specific) are rejected
-    by default rather than admitted by oversight of a deny-list.
+    by default rather than admitted by oversight of a deny-list, and rejects
+    fsspec protocol chaining for the reason given on
+    :func:`_check_chained_scheme`.
     """
+    _check_chained_scheme(path, field_name)
     _check_userinfo(path, field_name)
     parsed = urlparse(path)
     scheme = _effective_scheme(path)

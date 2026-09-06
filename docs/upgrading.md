@@ -198,6 +198,10 @@ This applies only if you actually had such a recipe. If your `az://` paths carry
 no colon before the `@`, they are the addressing form, nothing was logged, and
 there is nothing to rotate.
 
+**`az://` was not the only scheme with this gap** — see
+[`gs://` and `file://` disclosed the same way](#gs-and-file-disclosed-the-same-way)
+below before you conclude you have nothing to rotate.
+
 The other two changed rows are a fix, and need no action: the canonical
 `container@account.dfs.core.windows.net` form that Azure's own documentation
 uses was being refused on `abfs://` / `abfss://` as if it were a credential.
@@ -205,6 +209,53 @@ If you worked around that by rewriting those paths, you can now write them the
 documented way. The rule 2.1.0 applies to all three Azure aliases is: a bare
 `container@account` is addressing and is accepted; a real `user:pass@` pair is
 refused.
+
+### `gs://` and `file://` disclosed the same way
+
+The section above is written as an Azure story, but `az` was not the only
+scheme missing from 2.0.0's credentials check. `gs` was exempt from it
+**entirely** — rather than password-gated the way `az`/`abfs`/`abfss` were —
+because `gs://project@bucket/key` is a legitimate gcsfs billing-project
+override. A `gs://` URI whose userinfo also carried a *password* inherited that
+exemption and loaded. `file://` had no check at all.
+
+Measured at `v2.0.0` and at 2.1.0, same recipe, only `source.path` changed, with
+a marked secret in place of the password:
+
+| scheme | form | 2.0.0 | 2.1.0 | times the secret appeared in one `train` |
+|---|---|---|---|---|
+| `gs://` | `project@bucket…` (addressing) | accepted | accepted | — (no secret) |
+| `gs://` | `user:pass@…` (credentials) | **accepted** | **rejected** | **5** at 2.0.0 → **0** at 2.1.0 |
+| `file://` | `user:pass@…` (credentials) | **accepted** | **rejected** | **3** at 2.0.0 → **0** at 2.1.0 |
+| `s3://` | `anything@…` | rejected | rejected | 0 (control — `s3` has no addressing use of `@`) |
+
+The five `gs://` occurrences are not five copies of one line. The secret reaches
+the log through four independent paths plus stderr: the INFO
+`csv_source_fetch_start` event, an ERROR record raised by `gcsfs` itself
+(complete with traceback), the WARN `size_cap_probe_failed` event, the
+`train_error` event, and the `Training failed: …` line on stderr. Redacting any
+one of them would not have been enough, which is why the fix is at recipe load.
+
+**So the two-step remedy above applies to `gs://` as well**, and the "nothing to
+rotate" sentence is about `az://` only. If any recipe carried a `gs://` path
+with a colon before the `@`:
+
+1. Move the secret into the environment — gcsfs reads credentials from
+   `GOOGLE_APPLICATION_CREDENTIALS` or the ambient service account. `gs://`
+   paths whose userinfo is a bare project name (`gs://my-project@my-bucket/…`,
+   no colon) are the addressing form, still accepted, and were never logged as
+   a secret; leave them alone.
+2. **Rotate that key and purge or rotate the log archives**, for the same reason
+   and with the same urgency as the Azure case.
+
+`file://` is the narrow one. The refusal is scoped to an `@` in the URI's
+*authority* — the `file://` scheme followed directly by a `user:pass@` pair and
+only then the path. A local path that merely contains
+`@` in a directory or file name is unaffected in both the bare form
+(`/data/user@example.com/x.csv`) and the three-slash form
+(`file:///data/user@example.com/x.csv`); both load and train under 2.0.0 and
+2.1.0 alike. Only the authority form changed, and it is not a shape anyone
+writes by accident.
 
 ### `split.scheme: random` with a `time_column` now splits differently
 
@@ -294,19 +345,25 @@ Signing keys and the key-rotation procedure; and the artifact container itself
 artifact verifies under 2.1.0 and a 2.1.0-signed one verifies under 2.0.0, with
 the same key. Every recipe's `recipe_hash` does change, but nothing gates on it.
 
-**Three recipes' worth of exceptions, and they need different things from you.**
-Two `path` forms that loaded under 2.0.0 are now refused with **exit 2** and
-must be fixed *before* you upgrade. A third recipe shape keeps working but
+**Four recipes' worth of exceptions, and they need different things from you.**
+Three `path` forms that loaded under 2.0.0 are now refused with **exit 2** and
+must be fixed *before* you upgrade. A fourth recipe shape keeps working but
 changes what it measures — nothing to fix, but see
 [`split.scheme: random` with a `time_column`](#splitscheme-random-with-a-time_column-now-splits-differently)
 so the moved number does not read as a regression.
 
-Fix these two before upgrading:
+Fix these three before upgrading:
 
 - **`az://` carrying a `user:pass@` pair** — see
   [Azure URIs](#azure-uris-changed-in-both-directions) above. Move the secret
   into the environment **and rotate it**: 2.0.0 logged that URI in the clear on
   every run, so the key must be treated as disclosed.
+- **`gs://` carrying a `user:pass@` pair, and `file://` carrying an `@` in its
+  authority** — see
+  [`gs://` and `file://` disclosed the same way](#gs-and-file-disclosed-the-same-way).
+  The `gs://` form needs the same rotation as the `az://` one: 2.0.0 wrote that
+  secret to the log five times per run. A `gs://project@bucket` path with no
+  colon is addressing, is still accepted, and needs nothing.
 - **`arrow_hdfs://` and `async_wrapper://`** — the only two protocols fsspec
   registers whose names contain an underscore. RFC 3986 forbids `_` in a
   scheme, so `urlparse` reported no scheme at all and 2.0.0's allow-list read

@@ -117,9 +117,37 @@ and at 2.1.0:
 from the credentials check at 2.0.0, so such a URI loaded silently. It now
 exits **2** (`RecipeError`, category `security`) with `'source.path' contains
 embedded credentials in the URI. Use environment-based authentication
-instead.` Before upgrading, grep your recipes for an `az://` path containing a
-colon before the `@`, and move the secret into the environment — the Azure
-fsspec backends read credentials from `AZURE_STORAGE_*` / a connection string.
+instead.`
+
+Grep your recipes for an `az://` path with a colon before the `@`. **If you
+find one, it needs two separate things, and the second is easy to skip.**
+
+1. **Fix the recipe.** Move the secret into the environment — the Azure fsspec
+   backends read credentials from `AZURE_STORAGE_*` or a connection string.
+   That is what stops the exit 2.
+2. **Treat that credential as disclosed: rotate the storage account key, and
+   purge or rotate the log archives that may hold it.** Under 2.0.0 the URI was
+   written to the logs *in the clear*, on every run. Measured on 2.0.0 with a
+   marked secret, one `recotem train` emitted it **four times** — once at INFO
+   in the source-fetch event, and again inside the error text. The redaction
+   helper that strips `user:pass@` from logged URLs only covered
+   `http`/`https`/`ftp`/`ftps`, and the structlog DSN scrubber behind it did not
+   list `az` either. The generic high-entropy scrubbers are shape-based, so
+   whether a given key was caught depended on the key: across ten secrets that
+   were not chosen to be catchable, seven went through — including every
+   human-chosen password, and about half of the genuine random account keys,
+   because standard base64's `+` and `/` break the 43-character run the pattern
+   looks for.
+
+   Moving the secret fixes the recipe going forward. It does nothing about logs
+   already shipped to an aggregator, so do not stop at step 1.
+
+Under 2.1.0 the same recipe never reaches a log line — it is refused at load,
+and the marked secret appears **zero** times in the output.
+
+This applies only if you actually had such a recipe. If your `az://` paths carry
+no colon before the `@`, they are the addressing form, nothing was logged, and
+there is nothing to rotate.
 
 The other two changed rows are a fix, and need no action: the canonical
 `container@account.dfs.core.windows.net` form that Azure's own documentation
@@ -221,8 +249,9 @@ so the moved number does not read as a regression.
 Fix these two before upgrading:
 
 - **`az://` carrying a `user:pass@` pair** — see
-  [Azure URIs](#azure-uris-changed-in-both-directions) above. Move
-  the secret into the environment.
+  [Azure URIs](#azure-uris-changed-in-both-directions) above. Move the secret
+  into the environment **and rotate it**: 2.0.0 logged that URI in the clear on
+  every run, so the key must be treated as disclosed.
 - **`arrow_hdfs://` and `async_wrapper://`** — the only two protocols fsspec
   registers whose names contain an underscore. RFC 3986 forbids `_` in a
   scheme, so `urlparse` reported no scheme at all and 2.0.0's allow-list read

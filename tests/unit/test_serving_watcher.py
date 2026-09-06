@@ -6143,3 +6143,110 @@ def test_stat_timeout_is_retracted_by_the_next_successful_poll(tmp_path: Path) -
         "a timed-out stat outlived the next successful poll; the recipe stays "
         "degraded in /v1/health/details with nothing wrong"
     )
+
+
+# ---------------------------------------------------------------------------
+# A sidecar stat that cannot answer must not abandon the poll tick
+# ---------------------------------------------------------------------------
+
+
+def _stale_stat_on(target: str):
+    """An ``os.stat`` replacement that answers ESTALE for exactly one path.
+
+    The injection sits on ``os.stat`` rather than on ``Path.exists`` so the
+    mechanism under test — ``Path.exists`` re-raising a non-ignorable errno —
+    is the thing being exercised, not a stand-in for it.
+    """
+    import errno
+    import os
+
+    real = os.stat
+
+    def _stat(path, *args, **kwargs):
+        try:
+            same = os.fspath(path) == target
+        except Exception:
+            same = False
+        if same:
+            raise OSError(errno.ESTALE, "Stale file handle", target)
+        return real(path, *args, **kwargs)
+
+    return _stat
+
+
+def test_a_sidecar_stat_that_cannot_answer_is_declined(tmp_path: Path) -> None:
+    """``_check_sidecar_changed`` must answer False, not raise.
+
+    Its contract is "on any I/O error reading the sidecar, return False and let
+    the full-stat path decide".  ``Path.exists()`` only answers False for
+    pathlib's ignorable errnos and re-raises the rest, so the artifacts volume
+    going stale used to make the existence check raise instead of answer.
+    """
+    import os
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import _check_sidecar_changed, _RecipeWatchState
+
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(b"placeholder")
+    sidecar = str(artifact_path) + ".sha256"
+    Path(sidecar).write_text("sha_v1\n")
+
+    recipe = MagicMock()
+    recipe.name = "stale_sidecar"
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_sidecar_contents="sha_v1\n",
+    )
+
+    with patch.object(os, "stat", _stale_stat_on(sidecar)):
+        changed = _check_sidecar_changed(state)
+
+    assert changed is False, (
+        "a sidecar stat that raised was allowed to escape _check_sidecar_changed"
+    )
+
+
+def test_a_stale_sidecar_does_not_mark_every_recipe_unhealthy(
+    tmp_path: Path,
+) -> None:
+    """The escape is not scoped to one recipe — it abandons the whole tick.
+
+    ``_check_sidecar_changed`` is called from ``_process_stat_result``, inside
+    ``_poll_artifacts``.  An exception there is caught only by the poll loop's
+    catch-all, which increments ``_consecutive_errors`` on every tick and at
+    ``_unhealthy_threshold`` calls ``_mark_all_unhealthy`` — so a stale stat on
+    one recipe's ``.sha256`` file turns *every* recipe on the host into
+    ``503 degraded`` on ``/v1/health/details`` with ``last_load_error``
+    ``"watcher unhealthy"``, while the artifacts themselves are untouched and
+    ``:recommend`` keeps serving.
+    """
+    import os
+    from unittest.mock import patch
+
+    watcher, registry, artifact_path, _ = _started_watcher(tmp_path, "stale_tick")
+    sidecar = str(artifact_path) + ".sha256"
+    Path(sidecar).write_text("sha_v1\n")
+
+    try:
+        with patch.object(os, "stat", _stale_stat_on(sidecar)):
+            # More ticks than _unhealthy_threshold (5) at WATCH_INTERVAL.
+            became_unhealthy = _wait_until(
+                lambda: registry.get("stale_tick").last_load_error is not None,
+                timeout=2.0,
+            )
+            errors_seen = watcher._consecutive_errors
+    finally:
+        watcher.stop()
+        watcher.join(timeout=2.0)
+
+    assert not became_unhealthy, (
+        "a stale stat on the .sha256 sidecar escaped the poll tick and the "
+        "watcher marked the recipe unhealthy: "
+        f"{registry.get('stale_tick').last_load_error!r}"
+    )
+    assert errors_seen == 0, (
+        f"the poll loop counted {errors_seen} unhandled errors from a sidecar "
+        "stat that only needed to be declined"
+    )

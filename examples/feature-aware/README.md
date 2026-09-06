@@ -22,19 +22,22 @@ Field reference: [docs/recipe-reference.md#features](../../docs/recipe-reference
 
 ## Run
 
-From the repository root:
+From the repository root. `uv sync` installs the CLI into `.venv` and does not
+put it on `PATH`, so the commands below use `uv run` to reach it (as the other
+examples do). If you installed with `pip install recotem` into an active
+virtualenv instead, drop the `uv run` prefix.
 
 ```bash
 # 1. Generate keys (once per machine). Copy the values into the exports below.
-recotem keygen --type signing --kid dev
-recotem keygen --type api     --kid dev
+uv run recotem keygen --type signing --kid dev
+uv run recotem keygen --type api     --kid dev
 
 export RECOTEM_SIGNING_KEYS="dev:<signing-hex64>"       # signing: env_entry value
 export RECOTEM_API_KEYS="dev:sha256:<api-hash>"         # api:     env_entry value
 export RECOTEM_API_PLAINTEXT="<api-plaintext>"          # api:     plaintext, for curl
 
 # 2. Validate — probes both the interaction source AND features.item.source
-recotem validate examples/feature-aware/recipe.yaml
+uv run recotem validate examples/feature-aware/recipe.yaml
 ```
 
 ```
@@ -50,13 +53,13 @@ Validation passed.
 ```bash
 # 3. Train
 mkdir -p artifacts
-recotem train examples/feature-aware/recipe.yaml
+uv run recotem train examples/feature-aware/recipe.yaml
 # → ./artifacts/feature_aware_demo.<sha>.recotem (signed)
 ```
 
 ```bash
 # 4. Inspect the header — confirm the "features" block is present
-recotem inspect ./artifacts/feature_aware_demo.recotem
+uv run recotem inspect ./artifacts/feature_aware_demo.recotem
 ```
 
 Example output (the structural fields below — `best_class`, `n_items: 14`,
@@ -107,7 +110,7 @@ that number, even though it is otherwise invisible to training.
 
 ```bash
 # 5. Serve (foreground)
-recotem serve --recipes examples/feature-aware/ --port 8080
+uv run recotem serve --recipes examples/feature-aware/ --port 8080
 ```
 
 ```bash

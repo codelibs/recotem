@@ -1293,12 +1293,13 @@ What to do:
    an undefined margin — while the shipped model over the same four runs landed
    between **39% below and 1% above** the same 30-line kNN. If your catalogue
    turns over — news, feeds, deals, listings, anything perishable — a passing
-   popularity comparison carries no information whatsoever, and on *that* shape
-   the kNN is the only one of the two that means anything. Reproduced on a
+   popularity comparison carries no information whatsoever. Reproduced on a
    second perishable catalogue (a job board, 90 days of postings with a
    21-day life): popularity scored **0.0000 on all four runs** there too, with
    **0 of the top 10** training items appearing in the holdout, while the
-   shipped model lost to the kNN on all four (−11% to −93%).
+   shipped model lost to the kNN on all four (−11% to −93%). Whether the kNN
+   survives on a perishable catalogue is a separate question, and it is not
+   answered by the shape — see the turnover table below.
 
    **On a catalogue with far more items than users, the failure is the other
    way round: the kNN is the one that means nothing.** Item-item cosine needs
@@ -1316,20 +1317,81 @@ What to do:
    fail, but a margin most operators would read as a tie, against a baseline
    that was itself scoring 0.0018.
 
-   **The rule of thumb: if your item count is much larger than your user
-   count, trust the popularity comparison; if your catalogue turns over,
-   trust the kNN; if neither, both are informative and the model should beat
-   both.** The cheap tell for a degenerate baseline is to print, before
-   comparing, how many of the top ten most-popular training items appear
-   anywhere in your holdout — 0 of 10 means the popularity comparison is
-   dead — and the kNN's own ndcg against a random-ranking baseline: a kNN that
-   cannot beat random is not a bar either.
+   **The rule of thumb: do not pick the baseline from the shape — measure
+   which baselines are alive on this run, before comparing.** Print three
+   numbers first:
+
+   - how many of the top ten most-popular training items appear anywhere in
+     your holdout — **0 of 10 means the popularity comparison is dead**;
+   - the kNN's ndcg against a deterministic random ranking — **a kNN that
+     cannot beat random is not a bar either**;
+   - **the model's own ndcg against that same random ranking, as a decision
+     rather than a ratio** — bootstrap the per-user difference and read the
+     95% interval, or run a sign test over the users where the two differ.
+     This one is not optional: it is the only check that still has content
+     when both baselines are degenerate, and that state does occur.
+
+   Then require the model to beat every baseline that survived its own check,
+   **and** to beat the random ranking by a margin whose interval excludes
+   zero. A random ranking cannot go degenerate, which is what makes it the one
+   bar always worth stating.
+
+   Shape is a prior, not a verdict, and it mispredicts in both directions.
+   Catalogue turnover is not one bucket. Measured on two perishable
+   catalogues, five seeds each, both carrying a stable per-user topic
+   preference so a personalised model has something real to learn:
+
+   | catalogue | item life | popularity | kNN ÷ random | model ÷ kNN | model ÷ random |
+   |---|---|---|---|---|---|
+   | job board, 14 postings/day × 90 days | 21 days | 0.0000 on 5/5 | 6.4×–29.4× on 5/5 | 2.18×–3.71× | 15.5×–74.7× |
+   | news, 20 articles/day × 60 days | 12 days, 5-day half-life | 0.0000 on 5/5 | **0.17×–0.49× on 5/5** | 2.28×–5.10× | **0.72×–1.58×** |
+
+   (1,500 holdout users per news run, ~1,380 per job-board run.)
+
+   On the job board the advice above holds exactly: popularity is dead, the
+   kNN is a real bar, and the model clears it. On the news catalogue **both
+   baselines are dead at once** — popularity scores 0.0000 and the kNN scores
+   *below* a random ranking on every run — and the surviving comparison still
+   passes the model by 2.28× to 5.10× while it sits between 0.72× and 1.58× of
+   random. Requiring a decisive win over random instead refuses four of those
+   five runs: the paired 95% interval on `model − random` excludes zero on one
+   run only, and a sign test over the users where the two differ agrees run for
+   run (p = 0.62 to 0.92 on the four it refuses, p = 0.006 on the one it passes).
+
+   The reason the kNN lands below random rather than merely near it is that
+   item-item cosine is not neutral on a perishable catalogue, it is biased
+   backwards: it scores what co-occurred with the user's history, and on a
+   catalogue that turns over those are the *older* items. Mean publication day
+   over 400 users of one news run — training history 20.3, kNN top-10
+   **15.0**, random top-10 21.6, holdout 49.7 — so the kNN aims further from
+   the holdout than picking at random does.
+
+   The same caveat runs the other way. On the items-far-larger-than-users
+   shape this section tells you to trust popularity on, popularity can be dead
+   too: on an enterprise document corpus (250 users, ~2,180 documents, five
+   seeds) popularity scored **0.0000 with a 0-of-10 tell on 3 of the 5 runs**,
+   and on one of those the kNN was simultaneously below random (0.65×).
+
+   **When both baselines are dead, only the random check still says
+   anything.** A large margin over a dead baseline is not a pass — it is an
+   undefined ratio. What remains is `model − random`, and it answers a
+   narrower question than the baselines did: not "is this model good" but "is
+   it distinguishable from shuffling the catalogue". Clearing it is the floor,
+   not the bar.
+
+   If it fails there too, read the result as a statement about the holdout
+   rather than about the model: either build a holdout the comparison can work
+   on (for a perishable catalogue, hold out a later slice over items that still
+   exist in the training vocabulary — on the news runs above only 29–36% of
+   holdout interactions named an item the model had ever seen, against 52–56%
+   on the job board), or accept that this offline number is not evidence and
+   judge the model online instead.
 
    The kNN, in full: binarise the user × item matrix, normalise the columns,
    take `Sᵢⱼ = cos(i, j)` with a zero diagonal, keep each item's top ~200
    neighbours, score a user as `X[u] @ S`, and exclude what they already
-   interacted with. If recotem does not beat whichever of the two baselines is
-   informative for your shape, the answer is not to ship it and hope — it is to
+   interacted with. If recotem does not beat whichever baselines the checks
+   above found alive, the answer is not to ship it and hope — it is to
    widen `algorithms`, raise `n_trials`, or accept that this dataset does not
    reward a latent-factor model.
 3. **Narrow `algorithms` when the budget is small**, or raise `n_trials` so

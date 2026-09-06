@@ -6068,3 +6068,78 @@ def test_retraction_fires_once_per_fault_not_once_per_tick(tmp_path: Path) -> No
         "the retraction stayed armed and cleared an error written by a "
         "different path; /v1/health/details would flap every poll tick"
     )
+
+
+def test_stat_timeout_is_retracted_by_the_next_successful_poll(tmp_path: Path) -> None:
+    """A timed-out stat must not outlive the timeout.
+
+    ``docs/operations.md`` says a timed-out stat marks the recipe "with a load
+    error until the next successful poll".  The timeout path records the
+    failure through ``_record_load_failure``, which arms the backoff against
+    the marker that is *already* loaded, so the next poll takes the marker fast
+    path — and the annotation used to sit there for the life of the process.
+    Driven synchronously so the assertion is about the branch, not about
+    thread timing.
+    """
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving import watcher as _w
+    from recotem.serving.watcher import _RecipeWatchState, sha256_bytes, stat_marker
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path, "hungstat")
+    yaml_path = _write_recipe_yaml(recipes_dir, "hungstat", artifact_path)
+
+    registry = ModelRegistry()
+    entry = _make_entry("hungstat")
+    entry.artifact_path = str(artifact_path)
+    registry.replace("hungstat", entry)
+
+    marker = stat_marker(str(artifact_path))
+    # The state a successful load leaves behind: marker settled, bytes known,
+    # and last_attempted_marker pointing at the marker that was loaded.
+    state = _RecipeWatchState(
+        recipe=load_recipe(yaml_path),
+        artifact_path=str(artifact_path),
+        last_marker=marker,
+        last_sha256=sha256_bytes(artifact_path.read_bytes()),
+    )
+    state.last_attempted_marker = marker
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=_make_serve_config(watch_interval=1.0),
+        key_ring=KeyRing(f"active:{ACTIVE_KEY_HEX}"),
+        initial_states={"hungstat": state},
+    )
+
+    real_stat = _w._stat_marker_with_error
+
+    def hanging_stat(path, recipe_name="<unknown>"):
+        time.sleep(2.5)  # > the 1.0s per-future timeout
+        return real_stat(path, recipe_name=recipe_name)
+
+    try:
+        _w._stat_marker_with_error = hanging_stat
+        watcher._poll_artifacts()
+    finally:
+        _w._stat_marker_with_error = real_stat
+
+    assert "timeout" in str(registry.get("hungstat").last_load_error), (
+        "the probe never produced a stat timeout"
+    )
+    assert state.failed_marker == marker, (
+        "the timeout armed the backoff against a different marker than the "
+        "one that is loaded — the provoking condition was not reproduced"
+    )
+
+    # The next poll stats successfully and sees the same, unchanged marker.
+    watcher._process_stat_result("hungstat", marker, None)
+    watcher.stop()
+
+    assert registry.get("hungstat").last_load_error is None, (
+        "a timed-out stat outlived the next successful poll; the recipe stays "
+        "degraded in /v1/health/details with nothing wrong"
+    )

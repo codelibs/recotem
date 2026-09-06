@@ -96,6 +96,46 @@ potentially long after the deploy that caused it. Alert on that counter and
 scrape `/v1/health/details`; a green `/v1/health` is not evidence the swap
 worked. [operations.md](operations.md) calls this "degraded now, down later".
 
+### An `az://` path that embeds `user:pass@` now fails to load
+
+2.1.0 changed the embedded-credential rule for the three Azure protocol
+aliases, in **both** directions. Measured through the real loader on a recipe
+whose path is the URI under test — "addressing" is the bare
+`container@account` form, "userinfo" is a real `user:pass@` pair:
+
+| scheme  | form       | 2.0.0    | 2.1.0    |
+|---------|------------|----------|----------|
+| `az`    | addressing | accepted | accepted |
+| `az`    | userinfo   | **accepted** | **rejected** |
+| `abfs`  | addressing | **rejected** | **accepted** |
+| `abfs`  | userinfo   | rejected | rejected |
+| `abfss` | addressing | **rejected** | **accepted** |
+| `abfss` | userinfo   | rejected | rejected |
+
+`s3://`, `http(s)://`, `ftp(s)://` and `gs://project@bucket/key` are unchanged.
+
+Only the second row requires action. At 2.0.0 `az` was simply missing from the
+userinfo reject-list, so the check was skipped for that alias entirely: an
+`az://` URI that really did carry a secret loaded without complaint. It is now
+refused, on `source.path`, `item_metadata.path`, `features.*.source.path` and
+`output.path` alike, with:
+
+```
+'source.path' contains embedded credentials in the URI. Use environment-based
+authentication instead.
+```
+
+**Before upgrading, grep your recipes for `az://` paths containing a `:` before
+the `@`.** Move the secret out of the URI: `AZURE_STORAGE_ACCOUNT_NAME` /
+`AZURE_STORAGE_ACCOUNT_KEY`, a connection string, or a managed identity.
+
+The other two changed rows are a fix and need nothing done. All three aliases
+resolve to one adlfs filesystem and all three accept
+`<container>@<account>.dfs.core.windows.net` (`.blob.` for Blob storage) — the
+form Azure's own documentation uses, where the `@` separates the container from
+the storage account rather than carrying a secret. 2.0.0 refused that form on
+`abfs` and `abfss`, blaming the operator for a credential they had not written.
+
 ### Upgrade procedure
 
 1. `recotem inspect` every artifact and note which report
@@ -134,8 +174,8 @@ rolled back at all** and must be retrained without the block to run on 2.0.0.
 
 Signing keys and the key-rotation procedure; the artifact container itself
 (magic bytes, `FORMAT_VERSION` 1, and the header layout); and every existing
-recipe, which stays valid as written. Every recipe's `recipe_hash` does change,
-but nothing gates on it.
+recipe except one shape — an `az://` path that embeds `user:pass@`, covered
+above. Every recipe's `recipe_hash` does change, but nothing gates on it.
 
 One thing in that area *did* change: a malformed `RECOTEM_SIGNING_KEYS` now
 exits **8** (`_EXIT_CONFIG`) where 2.0.0 exited **5** (`_EXIT_ARTIFACT`), on

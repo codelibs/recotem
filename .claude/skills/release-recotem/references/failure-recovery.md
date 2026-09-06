@@ -50,7 +50,7 @@ Not the pre-release trap. Both workflows run the same
 tag `publish.yml` refuses too — neither registry receives anything, and the runs
 are red. What is still reachable is `docker.yml` going red *after*
 `publish-pypi` succeeded, almost always at `trivy`: the scan gates the push
-(`build` is `needs: [smoke, trivy]`), so a CVE finding leaves the version on
+(`build` is `needs: [test, smoke, trivy]`), so a CVE finding leaves the version on
 PyPI with nothing on GHCR.
 
 Do **not** delete and re-push the tag: PyPI already has the version, so the tag
@@ -88,7 +88,7 @@ gh run rerun --repo codelibs/recotem <id> --failed
 
 ## Red Trivy on the tag run
 
-`trivy` is `needs: smoke` and `build` is `needs: [smoke, trivy]`, so the scan
+`trivy` is `needs: smoke` and `build` is `needs: [test, smoke, trivy]`, so the scan
 runs *before* `Build and push`. A red Trivy means the push **was** withheld:
 nothing reached GHCR, and there is nothing published to replace or un-publish.
 PyPI publishes from a separate workflow and is unaffected, so the release is

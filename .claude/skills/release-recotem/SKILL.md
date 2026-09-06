@@ -105,7 +105,7 @@ is built. `docker.yml`'s tag filter `v[0-9]+.[0-9]+.[0-9]*` is a GitHub filter
 pattern, not a regex, so it still *fires* on `v2.0.0a0` — but the guard is
 upstream of everything that could publish: `smoke` is `needs: guard`, `trivy` is
 `needs: smoke`, and `build` — the only job that pushes — is
-`needs: [smoke, trivy]`. A pre-release tag now fails both workflows and reaches
+`needs: [test, smoke, trivy]`. A pre-release tag now fails both workflows and reaches
 neither PyPI nor GHCR; not even a `sha-` tag is pushed. Verify locally rather
 than trusting the description:
 
@@ -179,9 +179,10 @@ Branch (e.g. `release/vX.Y.Z`) from up-to-date `main`, then:
    bash .github/scripts/check-release-tag.sh vX.Y.Z   # MUST print "OK: ..."
    ```
 
-   It fails closed and reads all four declarations together — `pyproject.toml`,
-   `src/recotem/version.py`, and `helm/recotem/Chart.yaml`'s `version:` and
-   `appVersion:` — so it catches a partial bump (`pyproject.toml` moved,
+   It fails closed and reads all five declarations together — `pyproject.toml`,
+   `src/recotem/version.py`, `helm/recotem/Chart.yaml`'s `version:` and
+   `appVersion:`, and `helm/recotem/values.yaml`'s `image.tag` — so it
+   catches a partial bump (`pyproject.toml` moved,
    `version.py` not; or the package moved and the chart did not) that a grep for
    a single literal cannot. Because it reads the chart, run it **after** step 2 —
    between the two steps it will correctly name the chart, and that is a real
@@ -282,7 +283,7 @@ Commit, push, and open the PR with `gh pr create --base main`.
    ```
 
    `docker.yml` scans **before** it pushes: `trivy` is `needs: smoke` and
-   `build` is `needs: [smoke, trivy]`, so a red Trivy **blocks** the push. The
+   `build` is `needs: [test, smoke, trivy]`, so a red Trivy **blocks** the push. The
    image never reached GHCR and there is nothing published to un-publish — do
    not cut a patch release to "replace" it. Two remedies, in order:
 
@@ -518,8 +519,8 @@ post-release:
 | Verification printed nothing and you called it clean | A grep that only looks for an old literal cannot fail. Use the inverted block in `references/version-locations.md`. |
 | Deployment pins still on the previous release | The replace commands matched nothing and exited 0. The diff must be non-empty. |
 | Tag landed on the wrong commit | `git tag` without an explicit SHA tags whatever `main` is right now. |
-| `publish` red at *release tag guard* | The tag is not `vMAJOR.MINOR.PATCH`, or disagrees with `pyproject.toml` / `version.py` / `helm/recotem/Chart.yaml`. Nothing was built, and `docker` is red at its own guard for the same reason. Delete the tag, fix the tree, re-tag. Run `check-release-tag.sh` first next time. |
-| `docker` red at `trivy` | The scan gates the push (`build: needs: [smoke, trivy]`) — the image is *not* on GHCR. Re-run for an upstream-fixed CVE, or patch-release for a repo-side fix. Not a reason to retag. |
+| `publish` red at *release tag guard* | The tag is not `vMAJOR.MINOR.PATCH`; or it disagrees with `pyproject.toml` / `version.py` / `helm/recotem/Chart.yaml` / `helm/recotem/values.yaml`; or a deployment pin under `examples/` or `docs/` is stale; or the tagged commit is not on `main`. The error names which. Nothing was built, and `docker` is red at its own guard for the same reason. Delete the tag, fix the tree, re-tag. Run `check-release-tag.sh` first next time. |
+| `docker` red at `trivy` | The scan gates the push (`build: needs: [test, smoke, trivy]`) — the image is *not* on GHCR. Re-run for an upstream-fixed CVE, or patch-release for a repo-side fix. Not a reason to retag. |
 
 ## References
 

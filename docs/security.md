@@ -36,6 +36,16 @@
 
 The internet-facing boundary is `recotem serve`. `recotem train` has no inbound network surface.
 
+> **An API key is not scoped to a recipe.** Every entry in `RECOTEM_API_KEYS` admits its holder to **every recipe this server has registered**, on every `/v1` route — including the `GET /v1/recipes` listing. The `kid` is the unit of **audit and rotation**: it is attached to `request.state.kid` and rides on that request's log events (see [Authentication failure events](#authentication-failure-events)). It is not a unit of **authorization** — Recotem has no per-recipe authorization layer, so the unit of isolation is the `recotem serve` process, not the key.
+>
+> Measured on one server with two kids (`client-a`, `client-b`) and two registered recipes:
+>
+> | | `rotdemo` | `staledemo` | `GET /v1/recipes` |
+> |---|---|---|---|
+> | `kid=client-a` | 200 | 200 | both recipes listed |
+> | `kid=client-b` | 200 | 200 | both recipes listed |
+> | no `X-API-Key` | 401 | 401 | 401 |
+
 > **fsspec input schemes inherit cloud credentials.** When `source.path` uses `s3://`, `gs://`, `az://`, or `abfs(s)://`, the Pod's ambient IAM or service-account credentials are used directly by fsspec — there is no additional credential gate inside Recotem. The SSRF guard applies only to HTTP/HTTPS fetches. In environments where recipe authors are not fully trusted, scope the IAM role or service account to read-only access on the specific bucket(s) and prefix(es) used by your recipes.
 
 ## Threat model summary

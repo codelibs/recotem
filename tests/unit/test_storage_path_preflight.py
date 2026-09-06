@@ -471,3 +471,116 @@ def test_train_succeeds_with_a_writable_study_file(tmp_path) -> None:
     assert (tmp_path / "study.db").exists(), (
         "the study file must actually have been created"
     )
+
+
+# ---------------------------------------------------------------------------
+# Userinfo: refused before the scan, and described accurately.
+#
+# ``_make_storage`` has always refused a study URL carrying userinfo, but only
+# from inside ``run_search`` -- after fetch, cleansing and split.  Measured on
+# 08b1672: ``recotem validate`` printed ``Validation passed.`` for
+# ``postgresql+psycopg://recotem@127.0.0.1:19501/recotem`` and ``train`` then
+# exited 4.
+#
+# The refusal also covers a *bare username*, which nothing said.  Every existing
+# test uses ``user:pass@`` and the shipped message names ``(user:pass@host)``.
+# An operator following the documented ~/.pgpass route writes exactly the
+# username-only form, because ~/.pgpass matches on user.
+#
+# Verified against live servers while writing this: PostgreSQL works end to end
+# with PGUSER + PGPASSFILE and no userinfo in the DSN; MariaDB 11.8.9 works only
+# when the server knows the OS account, because pymysql reads no user variable.
+# That is why the remedy is dialect-specific.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "expect_word"),
+    [
+        ("postgresql+psycopg://recotem@host:5432/db", "a username"),
+        ("postgresql+psycopg://recotem:hunter2@host:5432/db", "a password"),
+        ("mariadb+pymysql://optuna@host:3306/db", "a username"),
+        ("mysql+pymysql://optuna:hunter2@host:3306/db", "a password"),
+    ],
+)
+def test_userinfo_is_refused_and_named_precisely(url: str, expect_word: str) -> None:
+    """A username-only URL must not be reported as an embedded password."""
+    with pytest.raises(TrainingError) as excinfo:
+        validate_storage_path(url)
+
+    message = str(excinfo.value)
+    assert excinfo.value.code == "storage_path_unusable"
+    assert expect_word in message, (
+        f"{url!r} must be described as embedding {expect_word}; got: {message}"
+    )
+    wrong = "a password" if expect_word == "a username" else "a username"
+    assert wrong not in message, (
+        f"{url!r} must not be described as embedding {wrong}; got: {message}"
+    )
+    assert "hunter2" not in message and "recotem@" not in message, (
+        f"the refusal must not echo the value; got: {message}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("url", "needle"),
+    [
+        ("postgresql+psycopg://recotem@host/db", "PGUSER"),
+        ("mariadb+pymysql://optuna@host/db", "OS account"),
+        ("mysql+pymysql://optuna@host/db", "OS account"),
+    ],
+)
+def test_userinfo_refusal_names_the_remedy_for_that_dialect(
+    url: str, needle: str
+) -> None:
+    """Generic "use env-driven auth" advice has no MySQL spelling.
+
+    libpq reads PGUSER; pymysql reads nothing, so the only thing to point a
+    MySQL / MariaDB operator at is the OS account the process runs as.
+    """
+    with pytest.raises(TrainingError) as excinfo:
+        validate_storage_path(url)
+    assert needle in str(excinfo.value), (
+        f"{url!r} must name {needle!r} as the way through; got: {excinfo.value}"
+    )
+
+
+def test_validate_refuses_userinfo_before_any_data_is_fetched(tmp_path) -> None:
+    """The point of moving the check: ``validate`` catches it, not ``train``.
+
+    Before this, validate exited 0 on the same recipe and the refusal arrived
+    from inside ``run_search``, after the scan had been paid for.
+    """
+    from typer.testing import CliRunner
+
+    from recotem.cli import app
+
+    yaml_path = _recipe(tmp_path, "postgresql+psycopg://recotem@h/db", "userinfo_sp")
+    result = CliRunner().invoke(app, ["validate", str(yaml_path)])
+
+    assert result.exit_code == _EXIT_CONFIG, (
+        "validate must refuse a storage_path carrying userinfo with exit 8; "
+        f"got {result.exit_code}. Output:\n{result.output}"
+    )
+    assert "Validation passed" not in result.output
+    assert "recotem@" not in result.output, (
+        f"validate must not echo the userinfo; got:\n{result.output}"
+    )
+
+
+def test_userinfo_free_server_url_still_validates(tmp_path) -> None:
+    """Positive control: the supported spelling is untouched.
+
+    Without this, a check that refused every server URL would pass the tests
+    above. Exercised end to end against a live PostgreSQL server separately;
+    here it only has to reach exit 0, since psycopg is installed.
+    """
+    from typer.testing import CliRunner
+
+    from recotem.cli import app
+
+    yaml_path = _recipe(tmp_path, "postgresql+psycopg://h:5432/db", "nouserinfo_sp")
+    result = CliRunner().invoke(app, ["validate", str(yaml_path)])
+
+    assert result.exit_code == 0, f"Output:\n{result.output}"
+    assert "Optuna storage: OK" in result.output

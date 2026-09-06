@@ -336,7 +336,11 @@ pre-flights the value — dialect, then the DBAPI the URL actually routes to —
 and refuses an unusable one with **exit 8** (`storage_path_unusable`), naming
 the spelling that works. `recotem validate` runs the identical check and prints
 `Optuna storage: OK (<dialect>, driver '<driver>')`, so a broken study backend
-is caught before the dataset is fetched. Without that pre-flight the failure
+is caught before the dataset is fetched. The same pre-flight refuses a URL carrying
+userinfo — a bare `user@host` as well as `user:pass@host`. Supply credentials from
+the environment (`PGUSER` / `PGPASSFILE` for PostgreSQL); pymysql has no such
+variable, so a MySQL or MariaDB study backend must accept the OS account the
+training process runs as. Without that pre-flight the failure
 surfaced from inside Optuna in `run_search`, which runs *after* fetch,
 cleansing and split — on a BigQuery- or SQL-backed recipe the scan was already
 billed — and reached the shell as an unmapped **exit 1**, which supervisor and

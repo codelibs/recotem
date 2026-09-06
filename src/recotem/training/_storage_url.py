@@ -69,6 +69,47 @@ def _fail(message: str) -> TrainingError:
     return TrainingError(message, code=_CODE)
 
 
+def _userinfo_message(backend: str, *, has_password: bool) -> str:
+    """Explain the userinfo refusal, and name the way through for *backend*.
+
+    Never echoes any part of the value: the message is assembled from the
+    dialect name and a boolean, neither of which can carry a secret.
+
+    The remedy is dialect-specific because the environment support is. libpq
+    reads ``PGUSER`` and ``PGPASSFILE``, so a PostgreSQL study backend is fully
+    usable with no userinfo in the DSN -- verified end to end against a live
+    server.  pymysql reads no user variable at all and falls back to the OS
+    user, so for ``mysql`` / ``mariadb`` there is nothing to point the operator
+    at except the account the training process already runs as.  Saying that
+    plainly is better than repeating a generic "use env-driven auth" that has
+    no MySQL spelling.
+    """
+    what = "a password" if has_password else "a username"
+    lead = (
+        f"training.storage_path must not embed userinfo, and it embeds {what}. "
+        "Credentials in a study URL end up in SQLAlchemy exception traces, "
+        "which the log redaction processor cannot reach because it redacts by "
+        "dict key."
+    )
+    if backend == "postgresql":
+        return (
+            f"{lead} Supply both from the environment instead: PGUSER for the "
+            "user, PGPASSFILE / ~/.pgpass for the password, and write the URL "
+            "as postgresql+psycopg://host:port/dbname with no user@ part."
+        )
+    if backend in ("mysql", "mariadb"):
+        return (
+            f"{lead} pymysql reads no user or password environment variable, "
+            "so a mysql / mariadb study backend must accept the OS account the "
+            "training process runs as. If it cannot, use a PostgreSQL study "
+            "backend (PGUSER / PGPASSFILE) or a local SQLite path instead."
+        )
+    return (
+        f"{lead} Supply it from the environment or a credential file instead of "
+        "the recipe."
+    )
+
+
 def describe_storage_path(storage_path: str) -> str:
     """Return a credential-free one-line description of *storage_path*.
 
@@ -161,6 +202,27 @@ def validate_storage_path(storage_path: str) -> None:
             "(recotem[postgres] / recotem[mysql]). Note that an unsupported "
             "scheme is NOT treated as a filename."
         )
+
+    # Userinfo is refused here as well as in ``_make_storage``.
+    #
+    # Two reasons.  First, ``_make_storage`` runs inside ``run_search``, after
+    # fetch, cleansing and split -- the same "caught only once the scan is paid
+    # for" problem this module exists to remove, and ``describe_storage_path``'s
+    # docstring already flags it: "``_make_storage`` refuses such a URL, but
+    # only at train time, so validate can still be handed one."  Second, the
+    # refusal covers a *bare username*, not only ``user:pass``, and nothing said
+    # so -- every existing test uses ``user:pass@`` and the shipped message
+    # names ``(user:pass@host)``.  An operator following the documented
+    # ``~/.pgpass`` route writes ``postgresql+psycopg://recotem@host/db``,
+    # because ``~/.pgpass`` matches on user, and is told they embedded
+    # credentials they did not write.
+    #
+    # ``_make_storage`` keeps its own check: it is the function that hands the
+    # string to SQLAlchemy, it parses with ``urllib.parse`` rather than
+    # ``make_url``, and a guard on the value that actually reaches the driver
+    # should not depend on a caller having run a pre-flight first.
+    if url.username or url.password:
+        raise _fail(_userinfo_message(backend, has_password=bool(url.password)))
 
     driver = url.get_driver_name()
     if driver not in _DRIVER_MODULE:

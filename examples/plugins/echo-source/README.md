@@ -74,6 +74,10 @@ output:
 Then:
 
 ```bash
+# `recotem train` refuses to write an unsigned artifact: without a signing key
+# it exits 8 with `RECOTEM_SIGNING_KEYS is not set`.
+export $(uv run recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
+
 mkdir -p artifacts
 uv run recotem train recipe.yaml
 ```

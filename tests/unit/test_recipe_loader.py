@@ -3522,3 +3522,73 @@ def test_load_recipe_rejects_chained_output_path(tmp_path: Path) -> None:
         filename="ok.yaml",
     )
     assert load_recipe(ok).output.path.endswith("ok.recotem")
+
+
+# ---------------------------------------------------------------------------
+# Userinfo on the addressing-@ schemes (gs) and on file://
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("scheme", ["gs", "az", "abfs", "abfss"])
+def test_addressing_at_scheme_rejects_password_accepts_bare(scheme: str) -> None:
+    """`project@bucket` / `container@account` is addressing; `user:pass@` is not.
+
+    `gs` used to be exempt from the userinfo check entirely rather than
+    password-gated, so `gs://user:pass@bucket/key` loaded. gcsfs does not
+    authenticate that way, but the fetch failure arrives *after*
+    ``csv_source_fetch_start`` has logged the path, and neither redaction layer
+    covered `gs`.
+    """
+    from recotem.recipe.loader import _validate_input_path, _validate_output_path
+
+    for validate, field in (
+        (_validate_input_path, "source.path"),
+        (_validate_output_path, "output.path"),
+    ):
+        with pytest.raises(RecipeError, match="embedded credentials"):
+            validate(f"{scheme}://user:hunter2@host/container/k.csv", field)
+        # Positive control: the bare addressing form must still be accepted,
+        # so the rejection above is about the password and not the `@`.
+        validate(f"{scheme}://container@host/k.csv", field)
+
+
+def test_file_uri_with_userinfo_rejected_on_input() -> None:
+    """`file://user:pass@/tmp/x.csv` must not load.
+
+    `_validate_output_path` already refused `file://<netloc>/...` via its
+    ambiguity check, but the input path had no equivalent, so a `file://` URI
+    carrying a password was accepted on `source.path`.
+    """
+    from recotem.recipe.loader import _validate_input_path, _validate_output_path
+
+    with pytest.raises(RecipeError, match="embedded credentials"):
+        _validate_input_path("file://svcacct:hunter2@/tmp/data.csv", "source.path")
+    with pytest.raises(RecipeError):
+        _validate_output_path("file://svcacct:hunter2@/tmp/out.recotem", "output.path")
+
+    # Positive control: ordinary file:// URIs are unaffected.
+    _validate_input_path("file:///tmp/data.csv", "source.path")
+    _validate_output_path("file:///tmp/out.recotem", "output.path")
+
+
+def test_load_recipe_rejects_gs_userinfo_before_any_log_line(tmp_path: Path) -> None:
+    """End to end: the recipe must be refused at load, not at fetch.
+
+    The ordering is the whole point. `recotem train` on this recipe used to
+    reach ``csv_source_fetch_start`` -- which logs the path -- and only then
+    fail in gcsfs with `Invalid bucket name`, exit 3. The secret was already
+    out. It must now be a `RecipeError` (exit 2) with nothing fetched.
+    """
+    secret = "Winter2026-AzureKey"
+    p = _write_recipe(
+        tmp_path,
+        MINIMAL_RECIPE_TEMPLATE.format(
+            name="gs_userinfo", output_path=str(tmp_path / "o.recotem")
+        ).replace(
+            "path: /tmp/data.csv", f'path: "gs://svcacct:{secret}@my-bucket/i.csv"'
+        ),
+    )
+    with pytest.raises(RecipeError, match="embedded credentials") as exc:
+        load_recipe(p)
+    # The refusal itself must not quote the secret back at the operator.
+    assert secret not in str(exc.value)

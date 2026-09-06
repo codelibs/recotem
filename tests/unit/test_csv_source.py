@@ -90,10 +90,53 @@ def test_csv_local_gzip_sha256_match(tmp_path: Path) -> None:
             "https://example.com:8443/data.csv",
             "https://example.com:8443/data.csv",
         ),
+        # A PASSWORD is redacted on every scheme, not only HTTP(S)/FTP(S).
+        # This function is the gate every source-path log line passes through,
+        # and the structlog processor behind it is not a backstop here:
+        # _DSN_USERINFO_RE covers HTTP and SQL schemes only, and the entropy
+        # scrubbers are shape-based, so a human-chosen password survives them.
+        ("gs://svcacct:hunter2@bucket/key.csv", "gs://bucket/key.csv"),
+        ("s3://AKIAEXAMPLE:hunter2@bucket/key.csv", "s3://bucket/key.csv"),
+        (
+            "az://user:hunter2@acct.blob.core.windows.net/c/k.csv",
+            "az://acct.blob.core.windows.net/c/k.csv",
+        ),
+        (
+            "abfss://user:hunter2@acct.dfs.core.windows.net/c/k.csv",
+            "abfss://acct.dfs.core.windows.net/c/k.csv",
+        ),
+        # ...but a BARE user@host on an object store is addressing syntax and
+        # must survive intact: blanking it removes information an operator
+        # reads logs for while protecting nothing.
+        ("gs://my-project@my-bucket/key.csv", "gs://my-project@my-bucket/key.csv"),
+        (
+            "abfss://container@acct.dfs.core.windows.net/k.csv",
+            "abfss://container@acct.dfs.core.windows.net/k.csv",
+        ),
     ],
 )
 def test_redact_url_userinfo_table(path: str, expected: str) -> None:
     assert _redact_url_userinfo(path) == expected
+
+
+@pytest.mark.parametrize(
+    "scheme",
+    ["gs", "s3", "az", "abfs", "abfss", "https", "ftp", "file"],
+)
+def test_redact_url_userinfo_password_never_survives(scheme: str) -> None:
+    """No scheme may leak a password through the log-redaction gate.
+
+    Measured before the fix: a `gs://user:<secret>@bucket` source path reached
+    stdout six times per `recotem train` and three times per `recotem validate`,
+    in both json and console log formats.
+    """
+    secret = "Winter2026-AzureKey"
+    redacted = _redact_url_userinfo(f"{scheme}://svcacct:{secret}@host/data.csv")
+    assert secret not in redacted, f"{scheme}:// leaked the password: {redacted}"
+    # Positive control: a path with no password is returned untouched, so the
+    # assertion above is about the password and not about blanket rewriting.
+    plain = f"{scheme}://host/data.csv"
+    assert _redact_url_userinfo(plain) == plain
 
 
 @pytest.mark.parametrize(

@@ -5767,3 +5767,250 @@ def test_backoff_does_not_delay_a_replaced_artifact(
         "a replaced artifact was not picked up within 1s — the backoff is "
         "gating on time rather than on the identity of the failing bytes"
     )
+
+
+# ---------------------------------------------------------------------------
+# Retracting an error the watcher has since disproved
+# ---------------------------------------------------------------------------
+
+
+def _wait_until(pred, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _started_watcher(tmp_path: Path, name: str):
+    """Start a real watcher on a real artifact and wait for the first load."""
+    from recotem.recipe.loader import load_recipe
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path, name)
+    yaml_path = _write_recipe_yaml(recipes_dir, name, artifact_path)
+
+    registry = ModelRegistry()
+    entry = _make_entry(name)
+    entry.artifact_path = str(artifact_path)
+    registry.replace(name, entry)
+
+    recipe = load_recipe(yaml_path)
+    states = build_initial_states([recipe], {name: entry})
+    states[name].last_sha256 = ""  # force a real load on the first tick
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=_make_serve_config(),
+        key_ring=KeyRing(f"active:{ACTIVE_KEY_HEX}"),
+        initial_states=states,
+    )
+    watcher.start()
+    assert _wait_until(lambda: registry.get(name).last_load_error is None), (
+        "the fixture never reached a clean loaded state"
+    )
+    return watcher, registry, artifact_path, yaml_path
+
+
+def test_transient_stat_failure_is_retracted_when_the_file_returns(
+    tmp_path: Path,
+) -> None:
+    """A blip that makes the artifact briefly unreachable must not stick.
+
+    The artifact is moved aside and back, so its mtime, size and bytes are all
+    unchanged — only its reachability blipped, exactly as an S3 throttle, an
+    NFS stale handle or a PVC remount looks to the watcher.  Because the marker
+    is unchanged the poll never reaches the load path, which used to be the
+    only place ``last_load_error`` was ever cleared, so a single blip left the
+    recipe 503 ``degraded`` in ``/v1/health/details`` for the life of the
+    process while ``:recommend`` served normally.
+    """
+    import os
+
+    watcher, registry, artifact_path, _ = _started_watcher(tmp_path, "blip")
+    away = artifact_path.with_suffix(".away")
+    try:
+        before = os.stat(artifact_path)
+        os.rename(artifact_path, away)
+        assert _wait_until(lambda: registry.get("blip").last_load_error is not None), (
+            "the missing artifact was never reported"
+        )
+
+        os.rename(away, artifact_path)
+        after = os.stat(artifact_path)
+        assert (before.st_mtime, before.st_size) == (after.st_mtime, after.st_size)
+
+        cleared = _wait_until(
+            lambda: registry.get("blip").last_load_error is None, timeout=3.0
+        )
+    finally:
+        watcher.stop()
+        watcher.join(timeout=2.0)
+
+    assert cleared, (
+        "the artifact came back byte-identical and the load error was never "
+        "retracted — /v1/health/details stays degraded until the process is "
+        "restarted or a different artifact is written"
+    )
+    assert registry.get("blip").loaded is True
+
+
+def test_rollback_to_the_serving_bytes_retracts_the_load_error(
+    tmp_path: Path,
+) -> None:
+    """Rolling a bad artifact back to the bytes already in memory must recover.
+
+    Both spellings of the rollback are covered: an mtime-preserving restore
+    (``cp -p`` / ``rsync -t`` / a snapshot restore, which puts the original
+    marker back) and a fresh-mtime restore (which reaches the load path but
+    short-circuits on the sha256 comparison).  Neither used to clear the
+    annotation, so the documented "keep serving the old model and fix the
+    artifact" recovery left the recipe permanently degraded whenever the fix
+    was to put the previous artifact back.
+    """
+    import os
+
+    watcher, registry, artifact_path, _ = _started_watcher(tmp_path, "rollback")
+    good = artifact_path.read_bytes()
+    stat0 = os.stat(artifact_path)
+    try:
+        for label, preserve_mtime in (("cp -p", True), ("fresh mtime", False)):
+            artifact_path.write_bytes(b"NOTRECOT" + good[8:])
+            assert _wait_until(
+                lambda: registry.get("rollback").last_load_error is not None
+            ), f"[{label}] the broken artifact was never reported"
+
+            artifact_path.write_bytes(good)
+            if preserve_mtime:
+                os.utime(artifact_path, ns=(stat0.st_atime_ns, stat0.st_mtime_ns))
+            assert _wait_until(
+                lambda: registry.get("rollback").last_load_error is None,
+                timeout=3.0,
+            ), (
+                f"[{label}] the artifact was rolled back to the bytes already "
+                "being served and the load error was never retracted"
+            )
+    finally:
+        watcher.stop()
+        watcher.join(timeout=2.0)
+
+    assert registry.get("rollback").loaded is True
+
+
+def test_unchanged_artifact_does_not_retract_a_recipe_yaml_error(
+    tmp_path: Path,
+) -> None:
+    """A broken recipe YAML must survive the artifact-side retraction.
+
+    ``last_load_error`` is shared between the rescan-parse path and the
+    artifact paths, and the artifact says nothing about whether the YAML
+    parses.  The rescan re-writes the error at the start of every tick, so a
+    retraction that ignored ``yaml_rescan_error`` would make
+    ``/v1/health/details`` flap between ``ok`` and ``degraded`` instead of
+    reporting the broken file.
+    """
+    import os
+
+    watcher, registry, artifact_path, yaml_path = _started_watcher(
+        tmp_path, "brokenyaml"
+    )
+    good = artifact_path.read_bytes()
+    stat0 = os.stat(artifact_path)
+    try:
+        # Arm the retraction first: without an outstanding load failure the
+        # retraction is never even attempted, and the test would pass without
+        # exercising the exemption it exists to pin.
+        artifact_path.write_bytes(b"NOTRECOT" + good[8:])
+        assert _wait_until(
+            lambda: registry.get("brokenyaml").last_load_error is not None
+        ), "the broken artifact was never reported"
+
+        # Now break the YAML *and* roll the artifact back to the loaded bytes,
+        # so the artifact side has every reason to declare the fault over.
+        yaml_path.write_text("name: brokenyaml\nsource: [[[ not yaml\n")
+        artifact_path.write_bytes(good)
+        os.utime(artifact_path, ns=(stat0.st_atime_ns, stat0.st_mtime_ns))
+
+        # The rescan re-writes the YAML error at the top of every tick, so a
+        # retraction that ignored ``yaml_rescan_error`` shows up as flapping
+        # rather than as a permanently cleared error: sample across many ticks
+        # and require that it is never cleared.
+        deadline = time.monotonic() + 1.0
+        cleared_at_least_once = False
+        samples = 0
+        while time.monotonic() < deadline:
+            samples += 1
+            if registry.get("brokenyaml").last_load_error is None:
+                cleared_at_least_once = True
+                break
+            time.sleep(0.01)
+    finally:
+        watcher.stop()
+        watcher.join(timeout=2.0)
+
+    assert samples > 10, "not enough samples to observe several poll ticks"
+    assert not cleared_at_least_once, (
+        "an artifact rollback retracted a YAML parse error it knows nothing "
+        "about; /v1/health/details flaps instead of reporting the broken file"
+    )
+
+
+def test_reread_of_the_serving_bytes_retracts_the_error_on_the_same_poll(
+    tmp_path: Path,
+) -> None:
+    """The sha256 short-circuit itself must retract, not only the next tick.
+
+    ``_load_recipe`` returns early when the bytes it just read hash to the
+    artifact already in memory.  That branch is reached whenever a rollback
+    lands with a *new* marker, and it is the only place that has actually
+    proved the point by re-reading the bytes — the marker fast path infers it.
+    Driven directly (no watcher thread) so the assertion cannot be satisfied a
+    tick later by the other retraction site.
+    """
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving.watcher import _RecipeWatchState, sha256_bytes, stat_marker
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path, "sameposll")
+    yaml_path = _write_recipe_yaml(recipes_dir, "sameposll", artifact_path)
+
+    registry = ModelRegistry()
+    entry = _make_entry("sameposll")
+    entry.artifact_path = str(artifact_path)
+    registry.replace("sameposll", entry)
+
+    recipe = load_recipe(yaml_path)
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_sha256=sha256_bytes(artifact_path.read_bytes()),
+        last_marker=("stale-marker", 0),
+    )
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=_make_serve_config(),
+        key_ring=KeyRing(f"active:{ACTIVE_KEY_HEX}"),
+        initial_states={"sameposll": state},
+    )
+    # A load failed earlier; the annotation is still on the entry.
+    registry.set_load_error("sameposll", "HMAC verification failed for kid 'active'")
+
+    watcher._load_recipe(
+        "sameposll",
+        state,
+        force=False,
+        marker=stat_marker(str(artifact_path)),
+    )
+
+    assert registry.get("sameposll").last_load_error is None, (
+        "re-reading bytes that hash to the artifact already in memory left the "
+        "stale load error in place; the short-circuit returns before the "
+        "successful-load path that would otherwise clear it"
+    )

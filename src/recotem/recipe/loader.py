@@ -155,6 +155,31 @@ def _check_userinfo(path: str, field_name: str) -> None:
         )
 
 
+def _reject_chained_scheme(path: str, field_name: str) -> None:
+    """Reject fsspec protocol chaining (``outer::inner://…``) on any path field.
+
+    Chained paths cannot be safely validated by scheme: ``urlparse`` reads only
+    the head (``file::s3://…`` parses as scheme ``file``), so a head that is on
+    the allow-list vouches for a chain whose tail was never inspected. That also
+    hides the userinfo check, because the credentials sit in the *tail* and
+    ``urlparse`` puts the whole tail in ``.path`` with an empty netloc —
+    ``file::s3://AKID:SECRET@bucket/key`` reports no username and no password.
+
+    Applied to ``output.path`` as well as the input paths. Skipping it there
+    accepted the chained form outright: ``recotem validate`` returned 0,
+    ``recotem train`` ran the whole search and then failed inside
+    ``os.replace`` as ``internal_error`` (exit 1, not the documented exit 8),
+    and the per-recipe lock had meanwhile written the plaintext secret into a
+    0755 directory name under the process's cwd.
+    """
+    if "::" in path:
+        raise RecipeError(
+            f"'{field_name}' uses a chained scheme (contains '::'). "
+            "Chained fsspec protocols are not permitted in recipes.",
+            category="security",
+        )
+
+
 def _validate_input_path(path: str, field_name: str) -> None:
     """Validate an input-side path (source.path, item_metadata.path).
 
@@ -162,15 +187,7 @@ def _validate_input_path(path: str, field_name: str) -> None:
     paths (e.g. ``simplecache::https://…``) which cannot be safely validated
     via ``urlparse``.
     """
-    # Chained-scheme paths (fsspec protocol chaining syntax) are rejected
-    # because urlparse cannot extract the effective scheme from them and they
-    # may reference transient caching protocols wrapping disallowed backends.
-    if "::" in path:
-        raise RecipeError(
-            f"'{field_name}' uses a chained scheme (contains '::'). "
-            "Chained fsspec protocols are not permitted in recipes.",
-            category="security",
-        )
+    _reject_chained_scheme(path, field_name)
 
     _check_userinfo(path, field_name)
 
@@ -193,6 +210,7 @@ def _validate_output_path(path: str, field_name: str) -> None:
     schemes (e.g. ``data:``, ``javascript:``, vendor-specific) are rejected
     by default rather than admitted by oversight of a deny-list.
     """
+    _reject_chained_scheme(path, field_name)
     _check_userinfo(path, field_name)
     parsed = urlparse(path)
     scheme = _effective_scheme(path)

@@ -759,10 +759,16 @@ only the top-level `source:`.
 `file://`, `s3://`, `gs://`, `az://`, `abfs://`, `abfss://`. Other schemes are
 rejected: `http://`, `https://`, `ftp://`, and `ftps://` because Recotem does
 not support writing artifacts over those protocols; `memory://` because it is
-process-local and would not survive past the training run.
+process-local and would not survive past the training run. Chained fsspec
+protocols (paths containing `::`) are rejected here too, including chains
+whose head is itself an allowed scheme (`file::s3://...`): only the head is
+visible to the scheme check, so an allowed head would otherwise vouch for a
+tail nothing had inspected.
 
 Embedded credentials (`s3://AKIA...:secret@bucket/`) are rejected at recipe
-load on every path field.
+load on every path field. The `::` rejection above is part of that guarantee
+on `output.path` — in a chained URI the credentials sit in the tail, where
+the userinfo check cannot see them.
 
 Local paths are resolved to absolute. If `RECOTEM_ARTIFACT_ROOT` is set,
 `output.path` must resolve to a path under it after `realpath` resolution

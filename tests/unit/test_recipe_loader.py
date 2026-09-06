@@ -3418,3 +3418,107 @@ def test_output_allowlist_is_still_a_strict_subset_after_the_fix() -> None:
     # Chained protocols stay rejected on the input side.
     with pytest.raises(RecipeError, match="chained scheme"):
         _validate_input_path("simplecache::https://e/x", "source.path")
+
+
+# ---------------------------------------------------------------------------
+# Chained fsspec protocols on output.path
+# ---------------------------------------------------------------------------
+
+
+CHAINED_WITH_ALLOWED_HEAD = [
+    "file::s3://bucket/key.recotem",
+    "s3::http://evil.example.com/x.recotem",
+    "gs::hdfs://evil.example.com:8020/x.recotem",
+    "file::hdfs://evil.example.com:8020/x.recotem",
+    "az::hdfs://evil.example.com:8020/x.recotem",
+]
+
+
+def test_output_path_rejects_chained_scheme_with_allow_listed_head() -> None:
+    """``::`` must be refused on output.path, not only on the input paths.
+
+    The head of a chain is the only part ``urlparse`` sees, so an allow-listed
+    head vouched for a tail that was never checked. ``source.path`` refused
+    every ``::`` form; ``output.path`` refused only the ones whose head was
+    itself off the allow-list (``simplecache::``), which made it accept a
+    strictly larger set than the input side that documentation calls a subset
+    of it.
+    """
+    from recotem.recipe.loader import _validate_input_path, _validate_output_path
+
+    # Anti-vacuity.  Every assertion below is inside a loop over this list, so
+    # emptying it leaves the test green with nothing exercised -- measured at
+    # 156 passed, guard otherwise intact.  This assert bounds that hole; it does
+    # not close it.  The list can still be *thinned* rather than switched off,
+    # and thinning is not caught here at all: a reverted output call site fails
+    # 3 tests with the list full and 2 with it empty, because two
+    # literal-string tests below catch the revert independently of this list.
+    assert CHAINED_WITH_ALLOWED_HEAD, (
+        "the chained-path list is empty; this guard is watching nothing"
+    )
+
+    for path in CHAINED_WITH_ALLOWED_HEAD:
+        with pytest.raises(RecipeError, match="chained scheme"):
+            _validate_output_path(path, "output.path")
+        # The input side already refused these; assert it still does, so a
+        # future edit cannot "align" the two by loosening the input side.
+        with pytest.raises(RecipeError, match="chained scheme"):
+            _validate_input_path(path, "source.path")
+
+    # Positive control: the unchained forms of the same heads stay accepted,
+    # so the new rejection is about the chain and not about those schemes.
+    for path in ("file:///abs/x.recotem", "s3://bucket/key.recotem"):
+        _validate_output_path(path, "output.path")
+
+
+def test_output_path_chained_scheme_cannot_smuggle_credentials() -> None:
+    """A chain hides userinfo from ``_check_userinfo``.
+
+    ``urlparse("file::s3://AKID:SECRET@bucket/key")`` reports scheme ``file``,
+    an empty netloc and the whole tail in ``.path``, so ``username`` and
+    ``password`` are both ``None`` and the embedded-credential rule never
+    fires on this form. The chain rejection is therefore the *only* thing
+    standing between a recipe and an accepted secret-bearing ``output.path``;
+    which of the two checks runs first does not matter, because the userinfo
+    check does not raise here at all.
+    """
+    from recotem.recipe.loader import _validate_output_path
+
+    with pytest.raises(RecipeError, match="chained scheme"):
+        _validate_output_path(
+            "file::s3://AKIAEXAMPLE:supersecret@bucket/k.recotem", "output.path"
+        )
+
+    # Positive control: the unchained form is refused by the credential rule,
+    # proving that rule is live and that the chain is what was bypassing it.
+    with pytest.raises(RecipeError, match="embedded credentials"):
+        _validate_output_path(
+            "s3://AKIAEXAMPLE:supersecret@bucket/k.recotem", "output.path"
+        )
+
+
+def test_load_recipe_rejects_chained_output_path(tmp_path: Path) -> None:
+    """End to end: ``load_recipe`` must refuse, so ``validate`` cannot exit 0.
+
+    Before the fix ``recotem validate`` returned 0 for this recipe and
+    ``recotem train`` ran the entire search before failing in ``os.replace``.
+    """
+    p = _write_recipe(
+        tmp_path,
+        MINIMAL_RECIPE_TEMPLATE.format(
+            name="chained_out",
+            output_path="file::s3://AKIAEXAMPLE:supersecret@bucket/k.recotem",
+        ),
+    )
+    with pytest.raises(RecipeError, match="chained scheme"):
+        load_recipe(p)
+
+    # Positive control: the same recipe with a bare local output loads.
+    ok = _write_recipe(
+        tmp_path,
+        MINIMAL_RECIPE_TEMPLATE.format(
+            name="plain_out", output_path=str(tmp_path / "ok.recotem")
+        ),
+        filename="ok.yaml",
+    )
+    assert load_recipe(ok).output.path.endswith("ok.recotem")

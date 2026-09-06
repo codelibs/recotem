@@ -193,10 +193,16 @@ after were computed against different holdouts, so do not diff them. See
 If you actually wanted the recency holdout, say so explicitly — set
 `split.scheme: time_user`, which is what 2.0.0 was giving you by accident.
 
-The shipped `examples/sql-sqlite/recipe.yaml` has carried exactly this pairing
-(`scheme: random` with `time_column: event_at`) since 2.0.0, so it is a
-concrete instance rather than a hypothetical; grep your own recipes for the
-same combination.
+**One of the six shipped example recipes is affected:**
+`examples/sql-sqlite/recipe.yaml` has carried this exact pairing
+(`scheme: random` with `time_column: event_at`) unchanged since 2.0.0. Of the
+other five, two use `time_user`, one sets no scheme, and two use `random` with
+no time column at all — so they are genuinely unaffected.
+
+That matters because `sql-sqlite` is the example the SQL data-source
+documentation points at. If you started from it, you have a recipe whose
+`best_score` moves on the first retrain after upgrading, for a reason nothing
+in the recipe explains. Grep your own recipes for the same combination.
 
 ### Upgrade procedure
 

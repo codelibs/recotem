@@ -140,7 +140,7 @@ class EchoSource:
    no `recipe.schema` columns to satisfy at all (see
    [recipe-reference.md](recipe-reference.md#features)).
 
-6. **`fetch()` must raise `DataSourceError`** for any external or transient failure (auth errors, network errors, query errors, empty results). `DataSourceError` is mapped to exit code 3. Any other exception raised from `__init__`, `probe()` or `fetch()` is wrapped by Recotem and **also** reported as exit code 3 — by `train` (as `Data fetch failed: <exc>`) and by `validate` (as `DataSource probe failed [source]: <exc>`) alike, so the two commands agree on the same failure. Wrapping is therefore about the *message*, not the exit code: an unwrapped exception reaches the operator as the third-party library's own wording, which names neither the extra nor the credential that is missing. Wrap third-party exceptions explicitly:
+6. **`fetch()` must raise `DataSourceError`** for any external or transient failure (auth errors, network errors, query errors, empty results). `DataSourceError` is mapped to exit code 3. Any other exception raised from `__init__` or `fetch()` is wrapped by Recotem and **also** reported as exit code 3 — by `train` as `Data fetch failed: <exc>` (construction happens inside the fetch step, so an `__init__` failure reports under that wording too) and, for `__init__` only, by `validate` as `DataSource probe failed [source]: DataSource construction failed: <exc>`. `__init__` is the only hook both commands call: `validate` never calls `fetch()` and `train` never calls `probe()`, so a failure in either of those reaches one command and not the other — see [Exit codes a plugin can actually produce](#exit-codes-a-plugin-can-actually-produce). Wrapping is therefore about the *message*, not the exit code: an unwrapped exception reaches the operator as the third-party library's own wording, which names neither the extra nor the credential that is missing. Wrap third-party exceptions explicitly:
 
    ```python
    def fetch(self, ctx: FetchContext) -> pd.DataFrame:
@@ -189,6 +189,7 @@ each with its own `recotem.datasources` entry point — into a bare
 | `fetch()` raises any other exception | 3 | 0 † |
 | `fetch()` returns something that is not a DataFrame | 3 | 0 † |
 | `fetch()` omits a column named in `schema:` | 3 | 0 † |
+| `fetch()` raises `HttpFetchError` (or wraps one) | 7 | 0 † |
 
 † `validate` never calls `fetch()`. It calls the optional `probe()` and
 `probe_columns()` hooks, so a plugin that defines neither validates clean and
@@ -208,10 +209,14 @@ Four things follow that are easy to get wrong:
   `RecipeError`. Exit 3 is for a source that loaded and then failed to produce
   data.
 * **Nothing your plugin does produces exit 1.** An unwrapped exception is
-  wrapped by Recotem on both commands and reports 3. The one code that escapes
-  the 2/3 split upward is 7, which a `HttpFetchError` keeps through the
-  `__cause__` chain — so an SSRF-guard refusal inside a plugin still reports 7
-  rather than being flattened.
+  wrapped by Recotem on whichever command reaches it and reports 3. The one
+  code that escapes the 2/3 split upward is 7, which a `HttpFetchError` keeps
+  through the `__cause__` chain — so an SSRF-guard refusal inside a plugin
+  still reports 7 rather than being flattened, from `fetch()` on the `train`
+  side and from `probe()` on the `validate` side. Note that the structured
+  `code` field on that failure is `datasource_error`, not something distinct:
+  the 7 comes from the `__cause__` chain, so an operator grepping `code` will
+  not find a separate value for it.
 * **`train` and `validate` agree on every failure they can both reach.** The
   rows they disagree on are exactly the rows one of them never executes: `†`
   (`validate` skips `fetch()`) and `‡` (`train` skips `probe()`). Anywhere both
@@ -439,6 +444,9 @@ the registry's `DataSourceError` arrives as a `RecipeError`. `recotem serve`
 does **not** exit: it logs the same error per recipe, then
 `recipes_directory_loaded_lenient` with `ok=0, errors=1`, and keeps running
 with those recipes unloaded. Uninstall one plugin or rename its `type_name`.
+See [Exit codes a plugin can actually produce](#exit-codes-a-plugin-can-actually-produce),
+which settles this question 200-odd lines earlier — the distance between the two
+is how they came to contradict each other.
 
 ## Validation in `recotem validate`
 

@@ -278,7 +278,7 @@ export RECOTEM_BQ_REQUIRE_STORAGE_API=1
 When this variable is truthy (`1`, `true`, `yes`, `on`):
 
 - A missing `google-cloud-bigquery-storage` raises `DataSourceError` naming the extra to install. It is a pure import check — no query, no credentials, no round trip — so it runs at `recotem validate` time as well as **before the query is submitted** in `recotem train`. A misconfigured strict-mode run costs nothing and is caught by the pre-flight gate rather than only at train time.
-- A Storage Read API download failure raises `DataSourceError` instead of falling back to REST.
+- A Storage Read API download failure raises `DataSourceError` instead of falling back to REST. The IAM / non-IAM classification above still runs first, so strict mode changes only whether a fallback is offered, never the diagnosis: a 403 is answered with `Grant bigquery.readSessions.create`, while a quota, 5xx or connectivity failure names the exception class and says explicitly that an IAM grant will not fix it.
 
 Strict mode governs the **download transport only**. It never changes how a query-execution failure is reported: a SQL typo under `RECOTEM_BQ_REQUIRE_STORAGE_API=1` is still `BigQuery query execution failed: 400 Syntax error: ...`, not IAM advice.
 

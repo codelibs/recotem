@@ -681,11 +681,11 @@ timeout rather than the process. The artifact write
 those blocks in the kernel, uninterruptibly, for as long as the server stays
 away.
 
-**What the run does when storage comes back depends on the mount, and used to
+**What the run does when storage comes back depends on the mount, and it can
 decide the run.** If the file server returns with the same export identity the
 client's handle survives and the blocked write simply finishes. If it does not
 — the server was rebuilt, or failed over, so the export's `fsid` changed — the
-node's mount answers the next metadata call with `ESTALE`. That used to end the
+node's mount answers the next metadata call with `ESTALE`, and that ends the
 run:
 
 ```console
@@ -695,10 +695,10 @@ RECOTEM_EXIT=1
 
 `os.makedirs(dir, exist_ok=True)` suppresses the `FileExistsError` from its
 `mkdir` only when the *single* `os.path.isdir()` call that follows returns
-True, and `os.path.isdir` reports False for any `OSError`. One stale `stat` was
+True, and `os.path.isdir` reports False for any `OSError`. One stale `stat` is
 therefore enough to discard a completed training run — and because the artifact
 write is the first metadata access after minutes of pure-CPU tuning, that call
-is exactly where a handle idled through the search goes stale. The failure was
+is exactly where a handle idled through the search goes stale. The failure is
 also not a one-off at the moment of recovery: measured on a 3-node cluster
 25 minutes *after* the file server returned, `os.path.isdir('/artifacts')`
 answered False while `os.stat` on the same path succeeded with mode `0o42777`
@@ -707,24 +707,84 @@ and the directory was readable throughout. With the chart's
 fetch, Optuna search and final refit before dying on the same line: **five
 consecutive runs discarded.**
 
-Recotem now re-checks that path once before giving up, so a stale `stat` costs
-one syscall rather than a training run. A `dest_dir` that is genuinely not a
-directory still fails, because the re-check fails too. What remains is the
-stall: nothing in the process bounds it, and a write that returns a real I/O
-error still surfaces as `exit 1` (`internal_error`) with a traceback through
-`recotem/artifact/io.py` and nothing naming the file server.
+Recotem re-checks that path once before giving up, and a `dest_dir` that is
+genuinely not a directory still fails because the re-check fails too. **The
+re-check only rescues a momentary stale answer, and an export whose identity
+changed does not give one.** Measured on a 3-node cluster with the same
+injection — file server taken away mid-search and returned as a new pod with a
+different export `fsid`:
 
-**Do not build the alert on the Job's outcome.** The same injection that used to
-end at `exit 1` now ends at `exit 0`, `artifact_written`, and a `Job` marked
-`SuccessCriteriaMet,Complete` — after 397 s in which the run produced no log
-line at all and the file server was absent for five minutes of it. A completed
-Job is therefore not evidence that no outage occurred, and a failed one names a
-directory rather than the file server. What is common to every ending is the
-**stall**: `train` runs for minutes to tens of minutes producing nothing after
-`final_model_trained`, at ~1 millicore, holding the recipe lock. Alert on
-training-run duration, or on the artifact's `trained_at` age — the same advice,
-for the same reason, that the per-recipe lock section gives about a silently
-skipped run.
+| `output.path`'s directory | what `os.makedirs(dir, exist_ok=True)` raises | what the re-check answers |
+|---|---|---|
+| the mount point itself (`/artifacts`, the chart's `artifacts.mountPath`) | `FileExistsError` — `mkdir` gets `EEXIST` from the directory entry underneath the mount, without reaching the server | `os.path.isdir('/artifacts')` → `False`, and stays False |
+| a directory below the mount (`/artifacts/models`) | `OSError [Errno 116] Stale file handle` — the `mkdir` itself crosses into the export | never consulted: only `FileExistsError` is caught |
+
+Probed every 3 s for the life of one pod, `os.path.isdir` on the mount point
+answered `False` on all 80 calls after the export changed identity and never
+once answered `True`, while a *fresh* pod mounting the same PVC — a new mount,
+a new root handle — was fine immediately. Two training Jobs under one injection,
+one image with the re-check and one with the plain `os.makedirs`, therefore end
+identically:
+
+```console
+Training failed: [Errno 116] Stale file handle: '/artifacts/rwx_outage.recotem'
+RECOTEM_EXIT=1
+```
+
+(The errno reported is `ESTALE` rather than the `EEXIST` above because the
+error-classification step that runs next stats `output.path` itself and gets
+the stale answer too.)
+
+**What decides the run is whether the mount's handles are still valid when the
+write executes — not the re-check.** Three restore modes, each injected at a
+`trial_done` count so the write lands in the window, measured with and without
+the re-check:
+
+| how the file server comes back | pre-`_makedirs_exist_ok` | with `_makedirs_exist_ok` |
+|---|---|---|
+| same export identity (a new pod of the same Deployment: same `exports`, same backing store, so the **same `fsid`**) | `exit 0` — the write blocked 162 s in silence, then `artifact_written`, Job `Complete` | `exit 0` — same |
+| same identity, but the export is republished later than the server starts answering (a *momentary* stale window) | — | `exit 1`: `os.makedirs` raises `FileExistsError` and the re-check answers `False` |
+| different `fsid` (rebuilt or failed over) | `exit 1` | `exit 1` |
+
+The re-check needs two `os.path.isdir` calls **microseconds apart** to disagree,
+and `os.makedirs(..., exist_ok=True)` already made the first one. Hammering that
+exact sequence at ~45 calls/second across a real momentary stale window — the
+mount answered `ESTALE` for 26 s and then recovered cleanly — produced **1,130
+consecutive re-raises and not one rescue**; the recovery landed between whole
+attempts, never between one attempt's two `stat`s.
+
+A run that survives an outage therefore says nothing about the re-check: the
+top row of that table reaches `exit 0` **without** it.
+
+**Do not build the alert on the Job's outcome.** No single ending is
+characteristic. When the export identity survives the outage the write finishes,
+the run exits 0 and the Job is marked `Complete` — having produced no log line
+at all for the length of the stall, so a completed Job is not evidence that no
+outage occurred, and not evidence of which code path ran. When the identity does
+not survive, the run exits 1 and the Job
+does not necessarily fail either: with the chart's `restartPolicy: OnFailure`
+the container is restarted **into the same pod**, and therefore onto the same
+stale mount. Measured, the kubelet could not create the container a second time
+at all —
+
+```console
+CreateContainerError: failed to generate container spec: failed to apply OCI
+options: failed to stat "/var/lib/kubelet/pods/<uid>/volumes/kubernetes.io~nfs/
+<pv>": stale file handle
+```
+
+— so `restartCount` stayed `0`, the `backoffLimit` was never consumed, and
+`kubectl get job` reported `Running 0/1` with `active: 1` indefinitely: no
+`Complete`, no `Failed`, no event naming the file server. What is common to
+every ending is the **stall**: `train` runs for minutes to tens of minutes
+producing nothing after `final_model_trained`, at ~1 millicore, holding the
+recipe lock. Alert on training-run duration, or on the artifact's `trained_at`
+age — the same advice, for the same reason, that the per-recipe lock section
+gives about a silently skipped run.
+
+Recovery on the stale path is **pod-level, not container-level**: delete the
+pod (or the Job) so the volume is mounted afresh. A `kubectl rollout restart`
+or a plain retry inside the same pod cannot clear it.
 
 Consequences on the shipped chart:
 

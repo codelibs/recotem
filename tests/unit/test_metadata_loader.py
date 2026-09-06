@@ -317,6 +317,58 @@ def test_local_metadata_sha256_mismatch_raises(tmp_path) -> None:
         )
 
 
+@pytest.mark.parametrize("as_file_uri", [False, True])
+def test_local_metadata_sha256_mismatch_does_not_chain_http_error(
+    tmp_path, as_file_uri
+) -> None:
+    """A non-network sha256 mismatch must not report as an HTTP failure.
+
+    ``verify_sha256`` is shared with the HTTP fetcher and signals with an
+    ``HttpFetchError``.  ``_map_exception_to_exit`` walks ``__cause__`` for
+    that type, so chaining it here would give a permanent content mismatch on
+    a local / object-store file exit 7 -- the code the k8s runbook marks
+    "Retry" -- while the identical mismatch on ``source.sha256`` reports 3.
+    """
+    from recotem._http_fetch import HttpFetchError
+    from recotem.cli import _EXIT_HTTP_FETCH, _map_exception_to_exit
+    from recotem.metadata.loader import MetadataError
+
+    csv_file = _write_csv(tmp_path, "item_id,title\ni1,Title1\n")
+    path = f"file://{csv_file}" if as_file_uri else str(csv_file)
+
+    with pytest.raises(MetadataError) as exc_info:
+        load_item_metadata(_Config("csv", path, sha256="0" * 64), fields=["title"])
+
+    err = exc_info.value
+    assert err.cause == "integrity", f"got cause={err.cause!r}"
+    assert not isinstance(err.__cause__, HttpFetchError), (
+        "a non-network sha256 mismatch must not chain an HttpFetchError"
+    )
+    # The CLI maps an unrecognised ValueError to _EXIT_UNKNOWN and validate
+    # then narrows it to _EXIT_DATASOURCE (3); what must not happen is 7.
+    assert _map_exception_to_exit(err) != _EXIT_HTTP_FETCH
+
+
+def test_http_metadata_sha256_mismatch_still_chains_http_error(httpserver) -> None:
+    """The network branch keeps exit 7: it really is a fetch-pipeline failure."""
+    from recotem._http_fetch import HttpFetchError
+    from recotem.cli import _EXIT_HTTP_FETCH, _map_exception_to_exit
+    from recotem.metadata.loader import MetadataError
+
+    httpserver.expect_request("/items.csv").respond_with_data(
+        b"item_id,title\ni1,Foo\n", content_type="text/csv"
+    )
+    url = httpserver.url_for("/items.csv")
+
+    with pytest.raises(MetadataError) as exc_info:
+        load_item_metadata(_Config("csv", url, sha256="0" * 64), fields=["title"])
+
+    err = exc_info.value
+    assert err.cause == "http_fetch"
+    assert isinstance(err.__cause__, HttpFetchError)
+    assert _map_exception_to_exit(err) == _EXIT_HTTP_FETCH
+
+
 # ---------------------------------------------------------------------------
 # custom item_id_column
 # ---------------------------------------------------------------------------

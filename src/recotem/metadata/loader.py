@@ -65,6 +65,15 @@ class MetadataError(ValueError):
             An HTTP/HTTPS fetch failed (SSRF guard, byte-cap, redirect, sha256
             mismatch, etc.).  ``__cause__`` will be the original
             :class:`~recotem.._http_fetch.HttpFetchError`.
+        ``"integrity"``
+            A ``sha256`` pin did not match on a **non-network** path (bare
+            local, ``file://``, ``s3://``, ``gs://``, ...).  ``__cause__`` is
+            deliberately **not** the ``HttpFetchError`` that
+            :func:`~recotem._http_fetch.verify_sha256` signals with: nothing
+            was fetched over HTTP, and chaining it would make
+            ``_map_exception_to_exit`` report exit 7 for a permanent content
+            mismatch that ``docs/operations.md`` and ``docs/deployment/k8s.md``
+            tell operators to retry as a transient network failure.
         ``"parse"``
             The file could not be parsed as the declared type (CSV/Parquet).
         ``"field_missing"``
@@ -414,10 +423,21 @@ def _read_file(
         try:
             verify_sha256(data, sha256)
         except HttpFetchError as exc:
+            # ``from None`` is deliberate, and mirrors ``datasource/csv.py``'s
+            # ``_verify_sha256(..., network=False)``.  ``verify_sha256`` is
+            # shared with the HTTP fetcher and signals with an
+            # ``HttpFetchError``, but this branch is the *non-network* path --
+            # nothing spoke HTTP and none of the ``RECOTEM_HTTP_*`` knobs
+            # apply.  ``_map_exception_to_exit`` walks ``__cause__`` for
+            # ``HttpFetchError``, so chaining would report exit 7 for a
+            # permanent content mismatch on a local / object-store file, while
+            # the identical mismatch on ``source.sha256`` reports 3.  Exit 7 is
+            # the code ``docs/deployment/k8s.md`` marks "Retry", so a CronJob
+            # would retry a file whose bytes will never match.
             raise MetadataError(
                 f"metadata sha256 verification failed for {safe_path!r}: {exc}",
-                cause="http_fetch",
-            ) from exc
+                cause="integrity",
+            ) from None
         return _parse_bytes(file_type, data, safe_path)
 
     # Non-sha256 non-network path: read fully into memory via fh.read(cap+1) so

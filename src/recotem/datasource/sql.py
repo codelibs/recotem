@@ -216,6 +216,44 @@ _USERINFO_IN_TEXT = re.compile(r"(?<=://)[^\s/@]*:[^\s/@]*@")
 _MAX_SA_DETAIL = 200
 
 
+# Exception types whose ``__str__`` is *argument validation* text rather than
+# text a database handed back.  Closed allow-list, and deliberately so: this
+# file already fails closed the same way for ``_DRIVER_MODULE`` and
+# ``_REMOVED_DIALECT_ALIASES``, and the alternative here -- "interpolate
+# whatever class turns up" -- is the shape ``_error_label`` exists to refuse.
+#
+# Every member is raised by the driver (or by ``ssl``) while it is still
+# checking the keyword arguments SQLAlchemy assembled, before a socket exists:
+#
+# * ``ValueError``  -- PyMySQL's ``port should be of type int``, reached by any
+#   DSN that routes with a query-string ``?port=`` (SQLAlchemy's MySQL dialect
+#   coerces the netloc port to ``int`` but leaves a query-string one a ``str``;
+#   libpq accepts a string port, so this is MySQL/MariaDB-only).
+# * ``TypeError``   -- an unexpected keyword argument from a query parameter
+#   the dialect passes straight through.
+# * ``OSError``     -- ``FileNotFoundError`` / ``PermissionError`` while
+#   building the TLS context from ``ssl_ca`` / ``ssl_cert`` / ``ssl_key``.
+#
+# A DBAPI error is never one of these, and cannot reach here anyway: the
+# ``orig is not None`` branch in ``_error_label`` claims it first.
+_SAFE_DETAIL_TYPES: tuple[type[BaseException], ...] = (ValueError, TypeError, OSError)
+
+
+def _redacted_detail(exc: Exception) -> str | None:
+    """Return *exc*'s own message, userinfo-stripped and length-capped.
+
+    Shared by the two callers that are allowed to surface a message at all, so
+    the redaction and the cap cannot drift apart between them.
+    """
+    detail = " ".join(str(exc).split())
+    if not detail:
+        return None
+    detail = _USERINFO_IN_TEXT.sub("***@", detail)
+    if len(detail) > _MAX_SA_DETAIL:
+        detail = detail[:_MAX_SA_DETAIL] + "…"
+    return detail
+
+
 def _sqlalchemy_detail(exc: Exception) -> str | None:
     """Return SQLAlchemy's own message for *exc*, redacted, or ``None``.
 
@@ -236,13 +274,7 @@ def _sqlalchemy_detail(exc: Exception) -> str | None:
         return None
     if not isinstance(exc, SQLAlchemyError):
         return None
-    detail = " ".join(str(exc).split())
-    if not detail:
-        return None
-    detail = _USERINFO_IN_TEXT.sub("***@", detail)
-    if len(detail) > _MAX_SA_DETAIL:
-        detail = detail[:_MAX_SA_DETAIL] + "…"
-    return detail
+    return _redacted_detail(exc)
 
 
 def _error_label(exc: Exception) -> str:
@@ -267,10 +299,26 @@ def _error_label(exc: Exception) -> str:
     change.  ``docs/data-sources/sql.md`` recommends ``mysql+pymysql://`` for
     MariaDB servers, so assuming the mirror image works is an ordinary mistake
     to make, and the operator was left with a bare class name for it.
+
+    The same argument covers a second, narrower set that is neither a DBAPI
+    error nor a ``SQLAlchemyError``: the driver's own argument validation
+    (``_SAFE_DETAIL_TYPES``).  Those reported as a bare class name too, and the
+    word they reported was never the word the operator needed:
+
+        probe failed for dialect 'mysql': ValueError
+        probe failed for dialect 'mysql': FileNotFoundError
+
+    while the messages underneath said ``port should be of type int`` and
+    ``[Errno 2] No such file or directory``.  Neither can carry DSN userinfo:
+    SQLAlchemy hands the driver ``user=`` and ``password=`` as separate keyword
+    arguments, so no URL exists at the point these are raised.  The redaction
+    runs anyway, for the same reason it runs on the SQLAlchemy branch.
     """
     orig = _dbapi_error(exc)
     if orig is None:
         detail = _sqlalchemy_detail(exc)
+        if detail is None and isinstance(exc, _SAFE_DETAIL_TYPES):
+            detail = _redacted_detail(exc)
         if detail is None:
             return type(exc).__name__
         return f"{type(exc).__name__}: {detail}"

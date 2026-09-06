@@ -2221,7 +2221,14 @@ def test_error_label_names_the_dbapi_error_without_leaking_the_dsn() -> None:
     assert "s3cret" not in label
     assert "alice" not in label
 
-    assert _error_label(ValueError("boom")) == "ValueError"
+    # ``ValueError`` is inside ``_SAFE_DETAIL_TYPES``: it is driver *argument
+    # validation* text, raised before a socket exists and with no URL in scope,
+    # so its message is surfaced.  See test_sql_error_label_driver_args.py.
+    assert _error_label(ValueError("boom")) == "ValueError: boom"
+    # A type outside that allow-list still withholds its message, which is the
+    # rule this test is about — the same rule as the wrapper case above,
+    # applied where there is no ``orig`` to name instead.
+    assert _error_label(RuntimeError("boom")) == "RuntimeError"
 
 
 def test_read_only_failure_message_carries_the_driver_error_class(

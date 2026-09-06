@@ -33,17 +33,29 @@ merge → push tag (human) → GitHub Release → sync recotem-docs → open dev
   "you do it" are not exceptions to this.
 - **CI now gates the tag→PyPI path — but `main` is still ungated.** Two
   release-blocking jobs run before anything is built: `publish.yml`'s `guard`
-  (*release tag guard*, which runs `.github/scripts/check-release-tag.sh`) and
-  its `test` (*pre-publish test gate* — ruff plus unit/integration/fuzz on
-  3.12), and `build` → `publish-pypi` depend on both. `test.yml` fires on `v*`
-  tags too and adds the 3.13/3.14 legs and e2e, but `publish.yml` does **not**
-  wait on it — the two run in parallel, so those extra legs are not
-  release-blocking. And `main` has no required status checks (`contexts: []`),
-  so a red commit can be merged and then tagged. Phase 3's pre-tag verification
-  is what closes that gap; do not skip it because the tag has gates now.
-  (In 2.0.0, before those gates existed, `publish-pypi` completed while the main
-  test run was still finishing — the code was on PyPI before its own tests were
-  green.)
+  (*release tag guard*) and its `test` (*pre-publish test gate* — ruff plus
+  unit/integration/fuzz on 3.12), and `build` → `publish-pypi` depend on both.
+  The `guard` job runs **two** scripts, and they answer different questions:
+
+  | Script | Question | Fixed by |
+  |---|---|---|
+  | `.github/scripts/check-release-tag.sh` | is the tag well-formed, does it agree with every version string and deployment pin, and is the tagged commit on `main`? | editing the tree |
+  | `.github/scripts/check-milestone-landed.sh` | is every PR the release milestone calls MERGED actually reachable from the tagged commit? | re-landing the missing PR **and re-cutting the tag** |
+
+  `docker.yml`'s identically-named `guard` job runs only the **first** of the
+  two, so the milestone check is the one gate whose failure is not symmetric
+  across the two workflows — see the "half-landed" rows in
+  `references/failure-recovery.md`. Both are runnable locally; Phase 3 step 1
+  runs them.
+
+  `test.yml` fires on `v*` tags too and adds the 3.13/3.14 legs and e2e, but
+  `publish.yml` does **not** wait on it — the two run in parallel, so those
+  extra legs are not release-blocking. And `main` has no required status checks
+  (`contexts: []`), so a red commit can be merged and then tagged. Phase 3's
+  pre-tag verification is what closes that gap; do not skip it because the tag
+  has gates now. (In 2.0.0, before those gates existed, `publish-pypi` completed
+  while the main test run was still finishing — the code was on PyPI before its
+  own tests were green.)
 - **The version must be identical in all five places**: `pyproject.toml`,
   `src/recotem/version.py`, `helm/recotem/Chart.yaml` (`version:` and
   `appVersion:`), `helm/recotem/values.yaml` (`image.tag` — the value that
@@ -143,12 +155,24 @@ Spawn parallel subagents to gather facts; do not fix anything yet. Cover:
    `docker.yml` (tag `v[0-9]+.[0-9]+.[0-9]*` → GHCR) are present and that
    `pyproject.toml` metadata (name, description, readme, license, authors,
    classifiers, urls) is complete. Confirm the release gates specifically —
-   `.github/scripts/check-release-tag.sh` exists, `publish.yml`'s `guard` and
-   `test` jobs are still upstream of `build`, and `docker.yml`'s `guard` is
-   still upstream of `smoke` (and so of `trivy` and `build`, the only job that
-   pushes). They are what stops a bad tag before the irreversible upload; a
-   refactor that reorders `needs:` would remove the gate without failing any
-   test.
+   `.github/scripts/check-release-tag.sh` and
+   `.github/scripts/check-milestone-landed.sh` exist and are both still steps
+   of `publish.yml`'s `guard`, that `guard` and `test` are still upstream of
+   `build`, and that `docker.yml`'s `guard` is still upstream of `smoke` (and
+   so of `trivy` and `build`, the only job that pushes). They are what stops a
+   bad tag before the irreversible upload; a refactor that reorders `needs:`
+   would remove the gate without failing any test.
+
+   Run the milestone check here as well as in Phase 3 — it reads the GitHub
+   milestone rather than the tree, so unlike every other gate it can turn red
+   between a green audit and the tag without a single file changing:
+
+   ```bash
+   bash .github/scripts/check-milestone-landed.sh vX.Y.Z   # MUST print "OK: ..."
+   ```
+
+   It needs an authenticated `gh` and a full-history checkout, and it refuses a
+   shallow clone rather than guessing.
 
 Report blockers vs. nice-to-haves. Present findings to the user and confirm the
 target version and scope before changing anything.
@@ -226,6 +250,14 @@ Commit, push, and open the PR with `gh pr create --base main`.
    git status --porcelain                                  # MUST be empty
    bash .github/scripts/check-release-tag.sh vX.Y.Z        # MUST print "OK: ..."
    uv lock --check                                         # MUST exit 0
+
+   # The second half of publish.yml's `guard`, which the line above does not
+   # cover: a PR can read MERGED on GitHub and still not be in this tree.
+   # Run it LAST — it is the only gate that reads the GitHub API rather than
+   # the tree, so it is the only one whose answer can change after a green
+   # Phase 2 without anybody touching a file.  docker.yml does NOT run it, so
+   # failing it at the tag leaves GHCR with the version and PyPI without it.
+   bash .github/scripts/check-milestone-landed.sh vX.Y.Z   # MUST print "OK: ..."
 
    # The script covers pyproject, version.py, Chart.yaml and values.yaml.
    # The remaining deployment pins are covered by nothing else, and Phase 2
@@ -520,7 +552,8 @@ post-release:
 | Verification printed nothing and you called it clean | A grep that only looks for an old literal cannot fail. Use the inverted block in `references/version-locations.md`. |
 | Deployment pins still on the previous release | The replace commands matched nothing and exited 0. The diff must be non-empty. |
 | Tag landed on the wrong commit | `git tag` without an explicit SHA tags whatever `main` is right now. |
-| `publish` red at *release tag guard* | The tag is not `vMAJOR.MINOR.PATCH`; or it disagrees with `pyproject.toml` / `version.py` / `helm/recotem/Chart.yaml` / `helm/recotem/values.yaml`; or a deployment pin under `examples/` or `docs/` is stale; or the tagged commit is not on `main`. The error names which. Nothing was built, and `docker` is red at its own guard for the same reason. Delete the tag, fix the tree, re-tag. Run `check-release-tag.sh` first next time. |
+| `publish` red at *release tag guard*, `docker` red too | `check-release-tag.sh` refused it: the tag is not `vMAJOR.MINOR.PATCH`; or it disagrees with `pyproject.toml` / `version.py` / `helm/recotem/Chart.yaml` / `helm/recotem/values.yaml`; or a deployment pin under `examples/` or `docs/` is stale; or the tagged commit is not on `main`. The error names which. Nothing was built, and `docker` is red at its own guard for the same reason. Delete the tag, fix the tree, re-tag. Run `check-release-tag.sh` first next time. |
+| `publish` red at *release tag guard*, `docker` **green** | `check-milestone-landed.sh` refused it — a PR the milestone calls MERGED is not reachable from the tagged commit. `docker.yml`'s guard does not run this script, so its build proceeded: **GHCR has the version and PyPI does not.** Re-running `publish.yml` cannot help — the fix is a new commit on `main`, which the existing tag can never reach. See `references/failure-recovery.md`. |
 | `docker` red at `trivy` | The scan gates the push (`build: needs: [test, smoke, trivy]`) — the image is *not* on GHCR. Re-run for an upstream-fixed CVE, or patch-release for a repo-side fix. Not a reason to retag. |
 
 ## References

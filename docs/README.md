@@ -23,6 +23,7 @@
 
 ## Operations
 
+- [Upgrading](upgrading.md) — version-to-version upgrade paths and what requires operator action
 - [Operations](operations.md) — key rotation, API key rotation, artifact recovery, sizing, SLOs, troubleshooting
 - [Security](security.md) — trust boundaries, threat model, IAM scopes, secrets handling
 

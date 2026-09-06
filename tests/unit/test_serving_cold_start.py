@@ -1236,7 +1236,7 @@ def test_over_cap_feature_value_is_rejected_at_validation_422(
     request-schema cap returns -- before it can reach the multi_label
     tokenizer. Pins the HTTP status the schema-level ``AfterValidator``
     produces (the unit tests assert only the model-level ValidationError), and
-    matches docs/recipe-reference.md + CHANGELOG.
+    matches docs/recipe-reference.md.
     """
     from recotem.serving.schemas import _MAX_FEATURE_VALUE_CHARS
 

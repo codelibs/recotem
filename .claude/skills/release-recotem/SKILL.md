@@ -16,7 +16,7 @@ pushing a `vX.Y.Z` tag fires `publish.yml` (PyPI, OIDC trusted publishing) and
 that single irreversible trigger.
 
 ```
-audit readiness → prepare PR (version + CHANGELOG + docs) → verify →
+audit readiness → prepare PR (version + docs) → verify →
 merge → push tag (human) → GitHub Release → sync recotem-docs → open dev cycle
 ```
 
@@ -128,8 +128,10 @@ Spawn parallel subagents to gather facts; do not fix anything yet. Cover:
    `uv run ruff check src tests`, `uv run ruff format --check src tests`. All
    must be green. **`-m slow` is the one tier CI never runs** (`test.yml` runs
    `-m "not slow"`), so release is the only time it gets exercised.
-3. **CHANGELOG** — is there a section for the version being released, including
-   breaking-change/migration notes? See `references/release-notes.md`.
+3. **Upgrade notes** — does anything in this release require operator action
+   (a retrain, a probe change, a manifest edit)? If so `docs/upgrading.md` needs
+   a `## <prev> → <this>` section. There is no `CHANGELOG.md`; the GitHub
+   Release is written at release time. See `references/release-notes.md`.
 4. **Open PR queue** — `gh pr list --author app/dependabot`. Dependabot opens up
    to 13 PRs/week (5 uv + 5 github-actions + 3 docker) and the 2.0.0 release
    drained six of them in the hours before the tag. Decide what lands before the
@@ -186,9 +188,9 @@ Branch (e.g. `release/vX.Y.Z`) from up-to-date `main`, then:
    failure to fix by finishing step 2, not one to read past. Finding any of this
    here rather than at the tag is the whole point: at the tag the same failure
    costs a deleted tag and a re-tag.
-3. **Update `CHANGELOG.md`** — see `references/release-notes.md`. If an
-   `Unreleased` section for this version already exists, rename it; do not add a
-   second one.
+3. **Update `docs/upgrading.md`** — only if this release requires operator
+   action. Add a `## <prev> → <this>` section. Nothing else in the tree records
+   the change list; the GitHub Release does that in step 8 of Phase 3.
 4. **Fold in agreed nice-to-haves** — doc inaccuracies, missing index links.
 
 Then run the full verification block in `references/version-locations.md` before
@@ -313,8 +315,9 @@ Commit, push, and open the PR with `gh pr create --base main`.
    ```
    Both must print `True`.
 
-8. **Create the GitHub Release** from the tag, marked latest, with notes derived
-   from the CHANGELOG section:
+8. **Create the GitHub Release** from the tag, marked latest. Write the notes
+   now, from `git log vPREV..main --oneline --no-merges` — see
+   `references/release-notes.md` for the template:
 
    ```bash
    gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <notes.md> --latest
@@ -522,6 +525,6 @@ post-release:
 
 - `references/version-locations.md` — every file that carries a version string,
   the verified bump commands, and the verification block.
-- `references/release-notes.md` — how CHANGELOG entries accumulate, plus the
-  CHANGELOG section and GitHub Release note templates.
+- `references/release-notes.md` — how the GitHub Release notes are written at
+  release time, and the template.
 - `references/failure-recovery.md` — what to do when a release goes wrong.

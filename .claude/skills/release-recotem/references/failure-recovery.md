@@ -124,4 +124,4 @@ from step 1.
 Caught before commit, this is free. `git diff uv.lock` must touch only the
 `recotem` entry; unrelated upgrades belong in their own PR. If it already
 shipped in the release PR, decide with the user whether to revert-and-retag
-(only if untagged) or accept it and note it in the CHANGELOG.
+(only if untagged) or accept it and note it in the GitHub Release notes.

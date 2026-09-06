@@ -24,6 +24,8 @@
 # whose manifests pull the *previous* image, with this script reporting OK.
 #
 #        - examples/k8s/ and docs/    pinned ghcr.io/codelibs/recotem:X.Y.Z
+#          (except docs/upgrading.md, whose pins name PREVIOUS releases on
+#           purpose -- see the note above the scan in section 4)
 #
 # The deployment pins are checked for a reason that was measured rather than
 # assumed.  They used to be excluded as "illustrative rather than
@@ -347,6 +349,30 @@ LABEL_RE='app\.kubernetes\.io/version: *"[^"]*"'
 EXCERPT_RE='^[[:space:]]+tag: *"[^"]*"'
 
 PIN_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${PIN_RE}" examples docs 2>/dev/null || true)"
+
+# `docs/upgrading.md` is dropped from the pin scan, and from this scan only.
+# That page's job is to name PREVIOUS releases: its "The 2.0.0 container image
+# never started" section carries `ghcr.io/codelibs/recotem:2.0.0` as the
+# subject of a sentence, not as something a reader deploys.  Scanning it made
+# the gate and the release mutually unsatisfiable.  Measured at 08b1672 after
+# following references/version-locations.md to the letter -- its PINS array
+# does not list this file, so the documented bump cannot clear it:
+#
+#   ::error::Tag 'v2.1.0' does not match every deployment pin.
+#     docs/upgrading.md:42:ghcr.io/codelibs/recotem:2.0.0
+#
+# and taking the advice this script prints ("set every reference above to
+# 2.1.0") leaves, under the heading "### The 2.0.0 container image never
+# started": "The published `ghcr.io/codelibs/recotem:2.1.0` cannot start on
+# either architecture ... The image published for 2.1.0 starts normally." --
+# two contradictory sentences in one paragraph, with this script exiting 0.
+#
+# The cost is that a pin a reader is meant to *deploy* would go unchecked if
+# one were ever added to that page.  Deployable manifests live in
+# docs/deployment/ and examples/k8s/, which are still scanned in full, and the
+# vacuity guard below counts the hits that survive this filter -- so moving
+# every pin into this file fails the scan rather than emptying it silently.
+PIN_HITS="$(printf '%s\n' "${PIN_HITS}" | grep -v '^docs/upgrading\.md:' || true)"
 LABEL_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${LABEL_RE}" examples docs 2>/dev/null || true)"
 EXCERPT_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${EXCERPT_RE}" examples docs 2>/dev/null || true)"
 
@@ -603,7 +629,9 @@ fi
 
 echo "OK: ${TAG} is a final release and matches pyproject.toml,"
 echo "    src/recotem/version.py, helm/recotem/Chart.yaml, helm/recotem/values.yaml,"
-echo "    and every pinned image reference under examples/ and docs/."
+echo "    and every pinned image reference under examples/ and docs/ — except"
+echo "    docs/upgrading.md, whose pins name previous releases and are NOT"
+echo "    checked against the tag."
 # Say which tree the lines above describe.  Without this the success message
 # reads the same whether it inspected the commit or an uncommitted edit of it —
 # and the next line makes a claim about HEAD, so the two must not be confused.

@@ -56,6 +56,7 @@ def _make_tree(
     version_label: str | None = "2.1.0",
     docs_version_label: str | None = "2.1.0",
     docs_values_tag: str | None = "2.1.0",
+    upgrading_pin: str | None = None,
 ) -> Path:
     """Build a minimal tree the script can read, and return its script path.
 
@@ -125,6 +126,17 @@ def _make_tree(
         docs += "\n```yaml\nimage:\n  repository: ghcr.io/codelibs/recotem\n"
         docs += f'  tag: "{docs_values_tag}"\n```\n'
     (root / "docs" / "deployment" / "k8s.md").write_text(docs, encoding="utf-8")
+
+    # docs/upgrading.md names the release being upgraded *from*, so its pins
+    # are deliberately outside the scan.  Omitted unless a case asks for one.
+    if upgrading_pin is not None:
+        (root / "docs" / "upgrading.md").write_text(
+            "# Upgrading\n\n## Previous → current\n\n"
+            "### The old container image never started\n\n"
+            f"The published `ghcr.io/codelibs/recotem:{upgrading_pin}` cannot "
+            "start on either architecture.\n",
+            encoding="utf-8",
+        )
 
     return script
 
@@ -510,6 +522,55 @@ def test_no_pin_anywhere_is_refused_rather_than_passed(tmp_path: Path) -> None:
     assert "No pinned" in proc.stdout
 
 
+# ---------------------------------------------------------------------------
+# docs/upgrading.md names the release being upgraded FROM
+#
+# Its pins are the subject of a sentence, not something a reader deploys, so
+# they are outside the scan.  Scanning them made the gate and the release
+# mutually unsatisfiable: `check-release-tag.sh v2.1.0` refused the tag naming
+# `docs/upgrading.md:42:ghcr.io/codelibs/recotem:2.0.0`, the runbook's own PINS
+# array does not list that file, and following the advice the script prints
+# left the page saying the 2.1.0 image "cannot start on either architecture"
+# two sentences before "The image published for 2.1.0 starts normally."
+# ---------------------------------------------------------------------------
+
+
+def test_a_stale_pin_in_upgrading_md_does_not_fail_the_tag(tmp_path: Path) -> None:
+    """The one file whose pins must NOT track the release."""
+    script = _make_tree(tmp_path, upgrading_pin="2.0.0")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "upgrading.md" not in proc.stdout.split("OK:")[0]
+
+
+def test_the_exemption_is_scoped_to_that_one_file(tmp_path: Path) -> None:
+    """Contrast: the same stale pin one directory over is still refused.
+
+    Without this the test above would also pass if the pin scan had been
+    switched off altogether.
+    """
+    script = _make_tree(tmp_path, upgrading_pin="2.0.0", docs_pin="2.0.0")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "docs/deployment/k8s.md" in proc.stdout
+    assert "docs/upgrading.md" not in proc.stdout
+
+
+def test_upgrading_md_cannot_become_the_only_pin(tmp_path: Path) -> None:
+    """The exemption must not turn into a hiding place.
+
+    The vacuity guard counts the hits that survive the filter, so moving every
+    pin into the exempt file empties the scan and is refused -- rather than
+    passing while the success message vouches for pins nobody looked at.
+    """
+    script = _make_tree(
+        tmp_path, example_pin=None, docs_pin=None, upgrading_pin="2.1.0"
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "No pinned" in proc.stdout
+
+
 def test_repo_deployment_pins_are_where_the_script_looks(tmp_path: Path) -> None:
     """Pins the script scans for must actually exist in this repository.
 
@@ -529,6 +590,91 @@ def test_repo_deployment_pins_are_where_the_script_looks(tmp_path: Path) -> None
         "no pinned ghcr.io/codelibs/recotem:X.Y.Z reference found under "
         "examples/ or docs/. The script refuses this case at release time; if "
         "the pins genuinely moved, teach the script where they went."
+    )
+
+
+def _bump(path: Path, pattern: str, repl: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    new, count = re.subn(pattern, repl, text, flags=re.M)
+    assert count, f"{path}: nothing matched {pattern!r} -- the bump is broken"
+    path.write_text(new, encoding="utf-8")
+
+
+def test_a_release_ready_copy_of_this_repository_passes(tmp_path: Path) -> None:
+    """The real tree, bumped the way a release bumps it, must satisfy the gate.
+
+    Every other case here builds a synthetic tree, deliberately -- so the suite
+    does not go red while the project's own version is mid-bump.  The gap that
+    leaves is that nothing measures the *real* tree until a tag is pushed, and
+    by then the tag exists and has to be deleted and re-pushed.  A docs PR
+    reached main that way: it added `ghcr.io/codelibs/recotem:2.0.0` to
+    docs/upgrading.md, a path the pin scan already read, and `v2.1.0` became
+    unreachable via the documented procedure with nothing on any PR to say so.
+
+    Bumping to a synthetic version keeps this version-agnostic: it asserts the
+    tree is *bumpable*, not what it happens to be pinned to today.  Only
+    version-shaped values move, mirroring the script's own `is_version_pin`, so
+    `:latest` stays a moving reference here exactly as it does at a release.
+    """
+    release = "9.9.9"
+    root = tmp_path / "tree"
+    (root / ".github").mkdir(parents=True)
+    shutil.copytree(REPO_ROOT / ".github" / "scripts", root / ".github" / "scripts")
+    for rel in ("helm", "examples", "docs"):
+        shutil.copytree(REPO_ROOT / rel, root / rel)
+    (root / "src" / "recotem").mkdir(parents=True)
+    shutil.copy(REPO_ROOT / "pyproject.toml", root / "pyproject.toml")
+    shutil.copy(
+        REPO_ROOT / "src" / "recotem" / "version.py",
+        root / "src" / "recotem" / "version.py",
+    )
+
+    _bump(root / "pyproject.toml", r'^version = "[^"]+"', f'version = "{release}"')
+    _bump(
+        root / "src" / "recotem" / "version.py",
+        r'^__version__ = "[^"]+"',
+        f'__version__ = "{release}"',
+    )
+    chart = root / "helm" / "recotem" / "Chart.yaml"
+    _bump(chart, r"^version: .+$", f"version: {release}")
+    _bump(chart, r'^appVersion: "[^"]*"$', f'appVersion: "{release}"')
+    _bump(
+        root / "helm" / "recotem" / "values.yaml",
+        r'^(\s+tag: )"[0-9][^"]*"',
+        rf'\g<1>"{release}"',
+    )
+
+    # docs/upgrading.md is left alone on purpose: the gate must pass with its
+    # historical pin in place, which is the whole point of the exemption.
+    for rel in ("examples", "docs"):
+        for path in (root / rel).rglob("*"):
+            if not path.is_file() or path.suffix not in {".yaml", ".yml", ".md"}:
+                continue
+            if path.relative_to(root).as_posix() == "docs/upgrading.md":
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            new = re.sub(
+                r"(ghcr\.io/codelibs/recotem:)v?[0-9][A-Za-z0-9_.-]*",
+                rf"\g<1>{release}",
+                text,
+            )
+            new = re.sub(
+                r'(app\.kubernetes\.io/version: )"[0-9][^"]*"',
+                rf'\g<1>"{release}"',
+                new,
+            )
+            new = re.sub(
+                r'^(\s+tag: )"[0-9][^"]*"', rf'\g<1>"{release}"', new, flags=re.M
+            )
+            if new != text:
+                path.write_text(new, encoding="utf-8")
+
+    proc = _run(root / ".github" / "scripts" / SCRIPT.name, f"v{release}")
+    assert proc.returncode == 0, (
+        "a release-ready copy of this repository does not satisfy the release "
+        "gate, so pushing the tag would fail after the tag already exists:\n"
+        + proc.stdout
+        + proc.stderr
     )
 
 

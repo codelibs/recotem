@@ -86,6 +86,12 @@ nothing else** — the script does not see it, so that step is not optional:
 |---|---|
 | `docs/deployment/docker.md` the "already pin `X.Y.Z`" sentence | prose, matching no pattern the script scans for |
 
+And one location is deliberately **not** bumped at all:
+
+| Never bumped | Why |
+|---|---|
+| `docs/upgrading.md` — `ghcr.io/codelibs/recotem:X.Y.Z` | its pins name the release being upgraded *from*. `check-release-tag.sh` skips this file for that reason; bumping it makes the page say the image it is warning about is the one you are shipping. |
+
 | File | What to change |
 |------|----------------|
 | `helm/recotem/Chart.yaml` | `version:` and `appVersion:` |

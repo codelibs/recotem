@@ -359,3 +359,108 @@ def test_real_service_http_statuses_are_scoped_to_remote_paths() -> None:
     """A local output.path keeps its existing classification (exit 8 via lock)."""
     assert _classify(_GcsHttpError(403, "forbidden"), "/var/lib/out.recotem") is None
     assert _classify(OSError("Forbidden: x"), "/var/lib/out.recotem") is None
+
+
+# ---------------------------------------------------------------------------
+# The quoted SDK text is one line and bounded
+# ---------------------------------------------------------------------------
+#
+# The Azure blob SDK's ``__str__`` is eleven lines: a human sentence, a
+# RequestId, a timestamp, an ErrorCode, then the whole XML error document
+# repeating all four.  Interpolated raw, recotem's own remedy ("Training
+# succeeded but the model was not persisted — ...") landed after ``</Error>``
+# on the twelfth line.  ``datasource/sql.py`` already collapses and caps
+# SQLAlchemy's text for exactly this reason.
+
+_AZURE_MULTILINE = """The specified container does not exist.
+RequestId:00000000-0000-0000-0000-000000000000
+Time:2026-01-01T00:00:00.000Z
+ErrorCode:ContainerNotFound
+Content: <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Error>
+  <Code>ContainerNotFound</Code>
+  <Message>The specified container does not exist.
+RequestId:00000000-0000-0000-0000-000000000000
+Time:2026-01-01T00:00:00.000Z</Message>
+</Error>"""
+
+
+class ClientAuthenticationError(Exception):
+    """Stand-in for azure.core's error of the same name.
+
+    The class NAME is what ``_CREDENTIAL_ERROR_NAMES`` matches on, so the
+    stand-in must be spelled exactly as the SDK spells it -- a leading
+    underscore makes it fall through unclassified.
+    """
+
+
+def _multiline_cases():
+    """One multi-line exception per branch of ``_artifact_write_credentials_error``.
+
+    Both credential branches and the destination branch build their own
+    message, so a helper applied to only some of them must fail here.
+    """
+    return [
+        # destination branch: stdlib errors fsspec raises
+        (FileNotFoundError(_AZURE_MULTILINE), "az://c/out.recotem", "then re-run."),
+        (PermissionError(_AZURE_MULTILINE), "s3://b/out.recotem", "then re-run."),
+        # destination branch: matched by class name
+        (
+            _AzureHttpResponseError(403, _AZURE_MULTILINE),
+            "az://c/out.recotem",
+            "then re-run.",
+        ),
+        # credential branch: matched by class name
+        (
+            ClientAuthenticationError(_AZURE_MULTILINE),
+            "az://c/out.recotem",
+            "and re-run.",
+        ),
+        # credential branch: matched by HTTP 401
+        (_GcsHttpError(401, _AZURE_MULTILINE), "gs://b/out.recotem", "and re-run."),
+    ]
+
+
+@pytest.mark.parametrize(("exc", "path", "tail"), _multiline_cases())
+def test_write_error_message_is_a_single_line(exc, path, tail) -> None:
+    """A multi-line SDK message must not split recotem's own remedy off."""
+    err = _classify(exc, path)
+    assert err is not None
+    message = str(err)
+    assert "\n" not in message, f"message spans lines:\n{message}"
+    assert message.endswith(tail), (
+        f"recotem's remedy must be the tail of the message, got: {message[-80:]!r}"
+    )
+
+
+def test_write_error_message_is_length_capped() -> None:
+    """A pathological SDK message cannot flood the log line.
+
+    The cap keeps the HEAD.  Every SDK measured leads with the human sentence
+    ("The specified container does not exist") and follows it with request
+    ids, timestamps and an XML document; a cap that kept the tail would drop
+    the one clause the operator needs and keep the boilerplate.
+    """
+    from recotem.training.pipeline import _MAX_WRITE_DETAIL
+
+    lead = "The specified bucket does not exist. "
+    err = _classify(FileNotFoundError(lead + "x" * 5000), "s3://b/out.recotem")
+    assert err is not None
+    message = str(err)
+    assert "x" * (_MAX_WRITE_DETAIL + 1) not in message
+    assert "…" in message
+    assert lead.strip() in message, (
+        f"the cap must keep the head of the SDK message, got: {message!r}"
+    )
+    assert message.endswith("then re-run.")
+
+
+def test_short_write_error_detail_is_preserved_verbatim() -> None:
+    """The cap must not truncate the ordinary one-sentence SDK message."""
+    err = _classify(
+        FileNotFoundError("The specified bucket does not exist"),
+        "s3://b/out.recotem",
+    )
+    assert err is not None
+    assert "The specified bucket does not exist" in str(err)
+    assert "…" not in str(err)

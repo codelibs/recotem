@@ -759,6 +759,28 @@ def _http_status_of(exc: BaseException) -> int | None:
     return None
 
 
+# Upper bound on the object-store SDK text quoted inside an artifact-write
+# error.  Long enough for the sentence the SDK actually leads with and short
+# enough that a multi-line error document cannot push recotem's own remedy off
+# the end of the message.
+#
+# The Azure blob SDK's ``__str__`` is eleven lines: the human sentence, then a
+# RequestId, a timestamp, an ErrorCode, and the whole XML error document
+# repeating all four.  Interpolated raw, recotem's "Training succeeded but the
+# model was not persisted — ..." landed on a line beginning ``</Error>.``.
+# ``datasource/sql.py`` already collapses and caps SQLAlchemy's text for the
+# same reason (``_MAX_SA_DETAIL``); this is that rule for the write path.
+_MAX_WRITE_DETAIL = 200
+
+
+def _write_error_detail(exc: BaseException) -> str:
+    """Return *exc*'s message as one whitespace-collapsed, length-capped line."""
+    detail = " ".join(str(exc).split())
+    if len(detail) > _MAX_WRITE_DETAIL:
+        detail = detail[:_MAX_WRITE_DETAIL] + "…"
+    return detail
+
+
 def _is_gcs_forbidden_oserror(exc: BaseException) -> bool:
     """True for gcsfs's bare ``OSError('Forbidden: ...')`` — a 403 with no status.
 
@@ -830,7 +852,8 @@ def _artifact_write_credentials_error(
         if type(cur).__name__ in _CREDENTIAL_ERROR_NAMES:
             return TrainingError(
                 f"could not authenticate to write the artifact to "
-                f"{output_path!r}: {type(cur).__name__}: {cur}.  Training "
+                f"{output_path!r}: {type(cur).__name__}: "
+                f"{_write_error_detail(cur)}.  Training "
                 "succeeded but the model was not persisted — configure "
                 "credentials for the destination and re-run.",
                 code="artifact_write_credentials",
@@ -839,7 +862,8 @@ def _artifact_write_credentials_error(
         if remote and status == 401:
             return TrainingError(
                 f"could not authenticate to write the artifact to "
-                f"{output_path!r}: {type(cur).__name__}: {cur}.  Training "
+                f"{output_path!r}: {type(cur).__name__}: "
+                f"{_write_error_detail(cur)}.  Training "
                 "succeeded but the model was not persisted — configure "
                 "credentials for the destination and re-run.",
                 code="artifact_write_credentials",
@@ -852,7 +876,8 @@ def _artifact_write_credentials_error(
         ):
             return TrainingError(
                 f"could not write the artifact to {output_path!r}: "
-                f"{type(cur).__name__}: {cur}.  Training succeeded but the "
+                f"{type(cur).__name__}: {_write_error_detail(cur)}.  "
+                "Training succeeded but the "
                 "model was not persisted — check that the bucket or container "
                 "exists and that the credentials may write to it, then re-run.",
                 code="artifact_write_destination",

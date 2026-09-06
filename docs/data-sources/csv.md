@@ -88,23 +88,29 @@ come from the environment (instance profile, ADC, `AWS_*` env vars, etc.).
 
 The userinfo check is applied selectively by scheme:
 
-- **Rejected** (`http`, `https`, `ftp`, `ftps`, `s3`): any URI with a
+- **Rejected** (`http`, `https`, `ftp`, `ftps`, `s3`, `file`): any URI with a
   `username` or `password` component raises `RecipeError`. These schemes do
   not use `@` in their canonical addressing syntax, so any `user:pass@host`
   pattern means embedded plaintext credentials.
-- **Password-only rejection** (`az`, `abfs`, `abfss`): these are three
-  protocol aliases for one adlfs filesystem, and
+- **Password-only rejection** (`az`, `abfs`, `abfss`, `gs`): these schemes do
+  use `@` for addressing.
   `abfss://<container>@<account>.dfs.core.windows.net/<path>` is the form
   Azure's own documentation uses — the `@` separates the container from the
-  storage account, so it is addressing syntax, not a credential. A bare
-  `container@account` is accepted; a real `user:pass@` pair still raises
-  `RecipeError`. Authentication comes from the environment
+  storage account — and `gs://project@bucket/key` is a valid billing-project
+  override accepted by gcsfs. A bare `container@account` or `project@bucket`
+  is accepted; a real `user:pass@` pair raises `RecipeError` on all four.
+  Authentication comes from the environment
   (`AZURE_STORAGE_ACCOUNT_NAME` / `AZURE_STORAGE_ACCOUNT_KEY`, a connection
-  string, or a managed identity), never from the URI.
-- **Permitted** (`gs`, bare paths, `file`): the `@` character may be
-  part of the canonical URI syntax. For GCS, `gs://project@bucket/key` is a
-  valid billing-project override accepted by gcsfs. Authentication is always
-  via ADC / `GOOGLE_APPLICATION_CREDENTIALS`, not the URI userinfo.
+  string, or a managed identity for Azure; ADC /
+  `GOOGLE_APPLICATION_CREDENTIALS` for GCS), never from the URI.
+- **Not applicable** (bare local paths): no userinfo concept.
+
+The same password rule governs logging. Every source-path log event is written
+through a redaction gate that strips userinfo whenever a password component is
+present, on **every** scheme — so a path that somehow reaches a log line cannot
+put a plaintext secret in it. A bare `project@bucket` / `container@account` is
+left intact in logs, because that is addressing information an operator needs
+and it protects nothing to blank it.
 
 `${RECOTEM_RECIPE_*}` env-var expansion **is** performed inside `path`
 fields (and is the recommended way to inject bucket names, dates, or

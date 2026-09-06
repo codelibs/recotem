@@ -44,12 +44,14 @@ merge → push tag (human) → GitHub Release → sync recotem-docs → open dev
   (In 2.0.0, before those gates existed, `publish-pypi` completed while the main
   test run was still finishing — the code was on PyPI before its own tests were
   green.)
-- **The version must be identical in all four places**: `pyproject.toml`,
+- **The version must be identical in all five places**: `pyproject.toml`,
   `src/recotem/version.py`, `helm/recotem/Chart.yaml` (`version:` and
-  `appVersion:`), and `uv.lock`. A mismatch between the first two nearly shipped
-  in 2.0.0. Do not check this by eye:
+  `appVersion:`), `helm/recotem/values.yaml` (`image.tag` — the value that
+  decides what a cluster actually pulls), and `uv.lock`. A mismatch between the
+  first two nearly shipped in 2.0.0. Do not check this by eye:
   `bash .github/scripts/check-release-tag.sh vX.Y.Z` is the authoritative check
-  for the first three and runs locally; `uv lock --check` covers `uv.lock`, as
+  for the first four — and for the deployment pins under `examples/` and
+  `docs/` — and runs locally; `uv lock --check` covers `uv.lock`, as
   does `uv sync --locked` in the pre-publish test gate. It has to be `--locked`:
   `--frozen` installs from the lockfile without comparing it to
   `pyproject.toml`, so it exits **0** on a version bump that forgot `uv lock`.

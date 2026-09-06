@@ -96,7 +96,7 @@ potentially long after the deploy that caused it. Alert on that counter and
 scrape `/v1/health/details`; a green `/v1/health` is not evidence the swap
 worked. [operations.md](operations.md) calls this "degraded now, down later".
 
-### Azure URIs: the `@` rule changed in both directions
+### Azure URIs changed in both directions
 
 2.1.0 rewrote how `source.path` and `item_metadata.path` treat an `@` in an
 Azure URI. Both halves are user-visible against 2.0.0, and one of them will
@@ -165,10 +165,26 @@ rolled back at all** and must be retrained without the block to run on 2.0.0.
 
 ### Unchanged by this upgrade
 
-Signing keys and the key-rotation procedure; the artifact container itself
-(magic bytes, `FORMAT_VERSION` 1, and the header layout); and every existing
-recipe, which stays valid as written. Every recipe's `recipe_hash` does change,
-but nothing gates on it.
+Signing keys and the key-rotation procedure; and the artifact container itself
+(magic bytes, `FORMAT_VERSION` 1, and the header layout). A 2.0.0-signed
+artifact verifies under 2.1.0 and a 2.1.0-signed one verifies under 2.0.0, with
+the same key. Every recipe's `recipe_hash` does change, but nothing gates on it.
+
+**Recipes are *nearly* unchanged — two `path` forms that loaded under 2.0.0 are
+now refused with exit 2.** Everything else stays valid as written, but if
+either of these describes a recipe you have, fix it before you upgrade:
+
+- **`az://` carrying a `user:pass@` pair** — see
+  [Azure URIs](#azure-uris-changed-in-both-directions) above. Move
+  the secret into the environment.
+- **`arrow_hdfs://` and `async_wrapper://`** — the only two protocols fsspec
+  registers whose names contain an underscore. RFC 3986 forbids `_` in a
+  scheme, so `urlparse` reported no scheme at all and 2.0.0's allow-list read
+  these as bare local paths and let them through, while `fsspec.open` routed
+  them to a real remote backend. 2.1.0 derives the scheme the way fsspec does
+  and refuses them, as it always did for the equivalent `hdfs://` form. This
+  was an allow-list bypass, so the refusal is the point — but a recipe that
+  relied on it stops loading. Use a supported scheme.
 
 One thing in that area *did* change: a malformed `RECOTEM_SIGNING_KEYS` now
 exits **8** (`_EXIT_CONFIG`) where 2.0.0 exited **5** (`_EXIT_ARTIFACT`), on

@@ -435,7 +435,60 @@ into**.
 it at ~4.8× the cap, not at the cap. At the 512 MiB default, plan for roughly
 2.5 GiB of resident memory per recipe that actually reaches the cap.
 
-For large models (IALS with many components, large item sets), use `recotem inspect` to read `data_stats` and `best_params` from the header before committing to a host size. Note that `n_components` — the term that dominates artifact size, since the factor matrices are `(n_users + n_items) × n_components × 4` bytes — is an Optuna-searched parameter over irspack's `[4, 300]`, so it is a property of the run rather than of the recipe: the same recipe on the same data can produce a materially different artifact size on the next train. `recotem train` logs `artifact_bytes` on `artifact_written` for every run.
+For large models (IALS with many components, large item sets), use `recotem inspect` to read `data_stats` and `best_params` from the header before committing to a host size. Two terms set the payload size, and **which one dominates depends on the dataset**:
+
+```
+payload ≈ (n_users + n_items) × n_components × 4 B     ← factor matrices
+        + n_rows × ~12 B                                ← the pickled interaction matrix
+```
+
+irspack's recommenders retain `X_train_all`, the user–item CSR, on the trained
+object, so every deduplicated interaction row is pickled into the artifact at
+roughly 12 bytes (a 4-byte column index plus an 8-byte value). That term does
+not shrink when the search picks a small `n_components`. Measured across eight
+runs on two occasions:
+
+| n_users | n_items | n_rows | `n_components` | payload | estimate error | B/entry |
+|---|---|---|---|---|---|---|
+| 2,000 | 500 | 120,000 | 41 | 1.79 MiB | −1.5% | 18.32 |
+| 3,000 | 800 | 36,000 | 166 | 2.86 MiB | −1.4% | 4.75 |
+| 5,000 | 1,000 | 123,525 | 69 | 3.06 MiB | −2.2% | 7.75 |
+| 8,000 | 2,000 | 120,000 | 93 | 5.03 MiB | −2.1% | 5.67 |
+| 20,000 | 4,000 | 200,000 | 133 | 14.73 MiB | −1.8% | 4.84 |
+| 20,000 | 4,000 | 498,536 | 219 | 26.02 MiB | −1.0% | 5.19 |
+| 60,000 | 10,000 | 1,498,219 | 44 | 29.71 MiB | −2.7% | 10.11 |
+| 150,000 | 20,000 | 2,998,529 | 218 | 177.75 MiB | −1.2% | 5.03 |
+
+The two-term estimate lands within **2.7%** on every run, and **always low** —
+all eight errors are negative, so treat it as a floor and leave headroom rather
+than sizing exactly to it. Reading `n_components` alone does not work at all:
+the last column, bytes per `(n_users + n_items) × n_components` entry, spans
+**4.75 to 18.32** — a factor of nearly four, set by how many interactions sit
+behind each factor entry rather than by anything in the header's `best_params`.
+
+That single number is really `4 + 12r`, where
+`r = n_rows / ((n_users + n_items) × n_components)` measures how many
+interactions each factor entry carries. It is close to 4 on a sparse,
+high-dimension model and rises without bound as the catalogue gets denser or
+the search picks a smaller `n_components` — which is why it cannot be quoted as
+a constant. The densest run above (`r` = 1.17) sits at 18.3 bytes per entry.
+
+`n_components` is an Optuna-searched parameter over irspack's `[4, 300]`, so it
+is a property of the run rather than of the recipe: the same recipe on the same
+data can produce a materially different artifact size on the next train. But a
+small `n_components` is **not** a guarantee of a small artifact. Against the
+512 MiB `RECOTEM_MAX_PAYLOAD_BYTES` default, a 1.2M-entity catalogue fits at
+`n_components` **111** with no interaction term at all, at **99** with 5M
+interactions, and at **61** with 20M — those being the largest values that
+still fit, with the next one over in each case. At 50M interactions the
+interaction matrix alone is 572 MiB, so **no value in irspack's search range
+fits**. Size a catalogue that large on `n_rows` first.
+
+`recotem train` logs `artifact_bytes` and `payload_bytes` on `artifact_written`
+for every run, and warns with `artifact_payload_exceeds_serve_cap` (naming
+`RECOTEM_MAX_PAYLOAD_BYTES`) when the file it just wrote is one this host's
+`recotem serve` would refuse — so the arithmetic above is for planning, and the
+run itself tells you the answer.
 
 > Measured on macOS/arm64 (16 cores, 128 GB). The double-resident raw bytes are
 > arithmetic and hold on any platform; whether a freed buffer is returned to the

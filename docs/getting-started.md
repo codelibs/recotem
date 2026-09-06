@@ -10,12 +10,14 @@ pip (everything in your venv).
 - ~50 MB of disk
 - Network access to fetch a small CSV from `raw.githubusercontent.com`
 - `curl` and [`jq`](https://jqlang.github.io/jq/), used by the request steps in
-  both paths. `curl` ships with macOS and most Linux distributions; **`jq` does
-  not** — install it (`brew install jq`, `apt install jq`, `dnf install jq`).
-  Without it the request steps below print `jq: command not found` and no
-  response at all, because `curl`'s output goes to a pipe that was never read.
-  If you would rather not install it, drop the `| jq .` and the raw JSON is
-  printed instead.
+  both paths. `curl` ships with macOS and most Linux distributions; **`jq` may
+  not** — check with `jq --version` before installing anything, because recent
+  macOS ships its own Apple-signed `/usr/bin/jq`. If it is missing, install it
+  (`brew install jq`, `apt install jq`, `dnf install jq`). Without it the
+  request steps below print `jq: command not found` and no response at all,
+  because `curl`'s output goes to a pipe that was never read. If you would
+  rather not install it, drop the `| jq .` and the raw JSON is printed
+  instead.
 - A second terminal for Path B, whose `recotem serve` runs in the foreground
 
 ## Path A — Docker Compose (recommended)

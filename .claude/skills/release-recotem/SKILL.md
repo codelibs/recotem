@@ -137,9 +137,41 @@ Spawn parallel subagents to gather facts; do not fix anything yet. Cover:
    drained six of them in the hours before the tag. Decide what lands before the
    tag. Check separately for pending CVE bumps: Trivy-flagged fixes are what
    populate the Security section, and Trivy fails this project in practice.
-5. **Docs staleness** — wrong version-specific advice, unrendered placeholders,
+5. **Milestone PRs that were closed, not merged** — the milestone counter says
+   "closed", which is one word for merged, superseded, and abandoned.
+   `check-milestone-landed.sh` cannot help here: it asks whether every *merged*
+   PR is an ancestor of the tree, so a PR with no merge commit was never a
+   candidate for that question. List them and read the list:
+
+   ```bash
+   gh pr list --repo codelibs/recotem --search "milestone:X.Y.Z" --state all \
+     --limit 300 --json number,title,state,mergedAt \
+     --jq '.[] | select(.state == "CLOSED" and .mergedAt == null)
+                | "#\(.number)  \(.title)"'
+   ```
+
+   Most entries are fine — a PR superseded by a replacement that did land. What
+   you are looking for is a closure whose **content never landed anywhere**:
+   the fix was right, the packaging was not, and nothing carried it forward.
+
+   **Do not try to automate the distinction, and do not trust the closing
+   comment's PR number.** Measured on 2.1.0's thirteen closures: every one of
+   them names a `#NNN`, so "names a successor" separates nothing. Six of those
+   thirteen named the *same* PR — the one whose policy change made their
+   packaging inadmissible — which is the reason they were closed, not a
+   replacement carrying their content. Telling the two apart means looking at
+   what the named PR actually did, which is why this is a list to read rather
+   than a gate.
+
+   Those six were closed in a single 31-second sweep and their branches were
+   all still on origin, so the remedy was to re-land each documentation half
+   rather than re-derive it. Recovering from such a branch is **not** the same
+   as reverting to it: if the branch is old, main may have moved past it, and a
+   faithful replay can undo later work. Re-check each claim against the current
+   tree and re-land only what is still true.
+6. **Docs staleness** — wrong version-specific advice, unrendered placeholders,
    missing index links.
-6. **Publishing infra** — confirm `publish.yml` (tag `v*` → PyPI) and
+7. **Publishing infra** — confirm `publish.yml` (tag `v*` → PyPI) and
    `docker.yml` (tag `v[0-9]+.[0-9]+.[0-9]*` → GHCR) are present and that
    `pyproject.toml` metadata (name, description, readme, license, authors,
    classifiers, urls) is complete. Confirm the release gates specifically —

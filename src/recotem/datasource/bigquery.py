@@ -264,16 +264,20 @@ class BigQuerySource:
           second attempt with the same outcome.
 
         ``RECOTEM_BQ_REQUIRE_STORAGE_API=1`` refuses the fallback even for the
-        PermissionDenied case.
-        """
-        if strict:
-            raise DataSourceError(
-                f"BigQuery Storage Read API failed and "
-                "RECOTEM_BQ_REQUIRE_STORAGE_API is set — no REST "
-                "fallback. Grant bigquery.readSessions.create on the "
-                f"project to fix this. Original error: {storage_exc}"
-            ) from storage_exc
+        PermissionDenied case.  It does *not* change the diagnosis: the IAM
+        classification below runs first either way, so strict mode only decides
+        whether a fallback is offered, never what the failure is said to be.
 
+        Detection deliberately precedes the strict branch.  While strict mode
+        answered every download failure with "Grant
+        bigquery.readSessions.create", a 503 from an unreachable
+        ``bigquerystorage.googleapis.com`` — measured live, as a connection
+        refused — told the operator to fix an IAM grant that was already
+        correct.  That is the same misdirection the phase-1 / phase-2 split
+        removed for query-execution errors, reproduced one branch over: the
+        non-strict path below already refuses to give IAM advice for a non-IAM
+        failure, and the two paths must agree on the same input.
+        """
         # Detect IAM-shaped failures by class name AND by message content so
         # the check works under three regimes:
         #
@@ -321,6 +325,24 @@ class BigQuerySource:
         else:
             is_iam_failure = False
             iam_detected_via = None
+
+        if strict:
+            remedy = (
+                "Grant bigquery.readSessions.create on the project to fix this."
+                if is_iam_failure
+                else (
+                    "This is not an IAM failure, so granting "
+                    "bigquery.readSessions.create will not fix it. The query "
+                    "itself completed — only the result download failed "
+                    "(quota / 5xx / connectivity). Unset "
+                    "RECOTEM_BQ_REQUIRE_STORAGE_API to allow the REST fallback."
+                )
+            )
+            raise DataSourceError(
+                f"BigQuery Storage Read API failed with {exc_name} and "
+                "RECOTEM_BQ_REQUIRE_STORAGE_API is set — no REST "
+                f"fallback. {remedy} Original error: {storage_exc}"
+            ) from storage_exc
 
         if not is_iam_failure:
             # Non-IAM failure: quota, transient 5xx, etc.  REST would hit the

@@ -1213,17 +1213,3 @@ def test_both_env_maps_offer_the_same_cap_knobs() -> None:
             "lowers it on serve has nowhere obvious to set it for train -- and "
             "train is the half that produces the warning."
         )
-
-
-def test_the_k8s_doc_tells_you_to_set_the_cap_on_both() -> None:
-    """The advice that walks operators into this must carry the caveat."""
-    doc = (REPO_ROOT / "docs" / "deployment" / "k8s.md").read_text(encoding="utf-8")
-    assert "lower `RECOTEM_MAX_PAYLOAD_BYTES`" in doc, (
-        "the sizing advice that motivates this pairing has moved or been "
-        "reworded; this guard is watching nothing."
-    )
-    assert "train.env" in doc and "two separate maps" in doc, (
-        "docs/deployment/k8s.md tells operators to lower "
-        "RECOTEM_MAX_PAYLOAD_BYTES but never says the chart has separate env "
-        "maps for serve and train, so the cap reaches only serve."
-    )

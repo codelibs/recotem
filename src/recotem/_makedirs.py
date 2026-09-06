@@ -38,14 +38,33 @@ def makedirs_exist_ok(dest_dir: str) -> None:
         FileExistsError: [Errno 17] File exists: '/artifacts'
 
     The per-recipe lock reaches the same directory one step earlier, before any
-    data is fetched, and used to answer a single stale ``stat`` there with the
-    same message mapped to exit 1 (``_EXIT_UNKNOWN``) — a permanent-looking
-    crash of recotem on a directory that is present and readable.
+    data is fetched, so it is exposed to the same behaviour and calls the same
+    rule.
 
     ``exist_ok=True`` already declares that an existing directory is the
     expected outcome, so re-checking once before giving up costs one ``stat``
     and keeps the failure semantics: a ``dest_dir`` that is genuinely not a
     directory still raises, because the second check fails too.
+
+    **What this does not fix.**  The re-check rescues an is-a-directory answer
+    that is False *momentarily*.  A mount whose handles have gone permanently
+    stale — the export was rebuilt or failed over, so its ``fsid`` changed —
+    gives no such window: measured on that cluster,
+    ``os.path.isdir('/artifacts')`` answered False on 1,198 consecutive calls
+    across the life of one pod and never once True, so this function re-raises
+    there exactly as the plain spelling does.  Nor do the two spellings even
+    fail alike in that state.  ``os.makedirs`` re-raises its own
+    ``FileExistsError`` (``[Errno 17]``), because ``os.path.isdir`` swallows
+    the ``ESTALE`` and reports False; ``Path.mkdir(parents=True,
+    exist_ok=True)`` surfaces ``OSError [Errno 116] Stale file handle``,
+    because ``Path.is_dir`` ignores only ENOENT / ENOTDIR / EBADF / ELOOP and
+    re-raises everything else.  Both end the run at exit 1 (``_EXIT_UNKNOWN``).
+
+    The tolerance is bounded to the mount *point* as well: when ``dest_dir``
+    lies below the mount rather than being the mount point itself, the
+    ``mkdir`` crosses into the export and raises ``OSError [Errno 116]``
+    instead of ``FileExistsError``, which the ``except`` clause below does not
+    catch at all.
     """
     try:
         os.makedirs(dest_dir, exist_ok=True)

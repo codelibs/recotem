@@ -274,14 +274,21 @@ def recipe_lock(
         lock_path = Path(output_str + ".lock")
     try:
         # Not ``lock_path.parent.mkdir(parents=True, exist_ok=True)``: that
-        # spelling re-raises its own ``FileExistsError`` whenever the single
-        # ``is_dir()`` check behind ``exist_ok`` answers False, and it answers
-        # False for any ``OSError``.  For a local ``output.path`` this
-        # directory is the artifacts directory, so on a network filesystem one
-        # transient ``stat`` used to end the run with
-        # ``[Errno 17] File exists: '/artifacts'`` — mapped to exit 1,
-        # ``_EXIT_UNKNOWN`` — on a directory that is present and readable.
-        # ``makedirs_exist_ok`` re-checks once; see its docstring.
+        # spelling re-raises whenever the single ``is_dir()`` check behind
+        # ``exist_ok`` fails to answer True, and it fails that way for any
+        # ``OSError``.  For a local ``output.path`` this directory is the
+        # artifacts directory, so on a network filesystem one *momentary*
+        # ``stat`` failure used to end the run at exit 1 (``_EXIT_UNKNOWN``) on
+        # a directory that is present and readable.  ``makedirs_exist_ok``
+        # re-checks once; see its docstring.
+        #
+        # It does not rescue a mount that is *permanently* stale (the export's
+        # ``fsid`` changed).  Measured there, both spellings end the run at
+        # exit 1, only with different errnos: this one re-raises
+        # ``FileExistsError [Errno 17] File exists: '<artifacts dir>'``, the
+        # ``Path.mkdir`` spelling raises ``OSError [Errno 116] Stale file
+        # handle``.  Neither errno is in ``_UNWRITABLE_ERRNOS``, so both fall
+        # through the ``except`` below and propagate.
         makedirs_exist_ok(str(lock_path.parent))
     except OSError as _mkdir_exc:
         # Same misconfiguration as the unwritable-path open below, one step

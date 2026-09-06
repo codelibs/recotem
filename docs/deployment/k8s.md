@@ -733,15 +733,35 @@ RECOTEM_EXIT=1
 
 (The errno reported is `ESTALE` rather than the `EEXIST` above because the
 error-classification step that runs next stats `output.path` itself and gets
-the stale answer too.) So on this path a completed run is still discarded; what
-the re-check buys is the case where the mount answers correctly on the second
-call.
+the stale answer too.)
+
+**What decides the run is whether the mount's handles are still valid when the
+write executes — not the re-check.** Three restore modes, each injected at a
+`trial_done` count so the write lands in the window, measured with and without
+the re-check:
+
+| how the file server comes back | pre-`_makedirs_exist_ok` | with `_makedirs_exist_ok` |
+|---|---|---|
+| same export identity (a new pod of the same Deployment: same `exports`, same backing store, so the **same `fsid`**) | `exit 0` — the write blocked 162 s in silence, then `artifact_written`, Job `Complete` | `exit 0` — same |
+| same identity, but the export is republished later than the server starts answering (a *momentary* stale window) | — | `exit 1`: `os.makedirs` raises `FileExistsError` and the re-check answers `False` |
+| different `fsid` (rebuilt or failed over) | `exit 1` | `exit 1` |
+
+The re-check needs two `os.path.isdir` calls **microseconds apart** to disagree,
+and `os.makedirs(..., exist_ok=True)` already made the first one. Hammering that
+exact sequence at ~45 calls/second across a real momentary stale window — the
+mount answered `ESTALE` for 26 s and then recovered cleanly — produced **1,130
+consecutive re-raises and not one rescue**; the recovery landed between whole
+attempts, never between one attempt's two `stat`s.
+
+A run that survives an outage therefore says nothing about the re-check: the
+top row of that table reaches `exit 0` **without** it.
 
 **Do not build the alert on the Job's outcome.** No single ending is
 characteristic. When the export identity survives the outage the write finishes,
 the run exits 0 and the Job is marked `Complete` — having produced no log line
 at all for the length of the stall, so a completed Job is not evidence that no
-outage occurred. When the identity does not survive, the run exits 1 and the Job
+outage occurred, and not evidence of which code path ran. When the identity does
+not survive, the run exits 1 and the Job
 does not necessarily fail either: with the chart's `restartPolicy: OnFailure`
 the container is restarted **into the same pod**, and therefore onto the same
 stale mount. Measured, the kubelet could not create the container a second time

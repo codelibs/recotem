@@ -612,6 +612,9 @@ def _run_training_locked(
         credentials_error = _artifact_write_credentials_error(exc, recipe.output.path)
         if credentials_error is not None:
             raise credentials_error from exc
+        destination_error = _local_write_destination_error(exc, recipe.output.path)
+        if destination_error is not None:
+            raise destination_error from exc
         raise
 
     # Canonical end-of-train marker.
@@ -866,6 +869,80 @@ def _is_remote_output(output_path: str) -> bool:
     """
     scheme = urllib.parse.urlparse(str(output_path)).scheme.lower()
     return len(scheme) > 1 and scheme != "file"
+
+
+def _local_write_destination_error(
+    exc: BaseException, output_path: str
+) -> TrainingError | None:
+    """Return a config-coded ``TrainingError`` when ``output.path`` is a directory.
+
+    ``_artifact_write_credentials_error`` above states that a local
+    ``output.path`` cannot reach the write handler at all, "because
+    ``_write_atomic`` creates missing parents and the lock already refused an
+    unwritable directory".  One local shape defeats both halves of that: a
+    path that names an **existing directory**.  ``_write_atomic`` has no
+    parent to create, and the per-recipe lock is taken at
+    ``<output_path>.lock`` -- a *sibling* of the destination, not the
+    destination -- so ``isdir.recotem.lock`` is created happily and says
+    nothing about whether the artifact itself can be written.  The search then
+    runs to completion and ``os.replace`` raises ``IsADirectoryError``.
+
+    Measured on ``08b1672``: exit 1 (``_EXIT_UNKNOWN``, "unhandled / unmapped
+    exception") with ``code="internal_error"``, after fetch, cleansing, split
+    and the whole Optuna search -- so on a BigQuery- or SQL-backed recipe the
+    scan is billed before a recipe-content mistake that no retry can fix is
+    reported as a crash of recotem itself.  A read-only directory, the
+    neighbouring case, has always reported exit 8 via ``LockPermissionError``,
+    because there the lock's own sibling path is unwritable too.
+
+    Classified by asking the filesystem what is wrong rather than by matching
+    an errno, so the shape is named precisely and every *other* write failure
+    keeps its current classification.  A full disk, an I/O error or a stalled
+    mount is not a configuration error and must stay retryable -- the same
+    boundary ``_artifact_write_credentials_error``'s closing paragraph draws
+    for the remote side.  Scoped to local paths, mirroring that function's
+    scope to remote ones, so neither can silently relabel the other's
+    failures.  ``_local_output_path`` is what enforces that scope: it returns
+    ``None`` for every scheme ``_is_remote_output`` calls remote, and for a
+    Windows drive letter as well, so no second scheme test is needed here --
+    one was written and removed, because no mutation of it could change a
+    single answer.
+
+    Deliberately NOT widened to the adjacent case where an *ancestor* of
+    ``output.path`` is a regular file.  That one never reaches here: it raises
+    ``FileExistsError`` from ``lock.py``'s ``lock_path.parent.mkdir`` before
+    any data is fetched, and that call site already has an explicit errno
+    allow-list whose comment classes ``ENOTDIR``-shaped failures as "a genuine
+    system problem [that] keeps propagating".  Reclassifying it is a decision
+    for that boundary's owner, and it costs the operator seconds rather than a
+    billed scan.
+
+    Not checked in ``recotem validate``: it deliberately does not probe write
+    targets, so a lint job on one host can vet a recipe that trains on another
+    (see #321, where a filesystem pre-flight was tried and the existing suite
+    rejected it -- ``test_usable_storage_path_is_accepted`` asserts a
+    production path absent from CI is accepted).  The answer belongs at the
+    train-time mapping, which is where the house already puts the read-only
+    directory's exit 8.
+    """
+    if not isinstance(exc, OSError):
+        return None
+
+    from recotem.recipe.loader import _local_output_path  # noqa: PLC0415
+
+    local = _local_output_path(str(output_path))
+    if local is None or not local.is_dir():
+        return None
+
+    return TrainingError(
+        f"output.path {str(output_path)!r} names an existing directory, so "
+        "the artifact cannot be written there. The per-recipe lock is taken "
+        "at '<output.path>.lock', a sibling of the destination, so it was "
+        f"created successfully and did not catch this: {type(exc).__name__}: "
+        f"{exc}.  Training succeeded but the model was not persisted — point "
+        "output.path at a file path and re-run.",
+        code="artifact_write_destination",
+    )
 
 
 def _normalize_paths_for_hash(obj: Any) -> Any:

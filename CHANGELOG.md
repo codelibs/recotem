@@ -306,16 +306,21 @@ exit 8.
   *had* loaded. `/v1/health/ready` answers `200` when at least one recipe is
   loaded and `503` when none is, so a cold fleet still stays out of the Service
   and the first-install guarantee holds. `/v1/health` itself is unchanged —
-  still `503` whenever `loaded < total` — and stays the startupProbe path,
-  where "every recipe present" is the right gate for a *new* pod.
+  still `503` whenever `loaded < total` — but no probe in the shipped chart
+  reads it any more. "Every recipe present" is the wrong gate for a *new* pod:
+  on a startupProbe it is a restart loop, because a failing startupProbe
+  restarts the container instead of withholding traffic, so one unloadable
+  recipe keeps every new pod from ever starting. Keep `/v1/health` for
+  dashboards and alerting, which is the question it does answer.
 
   In 2.0.0 all three probes polled `/v1/health`, so copying one untrained
   recipe into a running server's recipes directory failed readiness on every
   replica at the next watcher poll (they all read the same directory), dropped
   every endpoint from the Service, and then CrashLooped the pods with no
   self-healing path. The chart, `examples/k8s/` and `docs/deployment/k8s.md`
-  now wire `readinessProbe` to `/v1/health/ready` and `livenessProbe` to
-  `/v1/health/live`. **Hand-written manifests do not get this for free** — see
+  now point `startupProbe` at `/v1/health/ready`, `readinessProbe` at
+  `/v1/health/ready` and `livenessProbe` at `/v1/health/live`.
+  **Hand-written manifests do not get this for free** — see
   **Upgrading from 2.0.0** above. Full endpoint reference:
   [docs/api-reference.md](docs/api-reference.md).
 

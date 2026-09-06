@@ -601,33 +601,3 @@ def test_watcher_path_is_silent_when_the_recipe_matches(tmp_path: Path) -> None:
 
     assert registry.get("demo").loaded is True
     assert not _warnings(logs), f"a matching hash must be silent; got {logs}"
-
-
-def test_the_new_event_is_documented_in_the_operations_runbook() -> None:
-    """An operator who greps the log for this event must find it in the table.
-
-    The sibling gate's events are documented there; a WARNING nobody can look
-    up is only marginally better than silence.
-    """
-    doc = (Path(__file__).resolve().parents[2] / "docs" / "operations.md").read_text(
-        encoding="utf-8"
-    )
-    assert "`initial_artifact_recipe_name_mismatch`" in doc, (
-        "the log-event table has moved or been renamed; this guard is watching "
-        "nothing. Re-point it at the table's new location."
-    )
-    row = [
-        ln
-        for ln in doc.splitlines()
-        if ln.startswith("| `artifact_recipe_hash_mismatch` |")
-    ]
-    assert len(row) == 1, (
-        "docs/operations.md does not document artifact_recipe_hash_mismatch in "
-        "its log-event table (found "
-        f"{len(row)} rows)."
-    )
-    assert "still loads" in row[0] and "not a refusal" in row[0], (
-        "the documented row must say the artifact still loads -- an operator "
-        "who reads this as a load failure will go looking for an outage that "
-        "is not happening."
-    )

@@ -241,6 +241,7 @@ curl -X POST http://localhost:8080/v1/recipes/{name}:recommend \
 | Error | Exit | Message pattern |
 |-------|------|----------------|
 | ADC credentials not found | 3 | `DataSourceError: Failed to create BigQuery client: ... Ensure Application Default Credentials (ADC) are configured.` |
+| `source.project` names a project that cannot be resolved | 3 | `DataSourceError: BigQuery query submission failed: 400 POST .../projects/<your-project>/jobs...: ProjectId must be non-empty` |
 | Permission denied on dataset | 3 | `DataSourceError: BigQuery query execution failed: 403 Access Denied: Table my-project:analytics_123456789.events ...` |
 | Query syntax error | 3 | `DataSourceError: BigQuery query execution failed: 400 Syntax error: ...` |
 | Table not found | 3 | `DataSourceError: BigQuery query execution failed: 404 Not found: Table my-project:dataset.tbl was not found in location US; reason: notFound, ...` |
@@ -250,6 +251,8 @@ curl -X POST http://localhost:8080/v1/recipes/{name}:recommend \
 | Extra not installed | 3 | `DataSourceError: google-cloud-bigquery is required for BigQuerySource` (or `db-dtypes ...`) |
 
 All BigQuery failures are wrapped in `DataSourceError` and produce exit 3 — including a missing `schema:` column, which is a data-source problem (the query did not produce what the recipe names), not a recipe-schema problem. The full BigQuery error message is included in the stderr JSON line.
+
+**A typo in `source.project` reads as "ProjectId must be non-empty".** That is BigQuery's own wording for a billing project it cannot resolve, and it is misleading: the project ID is present, and the URL in the same message shows it. The message means *no such project*, not *empty field*. The neighbouring cases are clearer — a project that exists but you cannot use returns `403 Access Denied: Project <id>: User does not have bigquery.jobs.create permission`, and one that exists without the BigQuery API enabled returns `400 The project <id> has not enabled BigQuery`. Only the unresolvable case gets the confusing text, so check the spelling of `source.project` first.
 
 **A 403 does not always mean an IAM problem.** BigQuery does not disclose whether a resource exists to a caller who cannot see it, so a mistyped *dataset* or *project* name comes back as `403 Access Denied: Table <ref>: User does not have permission to query table ..., or perhaps it does not exist` rather than 404. Only a mistyped *table* within a dataset you can already read returns 404. Check the spelling of every part of the reference before reaching for IAM.
 

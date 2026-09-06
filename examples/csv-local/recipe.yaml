@@ -4,7 +4,7 @@
 # The interactions.csv.gz file is expected in the same directory as this recipe.
 #
 # Train:
-#   recotem train examples/csv-local/recipe.yaml
+#   uv run recotem train examples/csv-local/recipe.yaml
 #
 # The trained artifact is written to ./artifacts/csv_local_example.recotem
 # (or a sha-suffixed variant if versioning: append_sha).

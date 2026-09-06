@@ -84,6 +84,11 @@ The repository ships with a self-contained example at
 artifact directory all in one place. Train a TopPop recommender from a
 60-user CSV in under a minute.
 
+`examples/` lives in the repository, not in the wheel, so clone the repo
+first. The commands below use `uv run`, because `uv sync` installs the CLI
+into `.venv` rather than onto `PATH`; with `pip install recotem` into an
+active virtualenv, drop the `uv run` prefix.
+
 ```bash
 # 1. Set demo keys. DEMO ONLY — for production, generate fresh keys with
 #    `recotem keygen --type signing` and `recotem keygen --type api`.
@@ -92,8 +97,8 @@ export RECOTEM_API_PLAINTEXT="recotem-quickstart-demo-key-0000"
 export RECOTEM_API_KEYS="dev:sha256:21be5c3be85b8d68123df9f9b6a26d8e307db30350ea8bcc844883e22ebcf125"
 
 # 2. Train, serve
-recotem train examples/quickstart/recipe.yaml
-recotem serve --recipes examples/quickstart/ &
+uv run recotem train examples/quickstart/recipe.yaml
+uv run recotem serve --recipes examples/quickstart/ &
 
 # Wait for the server to become ready before sending traffic.
 until curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/v1/health | grep -q "200"; do sleep 1; done

@@ -31,7 +31,7 @@ The service account / ADC identity needs:
 # `recotem train` refuses to write an unsigned artifact: without a signing key
 # it exits 8 with `RECOTEM_SIGNING_KEYS is not set`.  In production this comes
 # from your scheduler's secret store — see "Adapting to your project" below.
-export $(recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
+export $(uv run recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
 
 RECOTEM_RECIPE_GCP_PROJECT=my-gcp-project \
   uv run recotem train examples/ga4-bigquery/recipe.yaml

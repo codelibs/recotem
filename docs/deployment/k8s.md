@@ -668,7 +668,7 @@ PVC, by scaling the NFS server to zero replicas mid-run:
 
 | | what happens | what the operator sees |
 |---|---|---|
-| `serve`, already running | keeps answering `:recommend` (10/10 `200`), stays `1/1` Ready, 0 restarts, 2–3 millicores | `artifact_stat_timeout` (WARN, per recipe, one scan every ~20 s), then `artifact_stat_failed` naming `OSError [Errno 116] Stale file handle` |
+| `serve`, already running | keeps answering `:recommend` (10/10 `200`), stays `1/1` Ready, 0 restarts, 2–3 millicores | `artifact_stat_timeout` (WARN, per recipe, one scan every ~20 s) for as long as the mount merely hangs; if its file handles do not survive the outage, `artifact_stat_failed` naming `OSError [Errno 116] Stale file handle` as well. A 403 s outage never got past the timeout stage |
 | `serve`, new pod | never starts | `FailedMount ... exit status 32` on the pod; the rollout stalls |
 | `train`, mid-run | **blocks in the artifact write for as long as the outage lasts** — measured 23 min 19 s at 1 millicore, and 6 min 52 s in a second run — then completes when storage returns | nothing at all while blocked: the last log line is `final_model_trained`, no error, no progress |
 
@@ -713,6 +713,18 @@ directory still fails, because the re-check fails too. What remains is the
 stall: nothing in the process bounds it, and a write that returns a real I/O
 error still surfaces as `exit 1` (`internal_error`) with a traceback through
 `recotem/artifact/io.py` and nothing naming the file server.
+
+**Do not build the alert on the Job's outcome.** The same injection that used to
+end at `exit 1` now ends at `exit 0`, `artifact_written`, and a `Job` marked
+`SuccessCriteriaMet,Complete` — after 397 s in which the run produced no log
+line at all and the file server was absent for five minutes of it. A completed
+Job is therefore not evidence that no outage occurred, and a failed one names a
+directory rather than the file server. What is common to every ending is the
+**stall**: `train` runs for minutes to tens of minutes producing nothing after
+`final_model_trained`, at ~1 millicore, holding the recipe lock. Alert on
+training-run duration, or on the artifact's `trained_at` age — the same advice,
+for the same reason, that the per-recipe lock section gives about a silently
+skipped run.
 
 Consequences on the shipped chart:
 

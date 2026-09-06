@@ -35,6 +35,8 @@ from recotem.training._storage_url import (
 )
 from recotem.training.errors import TrainingError
 
+_SIGNING = "dev:" + "ab" * 32
+
 # Spellings that must be ACCEPTED: the two always-available forms, plus every
 # dialect+driver combination the installed extras really provide.
 ACCEPTED = [
@@ -353,4 +355,119 @@ def test_unsupported_dialect_message_mentions_the_extras() -> None:
     assert "recotem[postgres]" in message and "recotem[mysql]" in message, (
         "listing the supported DSN forms without saying they need a driver "
         f"extra reproduces the gap this check exists to close; got: {message}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The residual class: the driver loads, the backend does not open.
+#
+# ``validate_storage_path`` answers everything decidable from text plus a local
+# import.  Whether the backend *opens* -- a directory that exists, a permission
+# bit, a running server -- it deliberately does not touch, because
+# ``recotem validate`` has to stay a text-and-driver check so a lint job on one
+# host can vet a recipe that trains on another.  (``output.path``, the other
+# write target in a recipe, is handled the same way: validate does not probe it,
+# and an unwritable destination reports 8 at train time.)
+#
+# So that class lands in ``run_search``, and it landed there as exit 1.
+# Measured on 08b1672, after fetch / cleanse / split had already run:
+#
+#   /no/such/dir/study.db        -> exit 1  (sqlite3.OperationalError)
+#   <a directory>                -> exit 1  (sqlite3.OperationalError)
+#   <a read-only directory>      -> exit 1  (sqlite3.OperationalError)
+#   postgresql+psycopg://<down>  -> exit 1  (psycopg.OperationalError)
+#
+# Exit 1 is "unhandled exception", so a CronJob retry policy reads a recipe
+# typo as a recotem crash. Only the SQLite spellings are exercised here: they
+# are deterministic and need no network.
+# ---------------------------------------------------------------------------
+
+
+def _trainable_recipe(tmp_path, storage_path: str, name: str):
+    """Like ``_recipe`` but with per-user depth enough for the split to run.
+
+    ``_recipe`` exists for ``validate``, which never splits; its 12 users have
+    3 items each and ``train`` on it exits 4 with a split error before the
+    study backend is ever built.  These tests need ``train`` to reach
+    ``run_search``, so every user gets 12 items.
+    """
+    csv = tmp_path / f"{name}.csv"
+    rows = "\n".join(f"u{u},i{i}" for u in range(20) for i in range(12))
+    csv.write_text("user_id,item_id\n" + rows + "\n")
+    yaml_path = tmp_path / f"{name}.yaml"
+    yaml_path.write_text(
+        f"name: {name}\n"
+        "source:\n"
+        "  type: csv\n"
+        f"  path: {csv}\n"
+        "schema:\n"
+        "  user_column: user_id\n"
+        "  item_column: item_id\n"
+        "training:\n"
+        "  algorithms: [TopPop]\n"
+        "  cutoff: 3\n"
+        "  n_trials: 1\n"
+        f'  storage_path: "{storage_path}"\n'
+        "output:\n"
+        f"  path: {tmp_path / (name + '.recotem')}\n"
+    )
+    return yaml_path
+
+
+@pytest.mark.parametrize(
+    ("subpath", "label"),
+    [
+        ("missing_dir/study.db", "a directory that does not exist"),
+        ("", "a path that is a directory"),
+    ],
+)
+def test_train_exits_8_when_the_sqlite_study_file_cannot_open(
+    tmp_path, subpath: str, label: str
+) -> None:
+    """An unopenable study file is a config error (8), not a crash (1)."""
+    from typer.testing import CliRunner
+
+    from recotem.cli import app
+
+    storage = str(tmp_path / subpath) if subpath else str(tmp_path)
+    yaml_path = _trainable_recipe(tmp_path, storage, "unopenable")
+    result = CliRunner().invoke(
+        app,
+        ["train", str(yaml_path)],
+        env={"RECOTEM_SIGNING_KEYS": _SIGNING},
+    )
+
+    assert result.exit_code != _EXIT_UNKNOWN, (
+        f"{label} must not report as an unhandled exception; "
+        f"got exit 1. Output:\n{result.output}"
+    )
+    assert result.exit_code == _EXIT_CONFIG, (
+        f"{label} must report exit 8; got {result.exit_code}. Output:\n{result.output}"
+    )
+    assert "training.storage_path" in result.output, (
+        "the failure must name the recipe field the operator has to fix; "
+        f"got:\n{result.output}"
+    )
+
+
+def test_train_succeeds_with_a_writable_study_file(tmp_path) -> None:
+    """Positive control: the same recipe with an openable path still trains.
+
+    Without this, a wrapper that turned *every* ``_make_storage`` outcome into
+    exit 8 would pass the test above.
+    """
+    from typer.testing import CliRunner
+
+    from recotem.cli import app
+
+    yaml_path = _trainable_recipe(tmp_path, str(tmp_path / "study.db"), "openable")
+    result = CliRunner().invoke(
+        app,
+        ["train", str(yaml_path)],
+        env={"RECOTEM_SIGNING_KEYS": _SIGNING},
+    )
+
+    assert result.exit_code == 0, f"Output:\n{result.output}"
+    assert (tmp_path / "study.db").exists(), (
+        "the study file must actually have been created"
     )

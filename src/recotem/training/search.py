@@ -24,7 +24,10 @@ from optuna.samplers import TPESampler
 
 # _compat applies IPython stub before irspack imports (see _compat.py).
 import recotem.training._compat  # noqa: F401
-from recotem.training._storage_url import validate_storage_path
+from recotem.training._storage_url import (
+    describe_storage_path,
+    validate_storage_path,
+)
 from recotem.training.algorithms import (
     get_recommender_cls,
     is_feature_capable,
@@ -412,7 +415,42 @@ def run_search(
     # cleansed and split, so the scan is already paid for.
     validate_storage_path(storage_path)
 
-    storage = _make_storage(storage_path)
+    # ``validate_storage_path`` answers everything decidable without touching
+    # the backend: the URL parses, the dialect is supported, the driver
+    # imports.  What it deliberately cannot answer is whether the backend
+    # *opens* -- that depends on a directory, a permission bit, a running
+    # server, a password -- and ``recotem validate`` must stay a text-and-driver
+    # check so a lint job on one host can vet a recipe that trains on another.
+    #
+    # So the residual class arrives here, and it arrived as exit 1.  Measured on
+    # a tree at 08b1672, all after fetch/cleanse/split had already run:
+    #
+    #   storage_path: /no/such/dir/study.db      (sqlite3.OperationalError)
+    #                                            unable to open database file
+    #   storage_path: <a read-only directory>    same
+    #   storage_path: postgresql+psycopg://      (psycopg.OperationalError)
+    #                 <a host that is down>      connection failed
+    #
+    # Each is a configuration failure of ``training.storage_path``, and each
+    # reached the operator as ``_EXIT_UNKNOWN`` -- "unhandled exception" --
+    # naming neither the recipe field nor the fix, which supervisor and CronJob
+    # retry logic reads as a recotem crash and retries forever.  ``output.path``,
+    # the other write target in a recipe, already reports 8 for exactly this
+    # (``artifact_write_destination``); this makes the study backend agree.
+    try:
+        storage = _make_storage(storage_path)
+    except TrainingError:  # SearchError included; already mapped
+        raise
+    except (MemoryError, RecursionError):
+        raise
+    except Exception as exc:
+        raise TrainingError(
+            "training.storage_path could not open a study backend "
+            f"({describe_storage_path(storage_path)}): {exc}. The driver "
+            "loaded, so this is the backend itself — a missing or unwritable "
+            "directory for SQLite, or an unreachable / refusing server.",
+            code="storage_path_unusable",
+        ) from exc
     study_name = f"recotem_{recipe_name}_{run_id}"
 
     sampler = TPESampler(seed=random_seed)

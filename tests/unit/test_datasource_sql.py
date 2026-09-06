@@ -1928,8 +1928,8 @@ def test_tls_warning_mysql_without_ssl(monkeypatch) -> None:
     assert events, f"expected sql_dsn_tls_not_configured warning, got {logs!r}"
 
 
-def test_tls_warning_mysql_silent_with_ssl_true(monkeypatch) -> None:
-    """MySQL DSN with ssl=true does not warn."""
+def test_tls_warning_mysql_silent_with_ssl_ca(monkeypatch) -> None:
+    """MySQL DSN with ssl_ca=... does not warn."""
     import sys
     import types
 
@@ -1941,7 +1941,7 @@ def test_tls_warning_mysql_silent_with_ssl_true(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "pymysql", types.ModuleType("pymysql"))
     monkeypatch.setenv(
         "RECOTEM_RECIPE_DB_DSN",
-        "mysql+pymysql://u:p@db.example.com/orders?ssl=true",
+        "mysql+pymysql://u:p@db.example.com/orders?ssl_ca=/etc/ssl/ca.pem",
     )
 
     with structlog.testing.capture_logs() as logs:
@@ -1949,6 +1949,58 @@ def test_tls_warning_mysql_silent_with_ssl_true(monkeypatch) -> None:
 
     events = [r for r in logs if r["event"] == "sql_dsn_tls_not_configured"]
     assert not events
+
+
+@pytest.mark.parametrize("value", ["true", "1", "false", "TRUE"])
+@pytest.mark.parametrize("backend", ["mysql", "mariadb"])
+def test_scalar_ssl_query_param_is_refused(monkeypatch, backend, value) -> None:
+    """A scalar ``?ssl=`` is refused before anything connects.
+
+    PyMySQL's ``ssl`` parameter takes a mapping or an ``ssl.SSLContext``.
+    SQLAlchemy hands a URL query value through as a string, so any non-empty
+    scalar reaches ``Connection.__init__`` as text and dies in PyMySQL's own
+    ``ssl.get(key)`` with ``AttributeError: 'str' object has no attribute
+    'get'`` -- a message that names neither the parameter nor the fix.
+    """
+    import sys
+    import types
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "pymysql", types.ModuleType("pymysql"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        f"{backend}+pymysql://u:p@db.example.com/orders?ssl={value}",
+    )
+
+    with pytest.raises(DataSourceError) as excinfo:
+        SQLSource(_make_cfg())
+
+    message = str(excinfo.value)
+    assert "?ssl=" in message
+    assert "ssl_ca=" in message
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["", "?ssl=", "?ssl_ca=/etc/ssl/ca.pem", "?ssl_verify_cert=true"],
+)
+def test_non_scalar_ssl_spellings_are_accepted(monkeypatch, query) -> None:
+    """The refusal is narrow: an empty ``ssl=`` and every ``ssl_*`` key pass."""
+    import sys
+    import types
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "pymysql", types.ModuleType("pymysql"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        f"mysql+pymysql://u:p@db.example.com/orders{query}",
+    )
+
+    SQLSource(_make_cfg())
 
 
 def test_tls_warning_silent_for_sqlite(monkeypatch) -> None:

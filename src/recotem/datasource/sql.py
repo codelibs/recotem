@@ -92,6 +92,27 @@ _PG_PLAINTEXT_SSLMODES: frozenset[str] = frozenset({"disable", "allow", "prefer"
 # chain from spinning.
 _MAX_CAUSE_DEPTH = 6
 
+# The MySQL / MariaDB spelling that actually turns TLS on.
+#
+# NOT ``?ssl=true``.  PyMySQL's ``ssl`` parameter takes an ``ssl.SSLContext``
+# or a mapping, and SQLAlchemy passes a URL query value through as the string
+# it was written as, so ``?ssl=true`` reaches ``Connection.__init__`` as
+# ``"true"`` and dies in PyMySQL's own ``ssl.get(key)`` with
+# ``AttributeError: 'str' object has no attribute 'get'`` -- no DBAPI error
+# underneath, so ``_error_label`` can only report the bare class name.  Any
+# non-empty scalar has the same effect (``ssl=1``, ``ssl=false``, ...); only
+# ``?ssl=`` with an empty value survives, because ``make_url`` drops it.
+#
+# ``ssl_ca`` / ``ssl_verify_cert`` are the per-option spellings SQLAlchemy's
+# PyMySQL dialect documents, and they do reach the server over TLS.
+_MYSQL_TLS_HINT = (
+    "Add ?ssl_ca=/path/to/ca.pem (or ?ssl_verify_cert=true to verify against "
+    "the system CA store) to the DSN to force TLS.  Plaintext connections to "
+    "mysql/mariadb are subject to credential interception on the wire.  Note "
+    "that ?ssl=true is NOT a usable spelling: PyMySQL's ssl parameter takes a "
+    "mapping or an SSLContext, never a string."
+)
+
 
 def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
     """Emit a structured warning when the DSN does not configure TLS.
@@ -131,11 +152,7 @@ def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
             _log.warning(
                 "sql_dsn_tls_not_configured",
                 dialect=dialect,
-                hint=(
-                    "Add ?ssl=true (or ssl_ca=...) to the DSN to force TLS.  "
-                    "Plaintext connections to mysql/mariadb are subject to "
-                    "credential interception on the wire."
-                ),
+                hint=_MYSQL_TLS_HINT,
             )
 
 
@@ -381,6 +398,24 @@ class SQLSource:
                     f"pip install 'recotem[{extra}]' provides, or install "
                     f"{driver_mod!r} yourself."
                 ) from exc
+
+        # Refuse a scalar ``?ssl=`` on mysql / mariadb before anything connects.
+        #
+        # This is the spelling recotem itself recommended until now, so it is
+        # in operators' DSNs.  Left to the driver it produces
+        # ``AttributeError: 'str' object has no attribute 'get'`` from inside
+        # PyMySQL, with no DBAPI error underneath -- which ``_error_label``
+        # reports as the bare word ``AttributeError``, naming neither the DSN,
+        # the parameter, nor the fix.  Like the driver probe above this is a
+        # pure local check on the URL text: no I/O, so ordering it before the
+        # SSRF guard weakens nothing.
+        if backend in {"mysql", "mariadb"} and url.query.get("ssl"):
+            raise DataSourceError(
+                f"DSN for dialect {backend!r} sets ?ssl= to a scalar value; "
+                "the driver's ssl parameter takes a mapping or an SSLContext, "
+                "so any non-empty scalar fails inside the driver with an "
+                "unhelpful AttributeError. " + _MYSQL_TLS_HINT
+            )
 
         # SSRF guard: reject private/loopback/link-local hosts unless opted in.
         # The full resolved IP set (IPv4 + IPv6) is pinned so that a DNS

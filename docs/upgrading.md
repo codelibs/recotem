@@ -96,6 +96,39 @@ potentially long after the deploy that caused it. Alert on that counter and
 scrape `/v1/health/details`; a green `/v1/health` is not evidence the swap
 worked. [operations.md](operations.md) calls this "degraded now, down later".
 
+### Azure URIs: the `@` rule changed in both directions
+
+2.1.0 rewrote how `source.path` and `item_metadata.path` treat an `@` in an
+Azure URI. Both halves are user-visible against 2.0.0, and one of them will
+stop a recipe that used to load. Measured through `load_recipe` at `v2.0.0`
+and at 2.1.0:
+
+| scheme | form | 2.0.0 | 2.1.0 |
+|---|---|---|---|
+| `abfss://` | `container@account…` (addressing) | rejected | **accepted** |
+| `abfs://` | `container@account…` (addressing) | rejected | **accepted** |
+| `az://` | `container@account…` (addressing) | accepted | accepted |
+| `abfss://` | `user:pass@…` (credentials) | rejected | rejected |
+| `abfs://` | `user:pass@…` (credentials) | rejected | rejected |
+| `az://` | `user:pass@…` (credentials) | **accepted** | **rejected** |
+| `s3://` | `user:pass@…` (credentials) | rejected | rejected |
+
+**The breaking row is `az://` with a real `user:pass@` pair.** `az` was absent
+from the credentials check at 2.0.0, so such a URI loaded silently. It now
+exits **2** (`RecipeError`, category `security`) with `'source.path' contains
+embedded credentials in the URI. Use environment-based authentication
+instead.` Before upgrading, grep your recipes for an `az://` path containing a
+colon before the `@`, and move the secret into the environment — the Azure
+fsspec backends read credentials from `AZURE_STORAGE_*` / a connection string.
+
+The other two changed rows are a fix, and need no action: the canonical
+`container@account.dfs.core.windows.net` form that Azure's own documentation
+uses was being refused on `abfs://` / `abfss://` as if it were a credential.
+If you worked around that by rewriting those paths, you can now write them the
+documented way. The rule 2.1.0 applies to all three Azure aliases is: a bare
+`container@account` is addressing and is accepted; a real `user:pass@` pair is
+refused.
+
 ### Upgrade procedure
 
 1. `recotem inspect` every artifact and note which report

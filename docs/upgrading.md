@@ -59,7 +59,25 @@ recipe keeps serving.
 ### On Kubernetes, the blast radius depends on your probes
 
 `/v1/health` is count-based: it returns `degraded` with HTTP **503** whenever
-`loaded < total` — that is, whenever *any* recipe failed to load.
+`loaded < total`. That covers the version-skew case this page is about — a
+recipe whose *artifact* will not load is counted in `total`, so the endpoint
+fires.
+
+It is **not** the same as "any recipe failed". A recipe file that cannot be
+parsed at all is *skipped* rather than counted: it is excluded from both
+`total` and `loaded` and reported under a separate `skipped` count, so
+`/v1/health` stays **200 `ok`** and `/v1/health/details` stays `ok` too. Both
+failures leave that recipe's verbs unavailable, but only the artifact one is
+visible in the counts. Measured, one loaded recipe alongside one broken one:
+
+```
+artifact missing   /v1/health 503 degraded   {"total":2,"loaded":1}
+YAML unparseable   /v1/health 200 ok         {"total":1,"loaded":1,"skipped":1}
+```
+
+The `skipped` field is the signal in the second case — see
+[Unparseable recipe files](operations.md#unparseable-recipe-files), which also
+explains why the obvious alert (`recotem_model_loaded == 0`) fires on both.
 
 **No probe in the 2.1.0 chart reads it.** Startup and readiness both read
 `/v1/health/ready`, which is `200` while at least one recipe is loaded, so a

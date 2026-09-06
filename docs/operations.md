@@ -822,6 +822,17 @@ The `/v1/metrics` endpoint is opt-in and off by default (a bare `/metrics` retur
 
 Available metrics:
 
+> **The `recipe` label carries `<unknown>` for a name this server does not
+> serve.** On `recotem_v1_requests_total` and `recotem_v1_request_latency_seconds`
+> the name comes from the request path, and the route pattern bounds only its
+> shape (`^[A-Za-z0-9_-]{1,64}$`) — so labelling it verbatim would let one
+> caller mint an unbounded number of time series, which `prometheus_client`
+> never evicts. Every unregistered name is therefore recorded as `<unknown>`
+> (a value no recipe can have, since `<` and `>` are outside the pattern).
+> `status="recipe_not_found"` still tells you it is happening; the actual names
+> are in the `recipe_not_found` log event, which is not cardinality-bounded.
+> A recipe that *is* registered keeps its own label even when it is not loaded.
+
 | Metric | Type | Labels | Purpose |
 |--------|------|--------|---------|
 | `recotem_v1_requests_total` | Counter | `recipe`, `verb`, `status` | v1 request volume; `status` ∈ {`ok`, `unknown_user`, `unknown_seed_items`, `no_candidates`, `recipe_not_found`, `unavailable`, `validation_error`, `features_not_supported`, `feature_value_unusable`, `related_not_supported`, `error`}. Every value except `error` is client-caused and expected in normal operation; `error` is reserved for genuine server faults (HTTP 500) — see [Monitoring SLIs](#monitoring-slis) |

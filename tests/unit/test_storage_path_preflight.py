@@ -584,3 +584,88 @@ def test_userinfo_free_server_url_still_validates(tmp_path) -> None:
 
     assert result.exit_code == 0, f"Output:\n{result.output}"
     assert "Optuna storage: OK" in result.output
+
+
+# ---------------------------------------------------------------------------
+# A driver that is installed but broken.
+#
+# The import probe caught only ImportError, so a driver whose own top-level code
+# raises anything else -- psycopg against a mismatched libpq, a DBAPI whose C
+# accelerator fails to initialise, a package refusing an unsupported platform --
+# escaped the pre-flight and reached the CLI as exit 1 carrying the driver's
+# text and nothing else.
+#
+# Measured on 08b1672 in a bare `pip install recotem` venv, same DSN, only the
+# driver's failure mode changed:
+#
+#   psycopg absent (ImportError)         -> validate 8 / train 8, names the
+#                                           field, the driver and the extra
+#   psycopg present, raises RuntimeError -> validate 1 / train 1,
+#                                           "BROKEN-DRIVER: libpq version mismatch"
+#
+# The operator whose install is broken is the one who most needs the field
+# named, so the two cannot differ like that.
+# ---------------------------------------------------------------------------
+
+
+def test_broken_driver_is_reported_as_a_storage_path_failure(monkeypatch) -> None:
+    """A non-ImportError from the driver must still be exit 8, not exit 1."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _explode(name, *args, **kwargs):
+        if name == "psycopg":
+            raise RuntimeError("libpq version mismatch")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _explode)
+
+    with pytest.raises(TrainingError) as excinfo:
+        validate_storage_path("postgresql+psycopg://host:5432/db")
+
+    assert excinfo.value.code == "storage_path_unusable"
+    code = _map_exception_to_exit(excinfo.value)
+    assert code == _EXIT_CONFIG, f"mapped to exit {code}, want 8"
+    assert code != _EXIT_UNKNOWN
+
+    message = str(excinfo.value)
+    assert "training.storage_path" in message, (
+        f"the failure must name the recipe field; got: {message}"
+    )
+    assert "installed but failed to import" in message, (
+        f"a broken install must be distinguished from a missing one; got: {message}"
+    )
+    assert "RuntimeError" in message and "libpq version mismatch" in message, (
+        f"the driver's own diagnosis must survive; got: {message}"
+    )
+
+
+def test_missing_driver_still_says_missing_not_broken(monkeypatch) -> None:
+    """Positive control: the absent case keeps its own wording and its extra.
+
+    Without this, collapsing both arms into one "failed to import" message
+    would pass the test above while losing `pip install recotem[postgres]`,
+    which is the only actionable half for the far more common case.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _absent(name, *args, **kwargs):
+        if name == "psycopg":
+            raise ImportError("No module named 'psycopg'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _absent)
+
+    with pytest.raises(TrainingError) as excinfo:
+        validate_storage_path("postgresql+psycopg://host:5432/db")
+
+    message = str(excinfo.value)
+    assert "recotem[postgres]" in message, (
+        f"a missing driver must still name the extra; got: {message}"
+    )
+    assert "installed but failed to import" not in message, (
+        f"an absent driver must not be described as broken; got: {message}"
+    )

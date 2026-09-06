@@ -262,3 +262,27 @@ def validate_storage_path(storage_path: str) -> None:
             f"{_BACKEND_RECOMMENDED_DSN[backend]} and install the driver — "
             f"{remedy}."
         ) from exc
+    except (MemoryError, RecursionError):
+        raise
+    except Exception as exc:
+        # A driver that is *installed but broken* raises something other than
+        # ImportError from its own top-level code -- psycopg against a
+        # mismatched libpq, a DBAPI whose C accelerator fails to initialise, a
+        # package that refuses an unsupported platform.  Catching only
+        # ImportError let that escape the pre-flight entirely and reach the CLI
+        # as exit 1 with the driver's own text and nothing else:
+        #
+        #   $ recotem validate recipe.yaml     # psycopg raising RuntimeError
+        #   Storage path check failed: BROKEN-DRIVER: libpq version mismatch
+        #   exit 1
+        #
+        # Same DSN with the driver merely absent reports 8 and names the field,
+        # the driver and the extra.  The operator whose install is broken is the
+        # one who needs the field named, so the two cannot differ like that.
+        raise _fail(
+            f"the {driver!r} driver for training.storage_path dialect "
+            f"{backend!r} is installed but failed to import: "
+            f"{type(exc).__name__}: {exc}. This is the driver package itself, "
+            "not the recipe — reinstall it, or check it against the database "
+            "client library it links to."
+        ) from exc

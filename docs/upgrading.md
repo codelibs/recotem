@@ -129,6 +129,47 @@ documented way. The rule 2.1.0 applies to all three Azure aliases is: a bare
 `container@account` is addressing and is accepted; a real `user:pass@` pair is
 refused.
 
+### `split.scheme: random` with a `time_column` now splits differently
+
+This one needs no action, but it will move a number you may be watching.
+
+Under 2.0.0 the pipeline forwarded `schema.time_column` to the splitter for
+*any* recipe that declared one, and irspack switches to a per-user **recency**
+holdout the moment it receives a time column. So a recipe asking for `random`
+while also declaring a `time_column` silently got a `time_user` split. 2.1.0
+forces `time_column` to `None` under `random`, which is what the field is
+documented to do.
+
+Measured, with irspack held constant so the difference is recotem's and not
+irspack's — the within-user time rank of the held-out interactions, where 1.0
+is the user's most recent:
+
+| what the version passes to irspack | mean time rank | share in the user's last 20% |
+|---|---|---|
+| `time_column="ts"` — 2.0.0 | 0.925 | **100%** |
+| `time_column=None` — 2.1.0 | 0.51 – 0.54 | 18–21% (i.e. uniform) |
+
+Identical under irspack 0.4.2 and 0.5.2. Instrumenting the call site confirms
+the argument itself changed: for one recipe with `scheme: random` and
+`time_column: ts`, 2.0.0 passes `"ts"` and 2.1.0 passes `None`.
+
+**Nothing errors and no exit code changes.** The recipe stays valid, training
+succeeds, and the only visible effect is that the validation set the Optuna
+search scores against is a different set of interactions — so `best_score` can
+move on the first retrain after the upgrade with nothing in the recipe touched.
+**That is not a regression and not something to chase.** It is also not a
+like-for-like comparison: a `best_score` from before the upgrade and one from
+after were computed against different holdouts, so do not diff them. See
+[operations.md](operations.md#what-best_score-is-and-is-not).
+
+If you actually wanted the recency holdout, say so explicitly — set
+`split.scheme: time_user`, which is what 2.0.0 was giving you by accident.
+
+The shipped `examples/sql-sqlite/recipe.yaml` has carried exactly this pairing
+(`scheme: random` with `time_column: event_at`) since 2.0.0, so it is a
+concrete instance rather than a hypothetical; grep your own recipes for the
+same combination.
+
 ### Upgrade procedure
 
 1. `recotem inspect` every artifact and note which report
@@ -170,9 +211,14 @@ Signing keys and the key-rotation procedure; and the artifact container itself
 artifact verifies under 2.1.0 and a 2.1.0-signed one verifies under 2.0.0, with
 the same key. Every recipe's `recipe_hash` does change, but nothing gates on it.
 
-**Recipes are *nearly* unchanged — two `path` forms that loaded under 2.0.0 are
-now refused with exit 2.** Everything else stays valid as written, but if
-either of these describes a recipe you have, fix it before you upgrade:
+**Three recipes' worth of exceptions, and they need different things from you.**
+Two `path` forms that loaded under 2.0.0 are now refused with **exit 2** and
+must be fixed *before* you upgrade. A third recipe shape keeps working but
+changes what it measures — nothing to fix, but see
+[`split.scheme: random` with a `time_column`](#splitscheme-random-with-a-time_column-now-splits-differently)
+so the moved number does not read as a regression.
+
+Fix these two before upgrading:
 
 - **`az://` carrying a `user:pass@` pair** — see
   [Azure URIs](#azure-uris-changed-in-both-directions) above. Move

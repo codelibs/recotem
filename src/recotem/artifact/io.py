@@ -40,6 +40,7 @@ from typing import Any, Literal
 import fsspec
 import structlog
 
+from recotem._makedirs import makedirs_exist_ok
 from recotem.artifact.format import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     SIZE_CAP_MSG_MARKER,
@@ -260,39 +261,6 @@ def _is_local_fs(fs: fsspec.AbstractFileSystem) -> bool:
     return type(fs).__name__ == "LocalFileSystem"
 
 
-def _makedirs_exist_ok(dest_dir: str) -> None:
-    """``os.makedirs(dest_dir, exist_ok=True)`` that tolerates a stale stat.
-
-    ``os.makedirs(..., exist_ok=True)`` swallows the ``FileExistsError`` from
-    its ``mkdir`` only when the *single* ``os.path.isdir()`` call that follows
-    returns True.  ``os.path.isdir`` reports False for any ``OSError``, so one
-    transient ``stat`` failure is enough to re-raise — and on a network
-    filesystem that happens routinely: an NFS handle that has been idle while
-    the Optuna search ran can answer the first metadata call with ``ESTALE``
-    and the next one, microseconds later, correctly.
-
-    Measured on a 3-node cluster with an NFS-backed ``ReadWriteMany`` PVC after
-    the file server was restarted: ``os.path.isdir('/artifacts')`` returned
-    False, ``os.stat`` on the same path then succeeded with mode ``0o42777``,
-    and the artifacts directory was readable throughout.  Because the artifact
-    write is the first metadata access after minutes of pure-CPU tuning, the
-    stale call lands on it every time: five consecutive training runs were
-    discarded, each after a full data fetch, search and final refit, with
-
-        FileExistsError: [Errno 17] File exists: '/artifacts'
-
-    ``exist_ok=True`` already declares that an existing directory is the
-    expected outcome, so re-checking once before giving up costs one ``stat``
-    and keeps the failure semantics: a ``dest_dir`` that is genuinely not a
-    directory still raises, because the second check fails too.
-    """
-    try:
-        os.makedirs(dest_dir, exist_ok=True)
-    except FileExistsError:
-        if not os.path.isdir(dest_dir):
-            raise
-
-
 def _write_atomic(
     fs: fsspec.AbstractFileSystem,
     dest: str,
@@ -307,7 +275,7 @@ def _write_atomic(
     """
     if is_local:
         dest_dir = os.path.dirname(dest) or "."
-        _makedirs_exist_ok(dest_dir)
+        makedirs_exist_ok(dest_dir)
         fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as fh:

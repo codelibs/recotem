@@ -1022,10 +1022,10 @@ def test_makedirs_exist_ok_still_raises_when_the_path_is_not_a_directory(
     even when the guard swallows everything.  This calls the guard directly so
     the failure it is responsible for is the one being measured.
     """
-    from recotem.artifact.io import _makedirs_exist_ok
+    from recotem._makedirs import makedirs_exist_ok
 
     collision = tmp_path / "artifacts"
     collision.write_text("i am a file, not a directory")
 
     with pytest.raises(FileExistsError):
-        _makedirs_exist_ok(str(collision))
+        makedirs_exist_ok(str(collision))

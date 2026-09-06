@@ -130,12 +130,69 @@ the default `versioning: append_sha` plus its pointer file makes this natural �
 repoint, do not delete. **A recipe using the new `features:` block cannot be
 rolled back at all** and must be retrained without the block to run on 2.0.0.
 
+### An `az://` path that embeds credentials no longer loads
+
+`az://`, `abfs://` and `abfss://` are three protocol aliases for one adlfs
+filesystem, and all three accept `<container>@<account>.dfs.core.windows.net`
+(`.blob.` for Blob storage) — the form Azure's own documentation uses, where
+the `@` separates the container from the storage account rather than carrying a
+secret. 2.0.0's embedded-credential check listed `abfs` and `abfss` but not
+`az`, so it was inverted on both halves. 2.1.0 gives the three schemes one
+rule, which changes behaviour **in both directions**:
+
+| `source.path` / `item_metadata.path` / `output.path` | 2.0.0 | 2.1.0 |
+|---|---|---|
+| `abfss://cont@acct.dfs.core.windows.net/x.csv` (addressing) | exit 2 | loads |
+| `abfs://cont@acct.dfs.core.windows.net/x.csv` (addressing) | exit 2 | loads |
+| `az://cont@acct.dfs.core.windows.net/x.csv` (addressing) | loads | loads |
+| `az://user:pass@acct/cont/x.csv` (real credential) | loads | **exit 2** |
+| `abfss://user:pass@acct/cont/x.csv` (real credential) | exit 2 | exit 2 |
+
+Only the fourth row requires action, and it is the one that stops an upgrade:
+a recipe you did not touch fails at load with
+
+```
+Recipe error: 'source.path' contains embedded credentials in the URI.
+Use environment-based authentication instead.
+```
+
+Move the secret out of the URI — `AZURE_STORAGE_ACCOUNT_NAME` /
+`AZURE_STORAGE_ACCOUNT_KEY`, a connection string, or a managed identity — and
+address the container with the `container@account` form. `s3://`,
+`http(s)://` and `ftp(s)://` are unchanged, and `gs://project@bucket/key` (a
+gcsfs billing project, not a credential) stays permitted.
+
+Find affected recipes before upgrading:
+
+```bash
+grep -rlE '^\s*path:.*\baz://[^/@[:space:]]*:[^/@[:space:]]*@' recipes/
+```
+
+### `split.scheme: random` on a recipe with a `time_column` splits differently
+
+The pipeline forwarded `schema.time_column` to the splitter for any recipe that
+declared one, and irspack switches to a per-user *recency* holdout the moment it
+receives one — so under 2.0.0 `random` silently behaved as `time_user`. 2.1.0
+ignores `time_column` under `random`, as the field is documented to do.
+
+The recipe stays valid and nothing fails. What changes is the validation set the
+Optuna search scores against, so **such a recipe splits differently on its next
+train and its reported `best_score` may move** — a shift with no entry in your
+own change log unless you know to expect it. Existing artifacts are unaffected
+until retrained. To keep the 2.0.0 behaviour, say so explicitly:
+
+```yaml
+training:
+  split:
+    scheme: time_user
+```
+
 ### Unchanged by this upgrade
 
 Signing keys and the key-rotation procedure; the artifact container itself
 (magic bytes, `FORMAT_VERSION` 1, and the header layout); and every existing
-recipe, which stays valid as written. Every recipe's `recipe_hash` does change,
-but nothing gates on it.
+recipe except the two cases above, which stay valid as written. Every recipe's
+`recipe_hash` does change, but nothing gates on it.
 
 One thing in that area *did* change: a malformed `RECOTEM_SIGNING_KEYS` now
 exits **8** (`_EXIT_CONFIG`) where 2.0.0 exited **5** (`_EXIT_ARTIFACT`), on

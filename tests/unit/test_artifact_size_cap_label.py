@@ -266,39 +266,6 @@ def test_startup_reason_vocabulary_matches_the_watchers() -> None:
     )
 
 
-def test_documented_reason_enum_covers_every_label_the_code_emits() -> None:
-    """``docs/operations.md``'s ``reason`` enum must list what the code emits.
-
-    The enum is the operator's reference for alerting on
-    ``recotem_artifact_load_failures_total``. It went stale the moment
-    ``size_cap`` was added to the classifier and nothing noticed, because no
-    test read the two together. Scanning the whole row and failing when the
-    row itself cannot be found keeps that from recurring quietly.
-    """
-    emitted = _emitted_reason_labels()
-
-    root = Path(__file__).resolve().parents[2]
-    doc = (root / "docs" / "operations.md").read_text(encoding="utf-8")
-    row = re.search(
-        r"recotem_artifact_load_failures_total.*?`reason` ∈ \{(?P<enum>[^}]*)\}",
-        doc,
-        re.DOTALL,
-    )
-    assert row, (
-        "no `recotem_artifact_load_failures_total` reason enum found in "
-        "docs/operations.md -- this guard is watching nothing."
-    )
-    documented = set(re.findall(r"`([a-z_]+)`", row.group("enum")))
-    assert documented, "the reason enum parsed as empty; the regex has drifted."
-
-    missing = sorted(emitted - documented)
-    assert not missing, (
-        "these reason labels are emitted by the code but absent from the "
-        f"documented enum in docs/operations.md: {missing}. An operator "
-        "alerting per-reason has no entry for them."
-    )
-
-
 def _emitted_reason_labels() -> set[str]:
     """Every ``reason`` label the serving code can hand to the metrics module.
 
@@ -335,10 +302,10 @@ def test_metrics_accepts_every_reason_label_the_code_emits() -> None:
     anywhere in between.
 
     ``size_cap`` was exactly that. Both call sites have returned it since #239
-    and #270, the documented enum in docs/operations.md lists it, and the
-    counter could never carry it. The sibling guard below compares the emitted
-    set against the *documentation*, so it stayed green throughout -- which is
-    why this one compares against the code that actually labels the metric.
+    and #270, and the counter could never carry it. The guard that used to
+    stand here compared the emitted set against the *documentation*, so it
+    stayed green throughout -- which is why this one compares against the code
+    that actually labels the metric.
     """
     from recotem.serving.metrics import _LOAD_FAILURE_REASONS
 

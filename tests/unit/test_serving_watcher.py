@@ -6014,3 +6014,57 @@ def test_reread_of_the_serving_bytes_retracts_the_error_on_the_same_poll(
         "stale load error in place; the short-circuit returns before the "
         "successful-load path that would otherwise clear it"
     )
+
+
+def test_retraction_fires_once_per_fault_not_once_per_tick(tmp_path: Path) -> None:
+    """A retraction must disarm, so it cannot flap against another path's error.
+
+    ``last_load_error`` is shared: the recipes-dir scan writes it too, and it
+    re-writes it on every failing tick.  The marker fast path runs every tick
+    as well, so a retraction that stayed armed would clear that error again and
+    again and ``/v1/health/details`` would alternate between ``ok`` and
+    ``degraded`` instead of reporting the scan failure.
+    """
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving.watcher import _RecipeWatchState, stat_marker
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path, "onceonly")
+    yaml_path = _write_recipe_yaml(recipes_dir, "onceonly", artifact_path)
+
+    registry = ModelRegistry()
+    entry = _make_entry("onceonly")
+    entry.artifact_path = str(artifact_path)
+    registry.replace("onceonly", entry)
+
+    marker = stat_marker(str(artifact_path))
+    state = _RecipeWatchState(
+        recipe=load_recipe(yaml_path),
+        artifact_path=str(artifact_path),
+        last_marker=marker,
+    )
+    # A load failed earlier against different bytes, and the annotation stands.
+    state.failed_marker = ("some-other-marker", 1)
+    registry.set_load_error("onceonly", "read failed: artifact too short")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=_make_serve_config(),
+        key_ring=KeyRing(f"active:{ACTIVE_KEY_HEX}"),
+        initial_states={"onceonly": state},
+    )
+
+    watcher._process_stat_result("onceonly", marker, None)
+    assert registry.get("onceonly").last_load_error is None
+
+    # Another path now records a failure of its own on the same field.
+    registry.set_load_error("onceonly", "recipes-dir scan failed: PermissionError")
+    watcher._process_stat_result("onceonly", marker, None)
+
+    assert registry.get("onceonly").last_load_error is not None, (
+        "the retraction stayed armed and cleared an error written by a "
+        "different path; /v1/health/details would flap every poll tick"
+    )

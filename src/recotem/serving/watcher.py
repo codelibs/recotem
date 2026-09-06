@@ -1343,6 +1343,14 @@ class ArtifactWatcher(threading.Thread):
         previous = entry.last_load_error
         self._registry.set_load_error(name, None)
         state.stat_error_outstanding = False
+        # Disarm, so a retraction fires once per fault rather than on every
+        # tick for as long as the marker stays put.  Without this the fast
+        # path's ``failed_marker != marker`` test keeps holding, and an error
+        # some other path re-writes each tick -- a recipes-dir scan failure,
+        # say -- would be cleared each tick too, flapping /v1/health/details
+        # instead of reporting it.  The backoff this drops is moot here: the
+        # marker that failed is no longer the one on disk.
+        self._clear_load_backoff(state)
         # Let the next failure log at ERROR again even if it is identical.
         state._last_failure_signature = None
         logger.info(

@@ -172,10 +172,23 @@ rolled back at all** and must be retrained without the block to run on 2.0.0.
 
 ### Unchanged by this upgrade
 
-Signing keys and the key-rotation procedure; the artifact container itself
-(magic bytes, `FORMAT_VERSION` 1, and the header layout); and every existing
-recipe except one shape — an `az://` path that embeds `user:pass@`, covered
-above. Every recipe's `recipe_hash` does change, but nothing gates on it.
+Signing keys and the key-rotation procedure — a 2.0.0-signed artifact verifies
+under 2.1.0 and a 2.1.0-signed one verifies under 2.0.0, with the same key — and
+the artifact container itself (magic bytes, `FORMAT_VERSION` 1, and the header
+layout). Every recipe's `recipe_hash` does change, but nothing gates on it.
+
+Recipes are unchanged **except for two `path` shapes** that loaded under 2.0.0
+and are now refused with exit 2. Check for both before you upgrade:
+
+- **`az://` embedding `user:pass@`** — covered above.
+- **`arrow_hdfs://` and `async_wrapper://`** — the only two protocols fsspec
+  registers whose names contain an underscore. RFC 3986 forbids `_` in a
+  scheme, so `urlparse` reported no scheme at all, 2.0.0's allow-list read
+  these as bare local paths and passed them through, and `fsspec.open` then
+  routed them to a real remote backend. 2.1.0 derives the scheme the way fsspec
+  does and refuses them, as it always did for the equivalent `hdfs://`. This
+  closed an allow-list bypass, so the refusal is the point — but a recipe that
+  depended on it stops loading. Move to a supported scheme.
 
 One thing in that area *did* change: a malformed `RECOTEM_SIGNING_KEYS` now
 exits **8** (`_EXIT_CONFIG`) where 2.0.0 exited **5** (`_EXIT_ARTIFACT`), on

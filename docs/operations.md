@@ -329,12 +329,19 @@ Defaults:
 For multi-process Optuna search (parallelism on a single host or a
 distributed cluster), set `training.storage_path` in the recipe. Accepted
 forms: a bare path → SQLite, or a URL beginning with `sqlite://`,
-`postgresql+psycopg://`, `mysql+pymysql://`, or `mariadb+pymysql://`. The
-`+driver` suffix is required: a bare `postgresql://` routes to the uninstalled
+`postgresql+psycopg://`, `mysql+pymysql://`, or `mariadb+pymysql://`.
+**The three server-backed forms need a driver extra that a bare `pip install
+recotem` does not include** — `recotem[postgres]` for `postgresql+psycopg://`,
+and `recotem[mysql]` for both `mysql+pymysql://` and `mariadb+pymysql://`.
+`sqlite://` and the bare-path form need nothing: SQLAlchemy arrives
+transitively with Optuna, which is a core dependency, so the URL parses on
+every install and only the driver is missing. The `+driver` suffix is
+required: a bare `postgresql://` routes to the uninstalled
 `psycopg2`, and `postgres://` is a dialect SQLAlchemy 2.x removed. Recotem
 pre-flights the value — dialect, then the DBAPI the URL actually routes to —
 and refuses an unusable one with **exit 8** (`storage_path_unusable`), naming
-the spelling that works. `recotem validate` runs the identical check and prints
+the dialect, the driver it needs, the spelling that works, and the extra
+that provides it. `recotem validate` runs the identical check and prints
 `Optuna storage: OK (<dialect>, driver '<driver>')`, so a broken study backend
 is caught before the dataset is fetched. The same pre-flight refuses a URL carrying
 userinfo — a bare `user@host` as well as `user:pass@host`. Supply credentials from

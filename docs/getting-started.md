@@ -9,6 +9,14 @@ pip (everything in your venv).
 - Either Docker (with the Compose plugin) **or** Python 3.12+
 - ~50 MB of disk
 - Network access to fetch a small CSV from `raw.githubusercontent.com`
+- `curl` and [`jq`](https://jqlang.github.io/jq/), used by the request steps in
+  both paths. `curl` ships with macOS and most Linux distributions; **`jq` does
+  not** — install it (`brew install jq`, `apt install jq`, `dnf install jq`).
+  Without it the request steps below print `jq: command not found` and no
+  response at all, because `curl`'s output goes to a pipe that was never read.
+  If you would rather not install it, drop the `| jq .` and the raw JSON is
+  printed instead.
+- A second terminal for Path B, whose `recotem serve` runs in the foreground
 
 ## Path A — Docker Compose (recommended)
 
@@ -236,11 +244,20 @@ mkdir -p artifacts
 recotem train recipes/purchase_log.yaml
 ```
 
-### 4. Serve
+### 4. Serve (foreground — this terminal is now busy)
+
+`recotem serve` does not fork into the background. It runs until you stop it
+with Ctrl-C, so **run step 5 in a second terminal** (Path A's `docker compose
+up -d serve` is detached, which is why it has no such note). If you want the
+shell back instead, append `&` and note the printed PID so you can `kill` it
+afterwards.
 
 ```bash
 recotem serve --recipes recipes/
 ```
+
+Step 5 needs `RECOTEM_API_PLAINTEXT` from step 2, so export it in the second
+terminal too.
 
 `--port` / `-p` and `--host` / `-H` override `RECOTEM_PORT` and `RECOTEM_HOST`
 for a single invocation — `recotem serve --recipes … -H 0.0.0.0 -p 9000`. The

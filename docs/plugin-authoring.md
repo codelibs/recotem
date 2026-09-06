@@ -113,11 +113,11 @@ class EchoSource:
 
 ### Rules
 
-1. **`type_name`** is the discriminator value. It appears as `source.type: echo` in the recipe. The registry validates that it is a non-empty string and unique across all loaded plugins; duplicate `type_name` values cause both `recotem train` and `recotem serve` to fail at startup with a `DataSourceError` (exit code 3) listing the conflicting fully-qualified class names.
+1. **`type_name`** is the discriminator value. It appears as `source.type: echo` in the recipe. The registry validates that it is a non-empty string and unique across all loaded plugins; duplicate `type_name` values are reported with both conflicting fully-qualified class names. `recotem train` and `recotem validate` exit **2**, not 3 — plugin discovery runs inside recipe loading, so the registry's `DataSourceError` is re-raised as a `RecipeError`. `recotem serve` does **not** exit: it logs `recipe_load_error_skipped` and keeps running with the affected recipes unloaded (see [Exit codes a plugin can actually produce](#exit-codes-a-plugin-can-actually-produce)).
 
 2. **`Config`** is a pydantic `BaseModel`. Fields are validated at recipe load. Use pydantic validators for constraints. Required fields without defaults cause a `RecipeError` when missing from the recipe.
 
-   `Config` **must** declare the discriminator field `type: Literal["<type_name>"] = "<type_name>"`, matching the class's `type_name` exactly. Recotem assembles every registered `Config` into a pydantic discriminated union keyed on `type` (`build_source_config_union`), and `recotem.training.pipeline` reads the field back to resolve the source class. `validate_plugin_contract` raises `DataSourceError` at plugin-discovery time (exit code 3) when the field is missing, is not a `typing.Literal`, or carries a value that disagrees with `type_name`.
+   `Config` **must** declare the discriminator field `type: Literal["<type_name>"] = "<type_name>"`, matching the class's `type_name` exactly. Recotem assembles every registered `Config` into a pydantic discriminated union keyed on `type` (`build_source_config_union`), and `recotem.training.pipeline` reads the field back to resolve the source class. `validate_plugin_contract` raises `DataSourceError` at plugin-discovery time when the field is missing, is not a `typing.Literal`, or carries a value that disagrees with `type_name`. Because discovery happens inside recipe loading, that error is wrapped into a `RecipeError` and the process exits **2** — the same code as the `extra="ignore"` mistake below, not the 3 a data-source failure produces.
 
    Do **not** rely on pydantic's default `extra="ignore"` to absorb the YAML `type:` key instead. That combination loads the recipe successfully but drops the discriminator, and training then fails with `Recipe source has no discriminator 'type' field.` (exit code 2).
 
@@ -165,6 +165,82 @@ class EchoSource:
    ```
 
    This ensures missing extras produce a clear `DataSourceError` mentioning the required extra by name. An unwrapped `ImportError` reports the same exit code 3, but reaches the operator as `No module named 'my_optional_dep'` — which names neither the extra nor the fix.
+
+## Exit codes a plugin can actually produce
+
+Measured by installing deliberately broken plugins — one violation per package,
+each with its own `recotem.datasources` entry point — into a bare
+`pip install recotem` environment and running the real CLI.
+
+| What your plugin does | `train` | `validate` |
+|---|---|---|
+| works | 0 | 0 |
+| `Config` omits the `type` discriminator | 2 | 2 |
+| `type` is `str` rather than `Literal` | 2 | 2 |
+| `type` `Literal` value disagrees with `type_name` | 2 | 2 |
+| `no_expand_fields` missing | 2 | 2 |
+| `no_expand_fields` is a `set`, not a `frozenset` | 2 | 2 |
+| `type_name` collides with another installed plugin | 2 | 2 |
+| `__init__` raises `DataSourceError` | 3 | 3 |
+| `__init__` raises any other exception | 3 | 3 |
+| `probe()` raises any exception | 3 | 3 |
+| `probe()` raises `HttpFetchError` (or wraps one) | 7 | 7 |
+| `fetch()` raises `DataSourceError` | 3 | 0 † |
+| `fetch()` raises any other exception | 3 | 0 † |
+| `fetch()` returns something that is not a DataFrame | 3 | 0 † |
+| `fetch()` omits a column named in `schema:` | 3 | 0 † |
+
+† `validate` never calls `fetch()`. It calls the optional `probe()` and
+`probe_columns()` hooks, so a plugin that defines neither validates clean and
+fails at train time. That is the argument for implementing `probe()`.
+
+Three things follow that are easy to get wrong:
+
+* **Every contract violation is exit 2, not 3.** Plugin discovery runs inside
+  recipe loading, so the registry's `DataSourceError` is re-raised as a
+  `RecipeError`. Exit 3 is for a source that loaded and then failed to produce
+  data.
+* **Nothing your plugin does produces exit 1.** An unwrapped exception is
+  wrapped by Recotem on both commands and reports 3. The one code that escapes
+  the 2/3 split upward is 7, which a `HttpFetchError` keeps through the
+  `__cause__` chain — so an SSRF-guard refusal inside a plugin still reports 7
+  rather than being flattened.
+* **`train` and `validate` agree on every row.** If you find a plugin failure
+  where they disagree, that is a Recotem bug, not a plugin bug.
+
+### One broken plugin breaks every recipe on the host
+
+Discovery is eager across the whole `recotem.datasources` entry-point group, not
+lazy per `source.type`. A recipe that names a completely different, valid source
+fails too:
+
+```
+Recipe '.../ok.yaml' source: plugin source discovery failed for type 'ok':
+DataSource plugin 'MismatchSource' ... declares Config.type as Literal['something_else'],
+which does not match its type_name 'mismatch'.
+```
+
+Nothing in that recipe refers to `MismatchSource`. So a contract violation in any
+installed plugin is a host-wide outage for `train` and `validate`, and the error
+names the offending plugin rather than the recipe you ran — read the class name in
+the message, not the file path.
+
+### What that looks like under `recotem serve`
+
+`serve` is deliberately lenient: one malformed recipe is not allowed to take down
+a server hosting others. Measured with a colliding `type_name` and a single
+recipe directory:
+
+```
+$ curl -s http://127.0.0.1:8080/v1/health
+{"status":"ok","total":0,"loaded":0,"skipped":1}
+```
+
+HTTP **200**, `"status": "ok"`, and **zero recipes loaded**. The process is alive,
+answering, and serving nothing; the log carries `recipe_load_error_skipped` and
+`recipes_directory_loaded_lenient`. A liveness or readiness probe that checks only
+the status code — or only the `status` field — reports healthy. **Alert on
+`loaded` and `skipped`, not on the process being up.**
 
 ## Package structure
 

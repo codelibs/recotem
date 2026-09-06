@@ -48,10 +48,11 @@ deleting the tag changes nothing on PyPI.
 Not the pre-release trap. Both workflows run the same
 `.github/scripts/check-release-tag.sh` guard, so a tag `docker.yml` refuses is a
 tag `publish.yml` refuses too — neither registry receives anything, and the runs
-are red. What is still reachable is `docker.yml` going red *after*
-`publish-pypi` succeeded, almost always at `trivy`: the scan gates the push
-(`build` is `needs: [test, smoke, trivy]`), so a CVE finding leaves the
-version on PyPI with nothing on GHCR.
+are red. (The converse does **not** hold; see the next section.) What is still
+reachable is `docker.yml` going red *after* `publish-pypi` succeeded, almost
+always at `trivy`: the scan gates the push (`build` is
+`needs: [test, smoke, trivy]`), so a CVE finding leaves the version on PyPI with
+nothing on GHCR.
 
 Do **not** delete and re-push the tag: PyPI already has the version, so the tag
 name is spent. Confirm what GHCR actually has, then decide with the user:
@@ -71,20 +72,50 @@ release. SKILL.md Phase 3, step 6 has the full decision.
 
 ## `docker.yml` succeeded but `publish.yml` failed
 
-Recoverable — the version is **not** on PyPI, so the number is still free.
-Confirm that first:
+The two guards are **not** mirror images. `publish.yml`'s `guard` runs a second
+script that `docker.yml`'s does not — `.github/scripts/check-milestone-landed.sh`
+— so this state is reachable by design, not only by a transient fault. Read the
+run log and split on which step went red.
+
+Either way the version is **not** on PyPI, so the number is still free. Confirm
+that first:
 
 ```bash
 curl -s https://pypi.org/pypi/recotem/json \
   | python3 -c "import json,sys; print('X.Y.Z' in json.load(sys.stdin)['releases'])"
 ```
 
-If `False`, read the run log. For a transient or OIDC/approval failure, re-run
-the workflow rather than re-tagging:
+**Case 1 — transient, OIDC, or approval failure.** Re-run rather than re-tag:
 
 ```bash
 gh run rerun --repo codelibs/recotem <id> --failed
 ```
+
+**Case 2 — red at *release tag guard*, on the milestone step.** A PR the release
+milestone calls MERGED is not reachable from the tagged commit. Do **not**
+re-run: the script asks whether each merge commit is an ancestor of the *tagged*
+commit, and the remedy for a stranded PR is a re-land, which produces a **new**
+commit on `main` that the existing tag can never reach. The run will fail
+identically forever. `.github/relanded-prs.tsv` does not help either — a record
+is honoured only when the replacement PR's own merge commit is already an
+ancestor, which is exactly what is missing.
+
+The sequence is:
+
+1. Re-land the stranded PR onto `main` and merge it (`git cherry-pick -n
+   <merge-commit>`, new PR with `base=main`; add the
+   `.github/relanded-prs.tsv` row so future releases do not trip on the dead
+   merge commit).
+2. Delete the tag — `git push origin :refs/tags/vX.Y.Z` — and re-cut it on the
+   new `main`. Reusing the number is safe for PyPI, which received nothing.
+3. Say plainly that **GHCR already carries `X.Y.Z`, built from the tree without
+   the missing PR** — `docker.yml` passed its own guard and pushed. Until the
+   re-cut run finishes, anyone pulling that tag gets the wrong image, and it
+   was never announced. Re-check the digest afterwards rather than assuming the
+   second push replaced it (SKILL.md Phase 3, step 7).
+
+Prevent it instead: `bash .github/scripts/check-milestone-landed.sh vX.Y.Z` is
+part of Phase 3 step 1 and costs one API call.
 
 ## Red Trivy on the tag run
 

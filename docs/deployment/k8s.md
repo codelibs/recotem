@@ -641,9 +641,9 @@ PVC, by scaling the NFS server to zero replicas mid-run:
 
 | | what happens | what the operator sees |
 |---|---|---|
-| `serve`, already running | keeps answering `:recommend` (10/10 `200`), stays `1/1` Ready, 0 restarts, 2–3 millicores | `artifact_stat_timeout` (WARN, per recipe, one scan every ~20 s), then `artifact_stat_failed` naming `OSError [Errno 116] Stale file handle` |
+| `serve`, already running | keeps answering `:recommend` (10/10 `200`), stays `1/1` Ready, 0 restarts, 2–3 millicores | `artifact_stat_timeout` (WARN, per recipe, one scan every ~20 s) for as long as the mount merely hangs; if its file handles do not survive the outage, `artifact_stat_failed` naming `OSError [Errno 116] Stale file handle` as well |
 | `serve`, new pod | never starts | `FailedMount ... exit status 32` on the pod; the rollout stalls |
-| `train`, mid-run | **blocks in the artifact write for as long as the outage lasts** — measured 23 min 19 s at 1 millicore — then fails | nothing at all while blocked: the last log line is `final_model_trained`, no error, no progress. On recovery, `exit 1` |
+| `train`, mid-run | **blocks in the artifact write for as long as the outage lasts** — measured at 23 min 19 s and again at 6 min 14 s, both at ~1 millicore | nothing at all while blocked: the last log line is `final_model_trained`, no error, no progress. What happens on recovery is not fixed — see below |
 
 The asymmetry is deliberate on one side only. The watcher stats artifacts on a
 worker thread with a wall-clock timeout and reports the ones that hang
@@ -654,9 +654,12 @@ timeout rather than the process. The artifact write
 those blocks in the kernel, uninterruptibly, for as long as the server stays
 away.
 
-**And the run does not simply resume when storage comes back.** With the file
-server restored, the blocked `os.makedirs(dest_dir, exist_ok=True)` returned by
-raising, and the run ended like this:
+**Whether the run resumes when storage comes back is not deterministic — plan
+for either ending.** Both have been measured on this setup, and which one you
+get turns on whether the NFS client's file handles survived the outage.
+
+*Ending A — it fails.* The blocked `os.makedirs(dest_dir, exist_ok=True)`
+returns by raising:
 
 ```console
 Training failed: [Errno 17] File exists: '/artifacts'
@@ -668,12 +671,31 @@ RECOTEM_EXIT=1
 ```
 
 `exist_ok=True` suppresses `FileExistsError` only when the `isdir` check that
-follows it succeeds; against a mount that has just come back that check does
+follows it succeeds; against a mount whose handles went stale that check does
 not, so the error is re-raised. It is then unmapped, so it lands on **exit 1**,
 which the table above calls "Unexpected error — Retry". Retrying is the right
 action, but the message an operator is left holding is a `FileExistsError` on a
 directory that plainly exists, with a traceback through `recotem/artifact/io.py`
 and nothing naming the file server.
+
+*Ending B — it completes.* If the mount comes back with its handles intact —
+the same server, the same export, the same fsid, which is what a restarted
+server pod backed by the same volume gives you — the parked `makedirs` simply
+returns and the write finishes. Measured on a 403 s outage: silence from
+`final_model_trained` at `14:22:09` to `artifact_written` at `14:28:23`, i.e.
+**374 s inside the write and 94 s after the server returned**, then `exit 0`
+and a `Job` marked `SuccessCriteriaMet,Complete` with the artifact present and
+signed. The run that produced ending A saw `Stale file handle` on the `serve`
+side; the run that produced ending B never got past `artifact_stat_timeout`,
+which is the same discriminator showing up in a second place.
+
+**Do not build an alert on either ending.** A completed Job proves nothing
+about whether the outage happened, and a failed one blames a directory rather
+than the file server. What is common to both — and is therefore the thing worth
+alerting on — is the stall itself: `train` runs for minutes to tens of minutes
+producing no log line after `final_model_trained`, at ~1 millicore, holding the
+recipe lock. Alert on training-run duration, or on artifact `trained_at` age,
+rather than on Job status.
 
 Consequences on the shipped chart:
 

@@ -14,10 +14,21 @@ and writing artifacts to GCS.
 ## Prerequisites
 
 ```bash
-pip install "recotem[bigquery]"
+pip install "recotem[bigquery,gcs]"
 gcloud auth application-default login
 # Or set GOOGLE_APPLICATION_CREDENTIALS to a service-account key path.
 ```
+
+Two extras, not one. `bigquery` is what reads the GA4 export; `gcs` is what
+**writes** the artifact, because `output.path` in this recipe is a
+`gs://` URI and the `gcs` extra is what installs the `gcsfs` backend fsspec
+needs to reach it. Installing `recotem[bigquery]` alone leaves the write to
+fail *after* the BigQuery scan has been billed and the whole Optuna search
+has run. The official Docker image already bundles both, so this applies to
+the pip install only. If you change `output.path` to a local directory, drop
+the `gcs` extra; if you point it at S3 or Azure Blob instead, swap in
+`recotem[s3]` or `recotem[azure]` (see
+[docs/data-sources/csv.md](../../docs/data-sources/csv.md#cloud-storage-extras)).
 
 The service account / ADC identity needs:
 

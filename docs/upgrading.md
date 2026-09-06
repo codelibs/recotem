@@ -96,6 +96,47 @@ potentially long after the deploy that caused it. Alert on that counter and
 scrape `/v1/health/details`; a green `/v1/health` is not evidence the swap
 worked. [operations.md](operations.md) calls this "degraded now, down later".
 
+### Azure URI rules changed in both directions
+
+`az://`, `abfs://` and `abfss://` paths in `source.path`, `item_metadata.path`
+and `output.path` are validated by a different rule than in 2.0.0. The
+discriminator is now the **password** component, not the `@`.
+
+**Breaking — fix before you upgrade.** A path carrying a `user:pass@` pair is
+now refused:
+
+```
+az://account:key@container/interactions.csv
+  2.0.0: accepted — `az` was absent from the userinfo reject list, so the
+         credential travelled inside the recipe and into logs and tracebacks
+  2.1.0: RecipeError, exit 2
+         'source.path' contains embedded credentials in the URI.
+         Use environment-based authentication instead.
+```
+
+`recotem validate` reports this without touching the network, so audit
+recipes with it before rolling serve or train forward. Move the credential to
+the environment — `AZURE_STORAGE_ACCOUNT_NAME` / `AZURE_STORAGE_ACCOUNT_KEY`,
+a connection string, or a managed identity — which is what fsspec reads
+anyway.
+
+**Fixed — no action needed.** The form Azure's own documentation uses was
+rejected by 2.0.0 and works now:
+
+```
+abfss://container@account.dfs.core.windows.net/path/interactions.parquet
+  2.0.0: RecipeError, exit 2 — `urlparse` reports username='container' for
+         this URI, and 2.0.0 rejected any userinfo on abfs/abfss
+  2.1.0: accepted — `container@account` is addressing syntax, not a credential
+```
+
+If you worked around that by rewriting `abfss://` paths into some other form,
+you can put them back.
+
+Nothing else about Azure changed: the schemes remain on the path allow-list,
+`output.path` still accepts them, and credentials are still supplied through
+the environment in every case.
+
 ### Upgrade procedure
 
 1. `recotem inspect` every artifact and note which report

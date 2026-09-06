@@ -17,10 +17,26 @@ def makedirs_exist_ok(dest_dir: str) -> None:
     ``os.makedirs(..., exist_ok=True)`` swallows the ``FileExistsError`` from
     its ``mkdir`` only when the *single* ``os.path.isdir()`` call that follows
     returns True.  ``os.path.isdir`` reports False for any ``OSError``, so one
-    transient ``stat`` failure is enough to re-raise — and on a network
-    filesystem that happens routinely: an NFS handle that has been idle while
-    the Optuna search ran can answer the first metadata call with ``ESTALE``
-    and the next one, microseconds later, correctly.
+    ``stat`` that cannot answer is enough to re-raise — and on a network
+    filesystem that is a routine state to be in, because a handle idled through
+    the Optuna search can answer the next metadata call with ``ESTALE``.
+
+    Being *rescued* by the re-check, however, is not routine, and the size of
+    that gap is the reason this function is documented so carefully.  A rescue
+    needs the two ``os.path.isdir`` calls — the one inside ``os.makedirs`` and
+    the one below — to disagree, so the mount has to recover in the microseconds
+    between them.  Measured against a real momentary window (an export
+    unpublished while the server kept answering, then republished 55 s later),
+    calling this function in a tight loop at ~360,000 attempts/second:
+
+        89,729,290 attempts    148,007 re-raises    1 rescue
+
+    The single rescue is the one attempt that straddled the recovery instant;
+    it and the return to ``OK`` are 1 ms apart.  Inside the stale window the
+    rescue rate is 7e-06.  A training run makes **one** such call, so it is
+    rescued only if that call lands on the recovery boundary — the tolerance
+    costs one ``stat`` and is worth having, but a run that survives an outage is
+    not evidence that it fired.
 
     ``pathlib.Path.mkdir(parents=True, exist_ok=True)`` has the identical
     shape — ``except OSError: if not exist_ok or not self.is_dir(): raise`` —

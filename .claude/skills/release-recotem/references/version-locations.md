@@ -72,17 +72,18 @@ it, so `appVersion` is a fallback that never fires); it was added to the guard
 after a tagged release was shown to pass with it left on the previous version.
 
 The script also scans the deployment pins outside the chart: every
-`ghcr.io/codelibs/recotem:X.Y.Z` under `examples/` and `docs/`, and every
-`app.kubernetes.io/version` label under `examples/`. So rows 3–5 below are
-covered in full, and row 6 is covered for its image tags.
+`ghcr.io/codelibs/recotem:X.Y.Z` under `examples/` **and** `docs/`, every
+`app.kubernetes.io/version` label under both, and the copy-pasteable
+`values.yaml` excerpt in `docs/deployment/k8s.md` (a bare `tag: "X.Y.Z"` key
+inside a fenced block). Each of those three scans is also refused when it
+matches nothing at all, so moving a pin out of the scanned paths is a failure
+rather than a silent pass. Rows 3–6 below are therefore covered in full.
 
-Three version strings are still checked by **step 3 of the block below and by
-nothing else** — the script does not see them, so that step is not optional:
+**One** version string is still checked by **step 3 of the block below and by
+nothing else** — the script does not see it, so that step is not optional:
 
 | Not machine-checked | Why the script misses it |
 |---|---|
-| `docs/deployment/k8s.md` `app.kubernetes.io/version: "X.Y.Z"` | the label scan covers `examples/` only, not `docs/` |
-| `docs/deployment/k8s.md` the `values.yaml` excerpt (`tag: "X.Y.Z"`) | the pin scan matches `ghcr.io/...` references, not a bare `tag:` key inside a fenced block |
 | `docs/deployment/docker.md` the "already pin `X.Y.Z`" sentence | prose, matching no pattern the script scans for |
 
 | File | What to change |
@@ -172,7 +173,7 @@ manifests on the last released version, and this block would flag them.
 #    (pyproject.toml moved, version.py not; or the package moved and the chart
 #    did not) that greps read by eye do not. uv.lock is not in its scope;
 #    `uv lock --check` covers that.  Step 3 is still required: see the
-#    "not machine-checked" table above for the three strings it alone catches.
+#    "not machine-checked" table above for the one string it alone catches.
 bash .github/scripts/check-release-tag.sh "v$NEW"   # MUST print "OK: ..."
 uv lock --check                                     # MUST exit 0
 

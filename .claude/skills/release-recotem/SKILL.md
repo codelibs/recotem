@@ -486,11 +486,15 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    string, on one page per locale:
 
    ```bash
-   MM=${NEW%.*}          # 2.1.0 -> 2.1
+   # `cut`, not ${NEW%.*}: this phase sets NEW=2.1 (see the top of 4A) while
+   # references/version-locations.md sets NEW=2.1.0. ${NEW%.*} yields "2" under
+   # the first convention and fails a correct promote; cut yields 2.1 under both.
+   MM=$(printf '%s' "$NEW" | cut -d. -f1,2)
+   MM_RE=$(printf '%s' "$MM" | sed 's/\./\\./g')   # the dot is a literal, not "any char"
    BAD=""
    for f in docs/security.html ja/docs/operations.html; do
      grep -oE 'class="version-button"[^>]*>[^<]*' ".vitepress/dist/$f" \
-       | grep -qE ">[[:space:]]*${MM}[[:space:]]*$" || BAD="$BAD $f"
+       | grep -qE ">[[:space:]]*${MM_RE}[[:space:]]*$" || BAD="$BAD $f"
    done
    [ -z "$BAD" ] || { echo "FAIL: version switcher does not read $MM on:$BAD"; exit 1; }
    echo "OK: the promoted tree's version button reads $MM"

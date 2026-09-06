@@ -52,8 +52,8 @@ source:
 | Dialect | DSN |
 |---|---|
 | PostgreSQL | `postgresql+psycopg://user:pass@host:5432/db?sslmode=require` |
-| MySQL | `mysql+pymysql://user:pass@host:3306/db?ssl=true` |
-| MariaDB | `mariadb+pymysql://user:pass@host:3306/db?ssl=true` — `mysql+pymysql://` also works and reaches the same server |
+| MySQL | `mysql+pymysql://user:pass@host:3306/db?ssl_ca=/path/to/ca.pem` |
+| MariaDB | `mariadb+pymysql://user:pass@host:3306/db?ssl_ca=/path/to/ca.pem` — `mysql+pymysql://` also works and reaches the same server |
 | SQLite (file) | `sqlite:///absolute/path/to/file.db` |
 | SQLite (read-only) | `sqlite:///file:absolute/path/to/file.db?mode=ro&uri=true` |
 
@@ -105,8 +105,13 @@ source:
   **never** written to the recipe. Any userinfo in the DSN is stripped before it reaches log
   lines by `recotem.log_redaction`.
 - TLS is strongly recommended in production. Always set `sslmode=require` (or stricter:
-  `verify-ca`, `verify-full`) on PostgreSQL, or `ssl=true` (or specify a CA bundle via
-  `ssl_ca=...`) on MySQL/MariaDB. Recotem does not enforce TLS — but the source emits a
+  `verify-ca`, `verify-full`) on PostgreSQL, or `ssl_ca=/path/to/ca.pem` (or
+  `ssl_verify_cert=true` to verify against the system CA store) on MySQL/MariaDB.
+  **`?ssl=true` is not a usable spelling** — PyMySQL's `ssl` parameter takes a mapping
+  or an `ssl.SSLContext`, never a string, so any non-empty scalar `ssl=` value fails
+  inside the driver. Recotem refuses such a DSN up front with exit 3 rather than letting
+  it surface as a bare `AttributeError`; use one of the `ssl_*` per-option keys instead.
+  Recotem does not enforce TLS — but the source emits a
   `sql_dsn_tls_not_configured` structlog warning at init when the DSN appears plaintext
   (PG without `sslmode`, or with `disable`/`allow`/`prefer`; MySQL/MariaDB without any
   `ssl*` query parameter). Operators with deployment-level TLS (service mesh, sidecar)
@@ -175,6 +180,7 @@ source:
 | Absolute-path host refused | 3 | `DataSourceError: DSN host is an absolute path (libpq Unix-socket form); this bypasses the network SSRF guard. Set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
 | Network DSN with no host refused | 3 | `DataSourceError: DSN for dialect 'postgresql' does not specify a host; the driver would default to the local socket / 127.0.0.1 which is rejected by the SSRF guard. Specify a host explicitly or set RECOTEM_SQL_ALLOW_PRIVATE=1 to opt in.` |
 | sqlalchemy not installed | 3 | `DataSourceError: sqlalchemy is required for SQLSource. Install one of: recotem[postgres], recotem[mysql], recotem[sqlite].` |
+| Scalar `?ssl=` on MySQL/MariaDB | 3 | `DataSourceError: DSN for dialect 'mysql' sets ?ssl= to a scalar value; the driver's ssl parameter takes a mapping or an SSLContext, so any non-empty scalar fails inside the driver with an unhelpful AttributeError. Add ?ssl_ca=/path/to/ca.pem ...` |
 | `mariadb+*` DSN pointed at a MySQL server | 3 | `DataSourceError: probe failed for dialect 'mariadb': InvalidRequestError: MySQL version 8.4.11 is not a MariaDB variant.` — the reverse of the row above does **not** hold: `mysql+pymysql://` reaches a MariaDB server, but `mariadb+pymysql://` is refused by a MySQL one. Use `mysql+pymysql://` when the server may be either. |
 | Query returned no rows | 3 | `DataSourceError: source 'sql' returned no rows for recipe '<name>'; the query or file matched no data. ...` |
 | Column missing after query | 3 | `DataSourceError: schema column(s) ['ts'] not found in the fetched data for recipe '<name>'; available columns: [...]` |

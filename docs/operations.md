@@ -1179,11 +1179,22 @@ What to do:
    A large `n_heldout_interactions` makes `best_score` *stable*; it does not
    make it an estimate of quality on your task. See
    [What `best_score` is, and is not](#what-best_score-is-and-is-not).
-2. **Compare against a baseline yourself — and not against popularity.**
-   Recotem does not do this for you, and it is the check that would have caught
-   the case above. Hold out a slice the training never sees, score the served
-   model on it, and require the model to win. But **beating popularity is not
-   the bar**: a most-popular-items list is so weak on a personalisable dataset
+2. **Compare against two baselines yourself, and require the model to beat
+   both.** Recotem does not do this for you, and it is the check that would
+   have caught the case above. Hold out a slice the training never sees, score
+   the served model on it, and require the model to win against *both* a
+   most-popular-items list and a 30-line item-item cosine kNN.
+
+   Two baselines rather than one, because **each of them degenerates on a
+   different catalogue shape, and the shape decides which one still carries
+   information.** Neither is safe to skip on the strength of the other passing:
+   on a catalogue that turns over, popularity collapses to zero and only the
+   kNN is informative; on a catalogue with far more items than users, the kNN
+   starves and only popularity is informative. Both failures are measured
+   below, and in both the surviving check passes the bad model comfortably.
+
+   Start with popularity, since **beating popularity is not by itself the
+   bar**: a most-popular-items list is so weak on a personalisable dataset
    that a badly chosen model clears it comfortably. Measured on four
    industries — a repeat-purchase grocery catalogue, a B2B parts catalogue,
    a media catalogue and a long-tail marketplace, each with a verified
@@ -1204,16 +1215,45 @@ What to do:
    an undefined margin — while the shipped model over the same four runs landed
    between **39% below and 1% above** the same 30-line kNN. If your catalogue
    turns over — news, feeds, deals, listings, anything perishable — a passing
-   popularity comparison carries no information whatsoever, and the kNN
-   comparison is the only one of the two worth running.
+   popularity comparison carries no information whatsoever, and on *that* shape
+   the kNN is the only one of the two that means anything. Reproduced on a
+   second perishable catalogue (a job board, 90 days of postings with a
+   21-day life): popularity scored **0.0000 on all four runs** there too, with
+   **0 of the top 10** training items appearing in the holdout, while the
+   shipped model lost to the kNN on all four (−11% to −93%).
 
-   The baseline worth the twenty minutes is an item-item cosine kNN: binarise
-   the user × item matrix, normalise the columns, take `Sᵢⱼ = cos(i, j)` with a
-   zero diagonal, keep each item's top ~200 neighbours, score a user as
-   `X[u] @ S`, and exclude what they already interacted with. If recotem does
-   not beat that, the answer is not to ship it and hope — it is to widen
-   `algorithms`, raise `n_trials`, or accept that this dataset does not reward
-   a latent-factor model.
+   **On a catalogue with far more items than users, the failure is the other
+   way round: the kNN is the one that means nothing.** Item-item cosine needs
+   co-occurrence, and when the catalogue is an order of magnitude larger than
+   the audience there is almost none to find. Measured on two independently
+   generated catalogues of that shape — an enterprise document corpus (250
+   users, ~2,500 documents, 8 runs) and a B2B parts catalogue (180 buyers,
+   ~2,150 parts, 4 runs) — the kNN scored ndcg@10 between **0.0000 and
+   0.0126**, at or below a random ranking on 2 of the 12 runs. In **4 of those
+   12 runs the shipped model was worse than a plain most-popular-items list**
+   (0.99×, 0.94×, 0.72× on document runs and **0.23×** on a parts run). The
+   kNN comparison **passed three of those four** — by +239%, +871% and
+   **+3832%** — so an operator running only the kNN would have shipped them.
+   The fourth, the 0.23× parts run, came out at −8% on the kNN: technically a
+   fail, but a margin most operators would read as a tie, against a baseline
+   that was itself scoring 0.0018.
+
+   **The rule of thumb: if your item count is much larger than your user
+   count, trust the popularity comparison; if your catalogue turns over,
+   trust the kNN; if neither, both are informative and the model should beat
+   both.** The cheap tell for a degenerate baseline is to print, before
+   comparing, how many of the top ten most-popular training items appear
+   anywhere in your holdout — 0 of 10 means the popularity comparison is
+   dead — and the kNN's own ndcg against a random-ranking baseline: a kNN that
+   cannot beat random is not a bar either.
+
+   The kNN, in full: binarise the user × item matrix, normalise the columns,
+   take `Sᵢⱼ = cos(i, j)` with a zero diagonal, keep each item's top ~200
+   neighbours, score a user as `X[u] @ S`, and exclude what they already
+   interacted with. If recotem does not beat whichever of the two baselines is
+   informative for your shape, the answer is not to ship it and hope — it is to
+   widen `algorithms`, raise `n_trials`, or accept that this dataset does not
+   reward a latent-factor model.
 3. **Narrow `algorithms` when the budget is small**, or raise `n_trials` so
    each algorithm still gets a meaningful number of trials.
 4. **Prefer one model over many tiny ones.** A per-tenant recipe for every

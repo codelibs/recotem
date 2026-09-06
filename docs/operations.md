@@ -287,6 +287,7 @@ Additional events emitted by the watcher, recipe loader, and size-cap helper tha
 | `recommender_layout_unexpected` | WARN | `serving/routes.py` | `_resolve_recommend` / `_resolve_recommend_related` encountered an `AttributeError` on `recommender._mapper.user_id_to_index` / `item_id_to_index`. The request is treated as `INTERNAL_ERROR`. Increment counter: `recotem_recommender_layout_unexpected_total`. |
 | `set_load_error_no_entry` | WARN | `serving/watcher.py` | The watcher tried to mark a load error on a recipe with no registry entry. Counter: `recotem_watcher_state_divergence_total`. |
 | `sidecar_disappeared` | WARN | `serving/watcher.py` | A `.sha256` sidecar file was present on the previous poll but raised ENOENT on the current read — emitted once per disappearance transition. |
+| `artifact_load_error_cleared` | INFO | `serving/watcher.py` | An outstanding `last_load_error` was retracted because the watcher could show it no longer holds: `reason=marker_restored` (a stat succeeded after a stat-side failure, or the artifact is back to the marker that is loaded) or `reason=bytes_unchanged` (a re-read hashed to the artifact already in memory — what a rollback looks like). `previous_error` carries the retracted text, truncated to 200 characters. Pairs with `artifact_load_failed` to bound how long a recipe was degraded. |
 | `metadata_index_row_error` | WARN | `metadata/loader.py` | A per-row exception occurred during `build_metadata_index`. The row is skipped. Counted by `recotem_metadata_index_build_errors_total{recipe}`. |
 
 The `train_error` event uses `name=` (not `recipe=`) for the recipe name field and includes `kid=` when the signing kid is known, matching the `train_done` event's field names.
@@ -886,6 +887,19 @@ Available metrics:
   `/v1/recipes/{name}:recommend` continues to return the previous good model.
 - On `_stat_marker` returning None (file disappeared), the existing entry
   keeps serving and an `artifact_disappeared` warning is logged once.
+- `last_load_error` is retracted as soon as the watcher can show it no longer
+  holds, and `artifact_load_error_cleared` (INFO, with `reason` and the
+  `previous_error`) records that. Three things clear it: a successful load of
+  a new artifact; a successful stat after a stat-side failure (a throttle, an
+  IAM blip, a path that was briefly unreachable); and a re-read whose bytes
+  hash to the artifact already in memory — which is what a rollback to the
+  previous artifact looks like. So the two ordinary recoveries, *retrain* and
+  *roll back*, both return `/v1/health/details` to `ok` without a restart.
+- Two errors are deliberately **not** retracted this way. A recipe YAML that
+  stopped parsing stays reported until it parses again — the artifact says
+  nothing about the YAML. And a load failure recorded against the artifact
+  that is still on disk stays until the artifact changes: the same bytes are
+  still there, so nothing has been disproved.
 
 ### Initial load failure
 

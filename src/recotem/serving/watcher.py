@@ -250,6 +250,15 @@ class _RecipeWatchState:
     #: successful YAML reparse says nothing about a broken artifact, so blanket
     #: clearing would hide a genuine load failure from ``/v1/health/details``.
     yaml_rescan_error: bool = False
+    #: True while the outstanding ``last_load_error`` came from the *stat* side
+    #: — the file was missing, the stat raised, or the stat future timed out —
+    #: rather than from reading or building the artifact.  A stat failure says
+    #: nothing about the bytes, so a later successful stat on the unchanged
+    #: marker is proof enough that it has passed and the error may be retracted.
+    #: A *load* failure is not retractable that way: the marker being unchanged
+    #: means the same bytes are still there, so it stays until a read proves
+    #: otherwise.  See ``_retract_stale_error``.
+    stat_error_outstanding: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -887,6 +896,9 @@ class ArtifactWatcher(threading.Thread):
                         _failed_recipe,
                         f"stat timeout after {_per_future_timeout:.0f}s",
                         reason="timeout",
+                        # A timed-out stat says nothing about the bytes; the
+                        # next stat that answers in time retracts it.
+                        stat_class=True,
                     )
                     fut.cancel()
                 pending = set()
@@ -945,6 +957,7 @@ class ArtifactWatcher(threading.Thread):
                 if entry is not None and entry.last_load_error is None:
                     logger.warning("artifact_disappeared", name=name)
             self._registry.set_load_error(name, error_msg)
+            state.stat_error_outstanding = True
             _metrics.inc_artifact_load_failure(name, reason="read")
             return
 
@@ -965,6 +978,27 @@ class ArtifactWatcher(threading.Thread):
             # poll and then returns to the original ETag on the next
             # poll would re-trigger a full reload unnecessarily.
             state.last_marker = marker
+            # Retract an outstanding error the marker has just disproved.
+            # ``last_marker`` only ever advances on a successful load, so
+            # reaching here means the file is once again the artifact in
+            # memory.  Two faults end that way and neither reaches the load
+            # path that would otherwise clear the annotation:
+            #
+            #   * a transient stat failure (S3 throttle, NFS stale handle, PVC
+            #     remount, a path briefly absent) — the stat that just
+            #     succeeded is the whole of what it claimed was wrong; and
+            #   * a broken artifact rolled back with an mtime-preserving copy
+            #     (``cp -p``, ``rsync -t``, a snapshot restore), which puts the
+            #     original marker back.
+            #
+            # A load failure recorded against *this* marker is excluded: the
+            # sidecar path can trigger a read without the marker moving, and
+            # there the same marker really does still mean the same broken
+            # bytes.
+            if state.stat_error_outstanding or (
+                state.failed_marker is not None and state.failed_marker != marker
+            ):
+                self._retract_stale_error(name, state, reason="marker_restored")
             sidecar_changed = _check_sidecar_changed(state)
             if not sidecar_changed:
                 return
@@ -1024,6 +1058,13 @@ class ArtifactWatcher(threading.Thread):
             if marker is not None:
                 state.last_marker = marker
             self._clear_load_backoff(state)
+            # These bytes hash to the artifact that is already serving, so
+            # whatever the last failure was — a broken artifact that has since
+            # been rolled back, a transient read error — it is over, and the
+            # entry in memory is the artifact on disk.  Retract the annotation:
+            # this short-circuit returns before ``_build_entry``, so the
+            # successful-load path below never runs and nothing else would.
+            self._retract_stale_error(name, state, reason="bytes_unchanged")
             return
 
         try:
@@ -1108,6 +1149,9 @@ class ArtifactWatcher(threading.Thread):
         state.last_sha256 = sha256
         state.last_marker = new_marker
         self._clear_load_backoff(state)
+        # The fresh entry carries last_load_error=None, so any outstanding
+        # stat-side annotation is gone with it.
+        state.stat_error_outstanding = False
         # Reset post-HMAC deserialization failure streak on successful load.
         self._post_hmac_failure_streak.pop(name, None)
         # Clear the repeat-suppression signature so the next failure — even an
@@ -1261,6 +1305,61 @@ class ArtifactWatcher(threading.Thread):
         state._last_failure_signature = signature
         return True
 
+    def _retract_stale_error(
+        self, name: str, state: _RecipeWatchState, *, reason: str
+    ) -> None:
+        """Clear a ``last_load_error`` the watcher has since proved obsolete.
+
+        ``last_load_error`` used to be written by every failure path and
+        cleared by exactly one: a *successful* load, which replaces the whole
+        entry.  Both of the watcher's "nothing to do" fast paths return before
+        that, so a recipe whose fault had passed kept reporting the fault:
+
+        * a transient stat failure, then a successful stat on the same marker —
+          the poll never reaches the load path at all; and
+        * a broken artifact rolled back to the bytes already in memory — the
+          load path is reached but short-circuits on the sha256 comparison.
+
+        In both cases ``/v1/health/details`` answered 503 ``degraded`` for the
+        life of the process while ``/v1/recipes/{name}:recommend`` served
+        normally, and the only remedies were writing a *different* artifact or
+        restarting.
+
+        Two outstanding errors are deliberately left alone.  ``yaml_rescan_error``
+        marks a recipe whose YAML stopped parsing: nothing about the artifact
+        speaks to that, and only a successful reparse may retract it (the same
+        asymmetry that flag already documents in the other direction).  The
+        ``_mark_all_unhealthy`` sentinel has its own recovery path
+        (``_clear_watcher_unhealthy_errors``) keyed to the poll-loop error
+        streak, so retracting it here would race that bookkeeping.
+        """
+        if state.yaml_rescan_error:
+            return
+        entry = self._registry.get(name)
+        if entry is None or entry.last_load_error is None:
+            return
+        if entry.last_load_error == self._WATCHER_UNHEALTHY_SENTINEL:
+            return
+        previous = entry.last_load_error
+        self._registry.set_load_error(name, None)
+        state.stat_error_outstanding = False
+        # Disarm, so a retraction fires once per fault rather than on every
+        # tick for as long as the marker stays put.  Without this the fast
+        # path's ``failed_marker != marker`` test keeps holding, and an error
+        # some other path re-writes each tick -- a recipes-dir scan failure,
+        # say -- would be cleared each tick too, flapping /v1/health/details
+        # instead of reporting it.  The backoff this drops is moot here: the
+        # marker that failed is no longer the one on disk.
+        self._clear_load_backoff(state)
+        # Let the next failure log at ERROR again even if it is identical.
+        state._last_failure_signature = None
+        logger.info(
+            "artifact_load_error_cleared",
+            name=name,
+            reason=reason,
+            previous_error=previous[:200],
+        )
+
     def _mark_error(self, name: str, error: str) -> None:
         """Mark last_load_error on the existing registry entry (if any).
 
@@ -1354,12 +1453,24 @@ class ArtifactWatcher(threading.Thread):
         state.retry_not_before = 0.0
 
     def _record_load_failure(
-        self, name: str, error: str, reason: str = "unexpected"
+        self,
+        name: str,
+        error: str,
+        reason: str = "unexpected",
+        *,
+        stat_class: bool = False,
     ) -> None:
         """Mark the entry's load error and increment the failure metrics.
 
         *reason* labels the failure step for ``recotem_artifact_load_failures_total``.
+
+        *stat_class* says the failure came from the stat side rather than from
+        the bytes, so a later successful stat on an unchanged marker may
+        retract it — see ``_RecipeWatchState.stat_error_outstanding``.
         """
+        state = self._states.get(name)
+        if state is not None:
+            state.stat_error_outstanding = stat_class
         self._mark_error(name, error)
         _metrics.inc_artifact_load_failure(name, reason=reason)
         _metrics.record_swap(name, ok=False)

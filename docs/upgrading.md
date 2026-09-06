@@ -114,6 +114,37 @@ potentially long after the deploy that caused it. Alert on that counter and
 scrape `/v1/health/details`; a green `/v1/health` is not evidence the swap
 worked. [operations.md](operations.md) calls this "degraded now, down later".
 
+### A degraded recipe now recovers on its own
+
+Before this release `last_load_error` was cleared by exactly one thing: a
+successful load of a **different** artifact. (The two short-circuits below are
+present unchanged in the 2.0.0 source, and neither clears it.) Anything else
+that set it stayed set for the life of the process, so `/v1/health/details`
+answered `503 degraded` long after the fault had passed, while
+`/v1/recipes/{name}:recommend` served normally throughout. Two ordinary
+situations ended that way:
+
+- **A transient stat failure.** An S3 throttle, an IAM propagation window, an
+  NFS stale handle or a remount makes one poll fail. The artifact is untouched,
+  so the next poll sees an unchanged marker and takes the fast path — which at
+  2.0.0 never reached the code that could clear the annotation.
+- **A rollback.** Putting the *previous* artifact back — the first response to
+  a bad deploy, and the remedy this page gives for a skewed IALS artifact —
+  restores bytes that hash to the model already in memory, which at 2.0.0
+  short-circuited before the annotation was cleared.
+
+In both cases the only ways out were writing a *different* artifact or
+restarting the process. 2.1.0 retracts the annotation once it can show it no
+longer holds and logs `artifact_load_error_cleared` (INFO) when it does; see
+[Watcher and registry semantics](operations.md#watcher-and-registry-semantics).
+
+**What this changes for your alerting.** If you have a rule that treats a
+`/v1/health/details` `degraded` as sticky — a runbook step that says "restart
+the pod to clear it", or an alert with a long `for:` chosen because the signal
+never cleared by itself — drop it. A `degraded` at 2.1.0 means the fault is
+current. A recipe YAML that stopped parsing, and a load failure against the
+artifact still on disk, are still reported until they are actually fixed.
+
 ### Azure URIs changed in both directions
 
 2.1.0 rewrote how `source.path` and `item_metadata.path` treat an `@` in an

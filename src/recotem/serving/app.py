@@ -628,8 +628,17 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     ) -> JSONResponse:
         match = _V1_VERB_PATH_RE.match(request.url.path)
         if match is not None:
+            # Same bound as the router's _request_metrics: the name here comes
+            # from the request path and is only shape-checked by the regex, so
+            # an unregistered one must not become a Prometheus label of its
+            # own.  See recotem.serving.metrics.UNKNOWN_RECIPE_LABEL.
+            _name = match.group("name")
             _metrics.record_v1_request(
-                recipe=match.group("name"),
+                recipe=(
+                    _name
+                    if registry.get(_name) is not None
+                    else _metrics.UNKNOWN_RECIPE_LABEL
+                ),
                 verb=match.group("verb"),
                 status="validation_error",
                 latency_seconds=0.0,

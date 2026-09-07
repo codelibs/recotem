@@ -165,7 +165,15 @@ def test_recommend_records_recipe_not_found_when_missing() -> None:
     r = client.post("/v1/recipes/ghost:recommend", json={"user_id": "u1"})
     assert r.status_code == 404
     assert r.json()["code"] == "RECIPE_NOT_FOUND"
-    assert _label_value("recommend", "recipe_not_found", recipe="ghost") == 1.0
+    # The status is recorded, but under the bounded label -- the name came off
+    # the request path, so labelling it verbatim is a cardinality DoS.
+    assert (
+        _label_value(
+            "recommend", "recipe_not_found", recipe=_metrics.UNKNOWN_RECIPE_LABEL
+        )
+        == 1.0
+    )
+    assert _label_value("recommend", "recipe_not_found", recipe="ghost") == 0.0
 
 
 def test_recommend_related_records_unknown_seed_items() -> None:
@@ -341,7 +349,11 @@ def test_recipe_not_found_metric_across_verbs(verb: str, path: str, body: dict) 
     r = client.post(f"/v1/recipes/{path}", json=body)
     assert r.status_code == 404
     assert r.json()["code"] == "RECIPE_NOT_FOUND"
-    assert _label_value(verb, "recipe_not_found", recipe="ghost") == 1.0
+    assert (
+        _label_value(verb, "recipe_not_found", recipe=_metrics.UNKNOWN_RECIPE_LABEL)
+        == 1.0
+    )
+    assert _label_value(verb, "recipe_not_found", recipe="ghost") == 0.0
 
 
 # ---------------------------------------------------------------------------

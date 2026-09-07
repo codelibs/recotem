@@ -175,6 +175,33 @@ def _set_site_url_version(text: str, version: str | None) -> str:
     return re.sub(r"recotem\.org/[0-9]+\.[0-9]+/", f"recotem.org/{version}/", text)
 
 
+def _site_roots() -> list[str]:
+    """The paths section 4b scans, read off the script itself.
+
+    A hand-copied list is how the release-ready fixture below came to cover
+    six of ten roots while reading as if it covered the tree.
+    """
+    text = SCRIPT.read_text(encoding="utf-8")
+    match = re.search(r"^SITE_ROOTS=\(([^)]*)\)", text, re.M)
+    assert match, "SITE_ROOTS is no longer a literal array in the script"
+    roots = match.group(1).split()
+    assert roots, "SITE_ROOTS parsed as empty -- the pattern is broken"
+    return roots
+
+
+def _current_site_url_version() -> str:
+    """The documentation line this tree belongs to: MAJOR.MINOR of its version.
+
+    Read from the package version rather than by grepping the tree for a
+    `recotem.org/X.Y/` URL, because a tree carrying a *stale* URL is exactly
+    the case the caller must not normalise away.
+    """
+    text = (REPO_ROOT / "src" / "recotem" / "version.py").read_text(encoding="utf-8")
+    match = re.search(r'^__version__ = "(\d+)\.(\d+)\.', text, re.M)
+    assert match, "could not read MAJOR.MINOR from src/recotem/version.py"
+    return f"{match.group(1)}.{match.group(2)}"
+
+
 def _run(script: Path, tag: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(_BASH), str(script), tag],
@@ -654,9 +681,28 @@ def test_a_release_ready_copy_of_this_repository_passes(tmp_path: Path) -> None:
     root = tmp_path / "tree"
     (root / ".github").mkdir(parents=True)
     shutil.copytree(REPO_ROOT / ".github" / "scripts", root / ".github" / "scripts")
-    for rel in ("helm", "examples"):
-        shutil.copytree(REPO_ROOT / rel, root / rel)
-    (root / "src" / "recotem").mkdir(parents=True)
+    # Every root section 4b scans, not a subset.  The copy used to carry
+    # `helm examples pyproject.toml README.md src/recotem/version.py` alone,
+    # which left `.claude`, `CLAUDE.md`, `CONTRIBUTING.md`, the rest of `src`
+    # and all of `tests` outside the fixture -- so a stale documentation URL in
+    # any of them passed here and refused the real tag.  Read the roots off the
+    # script rather than restating them, so the fixture cannot drift from the
+    # scan again.
+    # `__pycache__` is skipped so the copy is the clean checkout CI tags from.
+    # Bytecode embeds these URLs in compiled docstrings, and a rewrite cannot
+    # reach inside it -- a developer's stale .pyc would fail this test for a
+    # reason no release has.
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
+    for rel in _site_roots():
+        src = REPO_ROOT / rel
+        if not src.exists():
+            continue
+        if src.is_dir():
+            shutil.copytree(src, root / rel, dirs_exist_ok=True, ignore=ignore)
+        else:
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(src, root / rel)
+    (root / "src" / "recotem").mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO_ROOT / "pyproject.toml", root / "pyproject.toml")
     # README.md is copied for section 4b rather than for any pin: it is one of
     # the places a stale documentation URL ships where nobody can correct it,
@@ -701,14 +747,24 @@ def test_a_release_ready_copy_of_this_repository_passes(tmp_path: Path) -> None:
 
     # Section 4b's URLs are bumped at the dev bump rather than at release, but
     # a release-ready tree is one where that already happened -- so the copy
-    # gets the same blanket rewrite the dev bump performs, across every file,
-    # not just the ones carrying a deployment pin.  MAJOR.MINOR only: a patch
-    # release does not create a documentation line.
+    # gets the same rewrite the dev bump performs, across every file, not just
+    # the ones carrying a deployment pin.  MAJOR.MINOR only: a patch release
+    # does not create a documentation line.
+    #
+    # It rewrites only the line the tree *belongs to*, exactly as the runbook's
+    # `s{recotem\.org/\Q${OLD_MM}\E/}{...}` does.  A blanket
+    # `recotem\.org/[0-9]+\.[0-9]+/` rewrite would also normalise a URL naming
+    # some *other* line -- the one thing section 4b exists to refuse -- so the
+    # fixture would erase the defect before the script could see it, and this
+    # test would pass on a tree the real gate refuses.  Measured: with the
+    # blanket form, copying `.claude` in was not enough to make this test fail
+    # on a tree carrying a genuinely stale URL.
+    current_mm = _current_site_url_version()
     for path in root.rglob("*"):
         if not path.is_file() or path.is_symlink():
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        new = _set_site_url_version(text, release_mm)
+        new = text.replace(f"recotem.org/{current_mm}/", f"recotem.org/{release_mm}/")
         if new != text:
             path.write_text(new, encoding="utf-8")
 

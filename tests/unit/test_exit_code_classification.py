@@ -132,7 +132,7 @@ def test_network_path_sha256_mismatch_still_exits_7(
     failures of the same pipeline, all of which report exit 7.
 
     The ``code`` attribute stays ``datasource_error`` here.  That asymmetry is
-    the documented behaviour of the HTTP path — ``docs/data-sources/csv.md``
+    the documented behaviour of the HTTP path — ``https://recotem.org/2.1/docs/data-sources/csv``
     states that exit 7 takes precedence over ``DataSourceError`` in the
     exit-code chain — and is asserted so a change to it is deliberate.
     """

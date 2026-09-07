@@ -1254,7 +1254,7 @@ def test_is_allowed_deny_takes_precedence_over_exact_allow_list_entry(
 
 
 def test_key_rotation_step4_retired_kid_artifact_rejected() -> None:
-    """Validate the four-step key rotation from docs/operations.md.
+    """Validate the four-step key rotation from https://recotem.org/2.1/docs/operations.
 
     Step 1: ring = {A}       — sign artifact with kid=A
     Step 2: ring = {B, A}    — old artifact still verifiable (A in ring)

@@ -1236,7 +1236,7 @@ def test_over_cap_feature_value_is_rejected_at_validation_422(
     request-schema cap returns -- before it can reach the multi_label
     tokenizer. Pins the HTTP status the schema-level ``AfterValidator``
     produces (the unit tests assert only the model-level ValidationError), and
-    matches docs/recipe-reference.md.
+    matches https://recotem.org/2.1/docs/recipe-reference.
     """
     from recotem.serving.schemas import _MAX_FEATURE_VALUE_CHARS
 
@@ -1288,7 +1288,7 @@ def near_constant_numerical_client() -> TestClient:
 # 1e5, not 1e4: independently verified (see the mutation proof in the task
 # report) that against THIS fixture's exact dimensionality/lambda, the
 # solver singularity crossover for std=1.36e-15 falls between 1e4 (still
-# 200) and 1e5 (400) -- docs/api-reference.md already discloses that this
+# 200) and 1e5 (400) -- https://recotem.org/2.1/docs/serving-api already discloses that this
 # crossover is not a fixed constant across models, so the test uses a value
 # empirically confirmed to trip it here rather than assuming the review's
 # reported number transfers exactly to this fixture's shape.

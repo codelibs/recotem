@@ -219,7 +219,7 @@ def test_validate_reports_where_for_exception_whose_str_ignores_args(
     ``where`` by mutating ``exc.args`` in place (as an earlier version of
     this fix did) is silently invisible for this exception type. A plugin
     author who re-validates its config via a nested pydantic model inside
-    ``__init__`` (a plausible pattern per ``docs/plugin-authoring.md`` --
+    ``__init__`` (a plausible pattern per ``https://recotem.org/2.1/docs/plugin-authoring`` --
     nothing enforces the "always raise DataSourceError" convention) would
     trigger exactly this. The fix must carry ``where`` in the caller's error
     message instead, which works regardless of what ``str(exc)`` returns.
@@ -2431,7 +2431,7 @@ def test_inspect_corrupt_header_json_exits_5(tmp_path: Path, monkeypatch) -> Non
     was used for the JSON parse step.  JSONDecodeError / UnicodeDecodeError are
     not mapped by ``_map_exception_to_exit`` so they defaulted to _EXIT_UNKNOWN (1).
     After the fix, the specific exception types are caught and mapped to
-    _EXIT_ARTIFACT (5) explicitly, which matches what docs/operations.md documents.
+    _EXIT_ARTIFACT (5) explicitly, which matches what https://recotem.org/2.1/docs/operations documents.
     """
     from unittest.mock import patch
 

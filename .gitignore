@@ -52,7 +52,8 @@ az:/
 # Tools
 .serena/
 
-# Local working docs (plans, specs) — not for the public repo
-docs/plans/
-docs/specs/
-
+# Local working docs (plans, specs) — not for the public repo.
+# The whole directory is ignored: the published documentation moved to
+# https://recotem.org (repo: codelibs/recotem-docs), and nothing under docs/
+# should ever be committed here again.
+docs/

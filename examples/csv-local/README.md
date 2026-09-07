@@ -44,4 +44,4 @@ Use this example when you want to develop offline, or to study the recipe
 schema without an HTTPS round-trip. The
 [tutorial-purchase-log](../tutorial-purchase-log/README.md) example is the
 runnable end-to-end walkthrough that the [getting-started
-guide](../../docs/getting-started.md) is built around.
+guide](https://recotem.org/2.1/guide/) is built around.

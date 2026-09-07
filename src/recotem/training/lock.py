@@ -253,7 +253,7 @@ def recipe_lock(
         # and fail). The lock still cannot coordinate writers across hosts
         # — surface that via the structured warning so operators don't
         # assume distributed mutual exclusion. See
-        # docs/operations.md "Concurrent training" section.
+        # https://recotem.org/2.1/docs/operations "Concurrent training" section.
         lock_path = _remote_lock_path(output_str)
         _lock_path_str = str(lock_path)
         _log_kwargs: dict[str, str] = {

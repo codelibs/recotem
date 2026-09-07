@@ -60,7 +60,7 @@ moving parts to a recipe file and a binary artifact:
 
 - **CSV / Parquet** — local files or any fsspec-reachable URL (S3, GCS, Azure, HTTPS).
 - **BigQuery** — SQL queries with Storage Read API support.
-- **SQL** (PostgreSQL / MySQL / MariaDB / SQLite) — via SQLAlchemy 2. See `docs/data-sources/sql.md`.
+- **SQL** (PostgreSQL / MySQL / MariaDB / SQLite) — via SQLAlchemy 2. See [SQL data sources](https://recotem.org/2.1/docs/data-sources/sql).
 - **Custom plugins** — implement the `DataSource` Protocol and register via `recotem.datasources` entry-points.
 
 ## Install
@@ -150,7 +150,7 @@ trains TopPop, so the scores above are raw interaction counts.
 The recipe itself is 11 lines — every other field has a sensible default.
 See [`examples/quickstart/recipe.yaml`](examples/quickstart/recipe.yaml)
 for the source of truth and
-[docs/recipe-reference.md](docs/recipe-reference.md) for the full schema.
+[Recipe reference](https://recotem.org/2.1/docs/recipe-reference) for the full schema.
 
 ### Which env var is needed where?
 
@@ -188,13 +188,13 @@ on file mtime.
 
 Full documentation site: **[recotem.org](https://recotem.org)**.
 
-- [Getting started](docs/getting-started.md) — Docker Compose / pip walkthrough end-to-end
-- [Recipe reference](docs/recipe-reference.md) — every field documented
-- [API reference](docs/api-reference.md) — `/v1` endpoints and the request/response shape of every inference verb, including the batch ones
-- [Operations](docs/operations.md) — key rotation, sizing, troubleshooting
-- [Security](docs/security.md) — threat model, IAM scopes, secrets handling
-- [Plugin authoring](docs/plugin-authoring.md) — write a custom data source
-- [Documentation index](docs/README.md)
+- [Getting started](https://recotem.org/2.1/guide/) — Docker Compose / pip walkthrough end-to-end
+- [Recipe reference](https://recotem.org/2.1/docs/recipe-reference) — every field documented
+- [API reference](https://recotem.org/2.1/docs/serving-api) — `/v1` endpoints and the request/response shape of every inference verb, including the batch ones
+- [Operations](https://recotem.org/2.1/docs/operations) — key rotation, sizing, troubleshooting
+- [Security](https://recotem.org/2.1/docs/security) — threat model, IAM scopes, secrets handling
+- [Plugin authoring](https://recotem.org/2.1/docs/plugin-authoring) — write a custom data source
+- [Documentation index](https://recotem.org/2.1/docs/)
 
 ## Contributing
 

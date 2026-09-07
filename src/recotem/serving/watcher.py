@@ -1390,7 +1390,7 @@ class ArtifactWatcher(threading.Thread):
         next tick re-reads the artifact in full, and for a fault that is *not*
         transient (a kid that is not in the key ring, an irspack version skew,
         a truncated object) that repeats for as long as the artifact stays
-        broken.  ``docs/operations.md`` describes exactly that steady state as
+        broken.  ``https://recotem.org/2.1/docs/operations`` describes exactly that steady state as
         survivable — "a skewed artifact sits harmless in a running fleet" — so
         it can persist for days, at one full object-store GET per tick.
 

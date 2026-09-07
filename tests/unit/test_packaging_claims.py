@@ -3,7 +3,7 @@
 `[tool.hatch.build.targets.sdist] include` used to read
 ``["src/recotem", "README.md", "LICENSE"]``.  Hatchling's include patterns are
 gitignore-style, so an unanchored ``README.md`` matches a ``README.md`` at ANY
-depth: the sdist shipped ``docs/README.md`` and all nine
+depth: the sdist shipped ``https://recotem.org/2.1/docs/`` and all nine
 ``examples/*/README.md`` -- and, because no pattern named ``examples``, none of
 the ``recipe.yaml``, CSV, or manifest files those READMEs instruct the reader
 to run.  Nine example directories consisting only of instructions for files
@@ -17,7 +17,7 @@ wheel, complete sdist.
 **Scope boundary.** This file owns the *distributions* -- what
 ``pyproject.toml``'s build targets put in the sdist, and whether a file a
 shipped document tells you to run is actually there.  It asserts nothing about
-``docs/getting-started.md``'s Path B, which is owned by
+``https://recotem.org/2.1/guide/``'s Path B, which is owned by
 ``tests/unit/test_getting_started_path_b.py`` (`#262`): that PR rewrites Path B
 to run from a bare ``pip install`` with no checkout, so the two surfaces are
 disjoint by construction -- Path B stops naming ``examples/`` at all, and this
@@ -60,8 +60,18 @@ def _code_blocks(text: str) -> list[tuple[int, str]]:
 
 
 def _prose_files() -> list[Path]:
+    """Every shipped prose file that can tell a reader to run an example.
+
+    ``docs/`` used to be the bulk of this list.  It is gone -- the
+    documentation lives at recotem.org now -- and ``rglob`` on a missing
+    directory yields nothing and raises nothing, so leaving it here would have
+    left the guard green while it watched two files instead of sixteen.  The
+    example READMEs replace it and are a closer subject: they are the prose
+    that actually names ``examples/<dir>/<file>`` paths, and they ship in the
+    sdist alongside the files they name.
+    """
     files = [_ROOT / name for name in ("README.md", "CLAUDE.md")]
-    files.extend(sorted((_ROOT / "docs").rglob("*.md")))
+    files.extend(sorted((_ROOT / "examples").rglob("README.md")))
     return [f for f in files if f.is_file()]
 
 
@@ -84,7 +94,7 @@ def test_sdist_include_patterns_are_anchored_and_cover_examples() -> None:
         "these sdist include patterns are unanchored, so hatchling matches "
         f"them at every depth, not just the repository root: {unanchored}. "
         "Prefix each with '/'. An unanchored 'README.md' is what pulled "
-        "docs/README.md and nine examples/*/README.md into the sdist while "
+        "https://recotem.org/2.1/docs/ and nine examples/*/README.md into the sdist while "
         "shipping none of the files those READMEs describe."
     )
 

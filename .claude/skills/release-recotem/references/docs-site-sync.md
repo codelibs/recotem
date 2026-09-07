@@ -3,24 +3,54 @@
 Read this when Phase 4 of `SKILL.md` sends you here. Everything below runs in
 the `recotem-docs` repo, not in `recotem`. Do 4A before 4B.
 
-## Phase 4A — Freeze the old stable, promote the new one
+## Phase 4A — Promote the new stable, keep its version directory
 
 Skip this for a patch release (`X.Y.Z` where `Z > 0`) — a patch does not create
 a new documentation line. Run it for every minor or major.
 
-The site model (`specs/2026-07-20-docs-versioning-design.md` §2–§3): the
-unversioned root (`/docs/ /guide/ /learn/` + `/ja/…`) is the current stable and
-the only indexed tree; every `X.Y/` directory is a noindexed, self-canonical
-archive or preview. At release, the outgoing stable is frozen into its own
-`X.Y/` directory and the incoming preview is promoted to the root, so **every
-canonical URL keeps working and starts serving the new version**.
+The site model lives in **`recotem-docs/CLAUDE.md`** ("Documentation
+versioning" and "Version lifecycle"); the design detail is in
+`specs/2026-07-20-docs-versioning-design.md` §2–§3. Keep this file and that one
+consistent — if you change the lifecycle here, change it there in the same PR.
+The unversioned root (`/docs/ /guide/ /learn/` + `/ja/…`) is the current stable
+and the only indexed tree; every `X.Y/` directory is a noindexed,
+self-canonical copy of one version's docs.
+
+**A version directory is created once and never deleted.** It is the
+in-development preview while `X.Y` is being built, and the permanent archive of
+`X.Y` once it ships. The promote **copies** its content to the root; it does not
+move it. So a release does two things to `X.Y/`: nothing to its content, and one
+edit to its landing page (step 4).
+
+**Why it is never deleted.** The product bakes `https://recotem.org/X.Y/docs/…`
+URLs into shipped source — the text of a `DataSourceError`, the JSON Schema
+`recotem schema` emits for IDEs, the HELP string served at `/v1/metrics`,
+`README.md` as rendered on PyPI (see `references/version-locations.md`,
+"Documentation-site URLs"). Those URLs name the version being released, so
+deleting `X.Y/` as part of shipping `X.Y.0` would break every one of them for
+that version's **entire support window** — precisely the period during which
+they are read. An earlier version of this file ended 4A with `rm -rf 2.1` and
+noted that the removed files linger because the deploy is `scp` without
+`--delete`. That is an accident of the transport, not a contract; it does not
+survive a clean redeploy, and nothing about it was ever verified.
+
+The cost is that the current stable's content is served at two paths. That is
+accepted: everything matching `/^\d+\.\d+\//` is `noindex` + self-canonical and
+excluded from the sitemap, so the copy never competes with the root in search.
 
 Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
 
-1. **Freeze the outgoing stable into `$OLD/`.** Copy the versioned content
-   directories, EN and JA, into a new `$OLD/` directory laid out like the
-   existing `1.0/`: version directories are self-contained under the root
-   locale, so JA goes to `$OLD/ja/…`, not into a locale-routed path.
+1. **One-time, at the 2.1.0 release only: freeze the outgoing root into
+   `$OLD/`.** 2.0 shipped before this model, so it has no directory of its own
+   and its documentation exists only at the unversioned root that step 2 is
+   about to overwrite. **From 2.2 onward this step does not exist** — every
+   version directory already exists from its preview phase, and there is
+   nothing to freeze.
+
+   Copy the versioned content directories, EN and JA, into a new `$OLD/`
+   directory laid out like the existing `1.0/`: version directories are
+   self-contained under the root locale, so JA goes to `$OLD/ja/…`, not into a
+   locale-routed path.
 
    ```bash
    mkdir -p 2.0/ja
@@ -57,9 +87,14 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    on the promoted tree and of the one Phase 5 does when it seeds the next
    preview; the freeze needs it for the same reason and had no equivalent.
 
-2. **Promote the preview to the root.** Replace only the directories the
-   preview actually carries, and delete the old ones first so a file removed
-   during 2.1 development does not survive the copy:
+   A preview directory needs none of this at its own release: it was authored
+   with `/X.Y/…` links from the start, so the copy that stays behind is already
+   correct. Only the copy promoted to the root is rewritten (step 3).
+
+2. **Promote the preview's content to the root.** Copy, do not move — `2.1/`
+   stays exactly where it is. Replace only the directories the preview actually
+   carries, and delete the old ones first so a file removed during 2.1
+   development does not survive the copy:
 
    ```bash
    rm -rf docs guide ja/docs ja/guide
@@ -76,11 +111,11 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    place: they are shared and unversioned, the preview has no `learn/` to
    promote, and the freeze deliberately did not copy them either.
 
-3. **Rewrite the promoted tree's absolute version links.** The preview's pages
+3. **Rewrite the promoted copy's absolute version links.** The preview's pages
    link with absolute `/2.1/…` URLs (~40 of them across the EN and JA guide,
-   `docs/data-sources/plugins.md`, and both index pages). Once promoted these
-   must point at the unversioned root, or the new stable docs link back into a
-   preview directory that is about to be deleted:
+   `docs/data-sources/plugins.md`, and both index pages). At the root these
+   must point at the unversioned root, or the new stable docs send every reader
+   sideways into the archive:
 
    ```bash
    grep -rl '/2\.1/' --include='*.md' docs guide ja/docs ja/guide \
@@ -91,25 +126,52 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    Order matters in that substitution: rewrite `/2.1/ja/` before the bare
    `/2.1/`, or the JA links lose their locale prefix.
 
-4. **Retire the preview directory.** `rm -rf 2.1`. Note the deploy is `scp`
-   without `--delete`, so the removed files linger server-side; that is
-   expected and harmless (they are noindexed), but do not treat a still-live
-   `/2.1/` URL as a failed release.
+   **That second grep is now the only thing watching this step.** When the
+   promote deleted `2.1/`, a page left pointing at `/2.1/…` was a dead link and
+   `yarn docs:build` failed on it. `2.1/` now still exists, so the same mistake
+   builds clean and ships — a stable page quietly linking into the archive. Run
+   the grep and read it; do not rely on step 7's build.
+
+   Note the scope: `docs guide ja/docs ja/guide`, the promoted copies only.
+   Never run this rewrite over `2.1/` itself — its `/2.1/…` links are correct
+   and must stay.
+
+4. **Turn the kept directory's landing page into an archive notice.** This
+   replaces the old `rm -rf 2.1` and is the *only* edit `2.1/` receives.
+   `2.1/index.md` and `2.1/ja/index.md` were written as preview landing pages:
+   a title and `description` ending in "(in development)" / "(開発中)", an H1
+   the same, and a `::: warning In-development preview` / `::: warning
+   開発中プレビュー` container saying the content may still change. All of that
+   is now false — this is the shipped 2.1 documentation.
+
+   In both files, drop "(in development)" / "(開発中)" from the title,
+   description and H1, and replace the warning container with an
+   archived-version notice: this is the documentation for Recotem 2.1, kept at
+   a stable URL for readers running that release, and the current stable
+   documentation is at the site root. Keep the rest of both pages as they are —
+   the `/2.1/guide/` and `/2.1/docs/` links are internal to the archive and
+   correct, and the "Looking for the stable docs?" section already points at
+   the root, which is exactly what an archive wants.
 
 5. **Update the VitePress wiring** (`.vitepress/config.ts`):
 
-   - **Sidebars.** The EN locale registers `/2.1/guide/`, `/2.1/docs/`,
-     `/2.1/ja/guide/`, `/2.1/ja/docs/`, and the JA locale registers the two
-     `/2.1/ja/…` keys again. Delete all six and add the frozen archive's:
+   - **Sidebars.** Every `X.Y/` directory that exists needs its keys, and none
+     are removed at a release, because no directory is removed at a release.
+     The EN locale registers `/2.1/guide/`, `/2.1/docs/`, `/2.1/ja/guide/`,
+     `/2.1/ja/docs/`, and the JA locale registers the two `/2.1/ja/…` keys
+     again. **Keep all six** — 2.1 is now an archive, and an archive with no
+     sidebar key renders with no sidebar at all. Add, in the same shape:
      `'/2.0/guide/': v2GuideSidebar('en', '/2.0')`, `'/2.0/docs/':
-     v2DocsSidebar('en', '/2.0')`, and the `/2.0/ja/…` pair in both locales —
-     mirroring exactly how the `/2.1/` keys were registered. The root
+     v2DocsSidebar('en', '/2.0')`, and the `/2.0/ja/…` pair in both locales,
+     for the one-time `2.0/` freeze of step 1. The next preview's `/2.2/…` keys
+     are added when Phase 5 seeds that directory, not here. The root
      `'/guide/'` / `'/docs/'` / `'/learn/'` registrations already point at the
      unversioned tree and need no change.
    - **No noindex work is required.** `transformPageData` and
      `sitemap.transformItems` already match every version directory generically
      (`/^\d+\.\d+\//`), so the new `2.0/` tree is noindexed and out of the
-     sitemap the moment it exists.
+     sitemap the moment it exists, and `2.1/` stays noindexed exactly as it was
+     as a preview.
 
 6. **Update the version switcher**
    (`.vitepress/theme/VersionSwitcher.vue`). It hardcodes the version set. For
@@ -120,6 +182,13 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    **2.1** (unversioned root, marked latest), **2.0** (`/2.0/…`), **1.0**
    (`/1.0/…`). Check the `:class="{ active: … }"` bindings too — they key off
    the same booleans and will silently highlight the wrong entry.
+
+   `2.1/` still exists after the promote, and it is deliberately **not** given
+   its own menu entry: it holds the same pages as the root (differing only in
+   the link rewrite of step 3), so listing it would offer the reader two
+   entries serving one version. It
+   starts appearing in the switcher at the next release, as `/2.1/…`, when the
+   root moves on to 2.2. That is why the grep below is still right.
 
    `isJa` is the one that gets missed, because its name carries no version.
    Leave it on `2.1/ja/` and every page of the freshly frozen JA archive
@@ -143,11 +212,13 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    yarn docs:build
    ```
 
-   The build's dead-link check is the gate that catches a missed link rewrite
-   **in one direction only**: a promoted page still pointing at `/2.1/…` fails
-   the build, because that page is gone. A *frozen* page still pointing at
-   `/docs/…` builds clean — the target exists, it is just the wrong version now.
-   So assert the freeze's rewrite separately, against the built output:
+   The build's dead-link check **no longer catches a missed link rewrite in
+   either direction.** It used to catch one: a promoted page still pointing at
+   `/2.1/…` failed the build because that page had been deleted. Keeping `2.1/`
+   is what removed that safety net — both a promoted page pointing at `/2.1/…`
+   and a frozen page pointing at `/docs/…` now name a target that exists and is
+   simply the wrong version. Step 3's grep is the check for the first; assert
+   the freeze's rewrite separately, against the built output:
 
    ```bash
    # No link on a 2.0/ page may leave the archive. MUST print nothing.
@@ -163,10 +234,19 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    prints nothing there, because that archive was created with the rewrite. On
    a freeze that skipped the rewrite it prints 166 occurrences across 40 pages.
 
-   Then confirm in the built output that `/2.0/**` and `/1.0/**` carry
-   `noindex`, that the unversioned `/docs/**` does **not**, that the sitemap
-   excludes every `X.Y/` directory, and that the root front page still renders
-   the hero rather than a preview banner.
+   Then confirm in the built output that `/2.1/**`, `/2.0/**` and `/1.0/**`
+   carry `noindex`, that the unversioned `/docs/**` does **not**, that the
+   sitemap excludes every `X.Y/` directory, and that the root front page still
+   renders the hero rather than a preview banner. `/2.1/**` is on that list for
+   the first time and matters most: it now holds the same pages as the indexed
+   root, so if the generic `/^\d+\.\d+\//` rule ever stopped matching it the
+   site would be publishing the whole of its stable documentation twice to
+   search engines.
+
+   Confirm too that `2.1/`'s two landing pages no longer announce a preview
+   (step 4) — the built `/2.1/` and `/2.1/ja/` pages must not carry the
+   in-development warning, or the shipped release's own documentation tells its
+   readers it may still change.
 
    **Then check the version button the reader actually sees.** Step 6's two
    greps are path-only *by design* — they match `2.1/` with a trailing slash,
@@ -213,8 +293,15 @@ go stale after a release.
 - Branch there and bump the pins to `X.Y.Z`. `version-locations.md`
   has the exact edit and the verification; it discovers the files to edit
   rather than hardcoding them, because the set changes as version directories
-  come and go.
-- **Leave every archived `X.Y/` directory untouched** — `1.0/` documents the
-  legacy 1.x app, and a freshly frozen `2.0/` must keep documenting 2.0.
+  are added.
+- **Bump the release's own `X.Y/` directory along with the root.** It is not an
+  archive yet — it holds the same pages as the root and it is what the product's
+  baked `recotem.org/X.Y/docs/…` URLs resolve to for this release's whole
+  support window, so a pin left behind there is read by exactly the operators
+  running this version. It becomes an archive, and stops being bumped, when the
+  next minor moves the root past it.
+- **Leave every archived `X.Y/` directory untouched** — one whose line the root
+  has already moved past. `1.0/` documents the legacy 1.x app, and a freshly
+  frozen `2.0/` must keep documenting 2.0.
 - Verify no stale pin remains in any live (non-archive) tree, then open a PR
   there too. If 4A ran, both jobs belong in the same PR.

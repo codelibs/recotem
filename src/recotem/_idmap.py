@@ -548,7 +548,7 @@ class IDMappedRecommender:
         # reach the router's generic 500 handler, not be routed through
         # ``_is_numerical_cold_start_failure``'s message check only to be
         # re-raised anyway. Wrapping it would add a no-op except clause with
-        # no observable behavior change -- see docs/api-reference.md and the
+        # no observable behavior change -- see https://recotem.org/2.1/docs/serving-api and the
         # task report for the fuller rationale.
         item_emb = self.recommender.get_item_embedding()
         vectors = []

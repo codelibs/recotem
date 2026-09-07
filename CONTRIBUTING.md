@@ -40,7 +40,10 @@ uv run recotem keygen --type signing
 
 ## Making a change
 
-1. **Find or write a spec** under `docs/superpowers/specs/`. Substantive
+1. **Find or write a spec** under `docs/` locally. That directory is
+   gitignored — the published documentation lives at https://recotem.org
+   (repo: [codelibs/recotem-docs](https://github.com/codelibs/recotem-docs)) —
+   so a spec stays a working document and is never committed here. Substantive
    changes start as a design doc reviewed before any code lands.
 2. **Branch off `main`**: `git checkout -b feat/your-thing`.
 3. **Implement + test**. Every public-facing behavior gets a unit test, every
@@ -84,7 +87,7 @@ default. Run them with `uv run pytest tests -m slow`.
 A third-party DataSource plugin is a small package that declares an entry
 point and provides a class with `type_name`, `Config`, `extras_required`, and
 a `fetch(self, ctx) -> pd.DataFrame` method. See
-`docs/plugin-authoring.md` for the walkthrough and
+`https://recotem.org/2.1/docs/plugin-authoring` for the walkthrough and
 `examples/plugins/echo-source/` for a runnable template.
 
 ## Security

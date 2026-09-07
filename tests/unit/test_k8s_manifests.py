@@ -534,7 +534,7 @@ def test_allowed_hosts_always_admits_the_probe_host(
     log shows only ordinary rejected requests.
 
     The ingress-derived branch always prepended `localhost`; the operator
-    override branch did not, and `docs/deployment/k8s.md` tells operators to
+    override branch did not, and `https://recotem.org/2.1/docs/deployment/kubernetes` tells operators to
     use exactly that branch.
     """
     docs = _load_all_strict(_helm_template(*set_args))
@@ -635,7 +635,7 @@ def test_example_spread_constraint_does_not_deadlock_a_read_write_once_volume() 
 #
 # /v1/health/ready still 503s on a cold store, so pointing the startup probe
 # there keeps the first-install guarantee that these tests and
-# docs/deployment/k8s.md both describe.
+# https://recotem.org/2.1/docs/deployment/kubernetes both describe.
 # ---------------------------------------------------------------------------
 
 # The strict endpoint answers "is EVERY recipe present?".  No probe may read
@@ -936,7 +936,7 @@ def test_object_store_init_container_security_context_is_operator_overridable() 
 #
 # Kubernetes injects one legacy Docker-link variable per Service in the
 # namespace, named <SERVICE>_PORT and valued `tcp://<clusterIP>:<port>`.  The
-# chart's Service is `recotem` by default (docs/deployment/k8s.md installs the
+# chart's Service is `recotem` by default (https://recotem.org/2.1/docs/deployment/kubernetes installs the
 # release under that name), so every pod created after it inherits
 # `RECOTEM_PORT=tcp://10.96.139.23:8080`.  RECOTEM_PORT is fatal when it does
 # not parse, so measured in that namespace:
@@ -1051,7 +1051,7 @@ def test_allow_kubelet_probes_warning_names_the_client_traffic_loss() -> None:
 # written against the caps resolved in ITS OWN environment, so an operator who
 # lowers a cap on serve alone leaves the train job on the default: it writes an
 # over-cap artifact, exits 0 with no warning, and serve refuses it
-# (`reason: size_cap`, /v1/health/ready 503). `docs/deployment/k8s.md` tells
+# (`reason: size_cap`, /v1/health/ready 503). `https://recotem.org/2.1/docs/deployment/kubernetes` tells
 # operators to lower `RECOTEM_MAX_PAYLOAD_BYTES`, which is the walk-in.
 # ---------------------------------------------------------------------------
 

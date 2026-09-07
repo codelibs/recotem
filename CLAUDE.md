@@ -60,15 +60,6 @@ tests/
 ├── fuzz/               hypothesis byte mutations on artifact / recipe loaders
 └── e2e/                bash script: train → serve → curl /v1/recipes/{name}:recommend
 
-docs/
-├── getting-started.md  Docker / pip walkthrough → train → /v1/recipes/{name}:recommend
-├── recipe-reference.md every recipe field, type, default, validation
-├── data-sources/       bigquery.md, csv.md, sql.md
-├── deployment/         docker.md, k8s.md, cron.md
-├── operations.md       key rotation, recovery, sizing, troubleshooting
-├── security.md         trust boundaries, FQCN allow-list, threat model
-└── plugin-authoring.md DataSource plugin contract walkthrough
-
 helm/recotem/           serve-only chart with optional CronJob train
 examples/               quickstart/, csv-local/, sql-sqlite/, ga4-bigquery/, feature-aware/, k8s/, plugins/echo-source/, tutorial-purchase-log/
 Dockerfile              multi-stage python:3.12-slim, appuser:1000
@@ -106,7 +97,7 @@ curl -X POST http://localhost:8080/v1/recipes/news_articles:recommend \
 ## Recipe model
 
 A recipe is the single source of truth: 1 YAML = 1 model = 1 `/v1/recipes/{name}:recommend` (plus the related/batch verbs).
-See `docs/recipe-reference.md` for the full schema. Highlights:
+See `https://recotem.org/2.1/docs/recipe-reference` for the full schema. Highlights:
 
 - `source.type` is a discriminator (`csv` | `parquet` | `bigquery` | `sql` | plugins).
 - Env-var expansion is restricted to `${RECOTEM_RECIPE_*}` and never applied
@@ -130,7 +121,7 @@ See `docs/recipe-reference.md` for the full schema. Highlights:
   each declare a `source` (same datasource registry as the top-level
   `source`), an `id_column`, and a `columns` list of `{name, encoding,
   delimiter?, min_frequency?}` (`categorical` | `numerical` | `multi_label`).
-  See `docs/recipe-reference.md#features`.
+  See `https://recotem.org/2.1/docs/recipe-reference#features`.
 
 ## Artifact format
 
@@ -156,24 +147,38 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
   in depth: HMAC verify before any byte is interpreted, plus a hand-enumerated
   FQCN allow-list augmented by a narrow `numpy.*` / `scipy.sparse.*` module-
   prefix allow-list (with a deny-list for high-risk submodules) during load.
-  See `docs/security.md`.
+  See `https://recotem.org/2.1/docs/security`.
 
 ## Documentation policy
 
+- **The documentation lives in another repository.** This repo carries no
+  `docs/` tree. User- and operator-facing documentation is published at
+  https://recotem.org from
+  [codelibs/recotem-docs](https://github.com/codelibs/recotem-docs), expected at
+  `../recotem-docs`. When a change alters documented behaviour, the doc fix is a
+  PR there, against the in-development version directory (`2.1/docs/…`,
+  `2.1/guide/…`) **and its `2.1/ja/…` twin** — that site ships both languages.
+- **Links to it are versioned**: `https://recotem.org/2.1/docs/<page>`. The
+  segment is MAJOR.MINOR, and it is bumped in this repo at the **dev bump**, not
+  at release. `.github/scripts/check-release-tag.sh` refuses a tag whose version
+  disagrees with the URLs in the tree, because several of them ship where nobody
+  can correct them afterwards — the text of a `DataSourceError`, the JSON Schema
+  `recotem schema` emits, the `/v1/metrics` HELP string, `README.md` on PyPI.
 - **Documentation is managed as documentation.** Never write a test that reads a
-  markdown file (`docs/*.md`, `README.md`, `CLAUDE.md`, an example README, a
-  skill's `SKILL.md`) and asserts on its prose, headings, tables or phrasing.
-  When a change alters documented behaviour, fix the doc and stop there; test
-  the behaviour itself (an exit code, a response, a rendered manifest), never
-  the sentence describing it. Asserting that a *code-produced string* mentions a
-  doc path (e.g. an error message pointing at `plugin-authoring.md`) is fine —
-  that is a behaviour assertion.
+  markdown file (`README.md`, `CLAUDE.md`, an example README, a skill's
+  `SKILL.md`) and asserts on its prose, headings, tables or phrasing. When a
+  change alters documented behaviour, fix the doc and stop there; test the
+  behaviour itself (an exit code, a response, a rendered manifest), never the
+  sentence describing it. Asserting that a *code-produced string* contains a
+  documentation URL is fine — that is a behaviour assertion.
 - **There is no `CHANGELOG.md`.** The change record is the
   [GitHub Release](https://github.com/codelibs/recotem/releases) for each tag,
   written at release time from `git log vPREV..main`. A PR does not add a
   changelog entry.
-- Operator-facing upgrade steps go in `docs/upgrading.md` under a
-  `## <prev> → <this>` heading — that page outlives the release notes.
+- Operator-facing upgrade steps go in the recotem-docs page published at
+  https://recotem.org/2.1/docs/upgrading (edit `2.1/docs/upgrading.md` and
+  `2.1/ja/docs/upgrading.md` there), under a `## <prev> → <this>` heading — that
+  page outlives the release notes.
 
 ## Conventions
 
@@ -262,12 +267,12 @@ server running with a limit you did not choose.
 | `RECOTEM_HOST` / ⚠ `RECOTEM_PORT` | 127.0.0.1 / 8080 | uvicorn bind. Must be `0.0.0.0` inside Docker; overridden to 127.0.0.1 when no API keys are set. A non-integer or out-of-range `RECOTEM_PORT` is fatal; `RECOTEM_HOST` is taken as-is. |
 | ⚠ `RECOTEM_WATCH_INTERVAL` | 5 | Watcher poll seconds (clamped 1–30). Unlike the other numeric variables a non-numeric value is fatal, not a warn-and-default. |
 | `RECOTEM_MAX_ARTIFACT_BYTES` | 2 GiB | Per-artifact size cap. Clamped [1 MiB, 16 GiB]. **Lowering it below the payload cap is fatal even if you never set the payload cap** — the cross-check compares the two resolved values, so `RECOTEM_MAX_ARTIFACT_BYTES=256MiB` alone exits 8 naming `RECOTEM_MAX_PAYLOAD_BYTES` (default 512 MiB), which the operator did not set. 512 MiB exactly is accepted. |
-| `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Raw I/O bytes cap on source-path reads (HTTP/HTTPS, local, and object-store). Clamped [1 MiB, 16 GiB]. Does NOT cap the decompressed DataFrame size — see `docs/security.md#decompressed-size-cap-not-enforced-medium-5`. |
+| `RECOTEM_MAX_DOWNLOAD_BYTES` | 256 MiB | Raw I/O bytes cap on source-path reads (HTTP/HTTPS, local, and object-store). Clamped [1 MiB, 16 GiB]. Does NOT cap the decompressed DataFrame size — see `https://recotem.org/2.1/docs/security#decompressed-size-cap-not-enforced-medium-5`. |
 | `RECOTEM_HTTP_TIMEOUT_SECONDS` | 30 | Connect/read timeout for HTTP/HTTPS source fetch. Clamped [1, 600]. |
 | `RECOTEM_HTTP_ALLOW_PRIVATE` | (empty) | Truthy (`1`/`true`/`yes`/`on`) opts the HTTP fetcher into accepting private/loopback/link-local destinations. Default refuses RFC1918 / `127.0.0.0/8` / `169.254.0.0/16` to block SSRF on cloud-metadata services. |
 | `RECOTEM_ALLOWED_HOSTS` | 127.0.0.1,localhost | TrustedHostMiddleware list. Whitespace-only comma input falls back to default. |
 | `RECOTEM_ALLOWED_ORIGINS` | (empty) | CORS allow-list. Empty = deny. |
-| `RECOTEM_ENV` | (empty) | `--insecure-no-auth` permitted when set to `development`, `dev`, or `test`; `--dev-allow-unsigned` permitted only when set to `development`. See `docs/security.md`. |
+| `RECOTEM_ENV` | (empty) | `--insecure-no-auth` permitted when set to `development`, `dev`, or `test`; `--dev-allow-unsigned` permitted only when set to `development`. See `https://recotem.org/2.1/docs/security`. |
 | `RECOTEM_DRAIN_SECONDS` | 30 | SIGTERM grace window. Clamped [1, 300]. |
 | ⚠ `RECOTEM_LOG_FORMAT` | auto | `auto` / `json` / `console`. Any other value is fatal. |
 | `RECOTEM_MAX_PAYLOAD_BYTES` | 512 MiB | Per-payload cap (post-HMAC-verify) for serve-side deserialization. Clamped [1 MiB, 16 GiB]. Smaller than `RECOTEM_MAX_ARTIFACT_BYTES` to bound deserialization memory expansion; a configured value that exceeds it is fatal (that cross-check is enforced, the parse is not). |
@@ -280,9 +285,9 @@ server running with a limit you did not choose.
 | `RECOTEM_BQ_REQUIRE_STORAGE_API` | (empty) | When truthy (`1`/`true`/`yes`/`on`), the BigQuery source refuses both silent Storage-Read-API bypasses. (a) A missing `google-cloud-bigquery-storage` raises `DataSourceError` **before the query is submitted** (so the scan is never billed) — the capability is probed with an explicit import because `google-cloud-bigquery` never raises for it: `_should_use_bqstorage` and `_ensure_bqstorage_client` both warn and silently take the REST path. (b) A Storage-Read-API *download* failure raises instead of falling back to REST. Governs the download transport only: a query-execution failure is always reported as `BigQuery query execution failed: ...`, never with `readSessions` advice. Requires the service account to hold `bigquery.readSessions.create`. |
 | `RECOTEM_ALLOW_IRSPACK_VERSION_SKEW` | (empty) | Truthy downgrades the serve-side irspack version-skew check from `ArtifactError` to a warning. The default rule is an **allow-list** (`_irspack_compat.py`): same **major.minor** always loads (patch drift tolerated); a differing major.minor loads only when `(best_class, header_mm, running_mm)` is in the verified table — CosineKNN / TopPop / RP3beta / DenseSLIM / TruncatedSVD across (0,4)↔(0,5), both directions. IALS (known break: `IALSModelConfig.__setstate__` arity 7→10 at 0.5.0) and BPRFM (unverified: trainable since the `bprfm` extra shipped, so the interchange experiment is now possible, but it has not been run — a BPRFM payload also embeds a LightFM object, a second version axis the table does not model) are refused, as is a missing/non-str `best_class` on a real skew (fail-closed) and every not-yet-verified future transition. Missing/unparseable version fails **open**. The remedy is to retrain; this flag is for operators who know their artifact is unaffected. |
 | `RECOTEM_STARTUP_PARALLELISM` | (empty = auto) | Number of parallel threads used to load artifacts at `recotem serve` startup. Leave unset (default) for auto-sizing (`min(len(recipes), 8)`). Setting to `0` is NOT a sentinel — it clamps to 1 and emits an `env_var_clamped` warning. Clamped [1, 32]. Set to `1` to force sequential loading for debugging. |
-| `RECOTEM_MAX_SQL_ROWS` | 50_000_000 | Hard cap on rows returned by the SQL data source. Clamped [1_000, 500_000_000]. Caps **row count**, not DataFrame resident memory — see `docs/data-sources/sql.md` for the memory-bound caveat. |
+| `RECOTEM_MAX_SQL_ROWS` | 50_000_000 | Hard cap on rows returned by the SQL data source. Clamped [1_000, 500_000_000]. Caps **row count**, not DataFrame resident memory — see `https://recotem.org/2.1/docs/data-sources/sql` for the memory-bound caveat. |
 | `RECOTEM_SQL_ALLOW_PRIVATE` | (empty) | Truthy opts the SQL source into private/loopback DSN hosts (default deny, for SSRF). Covers every driver-routing form — netloc, `?host=`, `?hostaddr=`, `?service=`, `?unix_socket=`, absolute-path host, and network DSNs with no host info — all default-deny without this flag. Also disables the DNS-rebinding re-check before each probe/fetch — opting in means trusting the host end-to-end. |
-| `RECOTEM_MAX_FEATURE_DIM` | 5000 | Cap on the encoded feature dimension per side (item and user checked independently) for feature-aware iALS. Clamped [16, 100000]. Vocabulary is built from the whole fetched feature table (not just interaction-covered rows), so dimension scales with **catalog size, not interaction count**; `min_frequency` on high-cardinality `categorical`/`multi_label` columns is the only recipe-level lever. Cost grows super-linearly in this number and the exponent **rises with the dimension**, so no single power fits: measured per doubling, 1.7–1.9× below the default 5,000 cap, 5.1× from 5,000 to 10,000, and 7.5× from 10,000 to 20,000 — effectively the `dim^3` the dense `Fᵀ F` Cholesky suggests, at exactly the step an operator takes when the default cap refuses their catalogue. Memory grows quadratically. Both multiply with `training.parallelism`. See `docs/operations.md#feature-aware-ials-sizing`. |
+| `RECOTEM_MAX_FEATURE_DIM` | 5000 | Cap on the encoded feature dimension per side (item and user checked independently) for feature-aware iALS. Clamped [16, 100000]. Vocabulary is built from the whole fetched feature table (not just interaction-covered rows), so dimension scales with **catalog size, not interaction count**; `min_frequency` on high-cardinality `categorical`/`multi_label` columns is the only recipe-level lever. Cost grows super-linearly in this number and the exponent **rises with the dimension**, so no single power fits: measured per doubling, 1.7–1.9× below the default 5,000 cap, 5.1× from 5,000 to 10,000, and 7.5× from 10,000 to 20,000 — effectively the `dim^3` the dense `Fᵀ F` Cholesky suggests, at exactly the step an operator takes when the default cap refuses their catalogue. Memory grows quadratically. Both multiply with `training.parallelism`. See `https://recotem.org/2.1/docs/operations#feature-aware-ials-sizing`. |
 
 ## CI
 
@@ -294,7 +299,9 @@ server running with a limit you did not choose.
 
 ## Reference docs
 
-- Getting started: `docs/getting-started.md`
-- Operations runbook: `docs/operations.md`
-- Security model: `docs/security.md`
-- Upgrade paths: `docs/upgrading.md`
+All published at https://recotem.org — source in `../recotem-docs`, under `2.1/`.
+
+- Getting started: https://recotem.org/2.1/guide/
+- Operations runbook: https://recotem.org/2.1/docs/operations
+- Security model: https://recotem.org/2.1/docs/security
+- Upgrade paths: https://recotem.org/2.1/docs/upgrading

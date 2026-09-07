@@ -3,10 +3,23 @@
 Exposes a small set of recorder functions that are no-ops when
 ``prometheus_client`` is not installed, so callers never need to guard.
 
-The ``/metrics`` endpoint itself is opt-in via the
-``RECOTEM_METRICS_ENABLED`` environment variable (any of ``1``, ``true``,
-``yes``, ``on``).  When the variable is unset or any other value, the
-endpoint returns 404 even if recorders are populating the registry.
+The endpoint itself is opt-in via the ``RECOTEM_METRICS_ENABLED``
+environment variable (any of ``1``, ``true``, ``yes``, ``on``).  When the
+variable is unset or any other value, it returns 404 even if recorders are
+populating the registry.
+
+Two things about it routinely surprise operators setting up a scrape:
+
+* **The path is ``/v1/metrics``, not ``/metrics``.**  The route is registered
+  on the same router as everything else, and ``app.py`` includes that router
+  with ``prefix="/v1"``.  A scrape of bare ``/metrics`` gets 404, which looks
+  exactly like the opt-in not having taken effect.
+* **It requires authentication.**  ``metrics_endpoint`` takes
+  ``Depends(_require_auth)`` like every other ``/v1`` route, so a scrape with
+  no ``X-API-Key`` gets 401.  Prometheus needs the key configured (an
+  ``X-API-Key`` entry under ``http_headers`` in the scrape config), unless the
+  server is running with no ``RECOTEM_API_KEYS`` at all -- which forces the
+  loopback-only bind.
 
 All metrics share the default ``prometheus_client`` registry, so
 ``generate_latest()`` would expose any other counter registered in the same
@@ -78,7 +91,7 @@ _WATCHER_STATE_DIVERGENCE: Any = None
 
 
 def metrics_enabled() -> bool:
-    """Return True iff ``/metrics`` should be exposed.
+    """Return True iff ``/v1/metrics`` should be exposed.
 
     Both conditions must hold: ``prometheus_client`` is importable AND
     ``RECOTEM_METRICS_ENABLED`` is set to a truthy value.  This makes

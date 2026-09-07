@@ -4,6 +4,7 @@ The router is mounted at ``/v1`` by ``serving/app.py`` and exposes the
 ``:recommend``, ``:recommend-related``, ``:batch-recommend``,
 ``:batch-recommend-related`` colon-verb endpoints alongside the
 ``/recipes`` discovery, ``/health``, and (optional) ``/metrics`` routes.
+All of them are mounted under the ``/v1`` prefix by ``app.py``.
 """
 
 from __future__ import annotations

@@ -1000,7 +1000,7 @@ def test_unexpected_exception_in_fetch_raises_DataSourceError_not_TrainingError(
     """An unexpected exception raised by source_instance.fetch() must be
     wrapped as DataSourceError (exit 3), not TrainingError (exit 4).
 
-    The documented exit-code contract in docs/operations.md maps datasource
+    The documented exit-code contract in https://recotem.org/2.1/docs/operations maps datasource
     failures to exit 3.  Before this fix _fetch_data wrapped them as
     TrainingError(code='datasource_error'), which the CLI mapped to exit 4.
     """

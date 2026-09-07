@@ -3,10 +3,23 @@
 Exposes a small set of recorder functions that are no-ops when
 ``prometheus_client`` is not installed, so callers never need to guard.
 
-The ``/metrics`` endpoint itself is opt-in via the
-``RECOTEM_METRICS_ENABLED`` environment variable (any of ``1``, ``true``,
-``yes``, ``on``).  When the variable is unset or any other value, the
-endpoint returns 404 even if recorders are populating the registry.
+The endpoint itself is opt-in via the ``RECOTEM_METRICS_ENABLED``
+environment variable (any of ``1``, ``true``, ``yes``, ``on``).  When the
+variable is unset or any other value, it returns 404 even if recorders are
+populating the registry.
+
+Two things about it routinely surprise operators setting up a scrape:
+
+* **The path is ``/v1/metrics``, not ``/metrics``.**  The route is registered
+  on the same router as everything else, and ``app.py`` includes that router
+  with ``prefix="/v1"``.  A scrape of bare ``/metrics`` gets 404, which looks
+  exactly like the opt-in not having taken effect.
+* **It requires authentication.**  ``metrics_endpoint`` takes
+  ``Depends(_require_auth)`` like every other ``/v1`` route, so a scrape with
+  no ``X-API-Key`` gets 401.  Prometheus needs the key configured (an
+  ``X-API-Key`` entry under ``http_headers`` in the scrape config), unless the
+  server is running with no ``RECOTEM_API_KEYS`` at all -- which forces the
+  loopback-only bind.
 
 All metrics share the default ``prometheus_client`` registry, so
 ``generate_latest()`` would expose any other counter registered in the same
@@ -17,7 +30,7 @@ which serves no ``/v1/metrics`` endpoint, so
 scrapeable process and is deliberately absent from the inventory below.
 Its operable signal is the ``bigquery_storage_fallback`` log event.
 
-Metric inventory (matches docs/operations.md):
+Metric inventory (matches https://recotem.org/2.1/docs/operations):
 
 | Name                                               | Type       | Labels                  |
 |----------------------------------------------------|------------|-------------------------|
@@ -78,7 +91,7 @@ _WATCHER_STATE_DIVERGENCE: Any = None
 
 
 def metrics_enabled() -> bool:
-    """Return True iff ``/metrics`` should be exposed.
+    """Return True iff ``/v1/metrics`` should be exposed.
 
     Both conditions must hold: ``prometheus_client`` is importable AND
     ``RECOTEM_METRICS_ENABLED`` is set to a truthy value.  This makes
@@ -438,7 +451,7 @@ def _ensure_v1_initialized() -> None:
         "value where any supplied token misses, or a non-finite numerical "
         "value (+-inf, or NaN reached via a string). A missing or "
         "unparseable numerical value still degrades silently and is NOT "
-        "counted here. See docs/api-reference.md#feature-aware-cold-start.",
+        "counted here. See https://recotem.org/2.1/docs/serving-api#feature-aware-cold-start.",
         ["recipe", "side", "column"],
     )
     _V1_FEATURE_UNKNOWN_COLUMN = Counter(
@@ -488,7 +501,7 @@ def record_v1_request(
     ``features_not_supported`` / ``feature_value_unusable`` are the
     single-verb counterparts of the identically-named batch ``code`` labels
     on ``inc_batch_element_error``. They are client-caused 400s and must
-    stay OUT of ``"error"``, which docs/operations.md pages on-call for --
+    stay OUT of ``"error"``, which https://recotem.org/2.1/docs/operations pages on-call for --
     see that file's "Recommend error rate" row.
     """
     _ensure_v1_initialized()
@@ -568,7 +581,7 @@ def inc_feature_unknown_value(
     ``numerical`` value that is missing or fails to parse as a number at all
     still degrades to the standardized mean (0) with no signal -- that gap
     is deliberate and separate, not fixed by the non-finite case above. See
-    ``docs/api-reference.md#feature-aware-cold-start`` for the full
+    ``https://recotem.org/2.1/docs/serving-api#feature-aware-cold-start`` for the full
     breakdown.
     """
     _ensure_v1_initialized()

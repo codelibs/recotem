@@ -8,7 +8,7 @@ resolved in that same phase.  So a request that is ultimately rejected with
 caller can drive that allocation.  ``RECOTEM_MAX_BODY_BYTES`` bounds the raw
 bytes but not the several-fold expansion of a JSON body into Python objects.
 
-``docs/security.md`` documents this and tells operators to cap the body at the
+``https://recotem.org/2.1/docs/security`` documents this and tells operators to cap the body at the
 proxy as well.  This test guards both:
 
 * the runtime ordering (a no-key request with an invalid JSON body is answered

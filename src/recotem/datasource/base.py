@@ -147,7 +147,7 @@ def _validate_config_discriminator(cls: type) -> None:
     declaration = f'type: Literal["{type_name}"] = "{type_name}"'
     hint = (
         f"Declare '{declaration}' on the Config. "
-        "See docs/plugin-authoring.md for the plugin contract."
+        "See https://recotem.org/2.1/docs/plugin-authoring for the plugin contract."
     )
 
     model_fields = getattr(cls.Config, "model_fields", None)  # type: ignore[attr-defined]
@@ -196,7 +196,7 @@ def validate_plugin_contract(cls: type) -> None:
             raise DataSourceError(
                 f"DataSource plugin '{cls.__qualname__}' is missing required "
                 f"class attribute '{attr}'. "
-                "See docs/plugin-authoring.md for the plugin contract."
+                "See https://recotem.org/2.1/docs/plugin-authoring for the plugin contract."
             )
 
     if not isinstance(cls.type_name, str) or not cls.type_name:  # type: ignore[union-attr]
@@ -219,7 +219,7 @@ def validate_plugin_contract(cls: type) -> None:
             "class attribute 'no_expand_fields'. "
             "Declare 'no_expand_fields: ClassVar[frozenset[str]] = frozenset()' "
             "(or list field names whose values must not receive env-var expansion). "
-            "See docs/plugin-authoring.md for the plugin contract."
+            "See https://recotem.org/2.1/docs/plugin-authoring for the plugin contract."
         )
 
     if not isinstance(cls.no_expand_fields, frozenset):  # type: ignore[union-attr]
@@ -227,7 +227,7 @@ def validate_plugin_contract(cls: type) -> None:
             f"DataSource plugin '{cls.__qualname__}' has an invalid "
             f"'no_expand_fields': must be a frozenset[str], "
             f"got {type(cls.no_expand_fields).__name__!r}. "  # type: ignore[union-attr]
-            "See docs/plugin-authoring.md for the plugin contract."
+            "See https://recotem.org/2.1/docs/plugin-authoring for the plugin contract."
         )
 
     if not hasattr(cls, "fetch") or not callable(getattr(cls, "fetch", None)):

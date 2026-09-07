@@ -1,5 +1,5 @@
 # Tutorial recipe — fetches a small public CSV over HTTPS and trains.
-# Walkthrough: docs/getting-started.md
+# Walkthrough: https://recotem.org/2.1/guide/
 #
 # The CSV is the v1.0.0-tagged purchase log used by the original Recotem
 # project's e2e tests. Two columns: user_id, item_id.
@@ -13,7 +13,7 @@ source:
   # sha256 is mandatory for network-scheme paths. Computed once at
   # tutorial-authoring time. If upstream rotates the file, regenerate with:
   #   curl -sL <url> | shasum -a 256
-  # and update both this value and docs/getting-started.md.
+  # and update both this value and https://recotem.org/2.1/guide/.
   sha256: 945fc769205a5976d38c5783500ae473afbb04608043b703951a699993c8f8be
   dtype:
     user_id: str

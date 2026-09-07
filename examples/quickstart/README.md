@@ -44,7 +44,7 @@ curl -X POST http://localhost:8080/v1/recipes/top_picks:recommend \
 - Widen the algorithm search:
   `training.algorithms: [IALS, CosineKNN, TopPop]`
 - Add a `time_column` and switch to `split.scheme: time_user`
-- See [`docs/recipe-reference.md`](../../docs/recipe-reference.md) for every field.
+- See [Recipe reference](https://recotem.org/2.1/docs/recipe-reference) for every field.
 - See [`examples/csv-local`](../csv-local/README.md) for a richer local-CSV setup
   and [`examples/tutorial-purchase-log`](../tutorial-purchase-log/README.md) for
   the end-to-end Docker walkthrough.

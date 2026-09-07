@@ -4,7 +4,7 @@ Self-contained Recotem tutorial recipe. Fetches a small public CSV
 (≈37 KiB, ≈4 988 interactions) over HTTPS and trains an IALS + TopPop
 recommender against it.
 
-- Walkthrough: [docs/getting-started.md](../../docs/getting-started.md)
+- Walkthrough: [Getting started](https://recotem.org/2.1/guide/)
 - Source data: `https://raw.githubusercontent.com/codelibs/recotem/refs/tags/v1.0.0/frontend/e2e/test_data/purchase_log.csv`
 - sha256: `945fc769205a5976d38c5783500ae473afbb04608043b703951a699993c8f8be`
 

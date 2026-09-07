@@ -14,7 +14,7 @@ runnable example plugins that demonstrate the contract.
 ## Authoring your own plugin
 
 The full plugin contract is documented in
-[docs/plugin-authoring.md](../../docs/plugin-authoring.md). At a glance, a
+[Plugin authoring](https://recotem.org/2.1/docs/plugin-authoring). At a glance, a
 plugin must:
 
 1. Provide a class with the class-level attributes `type_name`, `Config`,

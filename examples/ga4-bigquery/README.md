@@ -28,7 +28,7 @@ has run. The official Docker image already bundles both, so this applies to
 the pip install only. If you change `output.path` to a local directory, drop
 the `gcs` extra; if you point it at S3 or Azure Blob instead, swap in
 `recotem[s3]` or `recotem[azure]` (see
-[docs/data-sources/csv.md](../../docs/data-sources/csv.md#cloud-storage-extras)).
+[Cloud storage extras](https://recotem.org/2.1/docs/data-sources/csv#cloud-storage-extras)).
 
 The service account / ADC identity needs:
 
@@ -49,7 +49,7 @@ RECOTEM_RECIPE_GCP_PROJECT=my-gcp-project \
 ```
 
 The `RECOTEM_RECIPE_*` prefix is the only env-var family allowed inside
-recipe field expansion (see [docs/recipe-reference.md](../../docs/recipe-reference.md)).
+recipe field expansion (see [Recipe reference](https://recotem.org/2.1/docs/recipe-reference)).
 Credentials are intentionally NOT expanded — use ADC / Workload Identity
 instead.
 

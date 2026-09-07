@@ -5284,7 +5284,7 @@ def test_hot_swap_version_skewed_artifact_keeps_serving_old_model(
 ) -> None:
     """A skewed hot-swap must degrade to "still serving the old model".
 
-    docs/operations.md promises operators that a version-skewed artifact
+    https://recotem.org/2.1/docs/operations promises operators that a version-skewed artifact
     appearing under a live serve degrades rather than causing an outage. Three
     things have to hold together for that promise to be true, and this pins all
     three against a REAL ModelRegistry / ModelEntry / ArtifactWatcher:
@@ -5388,7 +5388,7 @@ def test_hot_swap_version_skewed_artifact_keeps_serving_old_model(
     )
     assert entry.loaded is True, (
         "A refused hot-swap must leave the entry loaded — serve degrades to "
-        "'still serving the old model', not to an outage (docs/operations.md)"
+        "'still serving the old model', not to an outage (https://recotem.org/2.1/docs/operations)"
     )
     assert entry.last_load_error is not None, (
         "last_load_error must be set so /health/details surfaces the skew"
@@ -5431,7 +5431,7 @@ def test_malformed_recipe_leaves_valid_recipe_serving_and_health_ok(
 ) -> None:
     """A YAML syntax error in one file must not take the whole server down.
 
-    docs/operations.md (``recipe_load_error_skipped``) documents the file as
+    https://recotem.org/2.1/docs/operations (``recipe_load_error_skipped``) documents the file as
     "skipped".  The valid recipe alongside it must load and serve, and
     /v1/health must report ``ok`` (HTTP 200) because every *loadable* recipe
     is loaded — the unparseable file is reported under ``skipped`` instead of
@@ -6073,7 +6073,7 @@ def test_retraction_fires_once_per_fault_not_once_per_tick(tmp_path: Path) -> No
 def test_stat_timeout_is_retracted_by_the_next_successful_poll(tmp_path: Path) -> None:
     """A timed-out stat must not outlive the timeout.
 
-    ``docs/operations.md`` says a timed-out stat marks the recipe "with a load
+    ``https://recotem.org/2.1/docs/operations`` says a timed-out stat marks the recipe "with a load
     error until the next successful poll".  The timeout path records the
     failure through ``_record_load_failure``, which arms the backoff against
     the marker that is *already* loaded, so the next poll takes the marker fast

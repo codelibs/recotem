@@ -130,7 +130,7 @@ def test_lock_warns_on_remote_scheme(tmp_path: Path, monkeypatch) -> None:
     across hosts/pods. ``recipe_lock`` must surface this as a structured
     warning so operators do not assume distributed mutual exclusion.
     Regression test for the gap between the lock implementation and
-    docs/deployment/k8s.md guidance."""
+    https://recotem.org/2.1/docs/deployment/kubernetes guidance."""
     import structlog.testing
 
     # The remote-scheme branch must NOT depend on cwd being writable

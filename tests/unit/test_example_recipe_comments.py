@@ -1,7 +1,7 @@
 """The `# Choices:` comments in shipped recipes must name usable algorithms.
 
 A reader copies the algorithm list out of `examples/quickstart/recipe.yaml`
-before they have read `docs/recipe-reference.md`. When that comment offered
+before they have read `https://recotem.org/2.1/docs/recipe-reference`. When that comment offered
 `BPRFM` -- gated behind `lightfm`, which has no Python 3.12 release, so irspack
 never exports it -- following the shipped example produced exit 4 while the
 the release notes said the choice had been withdrawn.

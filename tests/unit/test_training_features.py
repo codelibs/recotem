@@ -803,7 +803,7 @@ def test_zero_overlap_message_does_not_hardcode_csv_only_dtype_key(
     )
     # Still diagnosable: names the side, the id_column, and points at the docs.
     assert "sku" in msg
-    assert "operations.md" in msg
+    assert "recotem.org/2.1/docs/operations" in msg
 
 
 # ---------------------------------------------------------------------------

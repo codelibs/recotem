@@ -1023,13 +1023,29 @@ label. If you add a port named `http` to the train container, revisit this.
 > actually got:
 >
 > ```console
-> $ kubectl get networkpolicy recotem -o jsonpath='{.spec.ingress}'
-> [{"ports":[{"port":8080,"protocol":"TCP"}]}]
+> $ kubectl get networkpolicy recotem -o jsonpath='{.spec.policyTypes} {.spec.ingress}'
+> ["Ingress","Egress"] [{"ports":[{"port":8080,"protocol":"TCP"}]}]
 > ```
 >
 > That single rule, with `ports` but no `from`, is "any source may reach TCP
 > 8080". The canonical deny-all-inbound form is `ingress: []` with
 > `policyTypes` including `Ingress`.
+>
+> **Ask for `policyTypes` as well as `ingress`, not `ingress` alone.** The
+> API server drops an empty `ingress` list on write — the chart renders
+> `ingress: []`, and the stored object has no `ingress` key at all
+> (`.spec` holds `egress`, `podSelector`, `policyTypes`). A bare
+> `jsonpath='{.spec.ingress}'` therefore prints **nothing** for a working
+> deny-all, and it also prints nothing when the policy does not exist,
+> because that failure goes to stderr. Measured, stdout only:
+>
+> | policy | `{.spec.ingress}` | `{.spec.policyTypes} {.spec.ingress}` |
+> |---|---|---|
+> | not present | *(empty)* | *(empty)* |
+> | deny-all | *(empty)* | `["Ingress","Egress"] ` |
+> | chart default | `[{"ports":[{"port":8080,"protocol":"TCP"}]}]` | `["Ingress","Egress"] [{"ports":[{"port":8080,"protocol":"TCP"}]}]` |
+>
+> The two-field form separates all three states without reading stderr.
 
 `allowKubeletProbes` defaults to `true` for a reason: kubelet health checks
 originate from the **node** network rather than from a pod, so no

@@ -130,10 +130,22 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
 - HMAC scope: `kid_bytes || header_json || payload`. Tampering inside those
   bytes fails verify. The 4-byte `header_len` field is **not** covered — it
   only says where the header stops and the payload starts, and both halves
-  are authenticated as one run of bytes. Moving that boundary therefore
-  still passes `verify_hmac` (`recotem inspect` prints `HMAC: OK`) and is
-  caught one layer later by the header JSON parse or the deserializer,
-  reported as exit 5. It shifts a split point; it cannot inject a byte.
+  are authenticated as one run of bytes. It shifts a split point; it cannot
+  inject a byte. Every move of that boundary is refused, and the outcome is
+  always exit 5 with nothing deserialized, but the layer that refuses depends
+  on which way it moved, so do not expect `HMAC: OK` as the tell:
+  - **Shrunk** (`header_len` lowered, `0` included) — reaches `verify_hmac`
+    and passes it, because the authenticated run is unchanged. `recotem
+    inspect` prints `HMAC: OK`, then the header JSON parse fails on the
+    truncated slice. Serve fails the same way, at the `json.loads` in
+    `ModelRegistry._build_entry`, before `unpickle_payload`.
+  - **Enlarged** — refused earlier, inside `parse_header_from_bytes`, so
+    `verify_hmac` is never called and `HMAC: OK` is never printed: the
+    widened header slice swallows payload bytes and fails the UTF-8 decode,
+    or the file is shorter than the claimed header, or the value trips the
+    64 KiB `MAX_HEADER_LEN` cap.
+  The deserializer is never the layer that catches this — the header JSON
+  parse always fires first.
 - Header JSON carries `recipe_name`, `recipe_hash`, `best_class`, `best_params`,
   `best_score`, `metric`, `cutoff`, `tuning`, `data_stats`, `recotem_version`,
   `irspack_version`, `trained_at`. Inspectable without deserialisation via

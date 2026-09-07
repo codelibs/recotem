@@ -72,7 +72,15 @@ pip install "recotem[metrics]"      # Prometheus metrics endpoint
 pip install 'recotem[postgres]'     # PostgreSQL via psycopg
 pip install 'recotem[mysql]'        # MySQL/MariaDB via PyMySQL
 pip install 'recotem[sqlite]'       # SQLite (stdlib)
+pip install "recotem[s3]"           # s3://   paths (source, item_metadata, output)
+pip install "recotem[gcs]"          # gs://   paths (source, item_metadata, output)
+pip install "recotem[azure]"        # az:// / abfs(s):// paths
 ```
+
+The three object-store extras are needed for `output.path` as well as for
+reading: `recotem train` resolves the destination through fsspec, so writing an
+artifact to `gs://…` without `recotem[gcs]` fails after the search has already
+run. The published Docker image bundles `s3` and `gcs` (not `azure`).
 
 Requires Python 3.12+, and a platform `irspack` publishes a wheel for:
 Linux on x86-64 or arm64 (glibc or musl), macOS on Apple Silicon, and

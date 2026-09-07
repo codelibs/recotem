@@ -198,6 +198,10 @@ This applies only if you actually had such a recipe. If your `az://` paths carry
 no colon before the `@`, they are the addressing form, nothing was logged, and
 there is nothing to rotate.
 
+**`az://` was not the only scheme with this gap** — see
+[`gs://` and `file://` disclosed the same way](#gs-and-file-disclosed-the-same-way)
+below before you conclude you have nothing to rotate.
+
 The other two changed rows are a fix, and need no action: the canonical
 `container@account.dfs.core.windows.net` form that Azure's own documentation
 uses was being refused on `abfs://` / `abfss://` as if it were a credential.
@@ -205,6 +209,53 @@ If you worked around that by rewriting those paths, you can now write them the
 documented way. The rule 2.1.0 applies to all three Azure aliases is: a bare
 `container@account` is addressing and is accepted; a real `user:pass@` pair is
 refused.
+
+### `gs://` and `file://` disclosed the same way
+
+The section above is written as an Azure story, but `az` was not the only
+scheme missing from 2.0.0's credentials check. `gs` was exempt from it
+**entirely** — rather than password-gated the way `az`/`abfs`/`abfss` were —
+because `gs://project@bucket/key` is a legitimate gcsfs billing-project
+override. A `gs://` URI whose userinfo also carried a *password* inherited that
+exemption and loaded. `file://` had no check at all.
+
+Measured at `v2.0.0` and at 2.1.0, same recipe, only `source.path` changed, with
+a marked secret in place of the password:
+
+| scheme | form | 2.0.0 | 2.1.0 | times the secret appeared in one `train` |
+|---|---|---|---|---|
+| `gs://` | `project@bucket…` (addressing) | accepted | accepted | — (no secret) |
+| `gs://` | `user:pass@…` (credentials) | **accepted** | **rejected** | **5** at 2.0.0 → **0** at 2.1.0 |
+| `file://` | `user:pass@…` (credentials) | **accepted** | **rejected** | **3** at 2.0.0 → **0** at 2.1.0 |
+| `s3://` | `anything@…` | rejected | rejected | 0 (control — `s3` has no addressing use of `@`) |
+
+The five `gs://` occurrences are not five copies of one line. The secret reaches
+the log through four independent paths plus stderr: the INFO
+`csv_source_fetch_start` event, an ERROR record raised by `gcsfs` itself
+(complete with traceback), the WARN `size_cap_probe_failed` event, the
+`train_error` event, and the `Training failed: …` line on stderr. Redacting any
+one of them would not have been enough, which is why the fix is at recipe load.
+
+**So the two-step remedy above applies to `gs://` as well**, and the "nothing to
+rotate" sentence is about `az://` only. If any recipe carried a `gs://` path
+with a colon before the `@`:
+
+1. Move the secret into the environment — gcsfs reads credentials from
+   `GOOGLE_APPLICATION_CREDENTIALS` or the ambient service account. `gs://`
+   paths whose userinfo is a bare project name (`gs://my-project@my-bucket/…`,
+   no colon) are the addressing form, still accepted, and were never logged as
+   a secret; leave them alone.
+2. **Rotate that key and purge or rotate the log archives**, for the same reason
+   and with the same urgency as the Azure case.
+
+`file://` is the narrow one. The refusal is scoped to an `@` in the URI's
+*authority* — the `file://` scheme followed directly by a `user:pass@` pair and
+only then the path. A local path that merely contains
+`@` in a directory or file name is unaffected in both the bare form
+(`/data/user@example.com/x.csv`) and the three-slash form
+(`file:///data/user@example.com/x.csv`); both load and train under 2.0.0 and
+2.1.0 alike. Only the authority form changed, and it is not a shape anyone
+writes by accident.
 
 ### `split.scheme: random` with a `time_column` now splits differently
 
@@ -253,6 +304,79 @@ documentation points at. If you started from it, you have a recipe whose
 `best_score` moves on the first retrain after upgrading, for a reason nothing
 in the recipe explains. Grep your own recipes for the same combination.
 
+### Exit codes moved, and one of them moved off zero
+
+Nothing in this section requires a recipe change. It is here because two things
+branch on these numbers — your supervisor or CronJob, and any CI step that runs
+`recotem validate` — and both can change behaviour on upgrade with no file
+touched.
+
+**The one that matters most: an artifact directory the process cannot write to
+used to be a silent success.** Under 2.0.0 the run exited **0** and logged
+`recipe_lock_contended_skipping`, the same structured event a genuine
+concurrent run produces — so a nightly job whose artifact volume lost write
+permission (an `fsGroup` change, a remount, a re-provisioned PVC) reported
+success every night and wrote nothing, while serve kept the model it already
+had. Measured at v2.0.0, two different causes, identical outcome:
+
+| cause | exit | structured event | artifact written |
+|---|---|---|---|
+| another process holds the lock | 0 | `recipe_lock_contended_skipping` | no |
+| artifact directory not writable | 0 | `recipe_lock_contended_skipping` | **no** |
+
+2.1.0 separates them: the second case now exits **8** with
+`lock_permission_denied`, naming the lock path, the uid/gid, and the fact that
+retrying will not help. The first case is unchanged — a real contended lock
+still exits 0 with `recipe_lock_contended_skipping` under both versions, which
+is what makes the split safe to rely on.
+
+**So expect a green job to turn red.** If a training CronJob starts failing with
+exit 8 immediately after the upgrade, 2.1.0 did not break it — 2.1.0 is telling
+you it had already stopped producing artifacts. Check how old the served model
+is before changing anything.
+
+The rest of the moves, measured by running both versions over the same recipes:
+
+| recipe fault | command | 2.0.0 | 2.1.0 |
+|---|---|---|---|
+| `output.path` directory not writable | `train` | **0** | 8 |
+| `output.path` names an existing directory | `train` | 1 | 8 |
+| `source.sha256` mismatch on a bare local or `file://` path | `train` | 7 | 3 |
+| `training.storage_path` naming an unsupported dialect | `train` | 1 | 8 |
+| `training.storage_path` carrying userinfo | `train` | 4 | 8 |
+| `training.cutoff` above the distinct item count | `train` | 1 | 4 |
+| `schema.user_column` absent from the data | `train` | 1 | 3 |
+| `item_metadata.sha256` mismatch | `validate` | 0 | 3 |
+| `item_metadata.path` that does not exist | `validate` | 0 | 3 |
+| an `item_metadata.fields` entry absent from the file | `validate` | 0 | 3 |
+| `schema.user_column` absent from the data | `validate` | 0 | 3 |
+| an algorithm name that does not exist | `validate` | 0 | 4 |
+| `training.storage_path` naming an unsupported dialect | `validate` | 0 | 8 |
+| `training.storage_path` carrying userinfo | `validate` | 0 | 8 |
+
+Two consequences:
+
+- **Exit 1 was never a category.** Four `train` rows moved off it. Exit 1 is
+  `_EXIT_UNKNOWN` — an unmapped exception — so alerting that treated it as
+  "recotem crashed, page someone" now gets the specific class instead
+  (8 configuration, 4 training, 3 data source). That is the improvement; the
+  point is that the *number* your rule matches on changed.
+- **`recotem validate` got materially stricter.** Seven recipe faults that
+  `validate` reported as passing under 2.0.0 now fail it. If you run
+  `recotem validate` as a CI gate, that gate can go red on recipes that have
+  been merged for months. The recipes were already broken — `train` failed on
+  most of them under 2.0.0 too — but the gate is where you will see it first.
+
+The `source.sha256` row is the one to check your retry logic against.
+[deployment/k8s.md](deployment/k8s.md) classifies exit 7 as *retry* (a
+transient network fault) and exit 3 as a data-source error. A permanently
+wrong `sha256` pin on a local path was reported as retryable under 2.0.0, so a
+CronJob would retry bytes that can never match; 2.1.0 reports 3.
+
+A malformed `RECOTEM_SIGNING_KEYS` also moved, from 5 to 8 — see
+[Unchanged by this upgrade](#unchanged-by-this-upgrade) below, which covers it
+in the context of the artifact format it does *not* affect.
+
 ### Upgrade procedure
 
 1. `recotem inspect` every artifact and note which report
@@ -294,19 +418,25 @@ Signing keys and the key-rotation procedure; and the artifact container itself
 artifact verifies under 2.1.0 and a 2.1.0-signed one verifies under 2.0.0, with
 the same key. Every recipe's `recipe_hash` does change, but nothing gates on it.
 
-**Three recipes' worth of exceptions, and they need different things from you.**
-Two `path` forms that loaded under 2.0.0 are now refused with **exit 2** and
-must be fixed *before* you upgrade. A third recipe shape keeps working but
+**Four recipes' worth of exceptions, and they need different things from you.**
+Three `path` forms that loaded under 2.0.0 are now refused with **exit 2** and
+must be fixed *before* you upgrade. A fourth recipe shape keeps working but
 changes what it measures — nothing to fix, but see
 [`split.scheme: random` with a `time_column`](#splitscheme-random-with-a-time_column-now-splits-differently)
 so the moved number does not read as a regression.
 
-Fix these two before upgrading:
+Fix these three before upgrading:
 
 - **`az://` carrying a `user:pass@` pair** — see
   [Azure URIs](#azure-uris-changed-in-both-directions) above. Move the secret
   into the environment **and rotate it**: 2.0.0 logged that URI in the clear on
   every run, so the key must be treated as disclosed.
+- **`gs://` carrying a `user:pass@` pair, and `file://` carrying an `@` in its
+  authority** — see
+  [`gs://` and `file://` disclosed the same way](#gs-and-file-disclosed-the-same-way).
+  The `gs://` form needs the same rotation as the `az://` one: 2.0.0 wrote that
+  secret to the log five times per run. A `gs://project@bucket` path with no
+  colon is addressing, is still accepted, and needs nothing.
 - **`arrow_hdfs://` and `async_wrapper://`** — the only two protocols fsspec
   registers whose names contain an underscore. RFC 3986 forbids `_` in a
   scheme, so `urlparse` reported no scheme at all and 2.0.0's allow-list read
@@ -321,7 +451,10 @@ exits **8** (`_EXIT_CONFIG`) where 2.0.0 exited **5** (`_EXIT_ARTIFACT`), on
 `train`, `serve` and `inspect` alike. The container format is untouched and no
 artifact needs anything done to it — but supervisor, CronJob or alerting logic
 that branches on exit 5 to mean "the artifact is corrupt, retrain it" will stop
-firing for an environment-variable typo and must learn exit 8.
+firing for an environment-variable typo and must learn exit 8. It is not the
+only exit code this release moves — see
+[Exit codes moved](#exit-codes-moved-and-one-of-them-moved-off-zero) above,
+where one of them moves off **0**.
 
 ## irspack 0.4 → 0.5
 

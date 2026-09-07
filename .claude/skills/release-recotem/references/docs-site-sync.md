@@ -17,21 +17,45 @@ canonical URL keeps working and starts serving the new version**.
 
 Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
 
-1. **Freeze the outgoing stable into `$OLD/`.** Copy the root tree, EN and JA,
-   into a new `$OLD/` directory laid out like the existing `1.0/`: version
-   directories are self-contained under the root locale, so JA goes to
-   `$OLD/ja/…`, not into a locale-routed path.
+1. **Freeze the outgoing stable into `$OLD/`.** Copy the versioned content
+   directories, EN and JA, into a new `$OLD/` directory laid out like the
+   existing `1.0/`: version directories are self-contained under the root
+   locale, so JA goes to `$OLD/ja/…`, not into a locale-routed path.
 
    ```bash
    mkdir -p 2.0/ja
-   cp -R docs guide learn index.md 2.0/
-   cp -R ja/docs ja/guide ja/learn ja/index.md 2.0/ja/
+   cp -R docs guide index.md 2.0/
+   cp -R ja/docs ja/guide ja/index.md 2.0/ja/
    ```
 
-   Copy **every** root content directory, not just the ones the preview
-   happens to contain. `learn/` in particular exists at the root but **not**
-   under `2.1/`; if the freeze skips it, the archive has a hole and the
-   promote in step 2 must not touch it either.
+   **Do not copy `learn/`.** It is version-agnostic and shared: the site's
+   `CLAUDE.md` says so, `1.0/` has none, and the `2.1/` preview ships without
+   one. Copying it duplicates 24 pages that no sidebar key matches — `/learn/`
+   does not match `/2.0/learn/` — so they render with no sidebar at all, the
+   only pages in the built site that do. It also leaves no hole: `docs/**` and
+   `guide/**`, EN and JA, contain **zero** links into `/learn/`, while the same
+   grep finds 64 inside `learn/` itself.
+
+   Then **rewrite the frozen tree's absolute links so they stay inside
+   `$OLD/`.** The stable tree links with absolute `/docs/…` and `/guide/…` URLs
+   by design (see the site's `CLAUDE.md`). Copied verbatim, every one of them
+   points at the tree that step 2 is about to replace with the *new* version:
+
+   ```bash
+   grep -rl '](/docs/\|](/guide/\|](/ja/docs/\|](/ja/guide/' --include='*.md' 2.0 \
+     | xargs perl -pi -e 's{\]\(/ja/(docs|guide)/}{](/2.0/ja/$1/}g; s{\]\(/(docs|guide)/}{](/2.0/$1/}g;'
+   # the two landing pages carry their hero CTA as a YAML `link:`, not markdown
+   perl -pi -e 's{^(\s*link:\s*)/ja/(docs|guide)/}{$1/2.0/ja/$2/}; s{^(\s*link:\s*)/(docs|guide)/}{$1/2.0/$2/};' \
+     2.0/index.md 2.0/ja/index.md
+   # MUST print nothing
+   grep -rno '](/[a-z0-9./-]*' --include='*.md' 2.0 | grep -v '](/2\.0/' | grep -v '/learn/'
+   ```
+
+   Rewrite `](/ja/…)` before the bare `](/…)`, for the same reason step 3 does.
+   Leave `](/learn/…)` alone — `learn/` stays shared and unversioned, so those
+   links are already right. This is the mirror image of the rewrite step 3 does
+   on the promoted tree and of the one Phase 5 does when it seeds the next
+   preview; the freeze needs it for the same reason and had no equivalent.
 
 2. **Promote the preview to the root.** Replace only the directories the
    preview actually carries, and delete the old ones first so a file removed
@@ -49,8 +73,8 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    "in-development preview" warning banner and links into `/2.1/…`. Overwriting
    the hero replaces the site's front page with a preview notice. Same for
    `ja/index.md` and `2.1/ja/index.md`. Leave `learn/` and `ja/learn/` in
-   place for the same reason the freeze had to copy them: the preview has no
-   `learn/`.
+   place: they are shared and unversioned, the preview has no `learn/` to
+   promote, and the freeze deliberately did not copy them either.
 
 3. **Rewrite the promoted tree's absolute version links.** The preview's pages
    link with absolute `/2.1/…` URLs (~40 of them across the EN and JA guide,
@@ -119,7 +143,26 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    yarn docs:build
    ```
 
-   The build's dead-link check is the gate that catches a missed link rewrite.
+   The build's dead-link check is the gate that catches a missed link rewrite
+   **in one direction only**: a promoted page still pointing at `/2.1/…` fails
+   the build, because that page is gone. A *frozen* page still pointing at
+   `/docs/…` builds clean — the target exists, it is just the wrong version now.
+   So assert the freeze's rewrite separately, against the built output:
+
+   ```bash
+   # No link on a 2.0/ page may leave the archive. MUST print nothing.
+   grep -rhoE 'href="/(docs|guide|ja/docs|ja/guide)/[^"]+"' .vitepress/dist/2.0/ | sort -u
+   ```
+
+   The trailing `+` matters: the site nav is global and emits a bare
+   `href="/docs/"` and `href="/guide/"` (and their `/ja/` pair) on **every**
+   page including the archives, so a `*` there matches four nav links per page
+   and never goes quiet. With `+` the pattern sees only links that name a page.
+
+   Run the same command against `.vitepress/dist/1.0/` as the control — it
+   prints nothing there, because that archive was created with the rewrite. On
+   a freeze that skipped the rewrite it prints 166 occurrences across 40 pages.
+
    Then confirm in the built output that `/2.0/**` and `/1.0/**` carry
    `noindex`, that the unversioned `/docs/**` does **not**, that the sitemap
    excludes every `X.Y/` directory, and that the root front page still renders

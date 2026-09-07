@@ -571,8 +571,49 @@ the readinessProbe passes (default `initialDelaySeconds: 10`). With many
 recipes or large artifacts, increase `initialDelaySeconds` and tune
 `maxSurge` / `maxUnavailable` so the rollout does not run below the
 desired-replica count. The watcher polls on a shared interval inside each
-pod — when `train` writes a new artifact, **all** replicas pick it up
-within `RECOTEM_WATCH_INTERVAL` seconds; no rollout is needed for hot-swap.
+pod, so a new artifact is picked up without a rollout.
+
+**`RECOTEM_WATCH_INTERVAL` does not bound when the *other* replicas see it.**
+The watcher decides by `stat`ing `output.path`, and on a network filesystem
+that answer comes from the client's attribute cache rather than from the
+server. Measured on a 3-node cluster with the shipped chart,
+`RECOTEM_WATCH_INTERVAL: "10"`, a 285 KB artifact whose load takes 7 ms, and
+the artifacts volume on an NFS-backed `ReadWriteMany` PVC with default mount
+options — time from the training job's `artifact_written` to each replica's
+`artifact_hot_swapped`, over two consecutive writes:
+
+| replica | swapped after `artifact_written` |
+|---|---|
+| on the node that ran `train` | 3.6 s, 4.0 s |
+| on any other node | 17.5 s, 22.9 s, 24.1 s, 25.5 s |
+
+The replica that shares a node with the writer sees the change immediately —
+that node's own NFS client invalidated the entry when it wrote. Every other
+node waits out its attribute cache first (`acregmin`…`acregmax` /
+`acdirmin`…`acdirmax`, 3–60 s on Linux defaults). Re-measured with the same
+chart, the same interval and the same write against a PV carrying
+`mountOptions: ["noac"]`, those off-node replicas swapped in **1.6 s and
+8.2 s** — inside the interval. The excess is the mount, not the watcher.
+
+**While the fleet is mid-swap it answers the same request two ways.** One
+`user_id` posted to `/v1/recipes/{name}:recommend` through the Service at
+~20 rps across 3 replicas got two *disjoint* top-3 lists for **21.8 s** after
+`artifact_written` — 398 requests in that window, 239 served by the old model
+and 159 by the new one, interleaved request by request as the Service
+round-robins over replicas that have swapped and replicas that have not.
+Nothing marks the transition except `model_version` in the response body (and
+the `X-Recotem-Model-Version` header), which does change per response.
+
+Consequences:
+
+- Do not derive an alert threshold or an SLO from `RECOTEM_WATCH_INTERVAL`
+  alone when the artifacts volume is a network filesystem. Either measure the
+  spread on your own mount, or mount that volume `noac` — the cost is one
+  uncached `stat` per poll per recipe, which is small next to the model load
+  it guards.
+- If a caller must not see two models inside one session, do not rely on
+  hot-swap for that guarantee: read `model_version` and pin, or roll the
+  Deployment on a new artifact instead.
 
 ### Secret rotation
 
@@ -786,6 +827,36 @@ Recovery on the stale path is **pod-level, not container-level**: delete the
 pod (or the Job) so the volume is mounted afresh. A `kubectl rollout restart`
 or a plain retry inside the same pod cannot clear it.
 
+**If the mount is already stale when a run starts, it dies at the lock
+instead — in seconds, not after the search.** Everything above describes the
+artifact write, which is where the run lands when the outage happens *during*
+tuning. The per-recipe lock touches the same directory much earlier: it
+creates `<output.path>`'s parent before any data is fetched. A container whose
+mount went stale before `recotem train` began — the CronJob's second recipe
+when `train.recipeFiles` lists several and the first one ran through the
+outage, or any run that starts after an `initContainer` or a long image pull —
+therefore fails there:
+
+```console
+{"error": "[Errno 17] File exists: '/artifacts'", "code": "internal_error",
+ "exit_code": 1, "event": "train_error"}
+```
+
+Measured on the same rig, one injection, three Jobs whose mounts were
+established before the export's `fsid` changed:
+
+| `output.path` | lock directory | how it ends |
+|---|---|---|
+| `/artifacts/a.recotem` | the mount point | `exit 1`, `FileExistsError [Errno 17] File exists: '/artifacts'` |
+| `/artifacts/b.recotem`, image with the pre-#354 `Path.mkdir` spelling | the mount point | `exit 1`, `OSError [Errno 116] Stale file handle: '/artifacts'` |
+| `/artifacts/models/c.recotem` | below the mount | `exit 1`, `OSError [Errno 116] Stale file handle: '/artifacts/models'` |
+
+The tolerance recotem applies at that `mkdir` rescues a stale answer that is
+momentary; a changed export identity is not momentary, so all three end the
+same way. Each took **4 s** from container start — so this ending is invisible
+to the training-run-duration alert this section recommends for the write path.
+Alert on the artifact's `trained_at` age, which catches both.
+
 Consequences on the shipped chart:
 
 * Nothing in the process ends the stall. The chart's
@@ -952,13 +1023,29 @@ label. If you add a port named `http` to the train container, revisit this.
 > actually got:
 >
 > ```console
-> $ kubectl get networkpolicy recotem -o jsonpath='{.spec.ingress}'
-> [{"ports":[{"port":8080,"protocol":"TCP"}]}]
+> $ kubectl get networkpolicy recotem -o jsonpath='{.spec.policyTypes} {.spec.ingress}'
+> ["Ingress","Egress"] [{"ports":[{"port":8080,"protocol":"TCP"}]}]
 > ```
 >
 > That single rule, with `ports` but no `from`, is "any source may reach TCP
 > 8080". The canonical deny-all-inbound form is `ingress: []` with
 > `policyTypes` including `Ingress`.
+>
+> **Ask for `policyTypes` as well as `ingress`, not `ingress` alone.** The
+> API server drops an empty `ingress` list on write — the chart renders
+> `ingress: []`, and the stored object has no `ingress` key at all
+> (`.spec` holds `egress`, `podSelector`, `policyTypes`). A bare
+> `jsonpath='{.spec.ingress}'` therefore prints **nothing** for a working
+> deny-all, and it also prints nothing when the policy does not exist,
+> because that failure goes to stderr. Measured, stdout only:
+>
+> | policy | `{.spec.ingress}` | `{.spec.policyTypes} {.spec.ingress}` |
+> |---|---|---|
+> | not present | *(empty)* | *(empty)* |
+> | deny-all | *(empty)* | `["Ingress","Egress"] ` |
+> | chart default | `[{"ports":[{"port":8080,"protocol":"TCP"}]}]` | `["Ingress","Egress"] [{"ports":[{"port":8080,"protocol":"TCP"}]}]` |
+>
+> The two-field form separates all three states without reading stderr.
 
 `allowKubeletProbes` defaults to `true` for a reason: kubelet health checks
 originate from the **node** network rather than from a pod, so no

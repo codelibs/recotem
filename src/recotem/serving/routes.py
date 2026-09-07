@@ -522,12 +522,23 @@ def make_router(
     def _request_metrics(recipe: str, verb: str, kid: str) -> Iterator[list[str]]:
         start = time.monotonic()
         structlog.contextvars.bind_contextvars(recipe=recipe, kid=kid)
+        # The metric label is resolved here, before the body runs, because the
+        # verbs enter this block *before* _resolve_entry decides whether the
+        # name exists -- so the raw path segment would otherwise become a
+        # Prometheus label.  Log fields keep the caller's name verbatim (logs
+        # are not cardinality-bounded and the operator needs it to diagnose);
+        # only the metric label is collapsed.  See UNKNOWN_RECIPE_LABEL.
+        metric_recipe = (
+            recipe
+            if registry.get(recipe) is not None
+            else _metrics.UNKNOWN_RECIPE_LABEL
+        )
         status_holder: list[str] = ["error"]
         try:
             yield status_holder
         finally:
             _metrics.record_v1_request(
-                recipe, verb, status_holder[0], time.monotonic() - start
+                metric_recipe, verb, status_holder[0], time.monotonic() - start
             )
             structlog.contextvars.unbind_contextvars("recipe", "kid")
 

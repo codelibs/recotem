@@ -457,6 +457,23 @@ def _ensure_v1_initialized() -> None:
     )
 
 
+# Label used in place of a recipe name that is not registered on this server.
+#
+# The ``recipe`` label is safe for every registered name -- its cardinality is
+# the operator's recipes directory.  It is NOT safe for a name taken straight
+# off the request path: the route pattern only bounds the *shape* of the name
+# (``^[A-Za-z0-9_-]{1,64}$``), so a caller can mint an unbounded set of
+# ``recipe_not_found`` / ``validation_error`` series, and prometheus_client
+# never evicts one.  Collapsing every unregistered name onto a single label
+# keeps the counter's meaning (someone is calling a recipe that does not exist,
+# visible in the ``status`` label) while bounding the series count.
+#
+# The value is deliberately unrepresentable as a real recipe name -- ``<`` and
+# ``>`` are outside ``^[A-Za-z0-9_-]{1,64}$`` -- so it can never collide with a
+# recipe the operator actually deployed.
+UNKNOWN_RECIPE_LABEL = "<unknown>"
+
+
 def record_v1_request(
     recipe: str, verb: str, status: str, latency_seconds: float
 ) -> None:

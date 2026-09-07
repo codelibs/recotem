@@ -30,6 +30,7 @@ import hmac
 import structlog
 from fastapi import HTTPException, Request
 
+from recotem._log_safe import escape_control_chars
 from recotem.config import ApiKeyEntry
 
 logger = structlog.get_logger(__name__)
@@ -184,7 +185,7 @@ def verify_api_key(
         logger.debug(
             "auth_anonymous_bypass",
             client_host=client_host,
-            path=request.url.path,
+            path=escape_control_chars(request.url.path),
             mode=_bypass_mode,
         )
 
@@ -197,7 +198,7 @@ def verify_api_key(
             logger.info(
                 "auth_anonymous_bypass_first_seen",
                 client_host=client_host,
-                path=request.url.path,
+                path=escape_control_chars(request.url.path),
                 mode=_bypass_mode,
             )
         else:
@@ -208,7 +209,9 @@ def verify_api_key(
 
     raw_header: str | None = request.headers.get(_API_KEY_HEADER)
     if raw_header is None:
-        logger.warning("auth_missing_header", path=request.url.path)
+        logger.warning(
+            "auth_missing_header", path=escape_control_chars(request.url.path)
+        )
         # Constant-time equalisation: run the scrypt KDF on a canonical-length
         # dummy value (exactly _API_KEY_MAX_LEN null bytes) so that the
         # missing-header response time is indistinguishable from the other
@@ -231,7 +234,7 @@ def verify_api_key(
     if len(raw_header) > _API_KEY_MAX_LEN:
         logger.warning(
             "auth_oversized_header",
-            path=request.url.path,
+            path=escape_control_chars(request.url.path),
             length=len(raw_header),
             cap=_API_KEY_MAX_LEN,
         )
@@ -255,7 +258,7 @@ def verify_api_key(
     if len(raw_header) < _API_KEY_MIN_LEN:
         logger.warning(
             "auth_short_key_rejected",
-            path=request.url.path,
+            path=escape_control_chars(request.url.path),
             length=len(raw_header),
             min_len=_API_KEY_MIN_LEN,
         )
@@ -291,7 +294,7 @@ def verify_api_key(
         request.state.kid = matched_kid
         return matched_kid
 
-    logger.warning("auth_invalid_key", path=request.url.path)
+    logger.warning("auth_invalid_key", path=escape_control_chars(request.url.path))
     raise HTTPException(
         status_code=401,
         detail={"detail": "Invalid API key", "code": "INVALID_API_KEY"},

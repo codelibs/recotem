@@ -53,9 +53,21 @@ dependencies = [
     "starlette>=1.0.0,<1.4",
     "uvicorn[standard]>=0.30,<0.53",
     "pydantic>=2.7,<3",
-    "typer>=0.12,<0.27",
+    # Floor measured, not guessed.  0.12.0-0.12.3 cannot build this CLI at
+    # all: `env_var` in cli.py is annotated `list[str] | None` and those
+    # versions raise `RuntimeError: Type not yet supported: list[str] |
+    # None` before `--help` prints.  0.12.4-0.15.3 declare `click>=8.0.0`
+    # with no upper bound, so a clean install pairs them with click 8.5 and
+    # every command dies in `Parameter.make_metavar()`.  0.15.4 is the
+    # first release a fresh `pip install recotem` resolves into a working
+    # CLI.  tests/unit/test_packaging_metadata.py pins the measurement.
+    "typer>=0.15.4,<0.27",
     "urllib3>=2.7.0,<3",  # CVE-2026-44431, CVE-2026-44432
-    "pyyaml>=6.0,<7",
+    # 6.0 publishes no wheel for any interpreter this project supports and
+    # its sdist no longer builds (Cython 3), so `>=6.0` named a version
+    # that cannot be installed anywhere.  6.0.1 installs on 3.12/3.13/3.14;
+    # 6.0.3 is the first with a wheel for all three.
+    "pyyaml>=6.0.1,<7",
     "structlog>=24,<26",
     "fsspec>=2024.6,<2026",
     "pandas>=3.0.3,<4",

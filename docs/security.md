@@ -36,6 +36,16 @@
 
 The internet-facing boundary is `recotem serve`. `recotem train` has no inbound network surface.
 
+> **An API key is not scoped to a recipe.** Every entry in `RECOTEM_API_KEYS` admits its holder to **every recipe this server has registered**, on every `/v1` route — including the `GET /v1/recipes` listing. The `kid` is the unit of **audit and rotation**: it is attached to `request.state.kid` and rides on that request's log events (see [Authentication failure events](#authentication-failure-events)). It is not a unit of **authorization** — Recotem has no per-recipe authorization layer, so the unit of isolation is the `recotem serve` process, not the key.
+>
+> Measured on one server with two kids (`client-a`, `client-b`) and two registered recipes:
+>
+> | | `rotdemo` | `staledemo` | `GET /v1/recipes` |
+> |---|---|---|---|
+> | `kid=client-a` | 200 | 200 | both recipes listed |
+> | `kid=client-b` | 200 | 200 | both recipes listed |
+> | no `X-API-Key` | 401 | 401 | 401 |
+
 > **fsspec input schemes inherit cloud credentials.** When `source.path` uses `s3://`, `gs://`, `az://`, or `abfs(s)://`, the Pod's ambient IAM or service-account credentials are used directly by fsspec — there is no additional credential gate inside Recotem. The SSRF guard applies only to HTTP/HTTPS fetches. In environments where recipe authors are not fully trusted, scope the IAM role or service account to read-only access on the specific bucket(s) and prefix(es) used by your recipes.
 
 ## Threat model summary
@@ -55,7 +65,7 @@ The internet-facing boundary is `recotem serve`. `recotem train` has no inbound 
 | Tampered or rotated network-fetched data | `sha256` integrity pin is **mandatory** on `source.path` / `item_metadata.path` when the scheme is `http://` or `https://`; mismatch is refused before the bytes reach the parser. Exit **7** on a network path (it is a fetch-pipeline failure) and exit **3** on a bare local, `file://` or object-store path, where the pin is optional and a mismatch is permanent — see [`docs/data-sources/csv.md`](data-sources/csv.md#errors-and-exit-codes) |
 | Resource exhaustion via giant network fetch | `RECOTEM_MAX_DOWNLOAD_BYTES` (default 256 MiB) caps the raw I/O body during fetch; cap exceeded → `DataSourceError` mid-stream. Does NOT cap the decompressed DataFrame — see [Decompressed-size cap not enforced](#decompressed-size-cap-not-enforced-medium-5) |
 | Plaintext HTTP source on the public internet | Operator policy. `http://` is allowed (legitimate inside trusted networks) but operators MUST avoid plaintext on the public internet; sha256 mitigates content tampering for any reachable response |
-| Unrecognised plugin loading arbitrary code | Conflicting plugin `type_name` fails startup; installed plugins are treated as trusted code (pin versions) |
+| Unrecognised plugin loading arbitrary code | A conflicting plugin `type_name` is refused rather than resolved to one of the candidates: discovery raises naming both fully-qualified classes, so `train` and `validate` exit **2** and no recipe that names the colliding type is ever loaded. **`serve` does not exit**: it logs the same error per recipe, reports `recipes_directory_loaded_lenient` with `ok=0, errors=1`, binds its port and keeps running with those recipes unloaded. `/v1/health` answers `200` (`{"status":"ok","total":0,"loaded":0,"skipped":1}`) and so does `/v1/health/details`, because a recipe that never loaded is *skipped* rather than degraded; only `/v1/health/ready` reports `503 unready`. Gate the rollout on the readiness probe, not on the process exiting. Installed plugins are treated as trusted code (pin versions) — see [plugin-authoring.md](plugin-authoring.md#exit-codes-a-plugin-can-actually-produce) |
 | Unauthenticated external access | Default bind `127.0.0.1`; `--insecure-no-auth` gated by `RECOTEM_ENV` in `{development, dev, test}`; `TrustedHostMiddleware` blocks unrecognized hosts |
 
 ## Decompressed-size cap not enforced (MEDIUM-5)
@@ -761,6 +771,8 @@ environment.
 | `auth_anonymous_bypass_first_seen` | INFO | First request from a given `client_host` in no-auth mode | — |
 
 Both `auth_missing_header` and `auth_invalid_key` log `path=<request.url.path>` only; the candidate header value is never logged in any form. The matching kid is attached to `request.state.kid` (and to subsequent log lines via `structlog.contextvars`) on success.
+
+The logged path is **caller-controlled**: an ASGI server percent-decodes the request target, so `%1B` arrives as a raw `ESC` byte in `scope["path"]`. Recotem escapes control characters (C0, `DEL`, C1) to `\xHH` before putting the value in a log field, so an operator tailing `RECOTEM_LOG_FORMAT=console` output cannot be sent terminal control sequences by an unauthenticated caller — these events fire before any key is checked. `RECOTEM_LOG_FORMAT=json` escapes them anyway as part of JSON encoding. Non-control characters are logged verbatim.
 
 When `RECOTEM_API_KEYS` is empty, `auth_anonymous_bypass` fires on **every** request (DEBUG) so access-log correlation is possible. `auth_anonymous_bypass_first_seen` fires once per unique `client_host` (INFO) for a first-seen audit trail. The LRU cache tracking first-seen client IPs is bounded to 1024 entries to prevent unbounded memory growth under high IP churn (e.g. rotating CI IPs or attacker scanning).
 

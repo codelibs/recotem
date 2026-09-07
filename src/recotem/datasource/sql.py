@@ -105,12 +105,55 @@ _MAX_CAUSE_DEPTH = 6
 #
 # ``ssl_ca`` / ``ssl_verify_cert`` are the per-option spellings SQLAlchemy's
 # PyMySQL dialect documents, and they do reach the server over TLS.
+#
+# ``ssl_ca`` alone is only sufficient when the server certificate names the
+# host the DSN connects to.  It does not when the server is using the
+# certificate it generated for itself, which is the posture an operator lands
+# in by turning on ``require_secure_transport`` and nothing else:
+#
+# * MySQL 8.4 writes ``ca.pem`` / ``server-cert.pem`` into its data directory,
+#   but that certificate's CN is ``MySQL_Server_<version>_Auto_Generated_
+#   Server_Certificate`` and carries no SAN, so SQLAlchemy's default
+#   ``check_hostname=True`` fails the handshake with ``CERTIFICATE_VERIFY_
+#   FAILED ... IP address mismatch``.  ``&ssl_check_hostname=false`` is what
+#   SQLAlchemy's own PyMySQL dialect documentation says to add, and it is what
+#   makes ``ssl_ca`` connect.
+# * MariaDB 11.8 generates its certificate in memory: ``@@ssl_ca`` and
+#   ``@@ssl_cert`` are NULL and no ``.pem`` is written anywhere.  There is no
+#   file for ``ssl_ca`` to name, so ``?ssl_check_hostname=false`` (or
+#   ``?ssl_verify_cert=false``) on its own is the only spelling that connects.
+#
+# Both of those turn certificate verification off while keeping the channel
+# encrypted, so they are a starting point, not a destination: pointing
+# ``ssl_ca`` at a CA you control is what authenticates the server.
 _MYSQL_TLS_HINT = (
-    "Add ?ssl_ca=/path/to/ca.pem (or ?ssl_verify_cert=true to verify against "
-    "the system CA store) to the DSN to force TLS.  Plaintext connections to "
-    "mysql/mariadb are subject to credential interception on the wire.  Note "
-    "that ?ssl=true is NOT a usable spelling: PyMySQL's ssl parameter takes a "
-    "mapping or an SSLContext, never a string."
+    "Add ?ssl_ca=/path/to/ca.pem to the DSN to force TLS (or "
+    "?ssl_verify_cert=true when the server certificate chains to the system "
+    "CA store).  If the server presents the certificate it generated for "
+    "itself, that certificate names no host: add &ssl_check_hostname=false "
+    "for MySQL, and use ?ssl_check_hostname=false on its own for MariaDB, "
+    "which writes no ca.pem to point at.  Both encrypt without "
+    "authenticating the server -- issue a certificate from a CA you control "
+    "to get both.  Plaintext connections to mysql/mariadb are subject to "
+    "credential interception on the wire.  Note that ?ssl=true is NOT a "
+    "usable spelling: PyMySQL's ssl parameter takes a mapping or an "
+    "SSLContext, never a string."
+)
+
+# ``sslmode=require`` encrypts but does not authenticate the server.  The two
+# stricter modes do, and both need a root certificate to check against: libpq
+# looks for ``~/.postgresql/root.crt`` when ``sslrootcert`` is unset and
+# refuses the connection when that file does not exist.  Naming the stricter
+# modes without naming ``sslrootcert`` sends an operator from a working
+# plaintext DSN to a DSN that cannot connect.
+_PG_TLS_HINT = (
+    "Add ?sslmode=require to the DSN to force TLS.  The stricter "
+    "verify-ca / verify-full also authenticate the server and need a root "
+    "certificate for it: add &sslrootcert=/path/to/root.crt (or "
+    "&sslrootcert=system to use the OS trust store), otherwise libpq looks "
+    "for ~/.postgresql/root.crt and refuses the connection when it is "
+    "absent.  Plaintext connections to postgres are subject to credential "
+    "interception on the wire."
 )
 
 
@@ -120,14 +163,24 @@ def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
     Heuristic check intended as an advisory, not an enforcement:
 
     * postgres / postgresql: warns if ``sslmode`` is absent or one of
-      ``disable`` / ``allow`` / ``prefer`` (the modes that permit plaintext).
+      ``disable`` / ``allow`` / ``prefer`` (the modes that do not *force* TLS).
     * mysql / mariadb: warns if no ``ssl`` / ``ssl_*`` query parameter is
-      present (driver default is plaintext).
+      present (nothing in the DSN forces TLS).
     * sqlite: not network-bearing; no check.
 
+    "Does not force TLS" is the claim, not "is plaintext".  Both drivers try
+    TLS opportunistically when the DSN says nothing -- psycopg defaults to
+    ``sslmode=prefer`` and PyMySQL to its PREFERRED mode -- so a warned
+    connection is frequently encrypted already; what it is not is guaranteed,
+    because both silently fall back to plaintext against a server that does
+    not offer TLS.
+
     Driver-specific TLS flags vary; the heuristic deliberately under-detects
-    rather than misclassify.  Operators can silence the warning by adding the
-    explicit TLS query parameter to the DSN.
+    rather than misclassify.  ``ssl_check_hostname`` is deliberately not in
+    ``ssl_keys``: its useful value is ``false``, which the value test below
+    reads as "TLS turned off", so listing it would not silence the warning
+    anyway.  Operators can silence the warning by adding the explicit TLS
+    query parameter to the DSN.
     """
     if dialect.startswith("postgres"):
         sslmode = (query.get("sslmode") or "").lower()
@@ -136,11 +189,7 @@ def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
                 "sql_dsn_tls_not_configured",
                 dialect=dialect,
                 detected_sslmode=sslmode or "(absent)",
-                hint=(
-                    "Add ?sslmode=require (or verify-ca / verify-full) to the "
-                    "DSN to force TLS.  Plaintext connections to postgres are "
-                    "subject to credential interception on the wire."
-                ),
+                hint=_PG_TLS_HINT,
             )
     elif dialect in {"mysql", "mariadb"}:
         # pymysql + drivers use one of these keys to indicate TLS.

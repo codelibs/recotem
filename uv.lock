@@ -2325,7 +2325,7 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=15,<26" },
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pymysql", marker = "extra == 'mysql'", specifier = ">=1.1,<2" },
-    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "pyyaml", specifier = ">=6.0.1,<7" },
     { name = "recotem", extras = ["bigquery", "postgres", "mysql", "sqlite", "s3", "gcs", "azure", "metrics", "bprfm"], marker = "extra == 'all'" },
     { name = "rich", specifier = ">=13,<16" },
     { name = "s3fs", marker = "extra == 's3'", specifier = ">=2024.6,<2026" },
@@ -2336,7 +2336,7 @@ requires-dist = [
     { name = "sqlalchemy", marker = "extra == 'sqlite'", specifier = ">=2,<3" },
     { name = "starlette", specifier = ">=1.0.0,<1.4" },
     { name = "structlog", specifier = ">=24,<26" },
-    { name = "typer", specifier = ">=0.12,<0.27" },
+    { name = "typer", specifier = ">=0.15.4,<0.27" },
     { name = "urllib3", specifier = ">=2.7.0,<3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<0.53" },
 ]

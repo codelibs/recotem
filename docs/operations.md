@@ -74,6 +74,8 @@ At startup, `recotem serve` logs a `security.posture` event that includes `sha25
 
 API keys live in `RECOTEM_API_KEYS` as `<kid>:sha256:<hex64>` entries. Rotation is additive: add the new entry, update clients, then remove the old entry.
 
+The per-client `kid` names used below (`client-a`, `client-a-v2`) identify **who to rotate and who to attribute a call to**. They do not partition access: any valid key reaches every recipe this server serves — see [API keys are not scoped to a recipe](security.md#trust-boundaries).
+
 1. **Generate a new key.**
 
    ```bash
@@ -226,7 +228,7 @@ logic instead of grepping stderr.
 | 5 | ArtifactError | Magic mismatch, kid unknown, HMAC mismatch, payload over cap, disallowed FQCN, header JSON over cap. A **malformed** `RECOTEM_SIGNING_KEYS` value is exit 8, not 5 — the artifact is fine, the environment is not |
 | 6 | LockContestedError | Recipe lock held by another process when `--fail-on-busy` is set |
 | 7 | HttpFetchError | Any failure during HTTP/HTTPS source fetch — SSRF guard refused the destination, connect/read timeout, HTTP 4xx/5xx, body cap exceeded, redirect cap, scheme-changing redirect, sha256 mismatch on a network-fetched source. Only an `http://` / `https://` fetch reports 7; the same checks on other schemes report 3 |
-| 8 | Configuration error | Missing `RECOTEM_SIGNING_KEYS` (also for `recotem inspect` when signing keys are absent and `--dev-allow-unsigned` not passed), a malformed `RECOTEM_SIGNING_KEYS` entry (non-hex, wrong length, no separator, empty kid, empty key) on `train` / `serve` / `inspect`, bind port already in use, a local `output.path` that cannot be written — either the per-recipe lock cannot be created (`LockPermissionError`), or the path names an existing directory (`code=artifact_write_destination`; the lock is taken at `<output.path>.lock`, a sibling of the destination, so it is created successfully and catches nothing, and the run fails at `os.replace` after the whole search has run) — or a remote one that cannot be written: credentials that do not resolve (`code=artifact_write_credentials`) and a missing bucket/container or refused credentials (`code=artifact_write_destination`), other env-var misconfiguration such as `RECOTEM_MAX_PAYLOAD_BYTES` exceeding `RECOTEM_MAX_ARTIFACT_BYTES`, `--dev-allow-unsigned` without its companion confirmation flag, `--dev-allow-unsigned` outside `RECOTEM_ENV=development` |
+| 8 | Configuration error | Missing `RECOTEM_SIGNING_KEYS` (also for `recotem inspect` when signing keys are absent and `--dev-allow-unsigned` not passed), a malformed `RECOTEM_SIGNING_KEYS` entry (non-hex, wrong length, no separator, empty kid, empty key) on `train` / `serve` / `inspect`, bind port already in use, a local `output.path` that cannot be written — either the per-recipe lock cannot be created (`LockPermissionError`), or the path names an existing directory (`code=artifact_write_destination`; the lock is taken at `<output.path>.lock`, a sibling of the destination, so it is created successfully and catches nothing, and the run fails at `os.replace` after the whole search has run) — or a remote one that cannot be written: credentials that do not resolve (`code=artifact_write_credentials`), a missing bucket/container or refused credentials (`code=artifact_write_destination`), and an fsspec backend that is not installed for the destination scheme (`code=artifact_write_driver` — `pip install "recotem[s3]"` / `"recotem[gcs]"` / `"recotem[azure]"`; like the two above it is only discovered once the search has finished, so it costs a whole run), other env-var misconfiguration such as `RECOTEM_MAX_PAYLOAD_BYTES` exceeding `RECOTEM_MAX_ARTIFACT_BYTES`, `--dev-allow-unsigned` without its companion confirmation flag, `--dev-allow-unsigned` outside `RECOTEM_ENV=development` |
 
 `--fail-on-busy` surfaces as exit 6, not exit 4 — `LockContestedError` is
 raised outside the `TrainingError` hierarchy. Without `--fail-on-busy`
@@ -782,8 +784,9 @@ Recotem does not enforce SLOs internally. Recommended baseline targets for produ
 | `/v1/recipes/{name}:batch-recommend` and `:batch-recommend-related` p99 latency | budget separately per verb — track via `recotem_v1_request_latency_seconds{recipe,verb}` |
 | `/v1/health` p99 latency | < 5 ms |
 | Availability (per recipe) | Measure via `recotem_model_loaded{recipe}` Prometheus gauge |
-| Artifact hot-swap time | ≤ `RECOTEM_WATCH_INTERVAL` + model load time |
-| Train-to-serve lag | Schedule train; serve detects in ≤ `RECOTEM_WATCH_INTERVAL` seconds |
+| Artifact hot-swap time | ≤ `RECOTEM_WATCH_INTERVAL` + model load time **on local or block storage**. On a network filesystem the client's attribute cache adds to it: measured 25.5 s at a 10 s interval on a default-mounted NFS `ReadWriteMany` PVC, and 8.2 s on the same volume mounted `noac` — see [k8s.md — Rolling updates and warm-up](deployment/k8s.md#rolling-updates-and-warm-up) |
+| Train-to-serve lag | Schedule train; serve detects in ≤ `RECOTEM_WATCH_INTERVAL` seconds, plus the attribute-cache term above when artifacts live on a network filesystem |
+| Cross-replica agreement during a swap | Not guaranteed. Replicas swap independently, so one `user_id` can get two different models until the last replica has swapped — measured 21.8 s with 3 replicas on a default-mounted NFS RWX PVC. `model_version` in the response identifies which |
 
 SLO budgets above describe each v1 verb individually (`recommend`,
 `recommend-related`, `batch-recommend`, `batch-recommend-related`). Use
@@ -821,6 +824,17 @@ The `/v1/metrics` endpoint is opt-in and off by default (a bare `/metrics` retur
 > baseline; allow only the scrapers and probes you actually need.
 
 Available metrics:
+
+> **The `recipe` label carries `<unknown>` for a name this server does not
+> serve.** On `recotem_v1_requests_total` and `recotem_v1_request_latency_seconds`
+> the name comes from the request path, and the route pattern bounds only its
+> shape (`^[A-Za-z0-9_-]{1,64}$`) — so labelling it verbatim would let one
+> caller mint an unbounded number of time series, which `prometheus_client`
+> never evicts. Every unregistered name is therefore recorded as `<unknown>`
+> (a value no recipe can have, since `<` and `>` are outside the pattern).
+> `status="recipe_not_found"` still tells you it is happening; the actual names
+> are in the `recipe_not_found` log event, which is not cardinality-bounded.
+> A recipe that *is* registered keeps its own label even when it is not loaded.
 
 | Metric | Type | Labels | Purpose |
 |--------|------|--------|---------|

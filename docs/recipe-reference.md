@@ -717,7 +717,7 @@ output:
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `path` | string | required | Artifact destination. See [Path rules](#path-rules). |
+| `path` | string | required | Artifact destination. See [Path rules](#path-rules). An object-store destination needs the same fsspec extra as an object-store *source* — `recotem[s3]` / `recotem[gcs]` / `recotem[azure]`, listed in [data-sources/csv.md](data-sources/csv.md#cloud-storage-extras). The destination is resolved only when the artifact is written, so a missing extra surfaces after the whole search has run. |
 | `versioning` | string | `append_sha` | How artifacts are written. |
 
 `versioning` modes:

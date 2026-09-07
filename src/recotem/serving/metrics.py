@@ -15,11 +15,18 @@ Two things about it routinely surprise operators setting up a scrape:
   with ``prefix="/v1"``.  A scrape of bare ``/metrics`` gets 404, which looks
   exactly like the opt-in not having taken effect.
 * **It requires authentication.**  ``metrics_endpoint`` takes
-  ``Depends(_require_auth)`` like every other ``/v1`` route, so a scrape with
-  no ``X-API-Key`` gets 401.  Prometheus needs the key configured (an
-  ``X-API-Key`` entry under ``http_headers`` in the scrape config), unless the
-  server is running with no ``RECOTEM_API_KEYS`` at all -- which forces the
-  loopback-only bind.
+  ``Depends(_require_auth)``, so a scrape with no ``X-API-Key`` gets 401.
+  Prometheus needs the key configured (an ``X-API-Key`` entry under
+  ``http_headers`` in the scrape config), unless the server is running with no
+  ``RECOTEM_API_KEYS`` at all -- which forces the loopback-only bind.
+
+  It is *not* the case that every ``/v1`` route does.  Three do not:
+  ``/v1/health``, ``/v1/health/live`` and ``/v1/health/ready`` are deliberately
+  open so a kubelet can reach them without a key.  ``/v1/health/details``,
+  ``/v1/recipes``, ``/v1/recipes/{name}`` and the four recommend verbs all
+  require it, and so does this endpoint -- which is why an operator who reasons
+  "the probes work unauthenticated, so the scrape will too" gets a 401 that
+  looks like a bad key rather than a missing one.
 
 All metrics share the default ``prometheus_client`` registry, so
 ``generate_latest()`` would expose any other counter registered in the same

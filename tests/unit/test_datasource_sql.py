@@ -1951,6 +1951,53 @@ def test_tls_warning_mysql_silent_with_ssl_ca(monkeypatch) -> None:
     assert not events
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "ssl_check_hostname=false",
+        "ssl_verify_cert=false",
+        "ssl_check_hostname=False",
+        "ssl_ca=/etc/ssl/ca.pem&ssl_check_hostname=false",
+    ],
+)
+@pytest.mark.parametrize("backend", ["mysql", "mariadb"])
+def test_tls_warning_silent_for_false_valued_ssl_options(
+    monkeypatch, backend, query
+) -> None:
+    """A ``false``-valued ``ssl_*`` option still forces TLS, so it must not warn.
+
+    SQLAlchemy's PyMySQL dialect folds ``ssl_check_hostname`` into the ``ssl``
+    mapping and passes ``ssl_verify_cert`` through as a raw string; PyMySQL
+    turns TLS on for a non-empty mapping or a truthy string, and ``"false"``
+    is truthy.  Both spellings are refused by the driver against a server with
+    ``have_ssl=DISABLED`` while a bare DSN connects -- they force TLS.
+
+    They are also the only spellings that connect to a MariaDB server
+    presenting its own in-memory certificate, which writes no ``ca.pem`` for
+    ``ssl_ca`` to name, so warning on them left that posture with no way to
+    silence the warning.
+    """
+    import sys
+    import types
+
+    import structlog
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "pymysql", types.ModuleType("pymysql"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        f"{backend}+pymysql://u:p@db.example.com/orders?{query}",
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        SQLSource(_make_cfg())
+
+    events = [r for r in logs if r["event"] == "sql_dsn_tls_not_configured"]
+    assert not events, f"unexpected TLS warning for ?{query}: {events!r}"
+
+
 @pytest.mark.parametrize("value", ["true", "1", "false", "TRUE"])
 @pytest.mark.parametrize("backend", ["mysql", "mariadb"])
 def test_scalar_ssl_query_param_is_refused(monkeypatch, backend, value) -> None:

@@ -176,11 +176,26 @@ def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
     not offer TLS.
 
     Driver-specific TLS flags vary; the heuristic deliberately under-detects
-    rather than misclassify.  ``ssl_check_hostname`` is deliberately not in
-    ``ssl_keys``: its useful value is ``false``, which the value test below
-    reads as "TLS turned off", so listing it would not silence the warning
-    anyway.  Operators can silence the warning by adding the explicit TLS
-    query parameter to the DSN.
+    rather than misclassify.
+
+    For mysql / mariadb the test is **presence** of an ``ssl_*`` key, not its
+    value, because that is what the driver keys off.  SQLAlchemy's PyMySQL
+    dialect folds ``ssl_ca`` / ``ssl_cert`` / ``ssl_key`` /
+    ``ssl_check_hostname`` into a single ``ssl`` mapping and passes
+    ``ssl_verify_cert`` through as a raw string; PyMySQL turns TLS on for a
+    non-empty ``ssl`` mapping or a truthy ``ssl_verify_cert``, and the string
+    ``"false"`` is truthy.  So ``?ssl_check_hostname=false`` and
+    ``?ssl_verify_cert=false`` both *force* TLS -- measured against a server
+    with ``have_ssl=DISABLED``, where a bare DSN connects and both of these
+    are refused by the driver.  Reading their value as "TLS turned off" made
+    the warning fire on the two spellings ``_MYSQL_TLS_HINT`` itself
+    prescribes for a MariaDB server presenting its own in-memory certificate,
+    which is the one posture where no other spelling exists: MariaDB writes no
+    ``ca.pem`` for ``ssl_ca`` to point at.  Empty values need no special case
+    -- ``make_url`` drops them, so a key present in *query* always has a
+    non-empty value.  A scalar ``?ssl=`` is refused before connect by the
+    check in ``SQLSource.__init__``, so it never reaches this check; ``ssl``
+    stays in the set only so a future caller cannot reintroduce the gap.
     """
     if dialect.startswith("postgres"):
         sslmode = (query.get("sslmode") or "").lower()
@@ -192,11 +207,17 @@ def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
                 hint=_PG_TLS_HINT,
             )
     elif dialect in {"mysql", "mariadb"}:
-        # pymysql + drivers use one of these keys to indicate TLS.
-        ssl_keys = {"ssl", "ssl_ca", "ssl_cert", "ssl_key", "ssl_verify_cert"}
-        has_ssl = any(k in query for k in ssl_keys) and any(
-            (query.get(k) or "").lower() not in {"false", "0", ""} for k in ssl_keys
-        )
+        # pymysql + drivers use one of these keys to indicate TLS.  Presence
+        # is the signal, not the value -- see the docstring.
+        ssl_keys = {
+            "ssl",
+            "ssl_ca",
+            "ssl_cert",
+            "ssl_key",
+            "ssl_verify_cert",
+            "ssl_check_hostname",
+        }
+        has_ssl = any(k in query for k in ssl_keys)
         if not has_ssl:
             _log.warning(
                 "sql_dsn_tls_not_configured",

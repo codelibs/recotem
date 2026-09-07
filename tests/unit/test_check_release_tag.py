@@ -155,7 +155,8 @@ def _make_tree(
             "def _fail() -> None:\n"
             "    raise DataSourceError(\n"
             '        "CSV source could not be read; see "\n'
-            f'        "https://recotem.org/{site_url_version}/docs/data-sources/csv"\n'
+            f'        "https://recotem.org/{site_url_version}'
+            '/docs/data-sources/csv.html"\n'
             "    )\n",
             encoding="utf-8",
         )
@@ -1131,6 +1132,108 @@ def test_a_stale_site_url_and_a_stale_pin_are_reported_in_one_run(
         f"src/recotem/datasource/csv.py:4:recotem.org/{STALE_MM}/",
     ):
         assert expected in proc.stdout, f"{expected!r} missing from:\n{proc.stdout}"
+
+
+# ---------------------------------------------------------------------------
+# Documentation-site URLs must carry `.html` (section 4c)
+#
+# The version segment is only half of what makes one of these resolve.
+# recotem.org is a VitePress build with `cleanUrls: false`, served off disk by
+# nginx with no try_files fallback, so a page URL without the suffix is a hard
+# 404 -- in exactly the artefacts section 4b exists for, which nobody can
+# correct after upload.  Directory URLs are the deliberate exception: nginx
+# resolves them to index.html, and appending `.html` there would break them.
+#
+# What 4c does NOT check is whether the page on the other end exists.  A
+# `.html` URL naming a deleted page passes here, by design: the check is a
+# string test so that a slow or unreachable docs site cannot make the project
+# unreleasable.
+# ---------------------------------------------------------------------------
+
+
+def _write_site_url(root: Path, url: str) -> None:
+    """Replace the fixture's shipped-in-an-error-message URL with *url*."""
+    (root / "src" / "recotem" / "datasource" / "csv.py").write_text(
+        "def _fail() -> None:\n"
+        "    raise DataSourceError(\n"
+        '        "CSV source could not be read; see "\n'
+        f'        "{url}"\n'
+        "    )\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_page_url_without_the_html_suffix_is_refused(tmp_path: Path) -> None:
+    """The 404 case: a page URL on the right line, but unreachable."""
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_site_url(tmp_path, f"https://recotem.org/{RELEASE_MM}/docs/security")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "missing the '.html' suffix" in proc.stdout
+    assert f"https://recotem.org/{RELEASE_MM}/docs/security" in proc.stdout
+
+
+def test_a_page_url_with_the_html_suffix_passes(tmp_path: Path) -> None:
+    """Control: the same tree with the suffix present is accepted.
+
+    Without it the case above would also pass if 4c refused every tree.
+    """
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_site_url(tmp_path, f"https://recotem.org/{RELEASE_MM}/docs/security.html")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_an_anchor_does_not_hide_a_missing_suffix(tmp_path: Path) -> None:
+    """`…/security#kid-rotation` is the same 404; the anchor must not excuse it.
+
+    The suffix belongs before the fragment, which is the half an author is most
+    likely to get wrong -- the URL still *looks* deep-linked.
+    """
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_site_url(
+        tmp_path, f"https://recotem.org/{RELEASE_MM}/docs/security#kid-rotation"
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "missing the '.html' suffix" in proc.stdout
+
+
+def test_a_scheme_less_reference_is_still_checked(tmp_path: Path) -> None:
+    """A bare host-and-path reference, with no scheme, must still be caught.
+
+    Three occurrences in this repository's own test suite are exactly that
+    shape -- an ``assert`` on the host, the version segment and a page name,
+    with no scheme in front -- and they are the ones most likely to rot
+    unnoticed: the extensionless literal is a *prefix* of the suffixed one, so
+    the assertion keeps passing after the product string is corrected, and
+    quietly stops being able to catch the regression it was written for.
+
+    Described in words rather than shown, and assembled from ``RELEASE_MM``
+    below, for the same reason every other fixture in this file is: ``tests`` is
+    one of the roots the real gate scans, so a spelled-out example here is a hit
+    the gate reads.  This test's first draft proved it by making the gate report
+    its own docstring.
+    """
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_site_url(tmp_path, f"recotem.org/{RELEASE_MM}/docs/plugin-authoring")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "missing the '.html' suffix" in proc.stdout
+
+
+def test_a_directory_url_is_not_reported_as_missing_the_suffix(
+    tmp_path: Path,
+) -> None:
+    """`…/docs/` and `…/guide/` resolve to index.html and must stay bare.
+
+    A check that demanded the suffix everywhere would order an operator to
+    break the five URLs in the tree that currently work.
+    """
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_site_url(tmp_path, f"https://recotem.org/{RELEASE_MM}/guide/")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 # ---------------------------------------------------------------------------

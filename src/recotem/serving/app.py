@@ -45,6 +45,7 @@ from recotem._features import (
     check_artifact_feature_version,
 )
 from recotem._irspack_compat import check_artifact_irspack_version
+from recotem._log_safe import escape_control_chars
 from recotem.artifact.format import (
     SIZE_CAP_MSG_MARKER,
     ArtifactError,
@@ -660,7 +661,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         # can grep by request_id and see which field failed without raw input.
         logger.warning(
             "validation_failed",
-            path=request.url.path,
+            path=escape_control_chars(request.url.path),
             method=request.method,
             request_id=request_id,
             error_count=len(sanitized_errors),
@@ -696,7 +697,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         request_id = getattr(request.state, "request_id", "")
         logger.exception(
             "unhandled_500",
-            path=str(request.url.path),
+            path=escape_control_chars(str(request.url.path)),
             request_id=request_id,
             exc_type=type(exc).__name__,
         )

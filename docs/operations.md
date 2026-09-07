@@ -784,8 +784,9 @@ Recotem does not enforce SLOs internally. Recommended baseline targets for produ
 | `/v1/recipes/{name}:batch-recommend` and `:batch-recommend-related` p99 latency | budget separately per verb — track via `recotem_v1_request_latency_seconds{recipe,verb}` |
 | `/v1/health` p99 latency | < 5 ms |
 | Availability (per recipe) | Measure via `recotem_model_loaded{recipe}` Prometheus gauge |
-| Artifact hot-swap time | ≤ `RECOTEM_WATCH_INTERVAL` + model load time |
-| Train-to-serve lag | Schedule train; serve detects in ≤ `RECOTEM_WATCH_INTERVAL` seconds |
+| Artifact hot-swap time | ≤ `RECOTEM_WATCH_INTERVAL` + model load time **on local or block storage**. On a network filesystem the client's attribute cache adds to it: measured 25.5 s at a 10 s interval on a default-mounted NFS `ReadWriteMany` PVC, and 8.2 s on the same volume mounted `noac` — see [k8s.md — Rolling updates and warm-up](deployment/k8s.md#rolling-updates-and-warm-up) |
+| Train-to-serve lag | Schedule train; serve detects in ≤ `RECOTEM_WATCH_INTERVAL` seconds, plus the attribute-cache term above when artifacts live on a network filesystem |
+| Cross-replica agreement during a swap | Not guaranteed. Replicas swap independently, so one `user_id` can get two different models until the last replica has swapped — measured 21.8 s with 3 replicas on a default-mounted NFS RWX PVC. `model_version` in the response identifies which |
 
 SLO budgets above describe each v1 verb individually (`recommend`,
 `recommend-related`, `batch-recommend`, `batch-recommend-related`). Use

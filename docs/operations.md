@@ -74,6 +74,8 @@ At startup, `recotem serve` logs a `security.posture` event that includes `sha25
 
 API keys live in `RECOTEM_API_KEYS` as `<kid>:sha256:<hex64>` entries. Rotation is additive: add the new entry, update clients, then remove the old entry.
 
+The per-client `kid` names used below (`client-a`, `client-a-v2`) identify **who to rotate and who to attribute a call to**. They do not partition access: any valid key reaches every recipe this server serves — see [API keys are not scoped to a recipe](security.md#trust-boundaries).
+
 1. **Generate a new key.**
 
    ```bash

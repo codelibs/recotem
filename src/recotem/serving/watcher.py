@@ -1682,7 +1682,29 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
         state.sidecar_unsupported_at_mtime = yaml_mtime2
         return False
 
-    if not sidecar_path.exists():
+    try:
+        sidecar_present = sidecar_path.exists()
+    except OSError as exc:
+        # ``Path.exists()`` answers False only for pathlib's ignorable errnos
+        # (ENOENT / ENOTDIR / EBADF / ELOOP) and *re-raises* every other one,
+        # so a stale NFS handle or a PVC remount on the artifacts volume makes
+        # this line raise rather than answer.  The escape is not scoped to this
+        # recipe: the caller is inside ``_poll_artifacts``, so the whole tick is
+        # abandoned, ``_consecutive_errors`` climbs on every tick, and at
+        # ``_unhealthy_threshold`` ``_mark_all_unhealthy`` marks *every* recipe
+        # "watcher unhealthy" — over a sidecar that says nothing about any of
+        # them.  An unanswerable question is not a "sidecar changed" answer;
+        # decline it, which is what this function already documents for every
+        # other sidecar I/O error and what the sibling ``exists()`` in
+        # ``build_initial_states`` already does.
+        logger.warning(
+            "sidecar_stat_failed",
+            path=str(artifact_path),
+            exc_type=type(exc).__name__,
+        )
+        return False
+
+    if not sidecar_present:
         state.sidecar_io_error_count = 0
         return False
 

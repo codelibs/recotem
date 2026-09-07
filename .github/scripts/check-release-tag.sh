@@ -341,7 +341,15 @@ add_mismatch() {
 PIN_RE='ghcr\.io/codelibs/recotem:[A-Za-z0-9_][A-Za-z0-9_.-]*'
 LABEL_RE='app\.kubernetes\.io/version: *"[^"]*"'
 
-PIN_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${PIN_RE}" examples 2>/dev/null || true)"
+# Skip compiled bytecode in every scan below, not just section 4b's.
+# `examples/plugins/echo-source` is an installable package, so `examples` grows
+# a `__pycache__` on any machine that has exercised the plugin walkthrough --
+# and a binary hit prints "Binary file ... matches" rather than the match,
+# which reaches the vacuity guards and the stale lists as if it were a pin.
+GREP_SKIP_BYTECODE=(-I --exclude-dir=__pycache__ --exclude=*.pyc)
+
+PIN_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${GREP_SKIP_BYTECODE[@]}" "${PIN_RE}" \
+  examples 2>/dev/null || true)"
 
 # The `docs/upgrading.md` exemption that used to sit here is gone with the
 # file.  That page named PREVIOUS releases -- `ghcr.io/codelibs/recotem:2.0.0`
@@ -349,7 +357,8 @@ PIN_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${PIN_RE}" examples 2>/dev/null || 
 # scanning it made the gate and the release mutually unsatisfiable.  Its
 # successor is https://recotem.org/2.1/docs/upgrading.html, outside this repository
 # and outside this scan, so no filter is needed to keep the two satisfiable.
-LABEL_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${LABEL_RE}" examples 2>/dev/null || true)"
+LABEL_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${GREP_SKIP_BYTECODE[@]}" "${LABEL_RE}" \
+  examples 2>/dev/null || true)"
 
 # Both hit shapes end in the tag, one after a ':' and one inside quotes:
 #   examples/k8s/cronjob.yaml:60:ghcr.io/codelibs/recotem:2.0.0
@@ -445,7 +454,18 @@ while IFS= read -r hit; do classify "${hit}" label; done < <(printf '%s\n' "${LA
 # thing that notices when the bump was skipped.
 SITE_ROOTS=(src tests examples helm .claude .github README.md CLAUDE.md CONTRIBUTING.md pyproject.toml)
 SITE_RE='recotem\.org/[0-9]+\.[0-9]+/'
-SITE_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${SITE_RE}" "${SITE_ROOTS[@]}" 2>/dev/null || true)"
+# -I and the __pycache__ exclusion, for the same reason the bump command in
+# references/version-locations.md carries them: *.pyc embeds these URLs in
+# compiled docstrings and error strings, and for a binary hit grep prints
+# "Binary file ... matches" instead of the match.  CI tags a fresh checkout and
+# never sees one, but the runbook tells the releaser to run this locally --
+# straight after `uv run pytest tests`, which generates exactly that bytecode.
+# Measured on a release-ready tree: rc=0, plant one .pyc carrying the previous
+# documentation line, rc=1 naming a file the releaser cannot edit; delete it,
+# rc=0 again.  A stale build artifact must not be able to refuse a correct tag,
+# and a "Binary file ... matches" line names nothing anyone can fix.
+SITE_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${GREP_SKIP_BYTECODE[@]}" "${SITE_RE}" \
+  "${SITE_ROOTS[@]}" 2>/dev/null || true)"
 
 EXPECTED_MM="${EXPECTED%.*}"
 VERSION_SITE_COUNT=0

@@ -99,7 +99,7 @@ Pick the source, then read the matching reference and gather the inputs it lists
 | BigQuery — GA4 export **or** a custom dataset | `references/bigquery.md` | project, table, date range, how `item_id` is encoded, ADC/IAM |
 | CSV or Parquet file (local / S3 / GCS / Azure / HTTP) | `references/files.md` | path + scheme, column names, delimiter/sha256 |
 | SQL database (Postgres / MySQL / SQLite) | `references/sql.md` | DSN env var, query, row volume |
-| Custom source plugin | see `https://recotem.org/2.1/docs/plugin-authoring` | the plugin's own config fields |
+| Custom source plugin | see `https://recotem.org/2.1/docs/plugin-authoring.html` | the plugin's own config fields |
 
 ## Step 2 — Write the recipe
 

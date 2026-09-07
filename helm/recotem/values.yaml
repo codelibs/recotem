@@ -248,7 +248,7 @@ artifacts:
 #   kubectl -n <ns> create job bootstrap-0 --from=cronjob/<release>-train
 #   kubectl -n <ns> wait --for=condition=complete job/bootstrap-0 --timeout=30m
 #
-# See https://recotem.org/2.1/docs/deployment/kubernetes "First install: seed an artifact before serve
+# See https://recotem.org/2.1/docs/deployment/kubernetes.html "First install: seed an artifact before serve
 # starts" for the alternatives (bundled bootstrap Job, out-of-cluster train).
 train:
   enabled: false

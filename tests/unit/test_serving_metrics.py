@@ -126,7 +126,7 @@ def test_bigquery_fallback_counter_exposed_via_metrics_endpoint(
     the counter is written exclusively by the BigQuery data source, which runs
     in ``recotem train``, a batch process with no ``/v1/metrics`` endpoint.
     See ``test_no_serving_code_increments_the_bigquery_fallback_counter`` and
-    the note in https://recotem.org/2.1/docs/operations.
+    the note in https://recotem.org/2.1/docs/operations.html.
     """
 
     monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "1")
@@ -390,7 +390,7 @@ def test_no_serving_code_increments_the_bigquery_fallback_counter() -> None:
     ``recotem_bigquery_storage_fallback_total`` is incremented only by the
     BigQuery data source, which runs inside ``recotem train``.  ``/v1/metrics``
     is served by ``recotem serve``, which never fetches data, so a scrape can
-    never see a non-zero value.  https://recotem.org/2.1/docs/operations documents the
+    never see a non-zero value.  https://recotem.org/2.1/docs/operations.html documents the
     ``bigquery_storage_fallback`` log event as the operable signal and
     deliberately omits the counter from the serving inventory and the alert
     table.

@@ -42,7 +42,7 @@ support question before it was written down:
   SystemExit`` branch in ``recotem/cli.py``.
 
 The operator-facing version of this table, with the remedy for each code, is
-published at https://recotem.org/2.1/docs/exit-codes.
+published at https://recotem.org/2.1/docs/exit-codes.html.
 
 Design note on imports
 ----------------------

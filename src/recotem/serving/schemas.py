@@ -8,13 +8,13 @@ from typing import Annotated, Any, Literal
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
 # Aggregate ``limit`` cap across all sub-requests in a single batch call.
-# Documented in https://recotem.org/2.1/docs/serving-api. Bounds total candidate work per HTTP
+# Documented in https://recotem.org/2.1/docs/serving-api.html. Bounds total candidate work per HTTP
 # request so a 256-element batch cannot demand 256_000 items in one go.
 BATCH_AGGREGATE_LIMIT = 5000
 
 # Aggregate cold-seed cap across all sub-requests in a single
-# ``:batch-recommend-related`` call. Documented in https://recotem.org/2.1/docs/serving-api and
-# https://recotem.org/2.1/docs/operations.
+# ``:batch-recommend-related`` call. Documented in https://recotem.org/2.1/docs/serving-api.html and
+# https://recotem.org/2.1/docs/operations.html.
 #
 # Why a SECOND cap rather than reusing BATCH_AGGREGATE_LIMIT: that one caps
 # ``sum(limit)`` -- response volume -- which is a different dimension. Case C
@@ -176,7 +176,7 @@ class RecommendRequest(BaseModel):
     # their real interactions and strictly dominates a profile prior, so a
     # client that always sends the profile keeps working either way. See
     # ``routes.py``'s ``recommend`` handler and
-    # ``https://recotem.org/2.1/docs/serving-api#feature-aware-cold-start`` ("A known `user_id`
+    # ``https://recotem.org/2.1/docs/serving-api.html#feature-aware-cold-start`` ("A known `user_id`
     # with `user_features` supplied is not an error.").
     user_features: _FeatureValues | None = None
 

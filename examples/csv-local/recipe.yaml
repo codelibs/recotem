@@ -29,7 +29,7 @@ schema:
   item_column: item_id
   time_column: timestamp       # optional; remove if the CSV has no time column
 
-# Optional `item_metadata:` block enriches `:recommend` / `:recommend-related` responses with item fields; see https://recotem.org/2.1/docs/recipe-reference.
+# Optional `item_metadata:` block enriches `:recommend` / `:recommend-related` responses with item fields; see https://recotem.org/2.1/docs/recipe-reference.html.
 
 cleansing:
   drop_null_ids: true

@@ -230,7 +230,7 @@ def _server_is_mariadb(conn, dialect: str) -> bool:
 
     The DSN scheme is not authoritative about which server answers.
     ``mysql+pymysql://`` is the DSN form PyMySQL documents and the only
-    PyMySQL row in ``https://recotem.org/2.1/docs/data-sources/sql``, and it connects to a MariaDB
+    PyMySQL row in ``https://recotem.org/2.1/docs/data-sources/sql.html``, and it connects to a MariaDB
     server just as happily as to MySQL — so ``url.get_backend_name()`` reports
     ``"mysql"`` for a large share of real MariaDB deployments.
 
@@ -313,7 +313,7 @@ def _error_label(exc: Exception) -> str:
 
     and nothing else, while SQLAlchemy's message underneath said "MySQL version
     8.4.11 is not a MariaDB variant" — which tells the operator exactly what to
-    change.  ``https://recotem.org/2.1/docs/data-sources/sql`` recommends ``mysql+pymysql://`` for
+    change.  ``https://recotem.org/2.1/docs/data-sources/sql.html`` recommends ``mysql+pymysql://`` for
     MariaDB servers, so assuming the mirror image works is an ordinary mistake
     to make, and the operator was left with a bare class name for it.
     """

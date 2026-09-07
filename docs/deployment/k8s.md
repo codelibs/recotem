@@ -827,6 +827,36 @@ Recovery on the stale path is **pod-level, not container-level**: delete the
 pod (or the Job) so the volume is mounted afresh. A `kubectl rollout restart`
 or a plain retry inside the same pod cannot clear it.
 
+**If the mount is already stale when a run starts, it dies at the lock
+instead — in seconds, not after the search.** Everything above describes the
+artifact write, which is where the run lands when the outage happens *during*
+tuning. The per-recipe lock touches the same directory much earlier: it
+creates `<output.path>`'s parent before any data is fetched. A container whose
+mount went stale before `recotem train` began — the CronJob's second recipe
+when `train.recipeFiles` lists several and the first one ran through the
+outage, or any run that starts after an `initContainer` or a long image pull —
+therefore fails there:
+
+```console
+{"error": "[Errno 17] File exists: '/artifacts'", "code": "internal_error",
+ "exit_code": 1, "event": "train_error"}
+```
+
+Measured on the same rig, one injection, three Jobs whose mounts were
+established before the export's `fsid` changed:
+
+| `output.path` | lock directory | how it ends |
+|---|---|---|
+| `/artifacts/a.recotem` | the mount point | `exit 1`, `FileExistsError [Errno 17] File exists: '/artifacts'` |
+| `/artifacts/b.recotem`, image with the pre-#354 `Path.mkdir` spelling | the mount point | `exit 1`, `OSError [Errno 116] Stale file handle: '/artifacts'` |
+| `/artifacts/models/c.recotem` | below the mount | `exit 1`, `OSError [Errno 116] Stale file handle: '/artifacts/models'` |
+
+The tolerance recotem applies at that `mkdir` rescues a stale answer that is
+momentary; a changed export identity is not momentary, so all three end the
+same way. Each took **4 s** from container start — so this ending is invisible
+to the training-run-duration alert this section recommends for the write path.
+Alert on the artifact's `trained_at` age, which catches both.
+
 Consequences on the shipped chart:
 
 * Nothing in the process ends the stall. The chart's

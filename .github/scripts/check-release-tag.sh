@@ -447,6 +447,28 @@ while IFS= read -r hit; do classify "${hit}" label; done < <(printf '%s\n' "${LA
 # the HELP string served at /v1/metrics, README.md as rendered on PyPI.  A
 # stale version segment there points a user at another version's documentation.
 #
+# What this section checks is the VERSION SEGMENT and nothing else.  It does
+# not fetch, so it cannot tell a live page from a dead one.  Measured, two
+# edits to the same line of README.md on an otherwise release-ready tree: a
+# URL on an older documentation line whose page is served (HTTP 200) is
+# refused, rc=1; a URL on the released line naming a page that does not exist
+# (HTTP 404) passes, rc=0.  (Described rather than written out: this file is
+# under .github, one of SITE_ROOTS below, so a spelled-out URL naming another
+# line is a hit this very scan reads -- and refuses the tag over.)
+#
+# That is the whole reason a tree can carry a documentation URL naming the
+# correct line and still 404 for every reader -- which is what happened when
+# the local docs/ tree was replaced by site URLs: every page link in the
+# repository was extensionless, the site serves .html, and this scan was green
+# throughout because each one named /2.1/.
+#
+# Fetching here was considered and rejected: it would make a release
+# unpublishable whenever the documentation site is down or slow, and this
+# script gates both publish.yml and docker.yml.  A link check belongs
+# somewhere that can be red without blocking a release.  The success message
+# below therefore says what was and was not established, rather than implying
+# the links were followed.
+#
 # The segment is MAJOR.MINOR, not the full release: a patch does not create a
 # documentation line, so v2.1.1 still points at /2.1/.  These URLs are bumped
 # at the DEV bump (Phase 5), not at release -- the opposite cadence to the
@@ -744,8 +766,8 @@ fi
 
 echo "OK: ${TAG} is a final release and matches pyproject.toml,"
 echo "    src/recotem/version.py, helm/recotem/Chart.yaml, helm/recotem/values.yaml,"
-echo "    every pinned image reference under examples/, and every recotem.org/${EXPECTED_MM}/"
-echo "    documentation URL in the tree."
+echo "    every pinned image reference under examples/, and every recotem.org/"
+echo "    documentation URL in the tree names the ${EXPECTED_MM} line."
 # Say which tree the lines above describe.  Without this the success message
 # reads the same whether it inspected the commit or an uncommitted edit of it —
 # and the next line makes a claim about HEAD, so the two must not be confused.
@@ -758,6 +780,8 @@ else
     echo "    which may not be the ones ${TAG} would publish, and whether the"
     echo "    tagged commit is on main was NOT checked."
 fi
-echo "    Not checked here: uv.lock (run 'uv lock --check'), and version strings"
+echo "    Not checked here: whether those documentation URLs RESOLVE — no page"
+echo "    is fetched, so a URL naming the right line still passes when it 404s."
+echo "    Also not checked: uv.lock (run 'uv lock --check'), and version strings"
 echo "    outside those files — see the verification block in"
 echo "    .claude/skills/release-recotem/references/version-locations.md."

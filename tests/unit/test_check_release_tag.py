@@ -455,6 +455,63 @@ def test_success_message_does_not_overclaim(tmp_path: Path) -> None:
     assert "version-locations.md" in proc.stdout
 
 
+def test_success_message_says_urls_are_not_fetched(tmp_path: Path) -> None:
+    """Section 4b reads the version segment; it never asks if the page exists.
+
+    The distinction is not academic.  Measured on an otherwise release-ready
+    tree, with two edits to the same line of README.md: a site URL on an older
+    documentation line whose page is served (HTTP 200) is refused, rc=1; a URL
+    on the released line naming a page that does not exist (HTTP 404) passes,
+    rc=0.  So the gate is green while every URL it inspected is dead -- which
+    is the state the tree was in when the local docs/ tree became site URLs.
+    The success message has to say which of the two it established, or it is
+    read as a link check that was never run.
+
+    The URLs above are described rather than written out: `tests` is one of the
+    roots section 4b scans, and a spelled-out URL naming another documentation
+    line is, to that plain grep, indistinguishable from a real stale pointer.
+    Writing one here refuses the tag -- see the module docstring.
+    """
+    script = _make_tree(tmp_path)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    # states what WAS established: the segment names the released line
+    assert f"names the {RELEASE_MM} line" in out
+    # and states what was not
+    assert "RESOLVE" in out
+    assert "404" in out
+
+
+def test_a_url_that_names_the_right_line_but_cannot_resolve_still_passes(
+    tmp_path: Path,
+) -> None:
+    """Pin the documented limitation, so narrowing it stays a deliberate act.
+
+    If a future change makes section 4b fetch, this test fails and its docstring
+    says what to decide: a release gate that reaches the network cannot publish
+    while the documentation site is down, and this script gates both
+    publish.yml and docker.yml.
+    """
+    script = _make_tree(tmp_path, site_url_version="2.1")
+    root = script.parent.parent.parent
+    csv_py = root / "src" / "recotem" / "datasource" / "csv.py"
+    csv_py.write_text(
+        csv_py.read_text(encoding="utf-8").replace(
+            "/docs/data-sources/csv", "/docs/no-such-page-here"
+        ),
+        encoding="utf-8",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, (
+        "section 4b now refuses a URL on the correct line whose page does not "
+        "exist.  If that is intended, decide first whether a release may be "
+        "blocked by the documentation site being unreachable:\n"
+        + proc.stdout
+        + proc.stderr
+    )
+
+
 def test_real_values_declares_an_image_tag(tmp_path: Path) -> None:
     """The shipped chart keeps the shape the extractor parses.
 
@@ -1074,7 +1131,7 @@ def test_site_urls_on_the_released_line_pass(tmp_path: Path) -> None:
     script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
     proc = _run(script, "v2.1.0")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert f"every recotem.org/{RELEASE_MM}/" in proc.stdout
+    assert f"names the {RELEASE_MM} line" in proc.stdout
 
 
 def test_a_patch_release_keeps_the_minor_documentation_line(tmp_path: Path) -> None:
@@ -1098,7 +1155,7 @@ def test_a_patch_release_keeps_the_minor_documentation_line(tmp_path: Path) -> N
     )
     proc = _run(script, "v2.1.1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert f"every recotem.org/{RELEASE_MM}/" in proc.stdout
+    assert f"names the {RELEASE_MM} line" in proc.stdout
 
 
 def test_no_site_url_anywhere_is_refused_rather_than_passed(tmp_path: Path) -> None:

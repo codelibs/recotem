@@ -82,12 +82,24 @@ reading: `recotem train` resolves the destination through fsspec, so writing an
 artifact to `gs://…` without `recotem[gcs]` fails after the search has already
 run. The published Docker image bundles `s3` and `gcs` (not `azure`).
 
-Requires Python 3.12+, and a platform `irspack` publishes a wheel for:
-Linux on x86-64 or arm64 (glibc or musl), macOS on Apple Silicon, and
-Windows on x86-64. `irspack` ships no source distribution, so on **macOS
-on Intel** and **Windows on arm64** there is nothing for pip to install and
-`pip install recotem` stops with `No matching distribution found for
-irspack==0.5.2`. Use the Docker image on those two.
+Requires Python 3.12+ and a platform every compiled dependency publishes a
+wheel for, because none of them can be built without a C/C++ toolchain the
+usual `pip install` host does not have. That set is **glibc Linux on x86-64 or
+arm64**, **macOS on Apple Silicon**, and **Windows on x86-64**. Three platforms
+are outside it:
+
+| platform | what is missing | what pip prints |
+|---|---|---|
+| macOS on Intel | `irspack` — no wheel, and no sdist to build | `No matching distribution found for irspack==0.5.2` |
+| Windows on arm64 | `irspack` — no wheel, and no sdist to build | `No matching distribution found for irspack==0.5.2` |
+| musl Linux (Alpine), either arch | `scikit-learn` — no `musllinux` wheel at any version in the supported range | falls back to the sdist and fails in its meson build: `Unknown compiler(s)` |
+
+`irspack` does publish `musllinux` wheels, and so does every other compiled
+dependency — `scikit-learn` alone is why Alpine does not work. It ships an
+sdist, so a musl host with a full C/C++ toolchain, meson and OpenMP can build
+it, but that is a build, not an install.
+
+Use the Docker image (which is glibc-based) on all three.
 
 A multi-arch Docker image (`linux/amd64`, `linux/arm64`) is published to
 `ghcr.io/codelibs/recotem`.

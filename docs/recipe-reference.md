@@ -42,7 +42,7 @@ source:
 | `encoding` | string | `"utf-8"` | Any encoding accepted by pandas. |
 | `header` | int | `0` | Row number of the header. |
 | `dtype` | map | `null` | Key = column name, value = pandas dtype string. |
-| `sha256` | string | optional (required when `path` is `http://` or `https://`) | 64-char lowercase hex; verified against the fetched bytes; mismatch raises `DataSourceError` |
+| `sha256` | string | optional (required when `path` is `http://` or `https://`) | 64-char lowercase hex; verified against the fetched bytes; mismatch raises `DataSourceError`. Checked at fetch time, so by `recotem train` and **not** by `recotem validate` — see [Where each `sha256` pin is checked](#where-each-sha256-pin-is-checked). |
 
 For Parquet files use `type: parquet`. Only `path` and (optional) `sha256` are accepted — `delimiter`, `encoding`, `header`, and `dtype` are not valid keys on a parquet source and will fail recipe load.
 
@@ -172,10 +172,51 @@ item_metadata:
 | `path` | string | required | See [Path rules](#path-rules). |
 | `fields` | list[string] | required | Non-empty. Only listed fields are returned in predict responses. |
 | `on_field_missing` | string | `error` | What to do if a `fields` entry is absent in the file. `error` fails the model load (at startup the recipe registers as `loaded=false` with `last_load_error` set; on hot-swap the previous model keeps serving and the failure is surfaced via `/health` and the `recotem_artifact_load_failures_total` metric); `null` fills the column with `null`. |
-| `sha256` | string | optional (required when `path` is `http://` or `https://`) | 64-char lowercase hex; verified against the fetched bytes; mismatch raises `DataSourceError` |
+| `sha256` | string | optional (required when `path` is `http://` or `https://`) | 64-char lowercase hex; verified against the fetched bytes; mismatch raises `DataSourceError`. Checked by `recotem validate` and at model load; **not** checked by `recotem train` — see [Where each `sha256` pin is checked](#where-each-sha256-pin-is-checked). |
 | `item_id_column` | string | `"item_id"` | Column name in the metadata file that holds item identifiers. Override when your metadata file uses a different column name (e.g. `product_id`). Must be a non-empty, non-whitespace string. |
 
 Server-side field suppression is also available via `RECOTEM_METADATA_FIELD_DENY` (comma-separated column names), applied as a post-join column drop.
+
+### Where each `sha256` pin is checked
+
+A recipe can carry two integrity pins — `source.sha256` and
+`item_metadata.sha256` — and **they are enforced at different commands.**
+Neither is checked everywhere, and no single command checks both. Measured on
+2.1.0 with one recipe per case, only the pin value changed:
+
+| pin that does not match | `recotem validate` | `recotem train` | artifact written | model load at `serve` |
+|---|---|---|---|---|
+| `source.sha256` | **0** | 3 | no | — (nothing to load) |
+| `item_metadata.sha256` | 3 | **0** | **yes, and signed** | refused |
+| neither (control) | 0 | 0 | yes | loads |
+
+The reason is which component reads which file. `train` fetches the
+interactions and never opens the metadata file; the metadata loader runs in
+`validate` and in the serving process, which is where the join happens.
+
+Two consequences worth planning around:
+
+- **A `train` run succeeds with a mismatched `item_metadata.sha256`, and the
+  artifact it writes carries a valid HMAC.** `recotem inspect` reports
+  `HMAC: OK`. Nothing in the training pipeline signals the mismatch. The
+  refusal arrives later, in the serving process: that recipe registers
+  `loaded: false` with `metadata load failed: metadata sha256 verification
+  failed for ...`, its verbs return `503`, and `/v1/health` reports `degraded`
+  while every other recipe keeps serving. A nightly training job will not
+  notice; alert on `/v1/health/details` or on
+  `recotem_artifact_load_failures_total`, as
+  [operations.md](operations.md#watcher-and-registry-semantics) already advises
+  for load failures generally.
+- **`recotem validate` is not an integrity gate for the training data.** It
+  checks the metadata pin but not the source pin — the source pin is verified
+  at fetch time, which only `train` reaches. A CI step that runs `validate`
+  alone is green against tampered interaction data. See
+  [data-sources/csv.md](data-sources/csv.md#path-schemes), which states the
+  fetch-time half of this rule.
+
+If you want both pins enforced before anything is published, run `validate`
+*and* `train` — the pair covers both, and each is the only command that covers
+its own.
 
 ### `csv` returns every field as a string; `parquet` preserves types
 

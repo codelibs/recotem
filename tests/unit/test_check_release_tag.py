@@ -1545,3 +1545,37 @@ def test_this_repository_carries_no_stale_site_url() -> None:
         "what check-release-tag.sh refuses a tag over -- and it runs on the "
         "tag, so the refusal arrives after the tag exists:\n  " + "\n  ".join(stale)
     )
+
+
+def test_compiled_modules_beside_the_source_do_not_fail_the_scan(
+    tmp_path: Path,
+) -> None:
+    """A `__pycache__` in the tree must not be read as a stale URL.
+
+    `src` and `tests` are scanned roots, and the docstrings this scan reads get
+    compiled into the `.pyc` files that sit beside every module once the suite
+    has run.  grep matches them, and with `-o` prints `Binary file <path>
+    matches` rather than a URL -- a line with no `recotem.org/` in it, which the
+    loop then reads as a MAJOR.MINOR of its own and reports as stale.
+
+    CI checks out clean, so this never fires there.  The local invocation the
+    script's own usage line documents (`bash .github/scripts/check-release-tag.sh
+    v2.1.0   # before tagging`) fires it every time, which is precisely when a
+    maintainer is trying to learn whether the tag will be refused -- and the
+    answer they get is one spurious failure per compiled module.
+    """
+    script = _make_tree(tmp_path)
+    cache = tmp_path / "src" / "recotem" / "datasource" / "__pycache__"
+    cache.mkdir(parents=True)
+    # A NUL byte is what makes grep call a file binary; the URL beside it is
+    # what a real .pyc carries, since the scan's own targets are docstrings.
+    (cache / "csv.cpython-313.pyc").write_bytes(
+        b"\x00\x01\x02recotem.org/" + RELEASE_MM.encode() + b"/docs/x\x00"
+    )
+
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, (
+        "a __pycache__ directory beside the source made the release gate refuse "
+        "an otherwise release-ready tree:\n" + proc.stdout + proc.stderr
+    )
+    assert "Binary file" not in proc.stdout, proc.stdout

@@ -31,6 +31,7 @@ is the same shape #321 fixed for ``training.storage_path``.
 
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 
@@ -236,3 +237,38 @@ def test_non_oserror_write_failures_are_still_unclassified(tmp_path: Path) -> No
     d = tmp_path / "model.recotem"
     d.mkdir()
     assert _classify(TypeError("cannot pickle a socket"), str(d)) is None
+
+
+def test_a_stat_that_cannot_answer_does_not_escape_the_write_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The classifier runs *inside* the artifact write's ``except`` block.
+
+    Its one ``stat`` of ``output.path`` can fail for the same reason the write
+    did.  ``Path.is_dir`` swallows only ``ENOENT``/``ENOTDIR``/``EBADF``/
+    ``ELOOP`` and re-raises everything else, so on a network filesystem it
+    raises rather than answers -- measured on a ``ReadWriteMany`` NFS mount
+    whose export changed identity, where it raised ``OSError [Errno 116] Stale
+    file handle`` and that replaced the write's own exception.
+
+    Declining is the only safe answer: an unanswerable question is not a "names
+    a directory" answer, and every other unclassifiable case here falls through
+    to the original error.
+    """
+    target = tmp_path / "model.recotem"
+
+    def _stale(self: Path) -> bool:
+        raise OSError(errno.ESTALE, "Stale file handle")
+
+    monkeypatch.setattr(Path, "is_dir", _stale)
+
+    # Every errno the write itself can carry, including the one this section's
+    # own mapping exists for -- none of them may turn into the stat's error.
+    for exc in (
+        FileExistsError(errno.EEXIST, "File exists"),
+        IsADirectoryError(errno.EISDIR, "Is a directory"),
+        OSError(errno.EIO, "Input/output error"),
+    ):
+        assert _classify(exc, str(target)) is None, (
+            f"{exc!r} must survive a stat that cannot answer"
+        )

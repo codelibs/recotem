@@ -1030,7 +1030,28 @@ def _local_write_destination_error(
     from recotem.recipe.loader import _local_output_path  # noqa: PLC0415
 
     local = _local_output_path(str(output_path))
-    if local is None or not local.is_dir():
+    if local is None:
+        return None
+
+    # Deciding the classification costs one ``stat`` of ``output.path`` -- and
+    # that ``stat`` can fail for the same reason the write did.  ``Path.is_dir``
+    # swallows only ``ENOENT``/``ENOTDIR``/``EBADF``/``ELOOP`` and re-raises
+    # everything else, so on a network filesystem it raises rather than answers:
+    # measured on a ``ReadWriteMany`` NFS mount whose export changed identity,
+    # where it raised ``OSError [Errno 116] Stale file handle`` from inside the
+    # artifact write's ``except`` block and replaced the write's own exception
+    # ("During handling of the above exception, another exception occurred").
+    # The remote classifier above had already declined the path, so nothing else
+    # was left to run.
+    #
+    # An unanswerable question is not a "names a directory" answer.  Fall
+    # through and let the original write failure propagate unchanged, which is
+    # what this function does for every other unclassifiable case.
+    try:
+        names_a_directory = local.is_dir()
+    except OSError:
+        return None
+    if not names_a_directory:
         return None
 
     return TrainingError(

@@ -15,15 +15,21 @@ neither findable by a relative path nor cleanly removable on uninstall.  Lean
 wheel, complete sdist.
 
 **Scope boundary.** This file owns the *distributions* -- what
-``pyproject.toml``'s build targets put in the sdist, and whether a file a
-shipped document tells you to run is actually there.  It asserts nothing about
-``https://recotem.org/2.1/guide/``'s Path B, which is owned by
-``tests/unit/test_getting_started_path_b.py`` (`#262`): that PR rewrites Path B
-to run from a bare ``pip install`` with no checkout, so the two surfaces are
-disjoint by construction -- Path B stops naming ``examples/`` at all, and this
-file keeps watching every *other* document that does.  The boundary is written
-down because a surface half-owned by two guards is how a surface ends up
-unowned.
+``pyproject.toml``'s build targets put in each archive, and whether a file a
+shipped document tells you to run is actually there.
+
+The wheel half used to live one file over, in
+``tests/unit/test_getting_started_path_b.py`` (`#262`), alongside that file's
+assertions about the getting-started Path B.  `#310` deleted that file when it
+stopped testing documentation prose -- correctly, three of its four tests read
+a markdown document -- and the fourth went with it:
+``test_the_wheel_target_declares_no_examples_directory`` read
+``pyproject.toml`` and nothing else.  Nothing has watched the wheel since;
+measured, adding ``include = ["examples"]`` to
+``[tool.hatch.build.targets.wheel]`` leaves the whole suite green.  It is
+restored below, where the rest of the distribution assertions live.  The
+boundary is written down because a surface half-owned by two guards is how a
+surface ends up unowned -- which is what happened to this one.
 
 Both guards read whole files and fail when they match nothing, so a rename or
 a reworded section cannot silently switch them off -- the failure mode `#220`
@@ -103,6 +109,53 @@ def test_sdist_include_patterns_are_anchored_and_cover_examples() -> None:
         "instructs the reader to run files from that directory, and the "
         "unanchored include pattern shipped those READMEs; shipping them "
         "without the recipes is worse than shipping neither."
+    )
+
+
+def test_wheel_target_declares_no_examples_directory() -> None:
+    """The other half of "lean wheel, complete sdist", asserted.
+
+    Named for what it checks: the **declaration** in ``pyproject.toml``, not a
+    built wheel.  Building one needs ``uv build`` and is out of scope for a
+    unit test, so this cannot catch a wheel that gained ``examples/`` some
+    other way (a hatch default change, a build plugin).  It catches the change
+    anyone would actually make -- and the one the sdist test above invites,
+    since that test requires ``/examples`` in the *sdist* include list and the
+    natural over-correction is to add it to the wheel target beside it.
+
+    A wheel unpacks into ``site-packages``, where an ``examples/`` directory
+    would be neither findable by the relative path the docs use nor cleanly
+    removable on uninstall.  An sdist that ships ``examples/`` is correct and
+    must not fail here, which is why this reads the wheel target alone rather
+    than the whole ``[tool.hatch.build*]`` region.
+    """
+    config = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    wheel = config["tool"]["hatch"]["build"]["targets"]["wheel"]
+
+    assert wheel, (
+        "[tool.hatch.build.targets.wheel] is empty or absent -- this guard is "
+        "watching nothing."
+    )
+
+    named = [
+        entry
+        for value in wheel.values()
+        for entry in (
+            value
+            if isinstance(value, list)
+            else (
+                list(value) + list(value.values())
+                if isinstance(value, dict)
+                else [value]
+            )
+        )
+        if isinstance(entry, str) and "examples" in entry
+    ]
+    assert not named, (
+        f"the wheel target now ships examples/ ({named}). A wheel unpacks into "
+        "site-packages, where the relative paths the docs use do not resolve "
+        "and an uninstall cannot cleanly remove the directory. examples/ "
+        "belongs in the sdist only."
     )
 
 

@@ -447,6 +447,28 @@ while IFS= read -r hit; do classify "${hit}" label; done < <(printf '%s\n' "${LA
 # the HELP string served at /v1/metrics, README.md as rendered on PyPI.  A
 # stale version segment there points a user at another version's documentation.
 #
+# What this section checks is the VERSION SEGMENT and nothing else.  It does
+# not fetch, so it cannot tell a live page from a dead one.  Measured, two
+# edits to the same line of README.md on an otherwise release-ready tree: a
+# URL on an older documentation line whose page is served (HTTP 200) is
+# refused, rc=1; a URL on the released line naming a page that does not exist
+# (HTTP 404) passes, rc=0.  (Described rather than written out: this file is
+# under .github, one of SITE_ROOTS below, so a spelled-out URL naming another
+# line is a hit this very scan reads -- and refuses the tag over.)
+#
+# That is the whole reason a tree can carry a documentation URL naming the
+# correct line and still 404 for every reader -- which is what happened when
+# the local docs/ tree was replaced by site URLs: every page link in the
+# repository was extensionless, the site serves .html, and this scan was green
+# throughout because each one named /2.1/.
+#
+# Fetching here was considered and rejected: it would make a release
+# unpublishable whenever the documentation site is down or slow, and this
+# script gates both publish.yml and docker.yml.  A link check belongs
+# somewhere that can be red without blocking a release.  The success message
+# below therefore says what was and was not established, rather than implying
+# the links were followed.
+#
 # The segment is MAJOR.MINOR, not the full release: a patch does not create a
 # documentation line, so v2.1.1 still points at /2.1/.  These URLs are bumped
 # at the DEV bump (Phase 5), not at release -- the opposite cadence to the
@@ -487,6 +509,64 @@ done < <(printf '%s\n' "${SITE_HITS}")
          "all carry one, so finding none means this check stopped matching rather" \
          "than that there is nothing to check.  Refused rather than skipped, for the" \
          "same reason as the image pins."
+
+# ---------------------------------------------------------------------------
+# 4c. Documentation-site URLs must carry the '.html' suffix
+# ---------------------------------------------------------------------------
+# The version segment above is only half of what makes one of these URLs
+# resolve.  recotem.org is a VitePress site built with `cleanUrls: false` --
+# its own canonical, hreflang and sitemap generation encodes that choice -- and
+# nginx serves the build off disk with no try_files fallback.  So a *page* URL
+# without `.html` is a hard 404, with no redirect to soften it:
+#
+#   .../docs/security        -> 404
+#   .../docs/security.html   -> 200
+#
+# (Written elided rather than in full: this file is one of the roots the scan
+# below reads, so a spelled-out counter-example would report itself.)
+#
+# Directory URLs are the exception and must NOT get the suffix: nginx resolves
+# `…/docs/` and `…/guide/` to their index.html.
+#
+# This is the same class of damage as a stale version segment, and it lands in
+# the same places nobody can correct afterwards -- so it gets the same gate.
+# The check is a string test, not a network fetch: this script gates publish.yml
+# and docker.yml, and a slow or unreachable docs site must not be able to make
+# the project unreleasable.  A 404 caused by a missing suffix is a property of
+# the string alone.  What it therefore does NOT check is whether the page on the
+# other end exists -- a `.html` URL naming a deleted page still passes here.
+#
+# The scheme is optional in the pattern.  Three of the occurrences this was
+# written for are `assert "recotem.org/2.1/docs/….html" in msg` in the test
+# suite, with no `https://`, and they are the ones most likely to rot silently:
+# the extensionless literal is a *prefix* of the suffixed one, so such an
+# assertion keeps passing after the product string is corrected, and stops
+# being able to catch the regression it was written for.
+SUFFIX_RE='(https://)?recotem\.org/[0-9]+\.[0-9]+/[A-Za-z0-9_/-]+(\.html)?'
+SUFFIX_HITS="$(cd "${REPO_ROOT}" && grep -rIhoE "${SUFFIX_RE}" "${SITE_ROOTS[@]}" 2>/dev/null || true)"
+
+SUFFIX_COUNT=0
+EXTLESS_SITE_URLS=()
+while IFS= read -r url; do
+    [ -n "${url}" ] || continue
+    SUFFIX_COUNT=$((SUFFIX_COUNT + 1))
+    case "${url}" in
+        */|*.html) ;;
+        *) EXTLESS_SITE_URLS+=("  ${url}") ;;
+    esac
+done < <(printf '%s\n' "${SUFFIX_HITS}" | sort -u)
+
+# Vacuity guard, for the same reason as every other scan in this section.
+[ "${SUFFIX_COUNT}" -gt 0 ] || \
+    fail "No 'recotem.org/X.Y/...' documentation URL found in the tree." \
+         "Section 4b found ${VERSION_SITE_COUNT} version segments, so finding no full" \
+         "URL here means this scan stopped matching rather than that there is nothing" \
+         "to check."
+
+# The offenders are reported in section 6 alongside the stale pins and the
+# stale version segments, not with a `fail` here.  Calling `fail` would exit
+# before either of those was printed, which is the exact round trip -- one tag
+# delete and re-push per class of failure -- that section 6 exists to prevent.
 
 # ---------------------------------------------------------------------------
 # 5. The commit being tagged must be on main
@@ -629,6 +709,21 @@ if [ "${#STALE_SITE_URLS[@]}" -gt 0 ]; then
              "  git grep -nE 'recotem[.]org/[0-9]+[.][0-9]+/'" \
              "")
 fi
+if [ "${#EXTLESS_SITE_URLS[@]}" -gt 0 ]; then
+    REPORT+=("Documentation-site page URLs missing the '.html' suffix:" \
+             "${EXTLESS_SITE_URLS[@]}" \
+             "" \
+             "recotem.org is built with cleanUrls: false and served off disk with no" \
+             "try_files fallback, so each of these is a 404 with no redirect -- in the" \
+             "same artefacts as above, which nobody can correct after the upload." \
+             "" \
+             "Append '.html' to the page name, keeping any '#anchor' after it:" \
+             "  https://recotem.org/${EXPECTED_MM}/docs/security.html#kid-rotation" \
+             "" \
+             "Directory URLs ('.../docs/', '.../guide/') resolve to index.html and are" \
+             "correct without it; they are not reported here." \
+             "")
+fi
 if [ -n "${MISMATCH}" ]; then
     REPORT+=("Version declarations that do not match: ${MISMATCH}." \
              "The tag, pyproject.toml, src/recotem/version.py, helm/recotem/Chart.yaml" \
@@ -671,8 +766,8 @@ fi
 
 echo "OK: ${TAG} is a final release and matches pyproject.toml,"
 echo "    src/recotem/version.py, helm/recotem/Chart.yaml, helm/recotem/values.yaml,"
-echo "    every pinned image reference under examples/, and every recotem.org/${EXPECTED_MM}/"
-echo "    documentation URL in the tree."
+echo "    every pinned image reference under examples/, and every recotem.org/"
+echo "    documentation URL in the tree names the ${EXPECTED_MM} line."
 # Say which tree the lines above describe.  Without this the success message
 # reads the same whether it inspected the commit or an uncommitted edit of it —
 # and the next line makes a claim about HEAD, so the two must not be confused.
@@ -685,6 +780,8 @@ else
     echo "    which may not be the ones ${TAG} would publish, and whether the"
     echo "    tagged commit is on main was NOT checked."
 fi
-echo "    Not checked here: uv.lock (run 'uv lock --check'), and version strings"
+echo "    Not checked here: whether those documentation URLs RESOLVE — no page"
+echo "    is fetched, so a URL naming the right line still passes when it 404s."
+echo "    Also not checked: uv.lock (run 'uv lock --check'), and version strings"
 echo "    outside those files — see the verification block in"
 echo "    .claude/skills/release-recotem/references/version-locations.md."

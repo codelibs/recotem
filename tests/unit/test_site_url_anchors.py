@@ -89,12 +89,19 @@ def test_the_scan_sees_a_url_split_across_source_lines() -> None:
     A scan that quietly stopped folding concatenation would pass the test above
     for the wrong reason, so assert that the folding still happens.
     """
+    # The URL in the fixture carries '.html', and must keep it.  tests/ is one
+    # of check-release-tag.sh's SITE_ROOTS, so a spelled-out extensionless page
+    # URL here -- even as sample source inside a string -- is a hit that scan
+    # reads, and it refuses the release tag over it.  The script elides its own
+    # counter-examples for exactly this reason.  Nothing here depends on the
+    # suffix: what is asserted is that the two fragments were folded into one
+    # value, which no line-based scan can do.
     tree = ast.parse(
-        'X = (\n    "https://recotem.org/2.1/docs/operations"\n'
+        'X = (\n    "https://recotem.org/2.1/docs/operations.html"\n'
         '    "#recotem-train-exits-4-with-feature_axis_error"\n)\n'
     )
     values = [v for _lineno, v in _string_values(tree)]
-    assert any("operations#recotem-train" in v for v in values), (
+    assert any("operations.html#recotem-train" in v for v in values), (
         "adjacent string fragments are no longer folded into one value, so the "
         "scan above cannot see a URL written the way this codebase writes long "
         f"messages: {values}"

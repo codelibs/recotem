@@ -400,7 +400,10 @@ def _check_axis_coverage(
             f"exact mechanism is source-specific (csv, bigquery, sql, and "
             f"parquet each differ) -- see "
             f"https://recotem.org/2.1/docs/operations.html"
-            f"#recotem-train-exits-4-with-feature_axis_error.",
+            # The site's heading is "recotem train exits 4 with
+            # feature_axis_error"; its generated slug folds the underscore to a
+            # hyphen, so the anchor is NOT spelled the way the code is.
+            f"#recotem-train-exits-4-with-feature-axis-error.",
             code="feature_axis_error",
         )
 

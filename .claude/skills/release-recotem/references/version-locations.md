@@ -86,12 +86,20 @@ promote (see `references/docs-site-sync.md`).
 
 `check-release-tag.sh` reads these at the tag and refuses one that disagrees
 with the tag's own `MAJOR.MINOR`, so a skipped Phase 5 bump is caught by the
-release it would otherwise mislabel rather than published. Its `SITE_ROOTS` are
-`src tests examples helm .claude README.md CLAUDE.md CONTRIBUTING.md
-pyproject.toml`; the commands below scan the whole tree, which is a deliberate
-superset — a URL outside those roots (today: `.dockerignore` and
-`.github/scripts/`) is bumped here but watched by nothing, so leaving it to a
-hand-maintained root list is how one goes stale.
+release it would otherwise mislabel rather than published. Do not restate its
+`SITE_ROOTS` here — read them, because a copy of that list is how this
+paragraph came to name `.github/scripts/` as unwatched when it is watched:
+
+```bash
+grep -m1 '^SITE_ROOTS=' .github/scripts/check-release-tag.sh
+```
+
+The commands below scan the whole tree, which is a deliberate superset — a URL
+outside those roots is bumped here but watched by nothing, so leaving it to a
+hand-maintained root list is how one goes stale. Measured on this tree by
+planting a `/9.9/` URL in each candidate and running all three gate scripts,
+exactly one such location survives today: **`.dockerignore`**. `.github` is a
+`SITE_ROOT`, so `.github/scripts/` and `.github/workflows/` are covered.
 
 ### Bump the site URLs (Phase 5 only)
 

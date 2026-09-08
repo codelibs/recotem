@@ -1454,3 +1454,94 @@ def test_an_untracked_file_outside_the_checked_paths_does_not_block(
     proc = _run(script, "v2.1.0")
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_this_repository_carries_no_stale_site_url() -> None:
+    """Read the real tree, and read it the way section 4b does.
+
+    ``test_a_release_ready_copy_of_this_repository_passes`` is the only other
+    case that touches the repository, and it cannot see this class of failure
+    for two reasons.  It copies six of the ten roots section 4b scans --
+    ``.claude``, ``tests``, ``CLAUDE.md`` and ``CONTRIBUTING.md`` are not among
+    them -- and before running the gate it rewrites *every* ``recotem.org/X.Y/``
+    in the copy to the synthetic release, which turns a stale URL into a fresh
+    one.  That is the right shape for the deployment pins, which move at
+    release; it is the wrong shape for these URLs, which move at the dev bump
+    and must already be correct by the time a tag is pushed.
+
+    So check the invariant directly instead of running the script: no file
+    under any scanned root may name a documentation line other than this
+    tree's own.  Version-agnostic -- the expected MAJOR.MINOR is read from
+    ``src/recotem/version.py`` -- so this does not go red during a bump.
+
+    Measured before this test existed: exactly one file in the tree carried a
+    concrete non-current URL, and ``check-release-tag.sh v2.1.0`` on an
+    otherwise release-ready copy exited 1 on it.  That gate runs inside
+    ``publish.yml`` and, on tag runs, ``docker.yml`` -- both triggered by the
+    tag -- so the failure would have arrived after the tag was pushed.
+    """
+    version_py = (REPO_ROOT / "src" / "recotem" / "version.py").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r'__version__ = "(\d+)\.(\d+)', version_py)
+    assert match, "could not read MAJOR.MINOR from src/recotem/version.py"
+    expected_mm = f"{match.group(1)}.{match.group(2)}"
+
+    # Mirrors SITE_ROOTS in the script.  A root added there and not here makes
+    # this test vouch for less than the gate checks, so keep them in step.
+    roots = (
+        "src",
+        "tests",
+        "examples",
+        "helm",
+        ".claude",
+        ".github",
+        "README.md",
+        "CLAUDE.md",
+        "CONTRIBUTING.md",
+        "pyproject.toml",
+    )
+    pattern = re.compile(r"recotem\.org/(\d+\.\d+)/")
+
+    def _files() -> list[Path]:
+        out: list[Path] = []
+        for rel in roots:
+            path = REPO_ROOT / rel
+            if path.is_file():
+                out.append(path)
+            elif path.is_dir():
+                out.extend(
+                    p
+                    for p in path.rglob("*")
+                    if p.is_file()
+                    and not p.is_symlink()
+                    and "__pycache__" not in p.parts
+                )
+        return out
+
+    stale: list[str] = []
+    total = 0
+    for path in _files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for found in pattern.finditer(line):
+                total += 1
+                if found.group(1) != expected_mm:
+                    rel_path = path.relative_to(REPO_ROOT)
+                    stale.append(f"{rel_path}:{lineno}: {found.group(0)}")
+
+    # The gate's own vacuity guard, restated: finding nothing means the scan
+    # stopped matching, not that there is nothing to check.
+    assert total, (
+        "no recotem.org/MAJOR.MINOR/ URL found under any scanned root, so this "
+        "test is vouching for nothing. Either the URLs moved or the pattern "
+        "stopped matching what the script matches."
+    )
+    assert not stale, (
+        f"these name a documentation line other than {expected_mm}, which is "
+        "what check-release-tag.sh refuses a tag over -- and it runs on the "
+        "tag, so the refusal arrives after the tag exists:\n  " + "\n  ".join(stale)
+    )

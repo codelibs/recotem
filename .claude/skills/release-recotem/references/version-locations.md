@@ -174,11 +174,17 @@ echo "OK: every documentation-site URL now names $NEW_MM"
 bump states below, and the reason the survey is printed rather than counted.
 
 One consequence of the gate's `tests` root is worth knowing before it costs a
-tag: a test that asserts on a *stale* site URL by spelling it out —
-`"…:recotem.org/2.0/"` in an expected-output assertion — is, to both this
-command and `check-release-tag.sh`, indistinguishable from a stale URL. The
-scan is a plain grep; it has no notion of a string being quoted inside a test.
-Build such fixtures so the literal never appears in the file.
+tag: a test that asserts on a *stale* site URL by spelling it out — an
+expected-output assertion containing `recotem.org/` followed by a literal
+older `MAJOR.MINOR` — is, to both this command and `check-release-tag.sh`,
+indistinguishable from a stale URL. The scan is a plain grep; it has no notion
+of a string being quoted inside a test. Build such fixtures so the literal
+never appears in the file.
+
+That rule binds this paragraph too, which is why it describes the shape in
+words instead of showing it. Spelling the example out cost exactly one tag:
+`check-release-tag.sh v2.1.0` refused the release naming this file, because
+the illustration was itself the only stale URL in the tree.
 
 The release skill's own files deliberately carry **no** concrete
 `recotem.org/<number>/` string — only `X.Y` placeholders and `${OLD_MM}` /

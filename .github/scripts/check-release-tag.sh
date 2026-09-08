@@ -347,7 +347,7 @@ PIN_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${PIN_RE}" examples 2>/dev/null || 
 # file.  That page named PREVIOUS releases -- `ghcr.io/codelibs/recotem:2.0.0`
 # as the subject of a sentence, not as something a reader deploys -- so
 # scanning it made the gate and the release mutually unsatisfiable.  Its
-# successor is https://recotem.org/2.1/docs/upgrading, outside this repository
+# successor is https://recotem.org/2.1/docs/upgrading.html, outside this repository
 # and outside this scan, so no filter is needed to keep the two satisfiable.
 LABEL_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${LABEL_RE}" examples 2>/dev/null || true)"
 

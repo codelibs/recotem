@@ -1,6 +1,6 @@
 """Verify ``recotem_v1_requests_total`` labels are set by the route handler.
 
-The metric ``status`` label values documented in ``https://recotem.org/2.1/docs/operations``
+The metric ``status`` label values documented in ``https://recotem.org/2.1/docs/operations.html``
 must be reachable from the HTTP handler — otherwise alert rules filtering
 on ``status="unavailable"`` / ``status="unknown_user"`` /
 ``status="recipe_not_found"`` silently never fire.  This file exercises
@@ -218,7 +218,7 @@ def test_recommend_related_records_no_candidates() -> None:
 # ``user_features``/``item_features`` to a model that cannot act on them
 # (FEATURES_NOT_SUPPORTED), or sending a value that cannot be standardized
 # (FEATURE_VALUE_UNUSABLE). ``_request_metrics`` defaults the label to
-# "error", which https://recotem.org/2.1/docs/operations's "Recommend error rate" row pages
+# "error", which https://recotem.org/2.1/docs/operations.html's "Recommend error rate" row pages
 # on-call at 10% — a threshold reserved for genuine 500s. These tests pin
 # the two branches to their own labels so a client cannot page on-call.
 

@@ -87,7 +87,7 @@ default. Run them with `uv run pytest tests -m slow`.
 A third-party DataSource plugin is a small package that declares an entry
 point and provides a class with `type_name`, `Config`, `extras_required`, and
 a `fetch(self, ctx) -> pd.DataFrame` method. See
-`https://recotem.org/2.1/docs/plugin-authoring` for the walkthrough and
+`https://recotem.org/2.1/docs/plugin-authoring.html` for the walkthrough and
 `examples/plugins/echo-source/` for a runnable template.
 
 ## Security

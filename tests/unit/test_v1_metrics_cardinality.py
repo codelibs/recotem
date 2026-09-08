@@ -19,7 +19,7 @@ Design:
   it asserts only that the metric is consistent (one Prometheus line per
   distinct label-set, not one line per request).  For operators that need a
   strict cardinality cap, the recommendation is to add a pre-routing name
-  allow-list; that is a separate concern documented in https://recotem.org/2.1/docs/operations.
+  allow-list; that is a separate concern documented in https://recotem.org/2.1/docs/operations.html.
 """
 
 from __future__ import annotations

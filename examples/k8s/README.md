@@ -180,7 +180,7 @@ CronJob equivalent of `cronjob.yaml`.
 
 The chart has no bootstrap Job — the first-artifact problem described above
 applies to it too. See
-[First install: seed an artifact before serve starts](https://recotem.org/2.1/docs/deployment/kubernetes#first-install-seed-an-artifact-before-serve-starts)
+[First install: seed an artifact before serve starts](https://recotem.org/2.1/docs/deployment/kubernetes.html#first-install-seed-an-artifact-before-serve-starts)
 for the Helm bootstrap sequence.
 
 ## Production checklist
@@ -195,5 +195,5 @@ for the Helm bootstrap sequence.
       object-store endpoints you need.
 - [ ] Pipe pod logs to a log aggregator that respects structlog JSON fields.
 - [ ] Wire the Service behind an Ingress / LoadBalancer with TLS.
-- [ ] Read [Operations](https://recotem.org/2.1/docs/operations) for the signing-key
+- [ ] Read [Operations](https://recotem.org/2.1/docs/operations.html) for the signing-key
       rotation runbook before going live.

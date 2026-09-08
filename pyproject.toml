@@ -124,7 +124,7 @@ sqlite = ["sqlalchemy>=2,<3"]
 # interpreter axis is not implied by the platform axis: 3.14 is a supported
 # interpreter (see the classifiers above) with no lightfm-next wheel anywhere.
 # `tests/unit/test_packaging_metadata.py` pins that wheel matrix.
-# See https://recotem.org/2.1/docs/recipe-reference#training.
+# See https://recotem.org/2.1/docs/recipe-reference.html#training.
 bprfm = ["lightfm-next==1.19.0"]
 all = ["recotem[bigquery,postgres,mysql,sqlite,s3,gcs,azure,metrics,bprfm]"]
 

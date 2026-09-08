@@ -96,5 +96,5 @@ uv run recotem train recipe.yaml
 Copy this directory, rename `recotem-echo-source` /
 `recotem_echo:EchoSource` / `type_name = "echo"` to fit your data source,
 and replace `fetch()` with your real data fetch. The
-[plugin-authoring docs](https://recotem.org/2.1/docs/plugin-authoring) walk through the
+[plugin-authoring docs](https://recotem.org/2.1/docs/plugin-authoring.html) walk through the
 full contract.

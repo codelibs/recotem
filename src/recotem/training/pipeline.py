@@ -443,7 +443,7 @@ def _run_training_locked(
     # or on noise.  It is recorded rather than thresholded: the shipped
     # examples hold out 12, 60 and 803 interactions, so any cutoff that flags a
     # genuinely unreliable search also flags the tutorials.  See
-    # https://recotem.org/2.1/docs/operations#choosing-a-model-on-a-small-dataset for how to read it.
+    # https://recotem.org/2.1/docs/operations.html#choosing-a-model-on-a-small-dataset for how to read it.
     n_heldout_interactions = int(X_val_test.nnz)
     n_heldout_users = int(X_val_test.shape[0])
     data_stats["n_heldout_interactions"] = n_heldout_interactions
@@ -1192,7 +1192,7 @@ def _fetch_data(recipe: Recipe, run_id: str) -> pd.DataFrame:
     except Exception as exc:
         # Unexpected exceptions from the datasource path map to DataSourceError
         # (exit 3), not TrainingError (exit 4), per the documented exit-code
-        # contract in https://recotem.org/2.1/docs/operations.
+        # contract in https://recotem.org/2.1/docs/operations.html.
         logger.error(
             "datasource_unexpected_error",
             recipe=recipe.name,
@@ -1244,7 +1244,7 @@ def _cleanse(
                 # Numeric columns require an explicit time_unit to avoid
                 # silent ns-interpretation that maps Unix epoch seconds to
                 # dates near 1970-01-01 00:00:00 rather than their intended
-                # values.  See https://recotem.org/2.1/docs/recipe-reference.
+                # values.  See https://recotem.org/2.1/docs/recipe-reference.html.
                 time_unit = recipe.schema_.time_unit
                 if time_unit is None:
                     raise TrainingError(
@@ -1475,7 +1475,7 @@ def _train_final(
                 "search trial succeeded, because the final matrix differs "
                 "from every trial's matrix. Raising min_frequency on "
                 "high-cardinality feature columns usually resolves it; see "
-                "https://recotem.org/2.1/docs/operations.",
+                "https://recotem.org/2.1/docs/operations.html.",
                 code="feature_cholesky_error",
             ) from exc
         raise

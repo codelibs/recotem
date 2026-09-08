@@ -1080,7 +1080,7 @@ def test_rendered_long_snake_case_event_name_survives(
 def test_rendered_sqlite_timeout_warning_from_the_real_call_site(
     rendered, monkeypatch
 ) -> None:
-    """The warning ``https://recotem.org/2.1/docs/data-sources/sql`` promises must be readable.
+    """The warning ``https://recotem.org/2.1/docs/data-sources/sql.html`` promises must be readable.
 
     ``tests/unit/test_datasource_sql.py`` asserts this event through
     ``capture_logs()``, which bypasses the processor chain -- so it kept

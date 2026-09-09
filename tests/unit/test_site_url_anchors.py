@@ -35,7 +35,21 @@ _SITE_URL = re.compile(
 
 
 def _string_values(tree: ast.AST) -> list[tuple[int, str]]:
-    """Every string literal, with implicit concatenation and f-strings folded."""
+    """Every string literal, with implicit concatenation and f-strings folded.
+
+    ``ast.walk`` yields a ``JoinedStr`` *and*, separately, each ``Constant``
+    inside it, so a value reached both ways would be returned twice -- which
+    reports one offending URL as two and inflates the "how many did we look at"
+    count that guards against a vacuous pass.  The literal parts of an f-string
+    are therefore skipped in their own right; they are already covered by the
+    folded value.
+    """
+    folded_parts = {
+        part
+        for node in ast.walk(tree)
+        if isinstance(node, ast.JoinedStr)
+        for part in node.values
+    }
     out: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.JoinedStr):
@@ -49,25 +63,45 @@ def _string_values(tree: ast.AST) -> list[tuple[int, str]]:
                     ),
                 )
             )
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node not in folded_parts
+        ):
             out.append((node.lineno, node.value))
     return out
+
+
+def _underscore_anchor_offenders(source: str, label: str) -> tuple[list[str], int]:
+    """Report site anchors containing ``_`` in every URL ``source`` assembles.
+
+    The whole detector lives here -- string extraction, URL match, anchor
+    shape -- so that the control below exercises the same code path the real
+    scan does.  Returns the offenders and how many anchored URLs were examined,
+    because "found nothing" and "looked at nothing" are different results.
+    """
+    offenders: list[str] = []
+    checked = 0
+    for lineno, value in _string_values(ast.parse(source)):
+        for match in _SITE_URL.finditer(value):
+            anchor = match.group(1)
+            if anchor is None:
+                continue
+            checked += 1
+            if "_" in anchor:
+                offenders.append(f"{label}:{lineno}: {match.group(0)}")
+    return offenders, checked
 
 
 def test_no_emitted_site_anchor_contains_an_underscore() -> None:
     offenders: list[str] = []
     checked = 0
     for path in sorted(SRC.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for lineno, value in _string_values(tree):
-            for match in _SITE_URL.finditer(value):
-                anchor = match.group(1)
-                if anchor is None:
-                    continue
-                checked += 1
-                if "_" in anchor:
-                    rel = path.relative_to(SRC.parent.parent)
-                    offenders.append(f"{rel}:{lineno}: {match.group(0)}")
+        found, seen = _underscore_anchor_offenders(
+            path.read_text(encoding="utf-8"), str(path.relative_to(SRC.parent.parent))
+        )
+        offenders.extend(found)
+        checked += seen
 
     assert checked, (
         "no anchored recotem.org URL found anywhere under src/, so this test is "
@@ -81,28 +115,63 @@ def test_no_emitted_site_anchor_contains_an_underscore() -> None:
     )
 
 
-def test_the_scan_sees_a_url_split_across_source_lines() -> None:
-    """Anti-vacuity control.
+# Both fixtures below spell the URL with '.html', and must keep it.  tests/ is
+# one of check-release-tag.sh's SITE_ROOTS, and section 4c matches the URL
+# wherever it appears -- it cannot tell sample source inside a string literal
+# from a real link, so an extensionless one here refuses the release tag.  The
+# script elides its own counter-examples for the same reason.  Nothing in these
+# tests depends on the suffix.
+_PLANTED_BAD = (
+    "raise E(\n"
+    '    f"... the remedy for {name} is documented at "\n'
+    '    f"https://recotem.org/2.1/docs/operations.html"\n'
+    '    f"#recotem-train-exits-4-with-feature_axis_error"\n'
+    ")\n"
+)
 
-    The defect this file exists for was invisible to every line-based scan
-    because the version segment and the anchor sat on different source lines.
-    A scan that quietly stopped folding concatenation would pass the test above
-    for the wrong reason, so assert that the folding still happens.
+_PLANTED_GOOD = _PLANTED_BAD.replace("feature_axis_error", "feature-axis-error")
+
+
+def test_the_scan_catches_a_planted_offender_split_across_source_lines() -> None:
+    """Positive control for the scan above.
+
+    The defect this file exists for was invisible to every line-based scan: the
+    version segment and the anchor sat on different source lines, so no `grep`
+    ever saw the whole URL.  The fixture reproduces that shape -- and adds a
+    placeholder, because that is how the message in ``training/features.py`` is
+    really written.
+
+    This asserts on the detector's *output*, not on an intermediate value.  An
+    earlier version of this control only checked that two fragments had been
+    folded into one string, which is something CPython's parser does on its own:
+    measured, that assertion still passed with the folding branch of
+    :func:`_string_values` deleted, so it could not fail for any reason the scan
+    cares about.
     """
-    # The URL in the fixture carries '.html', and must keep it.  tests/ is one
-    # of check-release-tag.sh's SITE_ROOTS, so a spelled-out extensionless page
-    # URL here -- even as sample source inside a string -- is a hit that scan
-    # reads, and it refuses the release tag over it.  The script elides its own
-    # counter-examples for exactly this reason.  Nothing here depends on the
-    # suffix: what is asserted is that the two fragments were folded into one
-    # value, which no line-based scan can do.
-    tree = ast.parse(
-        'X = (\n    "https://recotem.org/2.1/docs/operations.html"\n'
-        '    "#recotem-train-exits-4-with-feature_axis_error"\n)\n'
+    offenders, checked = _underscore_anchor_offenders(_PLANTED_BAD, "<planted>")
+
+    assert checked, (
+        "the planted URL was not recognised as an anchored recotem.org link at "
+        "all, so the scan above is looking at nothing -- _SITE_URL or the string "
+        "extraction stopped matching."
     )
-    values = [v for _lineno, v in _string_values(tree)]
-    assert any("operations.html#recotem-train" in v for v in values), (
-        "adjacent string fragments are no longer folded into one value, so the "
-        "scan above cannot see a URL written the way this codebase writes long "
-        f"messages: {values}"
+    assert len(offenders) == 1, (
+        "the scan no longer reports an underscored anchor assembled from "
+        f"fragments on separate source lines: {offenders}"
+    )
+    assert "feature_axis_error" in offenders[0], offenders
+
+
+def test_the_scan_passes_the_same_url_spelled_as_a_slug() -> None:
+    """Negative control: the scan must not flag a correctly spelled anchor.
+
+    Without this, a detector that reported *every* anchor would satisfy the
+    positive control while making the real scan unusable.
+    """
+    offenders, checked = _underscore_anchor_offenders(_PLANTED_GOOD, "<planted>")
+
+    assert checked, "the slug-spelled URL was not recognised as an anchored link"
+    assert not offenders, (
+        "a hyphenated anchor is what the site actually generates and must not be "
+        f"reported: {offenders}"
     )

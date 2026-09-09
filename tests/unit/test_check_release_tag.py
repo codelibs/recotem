@@ -1579,3 +1579,259 @@ def test_compiled_modules_beside_the_source_do_not_fail_the_scan(
         "an otherwise release-ready tree:\n" + proc.stdout + proc.stderr
     )
     assert "Binary file" not in proc.stdout, proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# A documentation URL assembled across source lines
+#
+# Sections 4b and 4c both grep, and grep reads one line at a time.  Python
+# folds implicit string concatenation, so a URL written across a wrap point is
+# a value no line of the file contains -- and neither scan can see it.  The
+# tree really carries one such URL today (in a `TrainingError` message), which
+# is what makes the shape ordinary rather than contrived: any formatter that
+# wraps a long error string can produce it.
+#
+# What the scans have to read is therefore the value the *user* receives, not
+# the line it was typed on.
+# ---------------------------------------------------------------------------
+
+
+def _write_split_site_url(root: Path, first: str, second: str) -> None:
+    """Write a site URL built from two literals, one per source line.
+
+    Python folds implicit concatenation, so what the message carries is
+    ``first + second`` -- while no single line of the file contains it.  The
+    comment between the halves mirrors the real occurrence in
+    ``src/recotem/training/features.py``, where the anchor is explained before
+    it is appended.
+    """
+    (root / "src" / "recotem" / "datasource" / "csv.py").write_text(
+        "def _fail() -> None:\n"
+        "    raise DataSourceError(\n"
+        '        "CSV source could not be read; see "\n'
+        f'        "{first}"\n'
+        "        # the halves are split by a comment, as in the real occurrence\n"
+        f'        "{second}"\n'
+        "    )\n",
+        encoding="utf-8",
+    )
+
+
+def _csv_source_lines(root: Path) -> list[str]:
+    return (
+        (root / "src" / "recotem" / "datasource" / "csv.py")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+
+
+def test_a_stale_site_url_assembled_across_lines_is_refused(tmp_path: Path) -> None:
+    """The version segment itself falls across the wrap, so no line carries it."""
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    major, minor = STALE_MM.split(".")
+    _write_split_site_url(
+        tmp_path,
+        f"https://recotem.org/{major}.",
+        f"{minor}/docs/data-sources/csv.html",
+    )
+
+    # Prove the fixture really is the cross-line shape: a line-based scan that
+    # could see this URL would make the assertion below pass for the wrong
+    # reason.  This is the check the first draft of this test lacked.
+    assert not any(
+        f"recotem.org/{STALE_MM}/" in line for line in _csv_source_lines(tmp_path)
+    ), "the fixture put the whole segment on one line, so grep would catch it"
+
+    proc = _run(script, "v2.1.0")
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 1, combined
+    assert "naming another version" in combined, combined
+
+
+def test_an_extensionless_page_url_assembled_across_lines_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Each half, read alone, looks like a directory URL -- which 4c exempts.
+
+    So the halves do not merely hide the offence from the scan; they disguise
+    it as the one case the scan is required to let through.
+    """
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_split_site_url(
+        tmp_path,
+        f"https://recotem.org/{RELEASE_MM}/docs/",
+        "data-sources/csv",
+    )
+
+    assert not any(
+        f"recotem.org/{RELEASE_MM}/docs/data-sources" in line
+        for line in _csv_source_lines(tmp_path)
+    ), "the fixture put the whole page URL on one line"
+
+    proc = _run(script, "v2.1.0")
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 1, combined
+    assert "missing the '.html' suffix" in combined, combined
+
+
+def test_a_correct_url_split_before_its_anchor_passes(tmp_path: Path) -> None:
+    """Control: the shape the tree carries today must keep passing.
+
+    ``src/recotem/training/features.py`` splits after ``.html`` and before the
+    ``#anchor``, so both halves are innocent and so is the assembled value.
+    Without this case the two above would also pass if the new scan simply
+    refused every tree whose URLs span a wrap.
+    """
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_split_site_url(
+        tmp_path,
+        f"https://recotem.org/{RELEASE_MM}/docs/operations.html",
+        "#recotem-train-exits-4-with-feature-axis-error.",
+    )
+
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_an_interpolated_version_segment_is_not_read_as_a_version(
+    tmp_path: Path,
+) -> None:
+    """Control: a segment that is computed, not written, is nobody's stale URL.
+
+    This file and the fixtures in it build their URLs from ``RELEASE_MM``, so a
+    scan that resolved an f-string placeholder to *something* version-shaped
+    would report the test suite as stale on every run.
+    """
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    (tmp_path / "src" / "recotem" / "datasource" / "sql.py").write_text(
+        "LINE = '2.0'\n"
+        "\n"
+        "def _fail() -> None:\n"
+        '    raise DataSourceError(f"see https://recotem.org/{LINE}/docs/x")\n',
+        encoding="utf-8",
+    )
+
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# 2b must watch every path sections 3, 4, 4b and 4c read
+#
+# 2b existed to stop the script vouching for bytes nobody is about to publish.
+# It watched the version declarations and `examples/` only, while 4b and 4c
+# read eight more roots -- so a stale URL could be committed, repaired in the
+# working tree alone, and the script would print "every recotem.org/
+# documentation URL in the tree names the <line> line" and "Those files are
+# committed, so the lines above describe the tree v2.1.0 would publish".  Both
+# false, and rc=0.
+#
+# CI is unaffected: a fresh checkout is clean.  This is the local pre-tag
+# rehearsal, which the script's own comment calls the run "the procedure tells
+# an operator to trust".
+# ---------------------------------------------------------------------------
+
+
+def _write_readme_site_url(root: Path, url: str) -> None:
+    (root / "README.md").write_text(f"# recotem\n\nSee {url}\n", encoding="utf-8")
+
+
+@requires_git
+@pytest.mark.parametrize(
+    ("relpath", "write"),
+    [
+        ("README.md", _write_readme_site_url),
+        ("src/recotem/datasource/csv.py", _write_site_url),
+    ],
+)
+def test_an_uncommitted_repair_to_a_scanned_file_is_refused(
+    tmp_path: Path, relpath: str, write: object
+) -> None:
+    script = _make_tree(tmp_path)
+    write(tmp_path, f"https://recotem.org/{STALE_MM}/docs/security.html")
+    _commit_everything(tmp_path)
+
+    # Repair the working tree and nothing else.  The commit -- the thing a tag
+    # names -- still carries the stale URL.
+    write(tmp_path, f"https://recotem.org/{RELEASE_MM}/docs/security.html")
+    committed = _git(tmp_path, "show", f"HEAD:{relpath}").stdout
+    assert f"recotem.org/{STALE_MM}/" in committed, committed
+
+    proc = _run(script, "v2.1.0")
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 1, combined
+    assert "differ from the commit" in combined, combined
+    assert relpath in combined, combined
+    # The worktree-derived claims must not be printed at all: printing them is
+    # what made the old behaviour look correct.
+    assert "OK:" not in combined, combined
+    assert "Those files are committed" not in combined, combined
+
+
+# ---------------------------------------------------------------------------
+# An unreadable pyproject.toml is named, not traced
+# ---------------------------------------------------------------------------
+
+
+def test_pyproject_without_a_project_version_is_refused_by_name(
+    tmp_path: Path,
+) -> None:
+    """It already failed closed; what it did not do was say what was wrong.
+
+    A `KeyError: 'version'` traceback from a heredoc names neither the file nor
+    the key, and reads like a broken script rather than a malformed manifest.
+    """
+    script = _make_tree(tmp_path, pyproject=None)
+    proc = _run(script, "v2.1.0")
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 1, combined
+    assert "Traceback" not in combined, combined
+    assert "Cannot read the project version from pyproject.toml" in combined, combined
+
+
+def test_malformed_pyproject_toml_is_refused_by_name(tmp_path: Path) -> None:
+    script = _make_tree(tmp_path)
+    (tmp_path / "pyproject.toml").write_text("[project\nname =", encoding="utf-8")
+    proc = _run(script, "v2.1.0")
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 1, combined
+    assert "Traceback" not in combined, combined
+    assert "Cannot read the project version from pyproject.toml" in combined, combined
+
+
+# ---------------------------------------------------------------------------
+# The headline names every class of failure the body reports
+#
+# `::error::` is the line an operator reads first, and on a tree whose only
+# fault was a documentation URL it used to read `Tag 'v2.1.0'.` -- a sentence
+# with no predicate.  The two URL classes populated the body and no clause.
+# ---------------------------------------------------------------------------
+
+
+def test_a_stale_site_url_is_named_in_the_headline(tmp_path: Path) -> None:
+    script = _make_tree(tmp_path, site_url_version=STALE_MM)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "::error::Tag 'v2.1.0' names another documentation line." in proc.stdout
+
+
+def test_an_extensionless_site_url_is_named_in_the_headline(tmp_path: Path) -> None:
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_site_url(tmp_path, f"https://recotem.org/{RELEASE_MM}/docs/security")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert (
+        "::error::Tag 'v2.1.0' carries a documentation URL that cannot resolve."
+        in proc.stdout
+    )
+
+
+def test_the_headline_joins_several_classes(tmp_path: Path) -> None:
+    """Control: the clause list still reads as one sentence, not a list."""
+    script = _make_tree(tmp_path, site_url_version=STALE_MM, pyproject="2.0.0")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert (
+        "::error::Tag 'v2.1.0' names another documentation line, and does not "
+        "match the project version: pyproject.toml (2.0.0)." in proc.stdout
+    )

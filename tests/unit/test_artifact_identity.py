@@ -601,3 +601,150 @@ def test_watcher_path_is_silent_when_the_recipe_matches(tmp_path: Path) -> None:
 
     assert registry.get("demo").loaded is True
     assert not _warnings(logs), f"a matching hash must be silent; got {logs}"
+
+
+# ---------------------------------------------------------------------------
+# The comparison must use the recipe as it is ON DISK NOW, not the body the
+# process parsed at startup.
+#
+# The two tests above build the watcher with a recipe_hash that cannot match
+# and never touch the YAML after ``start()``, so both pass whether the
+# comparison reads the startup body or the current one.  Everything below
+# edits the YAML *while the watcher is running*, which is the only way the
+# two differ -- and the way an operator actually meets this warning.
+# ---------------------------------------------------------------------------
+
+
+def _rewrite_recipe_cutoff(yaml_path: Path, cutoff: int) -> None:
+    """Change one value, so the recipe hash changes for a real reason."""
+    text = yaml_path.read_text()
+    assert "  n_trials: 1\n" in text
+    yaml_path.write_text(
+        text.replace("  n_trials: 1\n", f"  n_trials: 1\n  cutoff: {cutoff}\n")
+    )
+
+
+def test_warning_clears_once_the_artifact_catches_up_with_the_edited_recipe(
+    tmp_path: Path,
+) -> None:
+    """A retrain that makes the two agree must silence the warning.
+
+    Regression: the watcher re-parses an edited YAML on every scan but only
+    adopted the parsed body inside its two YAML-error-recovery branches, so a
+    recipe that always parsed cleanly kept the body read at process start
+    forever.  ``current_recipe_hash`` was therefore the STARTUP hash, and an
+    operator who edited a recipe and retrained -- making artifact and recipe
+    agree -- was told on every hot-swap to "Retrain to make them agree", with
+    no way to clear it short of restarting the process.
+    """
+    from recotem._recipe_hash import compute_recipe_hash
+    from recotem.recipe.loader import load_recipe
+
+    artifact_path = tmp_path / "model.recotem"
+    _write_artifact(artifact_path, recipe_name="demo", tag="v1", recipe_hash="0" * 64)
+    watcher, registry, _ = _build_watcher(tmp_path, "demo", artifact_path)
+    yaml_path = tmp_path / "recipes" / "demo.yaml"
+
+    with structlog.testing.capture_logs() as logs:
+        watcher.start()
+        try:
+            assert _wait_until(
+                lambda: (e := registry.get("demo")) is not None and e.loaded
+            ), "the artifact must load"
+
+            # The operator edits the recipe, then retrains: the new artifact
+            # carries the hash of the recipe AS EDITED.
+            _rewrite_recipe_cutoff(yaml_path, 15)
+            edited_hash = compute_recipe_hash(load_recipe(yaml_path))
+            _n = len(logs)
+            assert _wait_until(
+                lambda: any(r.get("event") == "recipe_loaded" for r in logs[_n:])
+            ), "the watcher must re-scan the edited YAML"
+
+            marker = len(logs)
+            _write_artifact(
+                artifact_path, recipe_name="demo", tag="v2", recipe_hash=edited_hash
+            )
+            assert _wait_until(
+                lambda: (
+                    (e := registry.get("demo")) is not None
+                    and e.recommender == {"tag": "v2"}
+                )
+            ), "the caught-up artifact must hot-swap in"
+        finally:
+            watcher.stop()
+            watcher.join(timeout=3.0)
+
+    after = _warnings(logs[marker:])
+    assert not after, (
+        "artifact and recipe agree -- the artifact was trained FROM the edited "
+        "recipe -- yet the watcher still warned. It is comparing against the "
+        f"recipe parsed at startup, not the one on disk. Emitted: {after}"
+    )
+
+
+def test_warning_fires_when_a_live_edit_makes_the_served_artifact_stale(
+    tmp_path: Path,
+) -> None:
+    """The positive control for the test above, and the other failure direction.
+
+    An edit made while the watcher is running must be noticed.  Reading the
+    startup body instead means the one condition this warning exists to
+    detect -- a recipe edited under a running server -- is the one it misses.
+    """
+    from recotem._recipe_hash import compute_recipe_hash
+    from recotem.recipe.loader import load_recipe
+
+    artifact_path = tmp_path / "model.recotem"
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir(exist_ok=True)
+    yaml_path = _write_recipe_yaml(recipes_dir, "demo", artifact_path)
+    startup_hash = compute_recipe_hash(load_recipe(yaml_path))
+
+    # Starts in agreement, so nothing can warn for a pre-existing reason.
+    _write_artifact(
+        artifact_path, recipe_name="demo", tag="v1", recipe_hash=startup_hash
+    )
+    watcher, registry, _ = _build_watcher(tmp_path, "demo", artifact_path)
+
+    with structlog.testing.capture_logs() as logs:
+        watcher.start()
+        try:
+            assert _wait_until(
+                lambda: (e := registry.get("demo")) is not None and e.loaded
+            )
+            assert not _warnings(logs), "must start silent -- they agree"
+
+            # Edit the recipe under the running watcher, then let an artifact
+            # still carrying the OLD hash swap in.  That artifact is now stale.
+            _rewrite_recipe_cutoff(yaml_path, 15)
+            _n = len(logs)
+            assert _wait_until(
+                lambda: any(r.get("event") == "recipe_loaded" for r in logs[_n:])
+            ), "the watcher must re-scan the edited YAML"
+
+            marker = len(logs)
+            _write_artifact(
+                artifact_path, recipe_name="demo", tag="v2", recipe_hash=startup_hash
+            )
+            assert _wait_until(
+                lambda: (
+                    (e := registry.get("demo")) is not None
+                    and e.recommender == {"tag": "v2"}
+                )
+            )
+        finally:
+            watcher.stop()
+            watcher.join(timeout=3.0)
+
+    fired = _warnings(logs[marker:])
+    assert fired, (
+        "the recipe was edited while the watcher ran and a stale artifact then "
+        "loaded, and nothing warned. The comparison is using the startup body, "
+        "which by construction still matches the stale artifact."
+    )
+    edited_hash = compute_recipe_hash(load_recipe(yaml_path))
+    assert fired[0]["current_recipe_hash"] == edited_hash[:12], (
+        "current_recipe_hash must be the hash of the recipe ON DISK; got "
+        f"{fired[0]['current_recipe_hash']}, startup was {startup_hash[:12]}"
+    )

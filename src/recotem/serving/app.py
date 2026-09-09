@@ -1167,7 +1167,7 @@ def _try_load_artifact(
         "recipe_loaded",
         name=recipe.name,
         kid=hdr.kid,
-        trained_at=header_dict.get("trained_at"),
+        trained_at=escape_control_chars(str(header_dict.get("trained_at"))),
         best_class=header_dict.get("best_class"),
     )
     return entry, "ok"

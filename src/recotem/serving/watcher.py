@@ -52,6 +52,7 @@ from recotem._irspack_compat import (
     SKEW_MSG_PREFIX,
     check_artifact_irspack_version,
 )
+from recotem._log_safe import escape_control_chars
 from recotem._log_safe import format_kid_for_log as _format_kid_for_log
 from recotem._metrics_watcher import inc_recipes_dir_scan_failure as _inc_scan_failure
 from recotem.artifact.format import SIZE_CAP_MSG_MARKER, ArtifactError
@@ -1165,7 +1166,7 @@ class ArtifactWatcher(threading.Thread):
             "artifact_hot_swapped",
             name=name,
             kid=_format_kid_for_log(entry.kid),
-            trained_at=entry.trained_at,
+            trained_at=escape_control_chars(str(entry.trained_at)),
         )
 
     def _build_entry(

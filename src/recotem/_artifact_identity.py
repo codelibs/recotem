@@ -137,10 +137,14 @@ def check_artifact_recipe_hash(header_dict: Any, *, recipe: Any, name: str) -> N
     retrain, restart serve. The old artifact loads, ``/v1/health`` reports
     ``ok``, and ``/v1/recipes/{name}`` reports the *artifact's*
     ``algorithms`` / ``cutoff`` / ``metric``, which now contradict the recipe on
-    disk with nothing marking them as historical. Every block the running
-    server holds comes from the body it parsed for the model it is serving, so
-    the whole response is of a piece: it is the *older* recipe throughout, and
-    the warning is the only thing that says so.
+    disk with nothing marking them as historical, and this warning is the only
+    thing that says so.
+
+    While it is firing the response is not of a piece, and the split is worth
+    knowing: everything read out of the *artifact* -- the model, and the header
+    fields ``/v1/recipes/{name}`` reports -- is the older recipe, while
+    ``item_metadata`` is read from the recipe on disk at the moment the model
+    was loaded. The two agree again as soon as a retrain silences this warning.
 
     **Warn, never refuse.** Unlike ``recipe_name``, a hash difference is not a
     contradiction -- it is the expected state whenever a recipe is edited in a

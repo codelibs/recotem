@@ -95,9 +95,22 @@ are outside it:
 | musl Linux (Alpine), either arch | `scikit-learn` — no `musllinux` wheel at any version in the supported range | falls back to the sdist and fails in its meson build: `Unknown compiler(s)` |
 
 `irspack` does publish `musllinux` wheels, and so does every other compiled
-dependency — `scikit-learn` alone is why Alpine does not work. It ships an
-sdist, so a musl host with a full C/C++ toolchain, meson and OpenMP can build
-it, but that is a build, not an install.
+dependency in the core set — `scikit-learn` alone is why Alpine does not work.
+It ships an sdist, so a musl host with a full C/C++ toolchain, meson and
+OpenMP can build it, but that is a build, not an install.
+
+The table above is about `pip install recotem`. One **extra** is narrower than
+the core set: `bprfm` installs `lightfm-next`, which publishes wheels only for
+macOS (both architectures), `manylinux` x86-64 and `musllinux` x86-64. On
+**glibc Linux arm64** and **Windows x86-64** — both inside the supported set
+above — `pip install "recotem[bprfm]"` and `"recotem[all]"` fall back to the
+sdist and need a C compiler:
+
+    error: command 'gcc' failed: No such file or directory
+
+Every other extra is pure Python or already covered. `pip install recotem`
+itself is unaffected on those platforms, and so is the published Docker image,
+which compiles `lightfm-next` in its build stage.
 
 Use the Docker image (which is glibc-based) on all three.
 
@@ -169,7 +182,7 @@ for the source of truth and
 | Variable | Required by | Purpose |
 |---|---|---|
 | `RECOTEM_SIGNING_KEYS` | `train` and `serve` | HMAC sign / verify artifact files (server keeps plaintext; needed for both sides) |
-| `RECOTEM_API_KEYS` | `serve` | Authenticate `/v1/recipes/*` callers (server keeps **hash** only) |
+| `RECOTEM_API_KEYS` | `serve` (optional) | Authenticate `/v1/recipes/*` callers (server keeps **hash** only). Omit it and authentication is **disabled** — every `/v1/recipes/*` call is served without a key, and the bind is forced to loopback so it cannot be reached off the host |
 | `X-API-Key: <plaintext>` | HTTP clients | Sent by clients on every `/v1/recipes/*` call; server re-hashes and compares |
 
 Both variables accept multiple comma-separated entries (`kid:value,kid2:value,…`)

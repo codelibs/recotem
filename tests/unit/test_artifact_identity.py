@@ -14,6 +14,7 @@ than swallowed by a neighbouring branch.  These tests pin all of that.
 
 from __future__ import annotations
 
+import os
 import time
 import types
 from pathlib import Path
@@ -616,12 +617,23 @@ def test_watcher_path_is_silent_when_the_recipe_matches(tmp_path: Path) -> None:
 
 
 def _rewrite_recipe_cutoff(yaml_path: Path, cutoff: int) -> None:
-    """Change one value, so the recipe hash changes for a real reason."""
+    """Change one value, so the recipe hash changes for a real reason.
+
+    The watcher re-parses a recipe only when its ``st_mtime`` differs from the
+    one it cached (``_yaml_mtime_cache``), so a rewrite that lands in the same
+    mtime tick as the original write is invisible to it and the scan never
+    re-parses.  Local filesystems here resolve every consecutive write
+    distinctly, but a CI runner's does not have to, and a test that depends on
+    that resolution fails on the runner and nowhere else.  Push the mtime
+    forward explicitly so the edit is observable regardless of granularity.
+    """
     text = yaml_path.read_text()
     assert "  n_trials: 1\n" in text
     yaml_path.write_text(
         text.replace("  n_trials: 1\n", f"  n_trials: 1\n  cutoff: {cutoff}\n")
     )
+    bumped = os.stat(yaml_path).st_mtime + 10
+    os.utime(yaml_path, (bumped, bumped))
 
 
 def test_warning_clears_once_the_artifact_catches_up_with_the_edited_recipe(

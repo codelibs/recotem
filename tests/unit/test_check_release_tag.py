@@ -40,6 +40,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -1745,7 +1746,7 @@ def _write_readme_site_url(root: Path, url: str) -> None:
     ],
 )
 def test_an_uncommitted_repair_to_a_scanned_file_is_refused(
-    tmp_path: Path, relpath: str, write: object
+    tmp_path: Path, relpath: str, write: Callable[[Path, str], None]
 ) -> None:
     script = _make_tree(tmp_path)
     write(tmp_path, f"https://recotem.org/{STALE_MM}/docs/security.html")

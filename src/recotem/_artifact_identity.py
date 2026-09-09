@@ -137,16 +137,23 @@ def check_artifact_recipe_hash(header_dict: Any, *, recipe: Any, name: str) -> N
     retrain, restart serve. The old artifact loads, ``/v1/health`` reports
     ``ok``, and ``/v1/recipes/{name}`` reports the *artifact's*
     ``algorithms`` / ``cutoff`` / ``metric``, which now contradict the recipe on
-    disk with nothing marking them as historical. Blocks that reach the model
-    are stale while blocks read at serve time are not, so a response can be a
-    hybrid: fresh ``item_metadata`` joined onto an old model.
+    disk with nothing marking them as historical. Every block the running
+    server holds comes from the body it parsed for the model it is serving, so
+    the whole response is of a piece: it is the *older* recipe throughout, and
+    the warning is the only thing that says so.
 
     **Warn, never refuse.** Unlike ``recipe_name``, a hash difference is not a
     contradiction -- it is the expected state whenever a recipe is edited in a
-    way that does not require retraining (a comment, a rename, a serve-side
-    ``item_metadata`` field), and serving the last-trained model is the correct
-    default. Refusing would turn a routine edit into an outage. The operator
-    just has to be able to see it, which today they cannot.
+    way that does not require retraining (a rename, a ``cleansing`` threshold
+    relaxed below what the data already satisfies), and serving the
+    last-trained model is the correct default. Refusing would turn a routine
+    edit into an outage. The operator just has to be able to see it, which
+    today they cannot.
+
+    Note which edits *cannot* reach here: the hash is taken over the recipe's
+    parsed ``model_dump``, so a comment, a whitespace change and a reordering
+    of mapping keys all canonicalise to the same digest and never warn. Only a
+    change to a *value* does.
 
     Absent or non-string ``recipe_hash`` returns silently: pre-2.0 artifacts
     predate the field, and ``check_artifact_recipe_name`` already warns once

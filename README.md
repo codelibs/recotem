@@ -100,16 +100,24 @@ It ships an sdist, so a musl host with a full C/C++ toolchain, meson and
 OpenMP can build it, but that is a build, not an install.
 
 The table above is about `pip install recotem`. One **extra** is narrower than
-the core set: `bprfm` installs `lightfm-next`, which publishes wheels only for
-macOS (both architectures), `manylinux` x86-64 and `musllinux` x86-64. On
-**glibc Linux arm64** and **Windows x86-64** — both inside the supported set
-above — `pip install "recotem[bprfm]"` and `"recotem[all]"` fall back to the
-sdist and need a C compiler:
+the core set: `bprfm` installs `lightfm-next`, whose wheels are narrower than
+recotem's support matrix on two independent axes.
+
+*Platform*: wheels exist only for macOS (both architectures), `manylinux`
+x86-64 and `musllinux` x86-64, so **glibc Linux arm64** and **Windows x86-64**
+fall back to the sdist.
+
+*Interpreter*: wheels exist only for **CPython 3.12 and 3.13**, so **3.14**
+falls back to the sdist on *every* platform — including the ones listed as
+covered above. The interpreter axis is not implied by the platform axis.
+
+In either case `pip install "recotem[bprfm]"` and `"recotem[all]"` build the C
+extension from source and need a C compiler:
 
     error: command 'gcc' failed: No such file or directory
 
 Every other extra is pure Python or already covered. `pip install recotem`
-itself is unaffected on those platforms, and so is the published Docker image,
+itself is unaffected in both cases, and so is the published Docker image,
 which compiles `lightfm-next` in its build stage.
 
 Use the Docker image (which is glibc-based) on all three.

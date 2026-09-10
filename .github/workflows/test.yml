@@ -18,12 +18,32 @@ on:
   pull_request:
     branches:
       - main
+    # These must cover every tree the suite READS, not just the Python it
+    # imports.  Many tests resolve REPO_ROOT and assert against the real
+    # `examples/`, `helm/` and `.github/` trees -- so with only `src/**` and
+    # `tests/**` here, the PRs those tests exist to police were the exact PRs
+    # that did not run them.  Measured on PR #214, which changed one file
+    # under the `docs/` tree of the day: the API reports 2 check runs for its
+    # head commit, both CodeQL.  No pytest, no ruff, no manifests, no e2e.
+    #
+    # That is how a `ghcr.io/codelibs/recotem:2.0.0` literal reached
+    # `docs/upgrading.md` and made the v2.1.0 tag unreachable through the
+    # documented release procedure with every check green.  That tree is gone
+    # -- #385 moved the documentation to codelibs/recotem-docs -- so `docs/**`
+    # is deliberately NOT listed below: a filter entry for a path that cannot
+    # exist reads as coverage and provides none.
+    #
+    # `test_pr_trigger_covers_the_trees_the_suite_reads` in
+    # tests/unit/test_workflow_gates.py fails if this list stops covering one
+    # of them, so a later trim cannot silently reopen the hole.
     paths:
       - "src/**"
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
-      - ".github/workflows/test.yml"
+      - "examples/**"
+      - "helm/**"
+      - ".github/**"
 
 permissions:
   contents: read

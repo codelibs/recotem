@@ -19,3 +19,5 @@
 #   <original-pr>	<replacement-pr>	<why>
 #
 245	256	merged into a base branch that had already been squash-merged by #250, five minutes earlier; re-landed by cherry-picking 26a8c3b onto main
+259	297	reverted by #276 together with #261; re-landed onto current main by #297, which also closed five holes #259 left
+261	280	reverted by #276 together with #259; re-landed onto current main by #280

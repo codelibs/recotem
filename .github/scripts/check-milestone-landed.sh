@@ -30,7 +30,7 @@
 #
 # ---------------------------------------------------------------------------
 # Ancestry answers ONE of the three ways a milestone's claim goes wrong, and
-# this repository contains a live instance of each of the other two.
+# this repository has produced an instance of each of the other two.
 #
 # The claim is always the same: "the release contains this PR's change".  It
 # fails in three shapes, and only the first is an ancestry question:
@@ -41,24 +41,35 @@
 #   reached main, then reverted        #259 #261  blind: reports LANDED
 #   merges cleanly, moves no bytes     #277       blind: VOUCHES for it
 #
+# #245, #259 and #261 are merged and in this history; #277 was closed without
+# merging, so its class is the one shape here with no merged instance.  It is
+# checked anyway: it was one `Merge` click away from being merged, and it is
+# the shape where the gate does not merely miss the gap but asserts there is
+# none.
+#
 # Reverted: a reverted PR's merge commit stays an ancestor forever.  #276
 # reverted #259 (`90c96f0`) and #261 (`d0118fc`); both are still ancestors, so
 # the ancestry test reports them LANDED while `is-ancestor|not on main` in
 # check-release-tag.sh goes from 3 hits at 90c96f0 to 0 in the tree, and
 # `mariadb` in search.py from 5 at d0118fc to 0.
 #
-# No-op: PR #277 is titled "re-land of #259" and is stacked on #276, so its
-# branch reverts #259, reverts #261, then restores #259 -- and the first and
-# third cancel.  Merging it into main is clean and its net diff is EMPTY.  It
-# is the sharper of the two, because after merging the gate does not merely
-# fail to notice: it ASSERTS the milestone is complete on the strength of a PR
-# that carried nothing, and a relanded-prs.tsv row naming it would clear the
-# original it was recorded against.
+# No-op: PR #277 was titled "re-land of #259" and stacked on #276, so its
+# branch reverted #259, reverted #261, then restored #259 -- and the first and
+# third cancelled.  It would have merged into main cleanly with a net diff of
+# EMPTY.  It is the sharper of the two, because after such a merge the gate
+# does not merely fail to notice: it ASSERTS the milestone is complete on the
+# strength of a PR that carried nothing, and a relanded-prs.tsv row naming it
+# would clear the original it was recorded against.  #277 was closed unmerged
+# instead, so that never happened -- by inspection, not by a check.
 #
-# Both new classes carry milestone 2.2.0, so 2.1.0 is unaffected -- but on the
-# day 2.2.0 is cut, this gate would green-light a release missing exactly the
-# content it was written to catch.  That is #245's failure one turn of the
-# crank later.
+# The reverted pair is live and this gate refuses it: run against milestone
+# 2.2.0, #259 and #261 are reported REVERTED by #276.  Both re-landed onto
+# current main under new numbers -- #259 as #297, #261 as #280 -- so the
+# relanded-prs.tsv rows recording that are what clears them, and the record
+# names the PR a reader can actually go and read.  Without the rows this gate
+# would have green-lit 2.2.0 as containing two changes whose every line had
+# been removed and restored elsewhere: #245's failure one turn of the crank
+# later.
 #
 # A reverted PR is not "stranded" and a no-op PR is neither; each gets its own
 # remedy, because being told to cherry-pick a change someone deliberately
@@ -80,8 +91,12 @@
 # The two classes added here were taken precisely because they are exact:
 # "is there a revert trailer naming this commit" and "is this commit's diff
 # empty" are both decidable with no heuristic.  Measured on this repository's
-# real history rather than predicted: over all 329 first-parent commits on
-# main, the number that would be flagged as an empty no-op is ZERO.
+# real history rather than predicted: over every first-parent commit on main,
+# the number that would be flagged as an empty no-op is ZERO.  No count is
+# written down -- main only grows, so a number here is exact the day it is
+# typed and stale after the next merge.  It is re-measured on every run of
+# `test_no_commit_in_this_repositorys_history_is_a_false_positive`, which is
+# the copy that cannot go stale.
 #
 # AND THIS GATE DOES NOT ESTABLISH THAT THE TREE IT VERIFIED IS MAIN.
 # ---------------------------------------------------------------------------
@@ -334,20 +349,25 @@ pr_merge_oid() {
 # contributes_nothing <commit> -> 0 when the commit's diff against its first
 # parent is empty, i.e. it moved no bytes into the tree.
 #
-# A PR can merge cleanly and change nothing.  The live shape: PR #277 is titled
-# "re-land of #259" and is stacked on #276, which reverted #259 -- so its branch
-# reverts #259, reverts #261, then restores #259, and the first and third cancel.
-# Merging it into main is clean and its net diff is EMPTY: `check-release-tag.sh`
-# stays at 305 lines instead of returning to #259's 555, and the `not on main`
-# logic stays at 0 occurrences.  A PR that delivers nothing then becomes an
-# ancestor, and without this the gate would VOUCH for it -- a false green on the
-# very PR meant to close this problem, and, worse, a relanded-prs.tsv row naming
-# it would clear the original it was recorded against.
+# A PR can merge cleanly and change nothing.  The shape this was written from:
+# PR #277 was titled "re-land of #259" and stacked on #276, which reverted #259
+# -- so its branch reverted #259, reverted #261, then restored #259, and the
+# first and third cancelled.  It would have merged into main cleanly with a net
+# diff of EMPTY: `check-release-tag.sh` staying at 305 lines instead of
+# returning to #259's 555, and the `not on main` logic staying at 0
+# occurrences.  A PR that delivers nothing then becomes an ancestor, and
+# without this the gate would VOUCH for it -- a false green on the very PR
+# meant to close this problem, and, worse, a relanded-prs.tsv row naming it
+# would clear the original it was recorded against.  #277 was closed unmerged,
+# so no merged instance of this class exists here; the check is kept because
+# nothing but someone noticing stopped it.
 #
 # False-positive rate measured on this repository's real history rather than
-# predicted: over all 329 first-parent commits on main (4 of them true merges,
-# 1 root), the number whose diff against their first parent is empty is ZERO.
-# Nothing legitimate in this history looks like this.
+# predicted: over every first-parent commit on main, the number whose diff
+# against their first parent is empty is ZERO.  Nothing legitimate in this
+# history looks like this.  The count is deliberately not written down -- see
+# the header -- and is re-measured by
+# `test_no_commit_in_this_repositorys_history_is_a_false_positive`.
 #
 # The first parent is the right comparison for every commit shape here: for a
 # squash merge it is "what did this add to main", and for a true merge commit it

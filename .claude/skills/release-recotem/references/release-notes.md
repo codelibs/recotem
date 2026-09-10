@@ -68,7 +68,7 @@ docker pull ghcr.io/codelibs/recotem:X.Y.Z
 ## Upgrading
 
 <one or two sentences, then:>
-See [Upgrading](https://recotem.org/X.Y/docs/upgrading#<anchor>).
+See [Upgrading](https://recotem.org/X.Y/docs/upgrading.html#<anchor>).
 
 ## Added
 - ... (#PR)
@@ -98,7 +98,7 @@ the notes are the most-read text the release produces, and the anchor is the
 half that rots — heading slugs change when a page is reorganised:
 
 ```bash
-curl -sSI -o /dev/null -w '%{http_code}\n' https://recotem.org/X.Y/docs/upgrading
+curl -sSI -o /dev/null -w '%{http_code}\n' https://recotem.org/X.Y/docs/upgrading.html
 ```
 
 Only include the sections that apply. Create the release with:

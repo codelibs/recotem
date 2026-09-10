@@ -14,7 +14,7 @@ For HTTP/HTTPS paths, the same controls applied to ``source.path`` are
 enforced here too: sha256 byte-content verification, ``RECOTEM_MAX_DOWNLOAD_BYTES``
 cap, ``RECOTEM_HTTP_TIMEOUT_SECONDS`` timeout, capped redirect loop with a
 scheme allow-list, and userinfo redaction in logs. See
-``https://recotem.org/2.1/docs/security`` for the threat model.
+``https://recotem.org/2.2/docs/security.html`` for the threat model.
 
 ``build_metadata_index`` converts a loaded DataFrame into a
 ``dict[str, dict[str, Any]]`` keyed by item_id for O(1) per-item lookups
@@ -72,7 +72,7 @@ class MetadataError(ValueError):
             :func:`~recotem._http_fetch.verify_sha256` signals with: nothing
             was fetched over HTTP, and chaining it would make
             ``_map_exception_to_exit`` report exit 7 for a permanent content
-            mismatch that ``https://recotem.org/2.1/docs/operations`` and ``https://recotem.org/2.1/docs/deployment/kubernetes``
+            mismatch that ``https://recotem.org/2.2/docs/operations.html`` and ``https://recotem.org/2.2/docs/deployment/kubernetes.html``
             tell operators to retry as a transient network failure.
         ``"parse"``
             The file could not be parsed as the declared type (CSV/Parquet).
@@ -432,7 +432,7 @@ def _read_file(
             # ``HttpFetchError``, so chaining would report exit 7 for a
             # permanent content mismatch on a local / object-store file, while
             # the identical mismatch on ``source.sha256`` reports 3.  Exit 7 is
-            # the code ``https://recotem.org/2.1/docs/deployment/kubernetes`` marks "Retry", so a CronJob
+            # the code ``https://recotem.org/2.2/docs/deployment/kubernetes.html`` marks "Retry", so a CronJob
             # would retry a file whose bytes will never match.
             raise MetadataError(
                 f"metadata sha256 verification failed for {safe_path!r}: {exc}",

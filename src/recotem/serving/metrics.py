@@ -15,11 +15,18 @@ Two things about it routinely surprise operators setting up a scrape:
   with ``prefix="/v1"``.  A scrape of bare ``/metrics`` gets 404, which looks
   exactly like the opt-in not having taken effect.
 * **It requires authentication.**  ``metrics_endpoint`` takes
-  ``Depends(_require_auth)`` like every other ``/v1`` route, so a scrape with
-  no ``X-API-Key`` gets 401.  Prometheus needs the key configured (an
-  ``X-API-Key`` entry under ``http_headers`` in the scrape config), unless the
-  server is running with no ``RECOTEM_API_KEYS`` at all -- which forces the
-  loopback-only bind.
+  ``Depends(_require_auth)``, so a scrape with no ``X-API-Key`` gets 401.
+  Prometheus needs the key configured (an ``X-API-Key`` entry under
+  ``http_headers`` in the scrape config), unless the server is running with no
+  ``RECOTEM_API_KEYS`` at all -- which forces the loopback-only bind.
+
+  It is *not* the case that every ``/v1`` route does.  Three do not:
+  ``/v1/health``, ``/v1/health/live`` and ``/v1/health/ready`` are deliberately
+  open so a kubelet can reach them without a key.  ``/v1/health/details``,
+  ``/v1/recipes``, ``/v1/recipes/{name}`` and the four recommend verbs all
+  require it, and so does this endpoint -- which is why an operator who reasons
+  "the probes work unauthenticated, so the scrape will too" gets a 401 that
+  looks like a bad key rather than a missing one.
 
 All metrics share the default ``prometheus_client`` registry, so
 ``generate_latest()`` would expose any other counter registered in the same
@@ -30,7 +37,7 @@ which serves no ``/v1/metrics`` endpoint, so
 scrapeable process and is deliberately absent from the inventory below.
 Its operable signal is the ``bigquery_storage_fallback`` log event.
 
-Metric inventory (matches https://recotem.org/2.1/docs/operations):
+Metric inventory (matches https://recotem.org/2.2/docs/operations.html):
 
 | Name                                               | Type       | Labels                  |
 |----------------------------------------------------|------------|-------------------------|
@@ -451,7 +458,7 @@ def _ensure_v1_initialized() -> None:
         "value where any supplied token misses, or a non-finite numerical "
         "value (+-inf, or NaN reached via a string). A missing or "
         "unparseable numerical value still degrades silently and is NOT "
-        "counted here. See https://recotem.org/2.1/docs/serving-api#feature-aware-cold-start.",
+        "counted here. See https://recotem.org/2.2/docs/serving-api.html#feature-aware-cold-start.",
         ["recipe", "side", "column"],
     )
     _V1_FEATURE_UNKNOWN_COLUMN = Counter(
@@ -501,7 +508,7 @@ def record_v1_request(
     ``features_not_supported`` / ``feature_value_unusable`` are the
     single-verb counterparts of the identically-named batch ``code`` labels
     on ``inc_batch_element_error``. They are client-caused 400s and must
-    stay OUT of ``"error"``, which https://recotem.org/2.1/docs/operations pages on-call for --
+    stay OUT of ``"error"``, which https://recotem.org/2.2/docs/operations.html pages on-call for --
     see that file's "Recommend error rate" row.
     """
     _ensure_v1_initialized()
@@ -581,7 +588,7 @@ def inc_feature_unknown_value(
     ``numerical`` value that is missing or fails to parse as a number at all
     still degrades to the standardized mean (0) with no signal -- that gap
     is deliberate and separate, not fixed by the non-finite case above. See
-    ``https://recotem.org/2.1/docs/serving-api#feature-aware-cold-start`` for the full
+    ``https://recotem.org/2.2/docs/serving-api.html#feature-aware-cold-start`` for the full
     breakdown.
     """
     _ensure_v1_initialized()

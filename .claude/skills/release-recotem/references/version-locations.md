@@ -86,12 +86,20 @@ promote (see `references/docs-site-sync.md`).
 
 `check-release-tag.sh` reads these at the tag and refuses one that disagrees
 with the tag's own `MAJOR.MINOR`, so a skipped Phase 5 bump is caught by the
-release it would otherwise mislabel rather than published. Its `SITE_ROOTS` are
-`src tests examples helm .claude README.md CLAUDE.md CONTRIBUTING.md
-pyproject.toml`; the commands below scan the whole tree, which is a deliberate
-superset — a URL outside those roots (today: `.dockerignore` and
-`.github/scripts/`) is bumped here but watched by nothing, so leaving it to a
-hand-maintained root list is how one goes stale.
+release it would otherwise mislabel rather than published. Do not restate its
+`SITE_ROOTS` here — read them, because a copy of that list is how this
+paragraph came to name `.github/scripts/` as unwatched when it is watched:
+
+```bash
+grep -m1 '^SITE_ROOTS=' .github/scripts/check-release-tag.sh
+```
+
+The commands below scan the whole tree, which is a deliberate superset — a URL
+outside those roots is bumped here but watched by nothing, so leaving it to a
+hand-maintained root list is how one goes stale. Measured on this tree by
+planting a `/9.9/` URL in each candidate and running all three gate scripts,
+exactly one such location survives today: **`.dockerignore`**. `.github` is a
+`SITE_ROOT`, so `.github/scripts/` and `.github/workflows/` are covered.
 
 ### Bump the site URLs (Phase 5 only)
 
@@ -174,11 +182,17 @@ echo "OK: every documentation-site URL now names $NEW_MM"
 bump states below, and the reason the survey is printed rather than counted.
 
 One consequence of the gate's `tests` root is worth knowing before it costs a
-tag: a test that asserts on a *stale* site URL by spelling it out —
-`"…:recotem.org/2.0/"` in an expected-output assertion — is, to both this
-command and `check-release-tag.sh`, indistinguishable from a stale URL. The
-scan is a plain grep; it has no notion of a string being quoted inside a test.
-Build such fixtures so the literal never appears in the file.
+tag: a test that asserts on a *stale* site URL by spelling it out — an
+expected-output assertion containing `recotem.org/` followed by a literal
+older `MAJOR.MINOR` — is, to both this command and `check-release-tag.sh`,
+indistinguishable from a stale URL. The scan is a plain grep; it has no notion
+of a string being quoted inside a test. Build such fixtures so the literal
+never appears in the file.
+
+That rule binds this paragraph too, which is why it describes the shape in
+words instead of showing it. Spelling the example out cost exactly one tag:
+`check-release-tag.sh v2.1.0` refused the release naming this file, because
+the illustration was itself the only stale URL in the tree.
 
 The release skill's own files deliberately carry **no** concrete
 `recotem.org/<number>/` string — only `X.Y` placeholders and `${OLD_MM}` /

@@ -31,7 +31,7 @@ cleansing:
 # The features: block is what turns on feature-aware iALS -- there is no
 # separate flag. Only features.item is used here; features.user follows the
 # same shape (id_column + columns) and is independently optional. See
-# https://recotem.org/2.1/docs/recipe-reference#features for the full field reference.
+# https://recotem.org/2.2/docs/recipe-reference.html#features for the full field reference.
 features:
   item:
     source:

@@ -4,7 +4,7 @@ Trains an `IALSRecommender` with an item-side `features:` block, then serves
 a cold-start recommendation for an item the model never saw during
 training. Small enough to run in a few seconds; no network access required.
 
-Field reference: [Recipe reference — `features`](https://recotem.org/2.1/docs/recipe-reference#features).
+Field reference: [Recipe reference — `features`](https://recotem.org/2.2/docs/recipe-reference.html#features).
 
 ## Files
 
@@ -101,7 +101,7 @@ tell the two apart without sending a request.
 
 `best_params` carries `lambda_item_feature` alongside iALS's usual
 hyperparameters — this is recotem's own tuned range, not irspack's (see
-[recipe-reference.md](https://recotem.org/2.1/docs/recipe-reference#features)). `n_items:
+[Recipe reference — features](https://recotem.org/2.2/docs/recipe-reference.html#features)). `n_items:
 14` (not 15): item `i15` never appears in `interactions.csv`, so it is not
 part of the trained id-map — that is what makes it a genuine cold item for
 step 7 below. `n_features: 13` is item `i15`'s only footprint in this
@@ -182,7 +182,7 @@ reachable.
   and the `features` header block respectively.
 - Case C cold-start (`:recommend-related` + `item_features` for an unseen
   seed item) — see
-  [api-reference.md#feature-aware-cold-start](https://recotem.org/2.1/docs/serving-api#feature-aware-cold-start)
+  [API reference — feature-aware cold start](https://recotem.org/2.2/docs/serving-api.html#feature-aware-cold-start)
   for the full case A/B/C table, including the user-feature cases this
   example does not exercise (no `features.user` block here).
 

@@ -943,7 +943,7 @@ def test_header_len_is_outside_the_hmac_scope_and_caught_one_layer_later(
 
     Pinned deliberately: the boundary can only be shifted, never used to inject
     a byte, so closing it would cost an artifact-format version bump for no
-    reachable gain.  CLAUDE.md and https://recotem.org/2.1/docs/security describe it this way; this
+    reachable gain.  CLAUDE.md and https://recotem.org/2.2/docs/security.html describe it this way; this
     test fails if the behaviour drifts from the description.
     """
     import struct

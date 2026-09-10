@@ -83,7 +83,7 @@ GA4 has no single "item" — choose what to recommend:
   (`value.int_value` / `value.string_value`).
 
 Combine with `cleansing.drop_null_ids: true` so rows where `REGEXP_EXTRACT`
-returned NULL are dropped. See `https://recotem.org/2.1/docs/data-sources/bigquery` for the full GA4
+returned NULL are dropped. See `https://recotem.org/2.2/docs/data-sources/bigquery.html` for the full GA4
 section.
 
 ## Cost / volume

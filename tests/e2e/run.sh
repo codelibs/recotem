@@ -15,7 +15,11 @@
 # _require_auth dependency, and 401 handling on every request it makes.
 #
 # Requirements: recotem installed.  Signing and API keys are generated here.
-# Usage: bash tests/e2e/run.sh [--tutorial]
+# Usage: uv run bash tests/e2e/run.sh [--tutorial]
+#        (the script calls the `recotem` console script, which `uv sync`
+#        installs into .venv and not onto PATH; under bare `bash` it exits
+#        127 with `recotem: command not found`.  Drop the `uv run` only
+#        inside an activated virtualenv.)
 #
 # Environment:
 #   RECOTEM_E2E_PORT     port the throwaway server binds (default 18080).
@@ -91,7 +95,7 @@ if [[ "${TUTORIAL_MODE}" == "1" ]]; then
     RECIPE="examples/tutorial-purchase-log/recipe.yaml"
     RECIPE_NAME="purchase_log"
     # The tutorial CSV uses numeric user_ids ("1", "2", ...) — match the
-    # documented curl example in https://recotem.org/2.1/guide/.
+    # documented curl example in https://recotem.org/2.2/guide/.
     PREDICT_USER_ID="1"
     # The tutorial recipe writes to ./artifacts/purchase_log.recotem (CWD-relative).
     mkdir -p artifacts
@@ -186,7 +190,7 @@ then
     echo "[e2e] ERROR: 127.0.0.1:${SERVE_PORT} is already in use."
     echo "[e2e]   A stale recotem serve or a concurrent e2e run is holding it."
     echo "[e2e]   Set RECOTEM_E2E_PORT to a free port and re-run, e.g.:"
-    echo "[e2e]     RECOTEM_E2E_PORT=18081 bash tests/e2e/run.sh"
+    echo "[e2e]     RECOTEM_E2E_PORT=18081 uv run bash tests/e2e/run.sh"
     exit 1
 fi
 

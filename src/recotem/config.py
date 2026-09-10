@@ -46,8 +46,9 @@ Environment variables:
   RECOTEM_HTTP_ALLOW_PRIVATE   See ``http_allow_private()`` below
   RECOTEM_LOCK_DIR             See ``lock_dir()`` below
 
-A malformed value is FATAL for only five of these
--------------------------------------------------
+A malformed value is FATAL for only five of these, and only where a
+``ServeConfig`` is built
+------------------------------------------------------------------------
 ``RECOTEM_PORT`` (non-integer, or outside 1-65535), ``RECOTEM_WATCH_INTERVAL``
 (non-numeric) and ``RECOTEM_LOG_FORMAT`` (not one of auto/json/console) each
 ``raise ConfigError`` in ``from_env`` below.  ``RECOTEM_API_KEYS`` does too, on
@@ -55,6 +56,17 @@ a malformed entry or a duplicate kid.  ``RECOTEM_SIGNING_KEYS`` is the odd one:
 ``from_env`` only stores it raw, and the ``KeyRingConfigError`` comes later,
 when ``KeyRing`` is constructed -- still exit 8, still before the port is
 bound, but do not look for the check here.
+
+"Fatal" is scoped to the commands that call ``from_env``: ``serve`` and
+``inspect``.  ``train``, ``validate``, ``keygen`` and ``schema`` never build a
+``ServeConfig``; they configure logging through
+``cli._configure_logging_from_env``, which is best-effort -- anything that is
+not ``json`` or ``console`` is treated as ``auto``.  Measured with
+``RECOTEM_LOG_FORMAT=bogus`` and nothing else changed: ``serve`` and
+``inspect`` exit **8**, and ``train`` / ``validate`` / ``keygen`` / ``schema``
+all exit **0**.  So a typo that a CronJob's ``recotem train`` inherits from the
+same ConfigMap as its ``serve`` Deployment stops the Deployment and leaves the
+CronJob running with a log format nobody chose.
 
 Note that ``RECOTEM_HOST``, sitting between two of those, is NOT validated: it
 is taken as-is.
@@ -78,7 +90,7 @@ Variables read outside this module -- ``RECOTEM_METRICS_ENABLED``
 (``_irspack_compat.py``), ``RECOTEM_SQL_ALLOW_PRIVATE`` (``datasource/sql.py``)
 and the ``RECOTEM_RECIPE_*`` expansion prefix (``recipe/envvars.py``) -- are
 documented at their reading site. The operator-facing table for all of them is
-published at https://recotem.org/2.1/docs/environment-variables.
+published at https://recotem.org/2.2/docs/environment-variables.html.
 """
 
 from __future__ import annotations
@@ -614,7 +626,7 @@ def get_max_feature_dim() -> int:
     cap refuses their catalogue.  Memory grows quadratically.  Measured per
     trial on a 100k-row fixture:
     5k -> 2.4 s / 200 MB; 10k -> 12 s / 771 MB; 20k -> 70 s / 3 GB; the lower
-    times in https://recotem.org/2.1/docs/operations's table come from a small fixture.  Both
+    times in https://recotem.org/2.2/docs/operations.html's table come from a small fixture.  Both
     multiply with training.parallelism.
     """
     return _clamped_int_env(

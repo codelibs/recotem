@@ -177,11 +177,21 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    (`.vitepress/theme/VersionSwitcher.vue`). It hardcodes the version set. For
    a 2.1 release: the `isV21` check becomes an `isV20` check on `2.0/`,
    `currentVersion` returns `'2.1'` for the unversioned tree, `v21Link` becomes
-   `v20Link` (`/2.0/` and `/2.0/ja/`), **`isJa`'s `p.startsWith('2.1/ja/')`
-   becomes `p.startsWith('2.0/ja/')`**, and the three menu entries become
-   **2.1** (unversioned root, marked latest), **2.0** (`/2.0/…`), **1.0**
-   (`/1.0/…`). Check the `:class="{ active: … }"` bindings too — they key off
-   the same booleans and will silently highlight the wrong entry.
+   `v20Link` (`/2.0/` and `/2.0/ja/`), **`isJa` gains
+   `p.startsWith('2.0/ja/')` and keeps `p.startsWith('2.1/ja/')`**, and the
+   three menu entries become **2.1** (unversioned root, marked latest), **2.0**
+   (`/2.0/…`), **1.0** (`/1.0/…`). Check the `:class="{ active: … }"` bindings
+   too — they key off the same booleans and will silently highlight the wrong
+   entry.
+
+   `isJa` is the one computed that **accumulates** rather than rotates. Every
+   other name here refers to the version set the switcher offers, and that set
+   moves on at a release. `isJa` answers a different question — "is this page
+   Japanese?" — for every directory that exists, and after this release both
+   `2.0/ja/` and `2.1/ja/` do. This is what changed when the promote stopped
+   deleting `X.Y/`: replacing the `2.1/ja/` arm was correct while that
+   directory was about to be removed, and is a regression now that it is
+   kept.
 
    `2.1/` still exists after the promote, and it is deliberately **not** given
    its own menu entry: it holds the same pages as the root (differing only in
@@ -190,21 +200,35 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    starts appearing in the switcher at the next release, as `/2.1/…`, when the
    root moves on to 2.2. That is why the grep below is still right.
 
-   `isJa` is the one that gets missed, because its name carries no version.
-   Leave it on `2.1/ja/` and every page of the freshly frozen JA archive
-   evaluates `isJa === false`, so `latestLink` and `v1Link` resolve to `/` and
-   `/1.0/`: the switcher sends Japanese readers to the English tree. Do not
-   eyeball it — no version *path* for the promoted version may survive in this
-   file, and the frozen one must appear:
+   `isJa` is the one that gets missed, because its name carries no version,
+   and it can now be missed in **either** direction. Omit `2.0/ja/` and every
+   page of the freshly frozen JA archive evaluates `isJa === false`; drop
+   `2.1/ja/` and every page of the kept 2.1 archive does. Either way
+   `latestLink` and `v1Link` resolve to `/` and `/1.0/` and the switcher sends
+   Japanese readers to the English tree. The 2.1 half is the one that is read:
+   `recotem.org/2.2/…` is what the product bakes into shipped source, so that
+   archive carries this version's traffic for its whole support window.
+
+   Do not eyeball it. No version *path* for the promoted version may survive
+   **outside `isJa`**, the frozen one must appear, and the kept one must
+   survive inside `isJa`:
 
    ```bash
-   grep -Fn '2.1/' .vitepress/theme/VersionSwitcher.vue   # MUST be empty
-   grep -Fc '2.0/' .vitepress/theme/VersionSwitcher.vue   # MUST be > 0
+   # Paths for the promoted version, excluding the isJa membership test.
+   grep -Fn '2.1/' .vitepress/theme/VersionSwitcher.vue \
+     | grep -v "startsWith('2.1/ja/')"                       # MUST be empty
+   grep -Fc '2.0/' .vitepress/theme/VersionSwitcher.vue      # MUST be > 0
+   grep -Fc "startsWith('2.1/ja/')" .vitepress/theme/VersionSwitcher.vue  # MUST be 1
    ```
 
    Match on `2.1/` **with the trailing slash**, not on `2.1`: after the promote
    `2.1` legitimately survives as the `currentVersion` string and as a menu
-   label — only the *paths* move.
+   label — only the *paths* move, and the `isJa` arm does not move at all.
+
+   The bare `grep -Fn '2.1/' … # MUST be empty` that stood here until this was
+   corrected did not merely fail to catch the regression: it **prescribed**
+   it. A promote that followed it to the letter shipped a JA-broken 2.1
+   archive with all three of step 6's and step 7's checks green.
 
 7. **Verify before opening the PR.**
 
@@ -259,7 +283,8 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    ```
    currentVersion stable arm left on '2.0'   grep 2.1/ : pass   grep 2.0/ : pass   build: 0   rendered: 2.0
    ternary arms rotated (all tokens kept)    grep 2.1/ : pass   grep 2.0/ : pass   build: 0   rendered: 2.0
-   isJa left on '2.1/ja/'                    grep 2.1/ : FAIL   grep 2.0/ : pass   build: 0   rendered: 2.1
+   isJa missing '2.0/ja/'                    grep 2.1/ : FAIL   grep 2.0/ : pass   build: 0   rendered: 2.1
+   isJa missing '2.1/ja/'                    grep 2.1/ : pass   grep 2.0/ : pass   build: 0   rendered: 2.1
    ```
 
    The third row is the case step 6 warns about, and its grep does catch it.

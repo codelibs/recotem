@@ -130,7 +130,7 @@ def test_lock_warns_on_remote_scheme(tmp_path: Path, monkeypatch) -> None:
     across hosts/pods. ``recipe_lock`` must surface this as a structured
     warning so operators do not assume distributed mutual exclusion.
     Regression test for the gap between the lock implementation and
-    https://recotem.org/2.1/docs/deployment/kubernetes guidance."""
+    https://recotem.org/2.2/docs/deployment/kubernetes.html guidance."""
     import structlog.testing
 
     # The remote-scheme branch must NOT depend on cwd being writable
@@ -1435,3 +1435,100 @@ def test_lock_still_fails_when_the_lock_directory_is_a_regular_file(
     assert not isinstance(excinfo.value, LockPermissionError), (
         "a path collision is not a permission problem and must not be relabelled"
     )
+
+
+# ---------------------------------------------------------------------------
+# The lock file must stay findable after the log-redaction processor runs
+#
+# These tests deliberately do NOT stop at ``capture_logs()``.  That helper
+# REPLACES structlog's processor chain, so an assertion made on what it
+# captured is an assertion about the kwargs the call site passed -- not about
+# the record that is written.  ``redact_sensitive_keys`` is the first processor
+# in the shipped chain (see ``recotem.logging.configure_logging``), so applying
+# it to the captured dict is the missing half.
+# ---------------------------------------------------------------------------
+
+
+def _emitted(captured: list[dict], event: str) -> dict:
+    """The record for *event* as the shipped processor chain would render it."""
+    from recotem.log_redaction import redact_sensitive_keys
+
+    raw = next(e for e in captured if e.get("event") == event)
+    return redact_sensitive_keys(None, "warning", dict(raw))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_remote_lock_file_is_findable_in_the_emitted_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A remote output's lock must be locatable from the record as written.
+
+    ``_remote_lock_path`` names the file ``sha256(output_uri).hexdigest()``.
+    That is a 64-hex run, which is also how a 32-byte signing key looks when
+    rendered as hex, so the redaction processor replaces it -- leaving
+    ``lock_path`` as ``<dir>/[REDACTED-HEX64].lock`` and the operator with no
+    way to say which file the advice is about.
+    """
+    import re
+
+    import structlog.testing
+
+    lock_dir = tmp_path / "locks"
+    monkeypatch.setenv("RECOTEM_LOCK_DIR", str(lock_dir))
+
+    with structlog.testing.capture_logs() as captured:
+        with recipe_lock("s3://bucket/key.recotem") as acquired:
+            assert acquired is True
+
+    record = _emitted(captured, "recipe_lock_local_only")
+
+    # The reason the other two fields exist.  If redaction ever stops firing
+    # here this assertion is the notice that they are no longer needed.
+    assert "[REDACTED-HEX64]" in record["lock_path"], record["lock_path"]
+
+    assert record["lock_dir"] == str(lock_dir)
+    assert re.fullmatch(r"[0-9a-f]{12}", record["lock_id"]), record["lock_id"]
+
+    # The point of the field: it must actually locate the file on disk.
+    found = sorted(Path(record["lock_dir"]).glob(record["lock_id"] + "*"))
+    assert len(found) == 1, found
+    assert found[0].name.endswith(".lock")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+def test_local_lock_path_is_published_whole_and_gains_no_digest_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local ``output.path`` must keep its real path and get no digest fields.
+
+    This is the boundary that stops the repair from being "exempt the
+    ``lock_path`` key".  For a local output the same key carries
+    ``<output.path>.lock`` -- recipe-controlled text, which must keep going
+    through the value-side scrubbing.  Widening ``_lock_path_fields`` to add
+    ``lock_id``/``lock_dir`` unconditionally fails here.
+    """
+    import errno as _errno
+
+    import structlog.testing
+
+    original_makedirs = os.makedirs
+
+    def _fake_makedirs(name, *args, **kwargs):
+        if str(tmp_path) in str(name):
+            raise OSError(_errno.EROFS, os.strerror(_errno.EROFS))
+        return original_makedirs(name, *args, **kwargs)
+
+    monkeypatch.setattr(os, "makedirs", _fake_makedirs)
+
+    output_path = tmp_path / "sub" / "model.recotem"
+    with structlog.testing.capture_logs() as captured:
+        with pytest.raises(LockPermissionError):
+            with recipe_lock(output_path):
+                pass  # pragma: no cover - the lock must not be acquired
+
+    record = _emitted(captured, "recipe_lock_permission_denied")
+
+    assert record["lock_path"] == str(output_path) + ".lock"
+    assert "REDACTED" not in record["lock_path"]
+    assert "lock_id" not in record, record
+    assert "lock_dir" not in record, record

@@ -60,7 +60,7 @@ moving parts to a recipe file and a binary artifact:
 
 - **CSV / Parquet** — local files or any fsspec-reachable URL (S3, GCS, Azure, HTTPS).
 - **BigQuery** — SQL queries with Storage Read API support.
-- **SQL** (PostgreSQL / MySQL / MariaDB / SQLite) — via SQLAlchemy 2. See [SQL data sources](https://recotem.org/2.1/docs/data-sources/sql).
+- **SQL** (PostgreSQL / MySQL / MariaDB / SQLite) — via SQLAlchemy 2. See [SQL data sources](https://recotem.org/2.2/docs/data-sources/sql.html).
 - **Custom plugins** — implement the `DataSource` Protocol and register via `recotem.datasources` entry-points.
 
 ## Install
@@ -82,12 +82,37 @@ reading: `recotem train` resolves the destination through fsspec, so writing an
 artifact to `gs://…` without `recotem[gcs]` fails after the search has already
 run. The published Docker image bundles `s3` and `gcs` (not `azure`).
 
-Requires Python 3.12+, and a platform `irspack` publishes a wheel for:
-Linux on x86-64 or arm64 (glibc or musl), macOS on Apple Silicon, and
-Windows on x86-64. `irspack` ships no source distribution, so on **macOS
-on Intel** and **Windows on arm64** there is nothing for pip to install and
-`pip install recotem` stops with `No matching distribution found for
-irspack==0.5.2`. Use the Docker image on those two.
+Requires Python 3.12+ and a platform every compiled dependency publishes a
+wheel for, because none of them can be built without a C/C++ toolchain the
+usual `pip install` host does not have. That set is **glibc Linux on x86-64 or
+arm64**, **macOS on Apple Silicon**, and **Windows on x86-64**. Three platforms
+are outside it:
+
+| platform | what is missing | what pip prints |
+|---|---|---|
+| macOS on Intel | `irspack` — no wheel, and no sdist to build | `No matching distribution found for irspack==0.5.2` |
+| Windows on arm64 | `irspack` — no wheel, and no sdist to build | `No matching distribution found for irspack==0.5.2` |
+| musl Linux (Alpine), either arch | `scikit-learn` — no `musllinux` wheel at any version in the supported range | falls back to the sdist and fails in its meson build: `Unknown compiler(s)` |
+
+`irspack` does publish `musllinux` wheels, and so does every other compiled
+dependency in the core set — `scikit-learn` alone is why Alpine does not work.
+It ships an sdist, so a musl host with a full C/C++ toolchain, meson and
+OpenMP can build it, but that is a build, not an install.
+
+The table above is about `pip install recotem`. One **extra** is narrower than
+the core set: `bprfm` installs `lightfm-next`, which publishes wheels only for
+macOS (both architectures), `manylinux` x86-64 and `musllinux` x86-64. On
+**glibc Linux arm64** and **Windows x86-64** — both inside the supported set
+above — `pip install "recotem[bprfm]"` and `"recotem[all]"` fall back to the
+sdist and need a C compiler:
+
+    error: command 'gcc' failed: No such file or directory
+
+Every other extra is pure Python or already covered. `pip install recotem`
+itself is unaffected on those platforms, and so is the published Docker image,
+which compiles `lightfm-next` in its build stage.
+
+Use the Docker image (which is glibc-based) on all three.
 
 A multi-arch Docker image (`linux/amd64`, `linux/arm64`) is published to
 `ghcr.io/codelibs/recotem`.
@@ -150,14 +175,14 @@ trains TopPop, so the scores above are raw interaction counts.
 The recipe itself is 11 lines — every other field has a sensible default.
 See [`examples/quickstart/recipe.yaml`](examples/quickstart/recipe.yaml)
 for the source of truth and
-[Recipe reference](https://recotem.org/2.1/docs/recipe-reference) for the full schema.
+[Recipe reference](https://recotem.org/2.2/docs/recipe-reference.html) for the full schema.
 
 ### Which env var is needed where?
 
 | Variable | Required by | Purpose |
 |---|---|---|
 | `RECOTEM_SIGNING_KEYS` | `train` and `serve` | HMAC sign / verify artifact files (server keeps plaintext; needed for both sides) |
-| `RECOTEM_API_KEYS` | `serve` | Authenticate `/v1/recipes/*` callers (server keeps **hash** only) |
+| `RECOTEM_API_KEYS` | `serve` (optional) | Authenticate `/v1/recipes/*` callers (server keeps **hash** only). Omit it and authentication is **disabled** — every `/v1/recipes/*` call is served without a key, and the bind is forced to loopback so it cannot be reached off the host |
 | `X-API-Key: <plaintext>` | HTTP clients | Sent by clients on every `/v1/recipes/*` call; server re-hashes and compares |
 
 Both variables accept multiple comma-separated entries (`kid:value,kid2:value,…`)
@@ -188,13 +213,13 @@ on file mtime.
 
 Full documentation site: **[recotem.org](https://recotem.org)**.
 
-- [Getting started](https://recotem.org/2.1/guide/) — Docker Compose / pip walkthrough end-to-end
-- [Recipe reference](https://recotem.org/2.1/docs/recipe-reference) — every field documented
-- [API reference](https://recotem.org/2.1/docs/serving-api) — `/v1` endpoints and the request/response shape of every inference verb, including the batch ones
-- [Operations](https://recotem.org/2.1/docs/operations) — key rotation, sizing, troubleshooting
-- [Security](https://recotem.org/2.1/docs/security) — threat model, IAM scopes, secrets handling
-- [Plugin authoring](https://recotem.org/2.1/docs/plugin-authoring) — write a custom data source
-- [Documentation index](https://recotem.org/2.1/docs/)
+- [Getting started](https://recotem.org/2.2/guide/) — Docker Compose / pip walkthrough end-to-end
+- [Recipe reference](https://recotem.org/2.2/docs/recipe-reference.html) — every field documented
+- [API reference](https://recotem.org/2.2/docs/serving-api.html) — `/v1` endpoints and the request/response shape of every inference verb, including the batch ones
+- [Operations](https://recotem.org/2.2/docs/operations.html) — key rotation, sizing, troubleshooting
+- [Security](https://recotem.org/2.2/docs/security.html) — threat model, IAM scopes, secrets handling
+- [Plugin authoring](https://recotem.org/2.2/docs/plugin-authoring.html) — write a custom data source
+- [Documentation index](https://recotem.org/2.2/docs/)
 
 ## Contributing
 

@@ -665,10 +665,30 @@ def inspect(
         # Same in-memory dev key as run_training / serve dev mode.
         signing_keys_raw = "dev:" + ("0" * 64)
     if signing_keys_raw:
-        try:
-            from recotem.artifact.signing import KeyRing, verify_hmac
+        from recotem.artifact.signing import KeyRing, KeyRingConfigError, verify_hmac
 
+        # Building the KeyRing is reported separately from verifying against it.
+        # A malformed RECOTEM_SIGNING_KEYS never reaches verify_hmac -- no HMAC
+        # is computed and the artifact is not read past its header -- so the
+        # "HMAC verification failed" wording that used to cover this branch
+        # announced a verification that did not happen, about an artifact that
+        # is intact.  The exit code already said configuration (8, via
+        # KeyRingConfigError's ConfigError base); the message contradicted it,
+        # and the message is what an operator triaging a red log line reads
+        # first.
+        try:
             key_ring = KeyRing(signing_keys_raw)
+        except (MemoryError, RecursionError):
+            raise
+        except KeyRingConfigError as exc:
+            _exit(
+                _map_exception_to_exit(exc),
+                f"Cannot build the signing keyring from RECOTEM_SIGNING_KEYS: "
+                f"{exc}\n"
+                "  The artifact was not verified and was not modified; fix the "
+                "environment variable and re-run.",
+            )
+        try:
             payload_bytes = data[hdr.payload_offset :]
             verify_hmac(
                 key_ring,

@@ -39,6 +39,7 @@ import structlog
 
 from recotem._artifact_identity import (
     RECIPE_NAME_MSG_PREFIX,
+    check_artifact_recipe_hash,
     check_artifact_recipe_name,
 )
 from recotem._features import (
@@ -200,6 +201,15 @@ class _RecipeWatchState:
 
     recipe: Any  # Recipe
     artifact_path: str
+    #: The most recently *parsed* body of this recipe's YAML, refreshed on
+    #: every successful rescan.  ``recipe`` above is deliberately NOT
+    #: refreshed: it is the body the currently-served model was built from,
+    #: and re-pointing ``output.path`` or ``item_metadata`` underneath a live
+    #: model is a behaviour change, not a warning fix.  This field exists so
+    #: the drift warning can compare the artifact against the recipe *as it
+    #: is on disk right now* without altering what is served.  ``None`` until
+    #: the first rescan after startup, where ``recipe`` is still current.
+    latest_recipe: Any = None
     last_marker: Any = None
     last_sha256: str = ""
     #: Last-known contents of the ``.sha256`` sidecar pointer file.
@@ -732,6 +742,14 @@ class ArtifactWatcher(threading.Thread):
                 # stub (artifact_path=""), update the state now that the YAML
                 # parsed successfully so _poll_artifacts uses the correct path.
                 existing_state = self._states[recipe.name]
+                # The YAML parsed, so this is the recipe as it is on disk now.
+                # Record it for the drift comparison regardless of which
+                # recovery branch below does or does not fire; without this the
+                # comparison keeps using the body read at process start and is
+                # wrong in both directions (it warns after a retrain that made
+                # the two agree, and stays silent when an edit made them
+                # disagree).
+                existing_state.latest_recipe = recipe
                 if not existing_state.artifact_path and recipe.output.path:
                     logger.info(
                         "recipe_yaml_failure_recovered",
@@ -1068,7 +1086,13 @@ class ArtifactWatcher(threading.Thread):
             return
 
         try:
-            entry = self._build_entry(name, state.recipe, data, artifact_path)
+            entry = self._build_entry(
+                name,
+                state.recipe,
+                data,
+                artifact_path,
+                drift_recipe=state.latest_recipe or state.recipe,
+            )
         except ArtifactError as exc:
             kid_log, kid_reason = _extract_kid_safe(data)
             if kid_reason is not None:
@@ -1168,9 +1192,22 @@ class ArtifactWatcher(threading.Thread):
         )
 
     def _build_entry(
-        self, name: str, recipe: Any, data: bytes, artifact_path: str
+        self,
+        name: str,
+        recipe: Any,
+        data: bytes,
+        artifact_path: str,
+        *,
+        drift_recipe: Any = None,
     ) -> ModelEntry:
-        """Parse, verify, deserialize data and return a fresh ModelEntry."""
+        """Parse, verify, deserialize data and return a fresh ModelEntry.
+
+        *recipe* is the body this model is being built from -- it decides
+        ``item_metadata`` and everything else that reaches the entry.
+        *drift_recipe* is compared against the artifact's ``recipe_hash`` and
+        is only ever read for that warning; it defaults to *recipe* so the
+        startup path, which has no separate on-disk body yet, is unchanged.
+        """
         from recotem.artifact.format import parse_header_from_bytes
         from recotem.artifact.signing import unpickle_payload, verify_hmac
 
@@ -1214,6 +1251,15 @@ class ArtifactWatcher(threading.Thread):
         # matter what the rest of the header says, and the check needs only
         # the dict already in hand — no payload, no version lookup.
         check_artifact_recipe_name(header_dict, name=name)
+        # Mirrored from the startup path deliberately: an artifact that
+        # arrives by hot-swap after a recipe edit is the same staleness,
+        # and a check wired into only one of the two load paths is the
+        # divergence #270 had to correct.
+        check_artifact_recipe_hash(
+            header_dict,
+            recipe=drift_recipe if drift_recipe is not None else recipe,
+            name=name,
+        )
 
         # Preflight the irspack version before deserializing: a skewed artifact
         # fails inside the C++ __setstate__ with an error that names neither
@@ -1390,7 +1436,7 @@ class ArtifactWatcher(threading.Thread):
         next tick re-reads the artifact in full, and for a fault that is *not*
         transient (a kid that is not in the key ring, an irspack version skew,
         a truncated object) that repeats for as long as the artifact stays
-        broken.  ``https://recotem.org/2.1/docs/operations`` describes exactly that steady state as
+        broken.  ``https://recotem.org/2.2/docs/operations.html`` describes exactly that steady state as
         survivable — "a skewed artifact sits harmless in a running fleet" — so
         it can persist for days, at one full object-store GET per tick.
 

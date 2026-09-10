@@ -69,4 +69,4 @@ read into a DataFrame, and `RECOTEM_MAX_DOWNLOAD_BYTES` caps the raw bytes for
 network/object-store reads (it does **not** cap the decompressed DataFrame).
 Keep an eye on row count for large exports; pre-aggregate upstream if needed.
 
-See `https://recotem.org/2.1/docs/data-sources/csv` for details.
+See `https://recotem.org/2.2/docs/data-sources/csv.html` for details.

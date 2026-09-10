@@ -13,7 +13,6 @@ All domain errors are subclasses of ``TrainingError`` (exit 4), except for
 from __future__ import annotations
 
 import copy
-import hashlib
 import urllib.parse
 import uuid
 from collections.abc import Callable
@@ -30,6 +29,11 @@ from irspack.utils import df_to_sparse
 
 from recotem._exit_codes import _map_exception_to_exit  # shared with cli.py
 from recotem._features import FEATURE_STATE_VERSION, state_descriptor
+from recotem._recipe_hash import (
+    compute_recipe_hash,
+    json_default_for_hash,
+    normalize_paths_for_hash,
+)
 from recotem.recipe.errors import RecipeError
 from recotem.recipe.models import Recipe
 from recotem.training._compat import IDMappedRecommender, suppress_progress_bars
@@ -443,7 +447,7 @@ def _run_training_locked(
     # or on noise.  It is recorded rather than thresholded: the shipped
     # examples hold out 12, 60 and 803 interactions, so any cutoff that flags a
     # genuinely unreliable search also flags the tutorials.  See
-    # https://recotem.org/2.1/docs/operations#choosing-a-model-on-a-small-dataset for how to read it.
+    # https://recotem.org/2.2/docs/operations.html#choosing-a-model-on-a-small-dataset for how to read it.
     n_heldout_interactions = int(X_val_test.nnz)
     n_heldout_users = int(X_val_test.shape[0])
     data_stats["n_heldout_interactions"] = n_heldout_interactions
@@ -762,6 +766,28 @@ def _http_status_of(exc: BaseException) -> int | None:
     return None
 
 
+# Upper bound on the object-store SDK text quoted inside an artifact-write
+# error.  Long enough for the sentence the SDK actually leads with and short
+# enough that a multi-line error document cannot push recotem's own remedy off
+# the end of the message.
+#
+# The Azure blob SDK's ``__str__`` is eleven lines: the human sentence, then a
+# RequestId, a timestamp, an ErrorCode, and the whole XML error document
+# repeating all four.  Interpolated raw, recotem's "Training succeeded but the
+# model was not persisted — ..." landed on a line beginning ``</Error>.``.
+# ``datasource/sql.py`` already collapses and caps SQLAlchemy's text for the
+# same reason (``_MAX_SA_DETAIL``); this is that rule for the write path.
+_MAX_WRITE_DETAIL = 200
+
+
+def _write_error_detail(exc: BaseException) -> str:
+    """Return *exc*'s message as one whitespace-collapsed, length-capped line."""
+    detail = " ".join(str(exc).split())
+    if len(detail) > _MAX_WRITE_DETAIL:
+        detail = detail[:_MAX_WRITE_DETAIL] + "…"
+    return detail
+
+
 def _is_gcs_forbidden_oserror(exc: BaseException) -> bool:
     """True for gcsfs's bare ``OSError('Forbidden: ...')`` — a 403 with no status.
 
@@ -904,7 +930,8 @@ def _artifact_write_credentials_error(
         if type(cur).__name__ in _CREDENTIAL_ERROR_NAMES:
             return TrainingError(
                 f"could not authenticate to write the artifact to "
-                f"{output_path!r}: {type(cur).__name__}: {cur}.  Training "
+                f"{output_path!r}: {type(cur).__name__}: "
+                f"{_write_error_detail(cur)}.  Training "
                 "succeeded but the model was not persisted — configure "
                 "credentials for the destination and re-run.",
                 code="artifact_write_credentials",
@@ -913,7 +940,8 @@ def _artifact_write_credentials_error(
         if remote and status == 401:
             return TrainingError(
                 f"could not authenticate to write the artifact to "
-                f"{output_path!r}: {type(cur).__name__}: {cur}.  Training "
+                f"{output_path!r}: {type(cur).__name__}: "
+                f"{_write_error_detail(cur)}.  Training "
                 "succeeded but the model was not persisted — configure "
                 "credentials for the destination and re-run.",
                 code="artifact_write_credentials",
@@ -926,7 +954,8 @@ def _artifact_write_credentials_error(
         ):
             return TrainingError(
                 f"could not write the artifact to {output_path!r}: "
-                f"{type(cur).__name__}: {cur}.  Training succeeded but the "
+                f"{type(cur).__name__}: {_write_error_detail(cur)}.  "
+                "Training succeeded but the "
                 "model was not persisted — check that the bucket or container "
                 "exists and that the credentials may write to it, then re-run.",
                 code="artifact_write_destination",
@@ -1005,7 +1034,28 @@ def _local_write_destination_error(
     from recotem.recipe.loader import _local_output_path  # noqa: PLC0415
 
     local = _local_output_path(str(output_path))
-    if local is None or not local.is_dir():
+    if local is None:
+        return None
+
+    # Deciding the classification costs one ``stat`` of ``output.path`` -- and
+    # that ``stat`` can fail for the same reason the write did.  ``Path.is_dir``
+    # swallows only ``ENOENT``/``ENOTDIR``/``EBADF``/``ELOOP`` and re-raises
+    # everything else, so on a network filesystem it raises rather than answers:
+    # measured on a ``ReadWriteMany`` NFS mount whose export changed identity,
+    # where it raised ``OSError [Errno 116] Stale file handle`` from inside the
+    # artifact write's ``except`` block and replaced the write's own exception
+    # ("During handling of the above exception, another exception occurred").
+    # The remote classifier above had already declined the path, so nothing else
+    # was left to run.
+    #
+    # An unanswerable question is not a "names a directory" answer.  Fall
+    # through and let the original write failure propagate unchanged, which is
+    # what this function does for every other unclassifiable case.
+    try:
+        names_a_directory = local.is_dir()
+    except OSError:
+        return None
+    if not names_a_directory:
         return None
 
     return TrainingError(
@@ -1019,64 +1069,13 @@ def _local_write_destination_error(
     )
 
 
-def _normalize_paths_for_hash(obj: Any) -> Any:
-    """Recursively convert Path-like objects to POSIX strings for stable hashing.
-
-    ``pathlib.Path`` (and its subclasses such as ``PurePosixPath`` and
-    ``PureWindowsPath``) serialise via ``str()`` to an OS-dependent
-    representation: POSIX gives ``/data/foo`` while Windows gives
-    ``\\data\\foo``.  Using ``Path.as_posix()`` normalises to the forward-
-    slash form on every platform so the same recipe always produces the same
-    hash regardless of where ``_compute_recipe_hash`` is called.
-    """
-    import pathlib  # noqa: PLC0415
-
-    if isinstance(obj, pathlib.PurePath):
-        return obj.as_posix()
-    if isinstance(obj, dict):
-        return {k: _normalize_paths_for_hash(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_normalize_paths_for_hash(v) for v in obj]
-    return obj
-
-
-def _json_default_for_hash(obj: Any) -> Any:
-    """Custom JSON default serialiser for ``_compute_recipe_hash``.
-
-    Converts ``pathlib.PurePath`` to a POSIX string before falling back to
-    ``str()`` for any other non-serialisable type.  This keeps the same
-    safety net as the previous ``default=str`` while guaranteeing that Paths
-    are never serialised with a OS-dependent separator.
-    """
-    import pathlib  # noqa: PLC0415
-
-    if isinstance(obj, pathlib.PurePath):
-        return obj.as_posix()
-    return str(obj)
-
-
-def _compute_recipe_hash(recipe: Recipe) -> str:
-    """Return a SHA-256 hex digest of the recipe's canonical YAML serialization.
-
-    Uses pydantic's ``model_dump`` -> sorted JSON to get a stable canonical
-    form.  No secrets are included (recipe YAML should never contain secrets).
-
-    Path normalisation: any ``pathlib.PurePath`` (including ``PureWindowsPath``)
-    found in the dump is converted to a POSIX forward-slash string via
-    ``as_posix()`` so the hash is identical on POSIX and Windows hosts given
-    the same recipe content.
-    """
-    import json  # noqa: PLC0415
-
-    raw = recipe.model_dump(mode="json", by_alias=False)
-    normalised = _normalize_paths_for_hash(raw)
-    canonical = json.dumps(
-        normalised,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=_json_default_for_hash,
-    )
-    return hashlib.sha256(canonical.encode()).hexdigest()
+# Moved to recotem._recipe_hash so serving/ can compare the header's
+# recipe_hash against the recipe it is about to serve under without importing
+# training/ (see CLAUDE.md). Re-exported here under the original private
+# spellings so existing importers keep working.
+_normalize_paths_for_hash = normalize_paths_for_hash
+_json_default_for_hash = json_default_for_hash
+_compute_recipe_hash = compute_recipe_hash
 
 
 def _assert_rows_present(df: pd.DataFrame, recipe: Recipe, type_name: str) -> None:
@@ -1192,7 +1191,7 @@ def _fetch_data(recipe: Recipe, run_id: str) -> pd.DataFrame:
     except Exception as exc:
         # Unexpected exceptions from the datasource path map to DataSourceError
         # (exit 3), not TrainingError (exit 4), per the documented exit-code
-        # contract in https://recotem.org/2.1/docs/operations.
+        # contract in https://recotem.org/2.2/docs/operations.html.
         logger.error(
             "datasource_unexpected_error",
             recipe=recipe.name,
@@ -1244,7 +1243,7 @@ def _cleanse(
                 # Numeric columns require an explicit time_unit to avoid
                 # silent ns-interpretation that maps Unix epoch seconds to
                 # dates near 1970-01-01 00:00:00 rather than their intended
-                # values.  See https://recotem.org/2.1/docs/recipe-reference.
+                # values.  See https://recotem.org/2.2/docs/recipe-reference.html.
                 time_unit = recipe.schema_.time_unit
                 if time_unit is None:
                     raise TrainingError(
@@ -1475,7 +1474,7 @@ def _train_final(
                 "search trial succeeded, because the final matrix differs "
                 "from every trial's matrix. Raising min_frequency on "
                 "high-cardinality feature columns usually resolves it; see "
-                "https://recotem.org/2.1/docs/operations.",
+                "https://recotem.org/2.2/docs/operations.html.",
                 code="feature_cholesky_error",
             ) from exc
         raise

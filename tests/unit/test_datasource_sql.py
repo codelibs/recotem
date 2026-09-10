@@ -1951,6 +1951,53 @@ def test_tls_warning_mysql_silent_with_ssl_ca(monkeypatch) -> None:
     assert not events
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "ssl_check_hostname=false",
+        "ssl_verify_cert=false",
+        "ssl_check_hostname=False",
+        "ssl_ca=/etc/ssl/ca.pem&ssl_check_hostname=false",
+    ],
+)
+@pytest.mark.parametrize("backend", ["mysql", "mariadb"])
+def test_tls_warning_silent_for_false_valued_ssl_options(
+    monkeypatch, backend, query
+) -> None:
+    """A ``false``-valued ``ssl_*`` option still forces TLS, so it must not warn.
+
+    SQLAlchemy's PyMySQL dialect folds ``ssl_check_hostname`` into the ``ssl``
+    mapping and passes ``ssl_verify_cert`` through as a raw string; PyMySQL
+    turns TLS on for a non-empty mapping or a truthy string, and ``"false"``
+    is truthy.  Both spellings are refused by the driver against a server with
+    ``have_ssl=DISABLED`` while a bare DSN connects -- they force TLS.
+
+    They are also the only spellings that connect to a MariaDB server
+    presenting its own in-memory certificate, which writes no ``ca.pem`` for
+    ``ssl_ca`` to name, so warning on them left that posture with no way to
+    silence the warning.
+    """
+    import sys
+    import types
+
+    import structlog
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "pymysql", types.ModuleType("pymysql"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        f"{backend}+pymysql://u:p@db.example.com/orders?{query}",
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        SQLSource(_make_cfg())
+
+    events = [r for r in logs if r["event"] == "sql_dsn_tls_not_configured"]
+    assert not events, f"unexpected TLS warning for ?{query}: {events!r}"
+
+
 @pytest.mark.parametrize("value", ["true", "1", "false", "TRUE"])
 @pytest.mark.parametrize("backend", ["mysql", "mariadb"])
 def test_scalar_ssl_query_param_is_refused(monkeypatch, backend, value) -> None:
@@ -2221,7 +2268,14 @@ def test_error_label_names_the_dbapi_error_without_leaking_the_dsn() -> None:
     assert "s3cret" not in label
     assert "alice" not in label
 
-    assert _error_label(ValueError("boom")) == "ValueError"
+    # ``ValueError`` is inside ``_SAFE_DETAIL_TYPES``: it is driver *argument
+    # validation* text, raised before a socket exists and with no URL in scope,
+    # so its message is surfaced.  See test_sql_error_label_driver_args.py.
+    assert _error_label(ValueError("boom")) == "ValueError: boom"
+    # A type outside that allow-list still withholds its message, which is the
+    # rule this test is about — the same rule as the wrapper case above,
+    # applied where there is no ``orig`` to name instead.
+    assert _error_label(RuntimeError("boom")) == "RuntimeError"
 
 
 def test_read_only_failure_message_carries_the_driver_error_class(
@@ -2343,7 +2397,7 @@ def test_error_label_walks_the_cause_chain_and_adds_sqlstate() -> None:
 # Measured against mariadb:11.8.9 and mysql:8.4.11: the two variables are
 # disjoint and each server rejects the other's with
 # ``ERROR 1193 (HY000) Unknown system variable``.  A ``mysql+pymysql://`` DSN
-# (the only PyMySQL DSN in https://recotem.org/2.1/docs/data-sources/sql) pointed at MariaDB used to
+# (the only PyMySQL DSN in https://recotem.org/2.2/docs/data-sources/sql.html) pointed at MariaDB used to
 # take the MySQL branch and abort the whole fetch.
 
 

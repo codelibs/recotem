@@ -219,7 +219,7 @@ def test_validate_reports_where_for_exception_whose_str_ignores_args(
     ``where`` by mutating ``exc.args`` in place (as an earlier version of
     this fix did) is silently invisible for this exception type. A plugin
     author who re-validates its config via a nested pydantic model inside
-    ``__init__`` (a plausible pattern per ``https://recotem.org/2.1/docs/plugin-authoring`` --
+    ``__init__`` (a plausible pattern per ``https://recotem.org/2.2/docs/plugin-authoring.html`` --
     nothing enforces the "always raise DataSourceError" convention) would
     trigger exactly this. The fix must carry ``where`` in the caller's error
     message instead, which works regardless of what ``str(exc)`` returns.
@@ -2219,6 +2219,102 @@ def test_inspect_malformed_signing_keys_exits_nonzero(
     )
 
 
+@pytest.mark.parametrize(
+    ("keyring", "why"),
+    [
+        ("not-a-keyring", "no colon separator"),
+        ("active:zz", "key is not hex"),
+        ("active:" + "ab" * 16, "key decodes to 16 bytes, not 32"),
+    ],
+)
+def test_inspect_keyring_config_error_does_not_claim_a_failed_hmac(
+    tmp_path: Path, monkeypatch, keyring: str, why: str
+) -> None:
+    """A bad RECOTEM_SIGNING_KEYS must not be reported as a failed HMAC.
+
+    Every value here is rejected while the KeyRing is being built, before
+    ``verify_hmac`` is reached: no HMAC is computed, and the artifact is read
+    no further than its header.  The exit code already distinguishes the two
+    (8 for the environment, 5 for the artifact), but the exit code is not what
+    an operator triaging a red log line reads first -- the message is, and
+    "HMAC verification failed" names the artifact as the suspect for a fault
+    that is entirely in the environment.  The artifact is byte-identical after
+    the run, which this asserts rather than assumes.
+    """
+    from tests.conftest import build_raw_artifact
+
+    data = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={"recipe_name": "keyring_message", "best_score": 0.5},
+        payload_bytes=b"payload",
+    )
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(data)
+    before = artifact_path.read_bytes()
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", keyring)
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+
+    assert result.exit_code == 8, (
+        f"{why}: a bad RECOTEM_SIGNING_KEYS is a configuration error (exit 8); "
+        f"got {result.exit_code}"
+    )
+    combined = result.stdout + (result.stderr or "")
+    assert "HMAC verification failed" not in combined, (
+        f"{why}: no HMAC was computed, so the output must not say one failed. "
+        f"Got {combined!r}"
+    )
+    assert "RECOTEM_SIGNING_KEYS" in combined, (
+        f"{why}: the message must name the variable that is wrong; got {combined!r}"
+    )
+    assert artifact_path.read_bytes() == before, (
+        f"{why}: inspect must not modify the artifact it refused to verify"
+    )
+
+
+def test_inspect_still_reports_a_genuine_hmac_failure_as_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The wording above must not be traded for silence on real tampering.
+
+    A well-formed keyring holding the wrong key reaches ``verify_hmac`` and
+    fails there; that is an artifact fault and must keep saying so.
+    """
+    from tests.conftest import build_raw_artifact
+
+    data = build_raw_artifact(
+        kid="active",
+        key_hex=ACTIVE_KEY_HEX,
+        header_dict={"recipe_name": "keyring_message", "best_score": 0.5},
+        payload_bytes=b"payload",
+    )
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(data)
+
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", "active:" + "cd" * 32)
+    result = runner.invoke(app, ["inspect", str(artifact_path)])
+
+    assert result.exit_code == 5, (
+        f"a wrong key is an artifact-verification failure (exit 5); "
+        f"got {result.exit_code}"
+    )
+    combined = result.stdout + (result.stderr or "")
+    assert "HMAC verification failed" in combined, (
+        f"a real verification failure must still be reported as one; got {combined!r}"
+    )
+    # `verify_hmac` puts "HMAC verification failed for kid ..." into the
+    # exception text itself, so the assertion above is satisfied by the
+    # exception alone and cannot tell whether the CLI still frames this as a
+    # verification failure.  Naming the wording that belongs to the *other*
+    # branch is what separates the two: a keyring the CLI built successfully
+    # must never be blamed for a mismatch found afterwards.
+    assert "Cannot build the signing keyring" not in combined, (
+        f"a wrong key is not a malformed keyring -- the keyring parsed; got "
+        f"{combined!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Finding #3: SystemExit misclassification — documented behavior verification
 # ---------------------------------------------------------------------------
@@ -2431,7 +2527,7 @@ def test_inspect_corrupt_header_json_exits_5(tmp_path: Path, monkeypatch) -> Non
     was used for the JSON parse step.  JSONDecodeError / UnicodeDecodeError are
     not mapped by ``_map_exception_to_exit`` so they defaulted to _EXIT_UNKNOWN (1).
     After the fix, the specific exception types are caught and mapped to
-    _EXIT_ARTIFACT (5) explicitly, which matches what https://recotem.org/2.1/docs/operations documents.
+    _EXIT_ARTIFACT (5) explicitly, which matches what https://recotem.org/2.2/docs/operations.html documents.
     """
     from unittest.mock import patch
 

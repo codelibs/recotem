@@ -898,3 +898,62 @@ def test_no_commit_in_this_repositorys_history_is_a_false_positive() -> None:
         "the no-op check would flag real commits in this repository's history, "
         f"so it is not the exact test it claims to be: {flagged}"
     )
+
+
+# The number the script asks `gh pr list` for.  Read from the script rather than
+# restated, so raising it there without moving the guard fails here instead of
+# leaving these two tests exercising a boundary that has moved.
+_PR_LIMIT = int(
+    next(
+        line.split("=", 1)[1]
+        for line in SCRIPT.read_text(encoding="utf-8").splitlines()
+        if line.startswith("PR_LIMIT=")
+    )
+)
+
+
+def _rows_with_no_merge_commit(count: int) -> list[str]:
+    """Rows the ancestry loop skips without spawning git.
+
+    `none` takes the `UNKNOWN` branch, so a full page costs no subprocesses and
+    the two tests below measure the guard rather than the loop.
+    """
+    return [f"{n}\tnone\tPR {n}" for n in range(1, count + 1)]
+
+
+@requires_bash
+def test_a_full_page_of_results_is_refused_not_checked_partially(repo: Path) -> None:
+    """`--limit` is a cap, and `gh` says nothing when it truncates.
+
+    Measured against the real API: `gh pr list --search ... --limit 5` returns
+    five rows and an empty stderr, and `--limit 1100` against a repository with
+    more merged PRs than that returns exactly 1000.  A milestone larger than the
+    cap would therefore have its most recent PRs checked and the rest reported
+    on -- the success line claims "every merged PR in milestone X", so passing
+    here would vouch for a set nobody read.  Same shape as the absent-milestone
+    case, and refused the same way.
+    """
+    _set_prs(repo, *_rows_with_no_merge_commit(_PR_LIMIT))
+    proc = _run(repo)
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 1, combined
+    assert "the maximum this query can return" in combined
+    assert "is an ancestor of" not in combined, (
+        "the success line was printed about a truncated list"
+    )
+
+
+@requires_bash
+def test_one_short_of_the_cap_is_still_checked(repo: Path) -> None:
+    """The boundary control: without it the test above passes for "many rows".
+
+    A guard written with `-gt`, or placed after an off-by-one, would refuse a
+    complete list too -- blocking every large release for a truncation that did
+    not happen.  This pins that the refusal starts exactly at the cap.
+    """
+    _set_prs(repo, *_rows_with_no_merge_commit(_PR_LIMIT - 1))
+    proc = _run(repo)
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 0, combined
+    assert "the maximum this query can return" not in combined
+    assert f"Checked {_PR_LIMIT - 1} merged PR(s)" in proc.stdout

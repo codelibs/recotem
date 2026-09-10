@@ -266,51 +266,202 @@ def test_startup_reason_vocabulary_matches_the_watchers() -> None:
     )
 
 
-def test_documented_reason_enum_covers_every_label_the_code_emits() -> None:
-    """``docs/operations.md``'s ``reason`` enum must list what the code emits.
+def _emitted_reason_labels() -> set[str]:
+    """Every ``reason`` label the serving code can hand to the metrics module.
 
-    The enum is the operator's reference for alerting on
-    ``recotem_artifact_load_failures_total``. It went stale the moment
-    ``size_cap`` was added to the classifier and nothing noticed, because no
-    test read the two together. Scanning the whole row and failing when the
-    row itself cannot be found keeps that from recurring quietly.
+    Scanned from source rather than exercised, because several of these
+    branches need a wedged mount or a 600 MiB artifact to reach. The scan is
+    the same one both guards below read, so they cannot disagree about what
+    "emitted" means.
     """
-    root = Path(__file__).resolve().parents[2]
-    serving = root / "src" / "recotem" / "serving"
-    emitted = set(
-        re.findall(r'\breturn "([a-z_]+)"', (serving / "watcher.py").read_text("utf-8"))
+    serving = Path(__file__).resolve().parents[2] / "src" / "recotem" / "serving"
+    watcher = (serving / "watcher.py").read_text("utf-8")
+    app = (serving / "app.py").read_text("utf-8")
+
+    emitted = set(re.findall(r'\breturn "([a-z_]+)"', watcher))
+    emitted |= set(re.findall(r'return _failed_entry\([^)]*\), "([a-z_]+)"', app))
+    emitted |= set(re.findall(r'_size_cap_or\([^)]*"([a-z_]+)"\)', app))
+    emitted |= set(
+        re.findall(r'inc_artifact_load_failure\([^)]*reason="([a-z_]+)"', watcher)
     )
     emitted |= set(
-        re.findall(
-            r'return _failed_entry\([^)]*\), "([a-z_]+)"',
-            (serving / "app.py").read_text("utf-8"),
-        )
-    )
-    emitted |= set(
-        re.findall(
-            r'_size_cap_or\([^)]*"([a-z_]+)"\)',
-            (serving / "app.py").read_text("utf-8"),
-        )
+        re.findall(r'inc_artifact_load_failure\([^)]*reason="([a-z_]+)"', app)
     )
     emitted.add("size_cap")
     emitted.discard("ok")
+    return emitted
 
-    doc = (root / "docs" / "operations.md").read_text(encoding="utf-8")
-    row = re.search(
-        r"recotem_artifact_load_failures_total.*?`reason` ∈ \{(?P<enum>[^}]*)\}",
-        doc,
-        re.DOTALL,
-    )
-    assert row, (
-        "no `recotem_artifact_load_failures_total` reason enum found in "
-        "docs/operations.md -- this guard is watching nothing."
-    )
-    documented = set(re.findall(r"`([a-z_]+)`", row.group("enum")))
-    assert documented, "the reason enum parsed as empty; the regex has drifted."
 
-    missing = sorted(emitted - documented)
-    assert not missing, (
-        "these reason labels are emitted by the code but absent from the "
-        f"documented enum in docs/operations.md: {missing}. An operator "
-        "alerting per-reason has no entry for them."
+def test_metrics_accepts_every_reason_label_the_code_emits() -> None:
+    """``_LOAD_FAILURE_REASONS`` must contain every label the code emits.
+
+    ``inc_artifact_load_failure`` coerces anything outside that set to
+    ``"unexpected"`` -- silently, by design, because the set exists to bound
+    the label's cardinality. That makes an omission invisible: the log line
+    says ``size_cap`` and the counter says ``unexpected``, with no error
+    anywhere in between.
+
+    ``size_cap`` was exactly that. Both call sites have returned it since #239
+    and #270, and the counter could never carry it. The guard that used to
+    stand here compared the emitted set against the *documentation*, so it
+    stayed green throughout -- which is why this one compares against the code
+    that actually labels the metric.
+    """
+    from recotem.serving.metrics import _LOAD_FAILURE_REASONS
+
+    unreachable = sorted(_emitted_reason_labels() - _LOAD_FAILURE_REASONS)
+    assert not unreachable, (
+        "these reason labels are emitted by the serving code but absent from "
+        f"_LOAD_FAILURE_REASONS: {unreachable}. inc_artifact_load_failure "
+        "will coerce each of them to 'unexpected', so the counter can never "
+        "carry the label and per-reason alerting on it is impossible."
+    )
+
+
+def test_size_cap_reaches_the_counter_as_its_own_label() -> None:
+    """End to end through the real registry, not just the allow-list.
+
+    The membership test above would still pass if ``inc_artifact_load_failure``
+    stopped consulting ``_LOAD_FAILURE_REASONS`` at all. This one reads the
+    label back off a rendered exposition, and pins that an unknown reason is
+    still coerced -- the cardinality guard has to keep working.
+    """
+    prometheus_client = pytest.importorskip("prometheus_client")
+    assert prometheus_client  # the metrics extra is what registers the counter
+
+    import recotem.serving.metrics as metrics_mod
+
+    metrics_mod._ensure_initialized()
+    if metrics_mod._ARTIFACT_LOAD_FAILURES is None:
+        pytest.skip("metrics are not enabled in this environment")
+
+    recipe = "sizecap_label_probe"
+    metrics_mod.inc_artifact_load_failure(recipe, reason="size_cap")
+    metrics_mod.inc_artifact_load_failure(recipe, reason="not_a_real_reason")
+
+    text = metrics_mod.generate_latest()[0].decode("utf-8")
+    rows = [
+        line
+        for line in text.splitlines()
+        if line.startswith("recotem_artifact_load_failures_total")
+        and f'recipe="{recipe}"' in line
+    ]
+    labels = {line.split('reason="', 1)[1].split('"', 1)[0] for line in rows}
+
+    assert "size_cap" in labels, (
+        'the counter did not carry reason="size_cap"; an over-cap artifact '
+        f"is being filed under something else. Rows: {rows}"
+    )
+    assert "unexpected" in labels, (
+        "an unrecognised reason must still be coerced to 'unexpected' -- the "
+        f"cardinality guard is gone. Rows: {rows}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R10-P2: the startup path's reason must be the value the counter receives
+#
+# Everything above proves two things separately: `_try_load_artifact` returns
+# "size_cap", and `inc_artifact_load_failure` carries "size_cap" when handed it.
+# Nothing joined them.  Rewriting `serving/app.py`'s single call site from
+# `reason=load_reason` to `reason="unexpected"` -- one token, in the line that
+# decides the label an operator's Prometheus scrape receives -- left the entire
+# suite green (2986 passed) while the exposition regressed to exactly the
+# pre-#294 output:
+#
+#   recotem_artifact_load_failures_total{reason="unexpected",recipe="overcap"} 1.0
+#
+# The watcher's identical wiring is covered incidentally, by
+# test_serving_watcher.py::test_hot_swap_version_skewed_artifact_keeps_serving_old_model.
+# The startup path had no equivalent, and it is the path a fresh `recotem serve`
+# takes -- where an over-cap model is actually met.
+#
+# This reads the label off a rendered exposition after a real `create_app` over
+# a real over-cap artifact, so it fails for every reason the two halves above
+# cannot see: a broken hand-off, a coercion that stopped consulting the
+# allow-list, a route that stopped exporting the counter.
+# ---------------------------------------------------------------------------
+
+
+def _serve_config_over_a_recipes_dir(tmp_path: Path) -> ServeConfig:
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir(exist_ok=True)
+    cfg = ServeConfig()
+    cfg.signing_keys_raw = "active:" + "aa" * 32
+    cfg.recipes_dir = str(recipes_dir)  # type: ignore[attr-defined]
+    cfg.env = "development"
+    cfg.insecure_no_auth = True
+    cfg.allowed_hosts = ["testserver", "localhost", "127.0.0.1", "*"]
+    cfg.metrics_enabled = True
+    return cfg
+
+
+def test_startup_size_cap_reaches_the_exposition_as_size_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real over-cap artifact at startup, read back off `/v1/metrics`."""
+    prometheus_client = pytest.importorskip("prometheus_client")
+    assert prometheus_client  # the metrics extra registers the counter
+
+    from fastapi.testclient import TestClient
+
+    import recotem.serving.metrics as metrics_mod
+    from recotem.serving.app import create_app
+
+    monkeypatch.setenv("RECOTEM_METRICS_ENABLED", "1")
+    metrics_mod._ensure_initialized()
+    if metrics_mod._ARTIFACT_LOAD_FAILURES is None:
+        pytest.skip("metrics are not enabled in this environment")
+
+    artifact = tmp_path / "overcap.recotem"
+    write_artifact(
+        payload_obj={"blob": "x" * 200_000},
+        header_dict={"recipe_name": "overcap"},
+        key_ring=_keyring(),
+        fs_path=str(artifact),
+        versioning="always_overwrite",
+    )
+
+    cfg = _serve_config_over_a_recipes_dir(tmp_path)
+    (Path(cfg.recipes_dir) / "overcap.yaml").write_text(  # type: ignore[arg-type]
+        f"""\
+name: overcap
+source:
+  type: csv
+  path: {tmp_path / "data.csv"}
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms:
+    - TopPop
+output:
+  path: {artifact}
+""",
+        encoding="utf-8",
+    )
+    # Well under the artifact's real size, so the payload cap refuses it.
+    cfg.max_artifact_bytes = 1 << 30
+    cfg.max_payload_bytes = 1024
+
+    with TestClient(create_app(cfg)) as client:
+        body = client.get("/v1/metrics").text
+
+    rows = [
+        line
+        for line in body.splitlines()
+        if line.startswith("recotem_artifact_load_failures_total")
+        and 'recipe="overcap"' in line
+    ]
+    assert rows, (
+        "the over-cap artifact produced no artifact_load_failures row at all; "
+        "this guard is watching nothing"
+    )
+    labels = {line.split('reason="', 1)[1].split('"', 1)[0] for line in rows}
+    assert labels == {"size_cap"}, (
+        "the startup load path's reason label did not reach the Prometheus "
+        f"exposition as 'size_cap'; the scrape carries {sorted(labels)}. "
+        "'unexpected' here means the classified reason is not what "
+        "inc_artifact_load_failure was handed -- per-reason alerting on an "
+        f"over-cap model is impossible. Rows: {rows}"
     )

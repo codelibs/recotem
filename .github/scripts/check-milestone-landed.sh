@@ -250,15 +250,59 @@ if [ "${MILESTONE_EXISTS}" = "0" ]; then
          "  - set RECOTEM_ALLOW_NO_MILESTONE=1 to release without one deliberately."
 fi
 
+# `--limit` is a cap, not a request: `gh pr list` returns at most that many rows
+# and says nothing when there were more.  Measured: `--limit 5` on a milestone
+# with more merged PRs than that returns 5 rows with an empty stderr, and
+# `--limit 1100` against a repository with more merged PRs than that returns
+# exactly 1000 -- the search API's own ceiling, also silent.  So a cap below the
+# size of the milestone checks its most recent PRs and prints the same "OK:
+# every merged PR ... is an ancestor" line about the rest, which is the
+# vacuous-check shape this file's header refuses everywhere else.  That was not
+# hypothetical: the previous `--limit 200` was already smaller than this
+# project's largest milestone by the time it was replaced, so the gate had
+# started under-reporting before anyone raised the number.
+#
+# No count is quoted here, deliberately.  A milestone's merged total only grows,
+# so a number written into a comment is exact on the day it is typed and
+# misleading from then on -- and the sentence built on it ("N away from
+# truncating") invites a reader to reason about headroom that has since been
+# spent.  That is what happened to the number this paragraph replaced.  The
+# guard below is what makes the question unnecessary: it refuses at
+# `count >= PR_LIMIT`, so truncation is reported when it happens rather than
+# predicted in advance.
+#
+# 1000 is chosen because it is where `gh pr list --search` truncates anyway, so
+# the guard below fires exactly when truncation starts rather than at an
+# arbitrary number of our own.
+PR_LIMIT=1000
 PRS="$(
     gh pr list --state merged --search "milestone:${MILESTONE}" \
-        --limit 200 --json number,title,mergeCommit \
+        --limit "${PR_LIMIT}" --json number,title,mergeCommit \
         --jq '.[] | "\(.number)\t\(.mergeCommit.oid // "none")\t\(.title)"'
 )"
 
 if [ -z "${PRS}" ]; then
     echo "Milestone '${MILESTONE}' has no merged pull requests. Nothing to verify."
     exit 0
+fi
+
+# Refuse a full page rather than checking a prefix of the milestone.  Placed
+# before the ancestry loop: a truncated list cannot be made trustworthy by
+# examining the part of it that arrived.
+PR_COUNT="$(printf '%s\n' "${PRS}" | grep -c '.' || true)"
+if [ "${PR_COUNT}" -ge "${PR_LIMIT}" ]; then
+    fail "milestone '${MILESTONE}' returned ${PR_COUNT} merged PRs, the maximum this query can return." \
+         "The list is truncated, so the PRs beyond it were never checked -- and passing" \
+         "here would print 'every merged PR in milestone ${MILESTONE} is an ancestor'" \
+         "about a set nobody read.  Refused rather than skipped, for the same reason as" \
+         "the missing-milestone case above." \
+         "" \
+         "gh pr list --search cannot return more than ${PR_LIMIT} rows (the search API's" \
+         "ceiling), so raising the number here does not help.  To fix, verify by hand:" \
+         "  gh pr list --state merged --search 'milestone:${MILESTONE} created:<YYYY-MM-DD' \\" \
+         "    --limit ${PR_LIMIT} --json number,mergeCommit" \
+         "in date slices, checking each merge commit with" \
+         "  git merge-base --is-ancestor <merge-commit> HEAD"
 fi
 
 # ---------------------------------------------------------------------------

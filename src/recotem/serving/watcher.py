@@ -4,9 +4,10 @@ Design (Watcher loop):
 - Runs as a daemon thread; started once during app lifespan.
 - Polls every ``watch_interval`` seconds with +-10% jitter.
 - For each known recipe, stats the artifact pointer via fsspec.
-- If the pointer (mtime / ETag) has changed, reads the entire artifact once
-  into memory, computes sha256, HMAC-verifies, deserializes, then atomically
-  replaces the registry entry.
+- If the pointer's change-marker (ETag, or mtime/size plus — for a
+  pointer-sized file — a digest of its contents) has changed, reads the entire
+  artifact once into memory, computes sha256, HMAC-verifies, deserializes,
+  then atomically replaces the registry entry.
 - Concurrent stat() calls are bounded at 16 in-flight.
 - Rescans the recipes directory each cycle: new YAML files are added; removed
   YAML files cause the entry to be dropped from the registry.
@@ -39,6 +40,7 @@ import structlog
 
 from recotem._artifact_identity import (
     RECIPE_NAME_MSG_PREFIX,
+    check_artifact_recipe_hash,
     check_artifact_recipe_name,
 )
 from recotem._features import (
@@ -51,6 +53,7 @@ from recotem._irspack_compat import (
     SKEW_MSG_PREFIX,
     check_artifact_irspack_version,
 )
+from recotem._log_safe import escape_control_chars
 from recotem._log_safe import format_kid_for_log as _format_kid_for_log
 from recotem._metrics_watcher import inc_recipes_dir_scan_failure as _inc_scan_failure
 from recotem.artifact.format import SIZE_CAP_MSG_MARKER, ArtifactError
@@ -121,10 +124,62 @@ def _read_artifact_bytes(path: str, max_bytes: int) -> bytes:
         raise ArtifactError(f"cannot read artifact '{path}': {exc}") from exc
 
 
+#: Upper bound on the size of a watched file whose *contents* are folded into
+#: the change marker.  Mirrors the pointer cap in
+#: ``recotem.artifact.io.resolve_artifact_pointer``: nothing larger can be a
+#: pointer, and no real artifact is anywhere near this small (the signed
+#: container's header JSON alone is bigger), so this read never touches an
+#: artifact payload — at worst it reads a few hundred bytes of a truncated file.
+_POINTER_PROBE_MAX_BYTES = 512
+
+
+def _pointer_content_digest(
+    fs: fsspec.AbstractFileSystem, fpath: str, size: Any
+) -> str | None:
+    """Return a digest of *fpath*'s contents when it is small enough to be a pointer.
+
+    Under ``versioning: append_sha`` — the documented default — the path the
+    watcher polls is not the artifact but a pointer file whose whole content is
+    ``<stem>.<sha8>.recotem``.  ``sha8`` is always 8 hex characters, so every
+    pointer for a given stem has the *same size*: the size half of the
+    ``(mtime, size)`` marker can never discriminate between two of them, and
+    change detection collapses onto mtime alone.  A rewrite that does not
+    advance the mtime — a coarse-granularity filesystem, or mtime-preserving
+    deploy tooling such as ``rsync -t`` / ``cp -p`` / a snapshot restore — is
+    then missed permanently and silently.
+
+    Folding the pointer's contents into the marker closes that gap for the cost
+    of one 512-byte-capped read per poll, and only for files that are
+    pointer-sized.  Files larger than :data:`_POINTER_PROBE_MAX_BYTES` (every real
+    artifact, which is what ``versioning: always_overwrite`` puts at this path)
+    return ``None`` and keep the previous ``(mtime, size)`` behaviour — hashing
+    those on every tick would mean re-reading up to ``max_artifact_bytes`` per
+    recipe per poll, which is exactly what the watcher's design avoids.
+
+    Returns ``None`` when the file is too large, when the size is unusable, or
+    when the read fails (a pointer deleted between ``info()`` and ``open()``, a
+    permission error).  ``None`` degrades the marker to what it was before this
+    check existed; it never fabricates a change.
+    """
+    try:
+        size_bytes = int(size)
+    except (TypeError, ValueError):
+        return None
+    if size_bytes < 0 or size_bytes > _POINTER_PROBE_MAX_BYTES:
+        return None
+    try:
+        with fs.open(fpath, "rb") as fh:
+            return _sha256_bytes(fh.read(_POINTER_PROBE_MAX_BYTES))
+    except Exception:
+        return None
+
+
 def _stat_marker(path: str, recipe_name: str = "<unknown>") -> Any:
     """Return an opaque change-marker for *path*.
 
-    For local filesystem: (mtime, size) tuple.
+    For local filesystem: ``(mtime, size, content_digest)``, where
+    ``content_digest`` is filled in only for pointer-sized files
+    (see :func:`_pointer_content_digest`) and is ``None`` otherwise.
     For object stores: ETag or VersionId from fsspec info.
 
     Returns ``None`` when the file does not exist (``FileNotFoundError``).
@@ -161,7 +216,10 @@ def _stat_marker_with_error(
             return etag, None
         mtime = info.get("mtime") or info.get("LastModified")
         size = info.get("size") or info.get("Size") or 0
-        return (mtime, size), None
+        # An append_sha pointer's size is a constant, so (mtime, size) alone
+        # cannot tell two pointers apart.  Fold the contents in for files small
+        # enough to be a pointer; larger paths keep the (mtime, size) marker.
+        return (mtime, size, _pointer_content_digest(fs, fpath, size)), None
     except FileNotFoundError:
         return None, None
     except Exception as exc:
@@ -198,7 +256,27 @@ def _sha256_bytes(data: bytes) -> str:
 class _RecipeWatchState:
     """Internal state the watcher maintains per recipe."""
 
+    #: The recipe **as it is on disk now**, refreshed by every rescan that
+    #: re-parses the YAML.  ``None`` only for a YAML-parse-failure stub, which
+    #: never parsed at all.
+    #:
+    #: This used to be the body parsed at process start and was never
+    #: refreshed outside the two YAML-error-recovery branches below, so for a
+    #: recipe that always parsed cleanly it stayed the startup body for the
+    #: life of the process.  It was read as a proxy for "the body the serving
+    #: model was built from", which it is only until the first hot-swap: edit
+    #: a recipe and retrain, and the startup body is neither the body on disk
+    #: nor the body the new artifact was trained from.  The watcher cannot
+    #: reconstruct the trained-from body -- it holds only its ``recipe_hash``
+    #: -- so the body on disk is the only one it can name, and it is the one
+    #: ``app.py`` already uses on the startup load path.  Keeping the two
+    #: paths on the same body is what makes the hot-swap path and a restart
+    #: produce the same entry.
     recipe: Any  # Recipe
+    #: Where the artifact for this recipe currently lives, i.e.
+    #: ``recipe.output.path``.  Kept as a separate field rather than read
+    #: through ``recipe`` because a re-point has to drop everything the
+    #: watcher remembers about the previous file; see ``_repoint_artifact``.
     artifact_path: str
     last_marker: Any = None
     last_sha256: str = ""
@@ -232,15 +310,14 @@ class _RecipeWatchState:
     last_attempted_marker: Any = None
     #: Set to True after the first TypeError from artifact_path + ".sha256"
     #: so subsequent polls skip the sidecar check rather than flooding logs
-    #: with the same warning on every poll cycle (M7).
+    #: with the same warning on every poll cycle (M7).  Cleared by
+    #: ``_scan_recipes_dir`` whenever the recipe YAML is re-parsed, so a
+    #: changed configuration gets a fresh evaluation (C4).
     sidecar_unsupported: bool = False
-    #: The yaml_mtime at which sidecar_unsupported was set.  When the recipe
-    #: YAML changes (yaml_mtime differs from this value) the sidecar_unsupported
-    #: flag is cleared so the new configuration gets a fresh evaluation (C4).
-    sidecar_unsupported_at_mtime: float | None = None
     #: Counter for consecutive transient OSErrors on sidecar reads.  After
-    #: 3 consecutive non-ENOENT OSErrors the watcher skips sidecar checks until
-    #: the next mtime change to avoid triggering full reloads indefinitely (m7).
+    #: 3 consecutive non-ENOENT OSErrors the watcher sets ``sidecar_unsupported``
+    #: and skips sidecar checks until the recipe YAML is re-parsed, so a
+    #: persistently unreadable sidecar cannot drive a reload every tick (m7).
     sidecar_io_error_count: int = 0
     #: True while the outstanding ``last_load_error`` on this recipe's registry
     #: entry is the one the rescan-parse path wrote.  Set where that path calls
@@ -250,6 +327,15 @@ class _RecipeWatchState:
     #: successful YAML reparse says nothing about a broken artifact, so blanket
     #: clearing would hide a genuine load failure from ``/v1/health/details``.
     yaml_rescan_error: bool = False
+    #: True while the outstanding ``last_load_error`` came from the *stat* side
+    #: — the file was missing, the stat raised, or the stat future timed out —
+    #: rather than from reading or building the artifact.  A stat failure says
+    #: nothing about the bytes, so a later successful stat on the unchanged
+    #: marker is proof enough that it has passed and the error may be retracted.
+    #: A *load* failure is not retractable that way: the marker being unchanged
+    #: means the same bytes are still there, so it stays until a read proves
+    #: otherwise.  See ``_retract_stale_error``.
+    stat_error_outstanding: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -601,8 +687,10 @@ class ArtifactWatcher(threading.Thread):
                     and cached[0] == current_mtime
                 ):
                     recipe = cached[1]
+                    reparsed = False
                 else:
                     recipe = load_recipe(yaml_file, recipes_root=self._recipes_dir)
+                    reparsed = True
                     if current_mtime is not None:
                         self._yaml_mtime_cache[yaml_file] = (current_mtime, recipe)
             except Exception as exc:
@@ -723,13 +811,38 @@ class ArtifactWatcher(threading.Thread):
                 # stub (artifact_path=""), update the state now that the YAML
                 # parsed successfully so _poll_artifacts uses the correct path.
                 existing_state = self._states[recipe.name]
+                # The YAML parsed, so this is the recipe as it is on disk now.
+                # Adopt it regardless of which recovery branch below does or
+                # does not fire.  Without this the watcher keeps the body read
+                # at process start: the drift comparison is wrong in both
+                # directions (it warns after a retrain that made the two agree,
+                # and stays silent when an edit made them disagree), and the
+                # ``item_metadata`` table ``_build_entry`` joins against is the
+                # one the startup body named, so a repointed metadata path plus
+                # a retrain serves the new model on the old table with nothing
+                # warning -- the hashes legitimately agree.
+                existing_state.recipe = recipe
+                if reparsed:
+                    # C4: the recipe changed, so anything latched against the
+                    # previous configuration gets a fresh evaluation.  The
+                    # sidecar path is ``artifact_path + ".sha256"`` and
+                    # ``artifact_path`` is ``output.path``, so an edit can move
+                    # the sidecar out from under a latch set on the old one.
+                    # This is the re-parse the latch's own comment asks about;
+                    # it used to be looked for in ``_check_sidecar_changed``
+                    # through ``getattr(recipe, "_yaml_path", None)``, an
+                    # attribute ``Recipe`` does not define and, with
+                    # ``extra="forbid"`` and no private attributes, cannot
+                    # carry -- so the flag was never cleared and the sidecar
+                    # backstop stayed off for the life of the process.
+                    existing_state.sidecar_unsupported = False
+                    existing_state.sidecar_io_error_count = 0
                 if not existing_state.artifact_path and recipe.output.path:
                     logger.info(
                         "recipe_yaml_failure_recovered",
                         name=recipe.name,
                     )
                     existing_state.artifact_path = recipe.output.path
-                    existing_state.recipe = recipe
                     # Reset last_marker so the next tick triggers a fresh load.
                     existing_state.last_marker = None
                 elif existing_state.yaml_rescan_error:
@@ -748,15 +861,26 @@ class ArtifactWatcher(threading.Thread):
                     # is the one *this* path wrote; an artifact-load failure
                     # never sets the flag and so is never cleared here.
                     self._registry.set_load_error(recipe.name, None)
-                    # Adopt the corrected recipe body (and the output path it
-                    # derives) so the repair actually takes effect.
-                    existing_state.recipe = recipe
+                    # The corrected body is already adopted above; take the
+                    # output path it derives so the repair takes effect.
                     existing_state.artifact_path = recipe.output.path
                     # Reset last_marker so the next tick reloads.  As in the
                     # discovery branch above, the load itself stays on the
                     # _poll_artifacts thread pool rather than blocking the
                     # scan (M-1).
                     existing_state.last_marker = None
+                elif existing_state.artifact_path != recipe.output.path:
+                    # Neither recovery branch fired, so this is a healthy
+                    # recipe whose ``output.path`` was edited under the running
+                    # watcher.  Follow it: ``output.path`` is where ``train``
+                    # writes, and a watcher that keeps polling the path it read
+                    # at discovery ignores the edit for the life of the process
+                    # with nothing to show for it -- the drift warning is
+                    # emitted from the load path, and no load ever happens at
+                    # the new location.
+                    self._repoint_artifact(
+                        recipe.name, existing_state, recipe.output.path
+                    )
                 existing_state.yaml_rescan_error = False
 
         for gone in current_names - found_names:
@@ -797,6 +921,48 @@ class ArtifactWatcher(threading.Thread):
 
         if found_names != current_names:
             _metrics.set_active_recipes(self._registry.loaded_count())
+
+    def _repoint_artifact(
+        self, name: str, state: _RecipeWatchState, new_path: str
+    ) -> None:
+        """Follow an edited ``output.path`` to the file it now names.
+
+        Everything the watcher remembers about this recipe's artifact -- the
+        change marker, the payload digest, the ``.sha256`` sidecar contents,
+        the load backoff and the repeat-suppression signatures -- describes the
+        *previous* file and says nothing at all about the new one, so all of it
+        is dropped here rather than carried across.  Leaving ``last_sha256``
+        behind in particular would let a new path holding byte-identical
+        content take the "unchanged bytes" short-circuit in ``_load_recipe``
+        and never rebuild the entry, so the served entry would keep naming the
+        old path.
+
+        The model currently in the registry is deliberately left serving.  When
+        the new path does not exist yet -- the ordinary case, an operator who
+        edited the recipe and has not retrained -- the next poll records
+        "artifact missing or unreadable" against the entry and
+        ``/v1/health/details`` degrades, which is the same M-2 contract every
+        other missing artifact gets.  The entry's own ``artifact_path`` keeps
+        naming the file it was last loaded from, which is what that field
+        documents; the ``recipe_output_path_changed`` line below is what ties
+        the two together in a log.
+        """
+        logger.info(
+            "recipe_output_path_changed",
+            name=name,
+            previous_path=str(state.artifact_path),
+            path=str(new_path),
+        )
+        state.artifact_path = new_path
+        state.last_marker = None
+        state.last_sha256 = ""
+        state.last_sidecar_contents = None
+        state.sidecar_io_error_count = 0
+        state.sidecar_unsupported = False
+        state._last_stat_error_class = None
+        state._last_failure_signature = None
+        state.stat_error_outstanding = False
+        self._clear_load_backoff(state)
 
     # ------------------------------------------------------------------
     # Artifact polling
@@ -887,6 +1053,9 @@ class ArtifactWatcher(threading.Thread):
                         _failed_recipe,
                         f"stat timeout after {_per_future_timeout:.0f}s",
                         reason="timeout",
+                        # A timed-out stat says nothing about the bytes; the
+                        # next stat that answers in time retracts it.
+                        stat_class=True,
                     )
                     fut.cancel()
                 pending = set()
@@ -945,6 +1114,7 @@ class ArtifactWatcher(threading.Thread):
                 if entry is not None and entry.last_load_error is None:
                     logger.warning("artifact_disappeared", name=name)
             self._registry.set_load_error(name, error_msg)
+            state.stat_error_outstanding = True
             _metrics.inc_artifact_load_failure(name, reason="read")
             return
 
@@ -952,7 +1122,10 @@ class ArtifactWatcher(threading.Thread):
         state._last_stat_error_class = None
 
         if marker == state.last_marker:
-            # Fast path: pointer/mtime unchanged.  For append_sha
+            # Fast path: the change marker is unchanged.  For a pointer-sized
+            # path that includes a digest of the pointer's contents, so a
+            # rewrite that did not advance the mtime has already been caught
+            # above and does not reach here.  For append_sha
             # artifacts we additionally check the cheap ``.sha256``
             # sidecar pointer file so the watcher can skip the full
             # artifact stat on the *resolved* target when neither the
@@ -965,6 +1138,27 @@ class ArtifactWatcher(threading.Thread):
             # poll and then returns to the original ETag on the next
             # poll would re-trigger a full reload unnecessarily.
             state.last_marker = marker
+            # Retract an outstanding error the marker has just disproved.
+            # ``last_marker`` only ever advances on a successful load, so
+            # reaching here means the file is once again the artifact in
+            # memory.  Two faults end that way and neither reaches the load
+            # path that would otherwise clear the annotation:
+            #
+            #   * a transient stat failure (S3 throttle, NFS stale handle, PVC
+            #     remount, a path briefly absent) — the stat that just
+            #     succeeded is the whole of what it claimed was wrong; and
+            #   * a broken artifact rolled back with an mtime-preserving copy
+            #     (``cp -p``, ``rsync -t``, a snapshot restore), which puts the
+            #     original marker back.
+            #
+            # A load failure recorded against *this* marker is excluded: the
+            # sidecar path can trigger a read without the marker moving, and
+            # there the same marker really does still mean the same broken
+            # bytes.
+            if state.stat_error_outstanding or (
+                state.failed_marker is not None and state.failed_marker != marker
+            ):
+                self._retract_stale_error(name, state, reason="marker_restored")
             sidecar_changed = _check_sidecar_changed(state)
             if not sidecar_changed:
                 return
@@ -1024,6 +1218,13 @@ class ArtifactWatcher(threading.Thread):
             if marker is not None:
                 state.last_marker = marker
             self._clear_load_backoff(state)
+            # These bytes hash to the artifact that is already serving, so
+            # whatever the last failure was — a broken artifact that has since
+            # been rolled back, a transient read error — it is over, and the
+            # entry in memory is the artifact on disk.  Retract the annotation:
+            # this short-circuit returns before ``_build_entry``, so the
+            # successful-load path below never runs and nothing else would.
+            self._retract_stale_error(name, state, reason="bytes_unchanged")
             return
 
         try:
@@ -1108,6 +1309,9 @@ class ArtifactWatcher(threading.Thread):
         state.last_sha256 = sha256
         state.last_marker = new_marker
         self._clear_load_backoff(state)
+        # The fresh entry carries last_load_error=None, so any outstanding
+        # stat-side annotation is gone with it.
+        state.stat_error_outstanding = False
         # Reset post-HMAC deserialization failure streak on successful load.
         self._post_hmac_failure_streak.pop(name, None)
         # Clear the repeat-suppression signature so the next failure — even an
@@ -1120,13 +1324,26 @@ class ArtifactWatcher(threading.Thread):
             "artifact_hot_swapped",
             name=name,
             kid=_format_kid_for_log(entry.kid),
-            trained_at=entry.trained_at,
+            trained_at=escape_control_chars(str(entry.trained_at)),
         )
 
     def _build_entry(
-        self, name: str, recipe: Any, data: bytes, artifact_path: str
+        self,
+        name: str,
+        recipe: Any,
+        data: bytes,
+        artifact_path: str,
     ) -> ModelEntry:
-        """Parse, verify, deserialize data and return a fresh ModelEntry."""
+        """Parse, verify, deserialize data and return a fresh ModelEntry.
+
+        *recipe* is the recipe as it is on disk: it decides ``item_metadata``
+        and everything else that reaches the entry, and it is the body compared
+        against the artifact's ``recipe_hash`` for the drift warning.  Both
+        callers pass a freshly-parsed body -- ``app.py`` because it has just
+        read the directory, the watcher because ``_scan_recipes_dir`` refreshes
+        ``state.recipe`` on every re-parse -- so a hot-swap and a restart build
+        the same entry from the same bytes.
+        """
         from recotem.artifact.format import parse_header_from_bytes
         from recotem.artifact.signing import unpickle_payload, verify_hmac
 
@@ -1170,6 +1387,11 @@ class ArtifactWatcher(threading.Thread):
         # matter what the rest of the header says, and the check needs only
         # the dict already in hand — no payload, no version lookup.
         check_artifact_recipe_name(header_dict, name=name)
+        # Mirrored from the startup path deliberately: an artifact that
+        # arrives by hot-swap after a recipe edit is the same staleness,
+        # and a check wired into only one of the two load paths is the
+        # divergence #270 had to correct.
+        check_artifact_recipe_hash(header_dict, recipe=recipe, name=name)
 
         # Preflight the irspack version before deserializing: a skewed artifact
         # fails inside the C++ __setstate__ with an error that names neither
@@ -1261,6 +1483,61 @@ class ArtifactWatcher(threading.Thread):
         state._last_failure_signature = signature
         return True
 
+    def _retract_stale_error(
+        self, name: str, state: _RecipeWatchState, *, reason: str
+    ) -> None:
+        """Clear a ``last_load_error`` the watcher has since proved obsolete.
+
+        ``last_load_error`` used to be written by every failure path and
+        cleared by exactly one: a *successful* load, which replaces the whole
+        entry.  Both of the watcher's "nothing to do" fast paths return before
+        that, so a recipe whose fault had passed kept reporting the fault:
+
+        * a transient stat failure, then a successful stat on the same marker —
+          the poll never reaches the load path at all; and
+        * a broken artifact rolled back to the bytes already in memory — the
+          load path is reached but short-circuits on the sha256 comparison.
+
+        In both cases ``/v1/health/details`` answered 503 ``degraded`` for the
+        life of the process while ``/v1/recipes/{name}:recommend`` served
+        normally, and the only remedies were writing a *different* artifact or
+        restarting.
+
+        Two outstanding errors are deliberately left alone.  ``yaml_rescan_error``
+        marks a recipe whose YAML stopped parsing: nothing about the artifact
+        speaks to that, and only a successful reparse may retract it (the same
+        asymmetry that flag already documents in the other direction).  The
+        ``_mark_all_unhealthy`` sentinel has its own recovery path
+        (``_clear_watcher_unhealthy_errors``) keyed to the poll-loop error
+        streak, so retracting it here would race that bookkeeping.
+        """
+        if state.yaml_rescan_error:
+            return
+        entry = self._registry.get(name)
+        if entry is None or entry.last_load_error is None:
+            return
+        if entry.last_load_error == self._WATCHER_UNHEALTHY_SENTINEL:
+            return
+        previous = entry.last_load_error
+        self._registry.set_load_error(name, None)
+        state.stat_error_outstanding = False
+        # Disarm, so a retraction fires once per fault rather than on every
+        # tick for as long as the marker stays put.  Without this the fast
+        # path's ``failed_marker != marker`` test keeps holding, and an error
+        # some other path re-writes each tick -- a recipes-dir scan failure,
+        # say -- would be cleared each tick too, flapping /v1/health/details
+        # instead of reporting it.  The backoff this drops is moot here: the
+        # marker that failed is no longer the one on disk.
+        self._clear_load_backoff(state)
+        # Let the next failure log at ERROR again even if it is identical.
+        state._last_failure_signature = None
+        logger.info(
+            "artifact_load_error_cleared",
+            name=name,
+            reason=reason,
+            previous_error=previous[:200],
+        )
+
     def _mark_error(self, name: str, error: str) -> None:
         """Mark last_load_error on the existing registry entry (if any).
 
@@ -1291,7 +1568,7 @@ class ArtifactWatcher(threading.Thread):
         next tick re-reads the artifact in full, and for a fault that is *not*
         transient (a kid that is not in the key ring, an irspack version skew,
         a truncated object) that repeats for as long as the artifact stays
-        broken.  ``docs/operations.md`` describes exactly that steady state as
+        broken.  ``https://recotem.org/2.2/docs/operations.html`` describes exactly that steady state as
         survivable — "a skewed artifact sits harmless in a running fleet" — so
         it can persist for days, at one full object-store GET per tick.
 
@@ -1354,12 +1631,24 @@ class ArtifactWatcher(threading.Thread):
         state.retry_not_before = 0.0
 
     def _record_load_failure(
-        self, name: str, error: str, reason: str = "unexpected"
+        self,
+        name: str,
+        error: str,
+        reason: str = "unexpected",
+        *,
+        stat_class: bool = False,
     ) -> None:
         """Mark the entry's load error and increment the failure metrics.
 
         *reason* labels the failure step for ``recotem_artifact_load_failures_total``.
+
+        *stat_class* says the failure came from the stat side rather than from
+        the bytes, so a later successful stat on an unchanged marker may
+        retract it — see ``_RecipeWatchState.stat_error_outstanding``.
         """
+        state = self._states.get(name)
+        if state is not None:
+            state.stat_error_outstanding = stat_class
         self._mark_error(name, error)
         _metrics.inc_artifact_load_failure(name, reason=reason)
         _metrics.record_swap(name, ok=False)
@@ -1520,30 +1809,13 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
     """
     artifact_path = state.artifact_path
 
-    # Short-circuit: if a previous poll already determined that sidecar
-    # construction is unsupported for this path, re-evaluate only if the
-    # recipe YAML mtime has changed since the flag was set (C4).
+    # Short-circuit: a previous poll already determined that the sidecar is
+    # unusable for this path.  The flag is cleared in ``_scan_recipes_dir``
+    # when the recipe YAML is re-parsed (C4) -- that is the watcher's own
+    # record of "the configuration changed", and it is where the sidecar path
+    # itself can move, since the path is derived from ``output.path``.
     if state.sidecar_unsupported:
-        import os as _os
-
-        yaml_mtime: float | None = None
-        try:
-            recipe_yaml = getattr(state.recipe, "_yaml_path", None) or getattr(
-                state.recipe, "yaml_path", None
-            )
-            if recipe_yaml is not None:
-                yaml_mtime = _os.stat(recipe_yaml).st_mtime
-        except OSError:
-            pass
-        if (
-            yaml_mtime is None
-            or state.sidecar_unsupported_at_mtime is None
-            or yaml_mtime == state.sidecar_unsupported_at_mtime
-        ):
-            return False
-        # YAML mtime changed — clear the flag and re-evaluate.
-        state.sidecar_unsupported = False
-        state.sidecar_unsupported_at_mtime = None
+        return False
 
     # Only meaningful for local-FS paths where we can form a sibling sidecar.
     # For remote URIs (s3://, gs://) this is a no-op; the marker comparison
@@ -1556,22 +1828,32 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
             path=str(artifact_path),
             exc_type=type(exc).__name__,
         )
-        import os as _os2
-
-        yaml_mtime2: float | None = None
-        try:
-            recipe_yaml2 = getattr(state.recipe, "_yaml_path", None) or getattr(
-                state.recipe, "yaml_path", None
-            )
-            if recipe_yaml2 is not None:
-                yaml_mtime2 = _os2.stat(recipe_yaml2).st_mtime
-        except OSError:
-            pass
         state.sidecar_unsupported = True
-        state.sidecar_unsupported_at_mtime = yaml_mtime2
         return False
 
-    if not sidecar_path.exists():
+    try:
+        sidecar_present = sidecar_path.exists()
+    except OSError as exc:
+        # ``Path.exists()`` answers False only for pathlib's ignorable errnos
+        # (ENOENT / ENOTDIR / EBADF / ELOOP) and *re-raises* every other one,
+        # so a stale NFS handle or a PVC remount on the artifacts volume makes
+        # this line raise rather than answer.  The escape is not scoped to this
+        # recipe: the caller is inside ``_poll_artifacts``, so the whole tick is
+        # abandoned, ``_consecutive_errors`` climbs on every tick, and at
+        # ``_unhealthy_threshold`` ``_mark_all_unhealthy`` marks *every* recipe
+        # "watcher unhealthy" — over a sidecar that says nothing about any of
+        # them.  An unanswerable question is not a "sidecar changed" answer;
+        # decline it, which is what this function already documents for every
+        # other sidecar I/O error and what the sibling ``exists()`` in
+        # ``build_initial_states`` already does.
+        logger.warning(
+            "sidecar_stat_failed",
+            path=str(artifact_path),
+            exc_type=type(exc).__name__,
+        )
+        return False
+
+    if not sidecar_present:
         state.sidecar_io_error_count = 0
         return False
 
@@ -1615,21 +1897,10 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
             if state.sidecar_io_error_count >= 3:
                 # After 3 consecutive non-ENOENT errors, stop triggering full
                 # reloads on every tick to avoid a reload storm from a
-                # persistently unreadable sidecar (m7).  The flag is cleared
-                # when the next yaml_mtime change is detected (C4 logic above).
-                import os as _os3
-
-                yaml_mtime3: float | None = None
-                try:
-                    recipe_yaml3 = getattr(state.recipe, "_yaml_path", None) or getattr(
-                        state.recipe, "yaml_path", None
-                    )
-                    if recipe_yaml3 is not None:
-                        yaml_mtime3 = _os3.stat(recipe_yaml3).st_mtime
-                except OSError:
-                    pass
+                # persistently unreadable sidecar (m7).  The flag is cleared on
+                # the next re-parse of the recipe YAML (C4, in
+                # ``_scan_recipes_dir``).
                 state.sidecar_unsupported = True
-                state.sidecar_unsupported_at_mtime = yaml_mtime3
                 state.sidecar_io_error_count = 0
                 logger.warning(
                     "sidecar_io_errors_suppressed",

@@ -26,11 +26,13 @@ Exit codes:
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
 import re
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -663,10 +665,30 @@ def inspect(
         # Same in-memory dev key as run_training / serve dev mode.
         signing_keys_raw = "dev:" + ("0" * 64)
     if signing_keys_raw:
-        try:
-            from recotem.artifact.signing import KeyRing, verify_hmac
+        from recotem.artifact.signing import KeyRing, KeyRingConfigError, verify_hmac
 
+        # Building the KeyRing is reported separately from verifying against it.
+        # A malformed RECOTEM_SIGNING_KEYS never reaches verify_hmac -- no HMAC
+        # is computed and the artifact is not read past its header -- so the
+        # "HMAC verification failed" wording that used to cover this branch
+        # announced a verification that did not happen, about an artifact that
+        # is intact.  The exit code already said configuration (8, via
+        # KeyRingConfigError's ConfigError base); the message contradicted it,
+        # and the message is what an operator triaging a red log line reads
+        # first.
+        try:
             key_ring = KeyRing(signing_keys_raw)
+        except (MemoryError, RecursionError):
+            raise
+        except KeyRingConfigError as exc:
+            _exit(
+                _map_exception_to_exit(exc),
+                f"Cannot build the signing keyring from RECOTEM_SIGNING_KEYS: "
+                f"{exc}\n"
+                "  The artifact was not verified and was not modified; fix the "
+                "environment variable and re-run.",
+            )
+        try:
             payload_bytes = data[hdr.payload_offset :]
             verify_hmac(
                 key_ring,
@@ -770,6 +792,73 @@ def validate(
         _exit(code, f"Algorithm check failed: {exc}")
     typer.echo(f"Algorithms: OK ({', '.join(resolved_algorithms)})")
 
+    # ``training.storage_path`` for the same reason as ``algorithms`` above:
+    # ``train`` only reaches it in ``run_search``, which runs *after* the
+    # dataset has been fetched, cleansed and split — so an unopenable study
+    # backend costs a full data pull, and on a BigQuery- or SQL-backed recipe a
+    # billed scan, before it surfaces.  ``validate`` is the documented
+    # pre-flight gate, so it asks the same question here by calling the same
+    # function, which is what keeps the message and the exit code from drifting
+    # apart.  The check is a pure local import probe: no connection is opened,
+    # so this stays as cheap as the other pre-source checks.
+    def _check_storage_path() -> str:
+        from recotem.training._storage_url import (
+            describe_storage_path,
+            validate_storage_path,
+        )
+
+        path = loaded_recipe.training.storage_path
+        validate_storage_path(path)
+        # Never echo the value itself: a study URL may carry userinfo, and
+        # ``validate`` writes to stdout.  ``describe_storage_path`` returns the
+        # dialect and driver only.
+        return describe_storage_path(path)
+
+    try:
+        storage_desc = _check_storage_path()
+    except Exception as exc:
+        code = _map_exception_to_exit(exc)
+        _exit(code, f"Storage path check failed: {exc}")
+    typer.echo(f"Optuna storage: OK ({storage_desc})")
+
+    @contextlib.contextmanager
+    def _datasource_layer(what: str) -> Iterator[None]:
+        """Report an unexpected datasource-layer failure the way ``train`` does.
+
+        ``train`` wraps anything unrecognised coming out of the datasource path
+        as ``DataSourceError(f"Data fetch failed: {exc}")`` (``pipeline.py``),
+        which the CLI maps to exit 3.  ``validate`` used to map the raw
+        exception instead, and a raw exception usually has no mapping — so the
+        two commands reported *different exit codes for the identical failure*.
+        Measured: a plugin whose ``__init__`` raises ``ImportError`` (the exact
+        case ``plugin-authoring.md`` tells authors to guard against) gave
+        ``train`` 3 and ``validate`` **1**.
+
+        Exit 1 is ``_EXIT_UNKNOWN`` — "unhandled / unmapped exception" — so a
+        pre-flight failure that ``train`` classifies correctly was reaching
+        supervisors and CI as an internal error of ``recotem`` itself.  That is
+        the drift this module's own ``_check_algorithms`` docstring warns
+        about: validate must ask the same question *and get the same answer*.
+
+        ``DataSourceError`` and every other already-mapped domain error pass
+        through untouched.  ``from exc`` is load-bearing: it preserves the
+        ``__cause__`` chain that ``_map_exception_to_exit`` walks for
+        ``HttpFetchError``, so a plugin probe refused by the SSRF guard still
+        reports 7 rather than being flattened to 3.  ``MemoryError`` and
+        ``RecursionError`` propagate unwrapped, matching the OOM policy the
+        rest of the codebase follows.
+        """
+        from recotem.datasource.base import DataSourceError
+
+        try:
+            yield
+        except DataSourceError:
+            raise
+        except (MemoryError, RecursionError):
+            raise
+        except Exception as exc:
+            raise DataSourceError(f"{what} failed: {exc}") from exc
+
     def _probe_source(source_cfg: Any, where: str) -> tuple[Any, str]:
         from recotem.datasource.registry import get_source_class
 
@@ -783,14 +872,16 @@ def validate(
         # google-cloud-bigquery) and config / Config-class mismatches.
         # We do NOT call .fetch() here — full data loads can be
         # expensive (BigQuery scans, large CSV reads).
-        source = source_cls(source_cfg)
+        with _datasource_layer("DataSource construction"):
+            source = source_cls(source_cfg)
 
         # Optional connectivity probe — plugin-authoring.md documents
         # this hook.  Built-ins implement it; third-party plugins may
         # opt in.
         probe = getattr(source, "probe", None)
         if callable(probe):
-            probe()
+            with _datasource_layer("DataSource probe"):
+                probe()
             typer.echo(f"DataSource: probe OK ({type_name}) [{where}]")
         else:
             typer.echo(
@@ -828,7 +919,9 @@ def validate(
                 "time_column": loaded_recipe.schema_.time_column,
             },
         )
-        if probe_columns(ctx):
+        with _datasource_layer("Schema column probe"):
+            has_columns = probe_columns(ctx)
+        if has_columns:
             typer.echo(f"Schema columns: OK ({type_name}) [{where}]")
         else:
             typer.echo(

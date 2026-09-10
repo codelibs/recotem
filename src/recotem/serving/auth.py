@@ -30,6 +30,7 @@ import hmac
 import structlog
 from fastapi import HTTPException, Request
 
+from recotem._log_safe import escape_control_chars
 from recotem.config import ApiKeyEntry
 
 logger = structlog.get_logger(__name__)
@@ -184,7 +185,7 @@ def verify_api_key(
         logger.debug(
             "auth_anonymous_bypass",
             client_host=client_host,
-            path=request.url.path,
+            path=escape_control_chars(request.url.path),
             mode=_bypass_mode,
         )
 
@@ -197,7 +198,7 @@ def verify_api_key(
             logger.info(
                 "auth_anonymous_bypass_first_seen",
                 client_host=client_host,
-                path=request.url.path,
+                path=escape_control_chars(request.url.path),
                 mode=_bypass_mode,
             )
         else:
@@ -208,7 +209,9 @@ def verify_api_key(
 
     raw_header: str | None = request.headers.get(_API_KEY_HEADER)
     if raw_header is None:
-        logger.warning("auth_missing_header", path=request.url.path)
+        logger.warning(
+            "auth_missing_header", path=escape_control_chars(request.url.path)
+        )
         # Constant-time equalisation: run the scrypt KDF on a canonical-length
         # dummy value (exactly _API_KEY_MAX_LEN null bytes) so that the
         # missing-header response time is indistinguishable from the other
@@ -231,7 +234,7 @@ def verify_api_key(
     if len(raw_header) > _API_KEY_MAX_LEN:
         logger.warning(
             "auth_oversized_header",
-            path=request.url.path,
+            path=escape_control_chars(request.url.path),
             length=len(raw_header),
             cap=_API_KEY_MAX_LEN,
         )
@@ -255,7 +258,7 @@ def verify_api_key(
     if len(raw_header) < _API_KEY_MIN_LEN:
         logger.warning(
             "auth_short_key_rejected",
-            path=request.url.path,
+            path=escape_control_chars(request.url.path),
             length=len(raw_header),
             min_len=_API_KEY_MIN_LEN,
         )
@@ -272,11 +275,22 @@ def verify_api_key(
     # kids cannot be inferred from response latency.  hmac.compare_digest
     # is constant-time; the OR accumulation preserves that property.
     #
-    # Retain only the FIRST matching kid for audit attribution.  Today the
-    # ConfigError at startup rejects duplicate sha256 hashes so at most one
-    # entry can ever match, but if that invariant is ever relaxed (e.g. to
-    # support shared keys with distinct labels) the first-match policy
-    # avoids misattributing access logs to the last duplicate.
+    # Retain only the FIRST matching kid for audit attribution.
+    #
+    # More than one entry CAN match.  ``ServeConfig.from_env`` rejects a
+    # duplicate *kid*, but it does not reject two entries whose *hashes* are
+    # equal — ``RECOTEM_API_KEYS="a:sha256:<h>,b:sha256:<h>"`` is accepted and
+    # loads both.  That is one plaintext key registered under two labels, which
+    # is almost certainly an operator mistake, but it is not refused, so the
+    # fold below must stay tolerant of it rather than assume a unique match.
+    # First-match keeps audit attribution deterministic (the earlier kid in
+    # RECOTEM_API_KEYS wins) instead of silently recording the last duplicate.
+    #
+    # This comment previously claimed startup "rejects duplicate sha256 hashes
+    # so at most one entry can ever match".  It never did — only duplicate kids
+    # are rejected — so do not build on that invariant.
+    # ``tests/unit/test_auth_duplicate_hash.py`` pins the real behaviour on both
+    # sides so this comment cannot drift from the code again.
     matched_kid: str | None = None
     matched = False
     for entry in api_keys:
@@ -291,7 +305,7 @@ def verify_api_key(
         request.state.kid = matched_kid
         return matched_kid
 
-    logger.warning("auth_invalid_key", path=request.url.path)
+    logger.warning("auth_invalid_key", path=escape_control_chars(request.url.path))
     raise HTTPException(
         status_code=401,
         detail={"detail": "Invalid API key", "code": "INVALID_API_KEY"},

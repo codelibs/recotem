@@ -16,7 +16,7 @@ pushing a `vX.Y.Z` tag fires `publish.yml` (PyPI, OIDC trusted publishing) and
 that single irreversible trigger.
 
 ```
-audit readiness → prepare PR (version + CHANGELOG + docs) → verify →
+audit readiness → prepare PR (version + docs) → verify →
 merge → push tag (human) → GitHub Release → sync recotem-docs → open dev cycle
 ```
 
@@ -33,23 +33,38 @@ merge → push tag (human) → GitHub Release → sync recotem-docs → open dev
   "you do it" are not exceptions to this.
 - **CI now gates the tag→PyPI path — but `main` is still ungated.** Two
   release-blocking jobs run before anything is built: `publish.yml`'s `guard`
-  (*release tag guard*, which runs `.github/scripts/check-release-tag.sh`) and
-  its `test` (*pre-publish test gate* — ruff plus unit/integration/fuzz on
-  3.12), and `build` → `publish-pypi` depend on both. `test.yml` fires on `v*`
-  tags too and adds the 3.13/3.14 legs and e2e, but `publish.yml` does **not**
-  wait on it — the two run in parallel, so those extra legs are not
-  release-blocking. And `main` has no required status checks (`contexts: []`),
-  so a red commit can be merged and then tagged. Phase 3's pre-tag verification
-  is what closes that gap; do not skip it because the tag has gates now.
-  (In 2.0.0, before those gates existed, `publish-pypi` completed while the main
-  test run was still finishing — the code was on PyPI before its own tests were
-  green.)
-- **The version must be identical in all four places**: `pyproject.toml`,
+  (*release tag guard*) and its `test` (*pre-publish test gate* — ruff plus
+  unit/integration/fuzz on 3.12), and `build` → `publish-pypi` depend on both.
+  The `guard` job runs **two** scripts, and they answer different questions:
+
+  | Script | Question | Fixed by |
+  |---|---|---|
+  | `.github/scripts/check-release-tag.sh` | is the tag well-formed, does it agree with every version string and deployment pin, and is the tagged commit on `main`? | editing the tree |
+  | `.github/scripts/check-milestone-landed.sh` | is every PR the release milestone calls MERGED actually reachable from the tagged commit? | re-landing the missing PR **and re-cutting the tag** |
+
+  `docker.yml`'s identically-named `guard` job runs only the **first** of the
+  two, so the milestone check is the one gate whose failure is not symmetric
+  across the two workflows — see the "half-landed" rows in
+  `references/failure-recovery.md`. Both are runnable locally; Phase 3 step 1
+  runs them.
+
+  `test.yml` fires on `v*` tags too and adds the 3.13/3.14 legs and e2e, but
+  `publish.yml` does **not** wait on it — the two run in parallel, so those
+  extra legs are not release-blocking. And `main` has no required status checks
+  (`contexts: []`), so a red commit can be merged and then tagged. Phase 3's
+  pre-tag verification is what closes that gap; do not skip it because the tag
+  has gates now. (In 2.0.0, before those gates existed, `publish-pypi` completed
+  while the main test run was still finishing — the code was on PyPI before its
+  own tests were green.)
+- **The version must be identical in all five places**: `pyproject.toml`,
   `src/recotem/version.py`, `helm/recotem/Chart.yaml` (`version:` and
-  `appVersion:`), and `uv.lock`. A mismatch between the first two nearly shipped
-  in 2.0.0. Do not check this by eye:
+  `appVersion:`), `helm/recotem/values.yaml` (`image.tag` — the value that
+  decides what a cluster actually pulls), and `uv.lock`. A mismatch between the
+  first two nearly shipped in 2.0.0. Do not check this by eye:
   `bash .github/scripts/check-release-tag.sh vX.Y.Z` is the authoritative check
-  for the first three and runs locally; `uv lock --check` covers `uv.lock`, as
+  for the first four — and for the deployment pins under `examples/`, for
+  `helm/`, and for the `recotem.org/X.Y/` documentation-site URLs — and runs
+  locally; `uv lock --check` covers `uv.lock`, as
   does `uv sync --locked` in the pre-publish test gate. It has to be `--locked`:
   `--frozen` installs from the lockfile without comparing it to
   `pyproject.toml`, so it exits **0** on a version bump that forgot `uv lock`.
@@ -103,9 +118,9 @@ is built. `docker.yml`'s tag filter `v[0-9]+.[0-9]+.[0-9]*` is a GitHub filter
 pattern, not a regex, so it still *fires* on `v2.0.0a0` — but the guard is
 upstream of everything that could publish: `smoke` is `needs: guard`, `trivy` is
 `needs: smoke`, and `build` — the only job that pushes — is
-`needs: [smoke, trivy]`. A pre-release tag now fails both workflows and reaches
-neither PyPI nor GHCR; not even a `sha-` tag is pushed. Verify locally rather
-than trusting the description:
+`needs: [test, smoke, trivy]`. A pre-release tag now fails both workflows
+and reaches neither PyPI nor GHCR; not even a `sha-` tag is pushed. Verify
+locally rather than trusting the description:
 
 ```bash
 bash .github/scripts/check-release-tag.sh v2.0.0a0   # rc=1, names the 'a' suffix
@@ -120,31 +135,90 @@ remote before the correct one can be pushed.
 Spawn parallel subagents to gather facts; do not fix anything yet. Cover:
 
 1. **Version state** — current string in `pyproject.toml`, `version.py`,
-   `uv.lock`, and every image pin in `helm/`, `examples/k8s/`, `docs/`. See
-   `references/version-locations.md` for the exhaustive list.
+   `uv.lock`, and every image pin in `helm/` and `examples/k8s/`. Check the
+   `recotem.org/X.Y/` documentation-site URLs in the same pass: they move on the
+   *opposite* cadence (Phase 5, not release), so at this point every one of them
+   must already name the `MAJOR.MINOR` being released. If they do not, the
+   previous cycle's Phase 5 skipped them and the fix belongs in the release PR.
+   See `references/version-locations.md` for the exhaustive list of both.
 2. **Quality gates** — `uv run pytest tests`, `uv run pytest tests -m slow`,
    `uv run ruff check src tests`, `uv run ruff format --check src tests`. All
    must be green. **`-m slow` is the one tier CI never runs** (`test.yml` runs
    `-m "not slow"`), so release is the only time it gets exercised.
-3. **CHANGELOG** — is there a section for the version being released, including
-   breaking-change/migration notes? See `references/release-notes.md`.
+3. **Upgrade notes** — does anything in this release require operator action
+   (a retrain, a probe change, a manifest edit)? If so the **upgrading page
+   needs a `## <prev> → <this>` section — in the `recotem-docs` repo, not
+   here.** This repository has no `docs/upgrading.md`; do not send a subagent
+   looking for one. The page is `docs/upgrading.md` in `recotem-docs`, in both
+   languages, inside the in-development version directory
+   (`X.Y/docs/upgrading.md` and `X.Y/ja/docs/upgrading.md`). There is no
+   `CHANGELOG.md`; the GitHub Release is written at release time. See
+   `references/release-notes.md` for which pair to edit at a patch release.
 4. **Open PR queue** — `gh pr list --author app/dependabot`. Dependabot opens up
    to 13 PRs/week (5 uv + 5 github-actions + 3 docker) and the 2.0.0 release
    drained six of them in the hours before the tag. Decide what lands before the
    tag. Check separately for pending CVE bumps: Trivy-flagged fixes are what
    populate the Security section, and Trivy fails this project in practice.
-5. **Docs staleness** — wrong version-specific advice, unrendered placeholders,
-   missing index links.
-6. **Publishing infra** — confirm `publish.yml` (tag `v*` → PyPI) and
+5. **Milestone PRs that were closed, not merged** — the milestone counter says
+   "closed", which is one word for merged, superseded, and abandoned.
+   `check-milestone-landed.sh` cannot help here: it reads
+   `gh pr list --state merged`, so it asks whether every *merged* PR is an
+   ancestor of the tree. A PR with no merge commit was never a candidate for
+   that question. List them and read the list:
+
+   ```bash
+   gh pr list --repo codelibs/recotem --search "milestone:X.Y.Z" --state all \
+     --limit 300 --json number,title,state,mergedAt \
+     --jq '.[] | select(.state == "CLOSED" and .mergedAt == null)
+                | "#\(.number)  \(.title)"'
+   ```
+
+   Most entries are fine — a PR superseded by a replacement that did land. What
+   you are looking for is a closure whose **content never landed anywhere**:
+   the fix was right, the packaging was not, and nothing carried it forward.
+
+   **Do not try to automate the distinction, and do not trust the closing
+   comment's PR number.** Measured on 2.1.0's fifteen closures: every one of
+   them names a `#NNN`, so "names a successor" separates nothing. Six of those
+   fifteen named the *same* PR — the one whose policy change made their
+   packaging inadmissible — which is the reason they were closed, not a
+   replacement carrying their content. Telling the two apart means looking at
+   what the named PR actually did, which is why this is a list to read rather
+   than a gate.
+
+   Those six were closed in a single 13-second sweep and their branches were
+   all still on origin, so the remedy was to re-land each documentation half
+   rather than re-derive it. Recovering from such a branch is **not** the same
+   as reverting to it: if the branch is old, main may have moved past it, and a
+   faithful replay can undo later work. Re-check each claim against the current
+   tree and re-land only what is still true.
+6. **Docs staleness** — wrong version-specific advice, unrendered placeholders,
+   missing index links. This audit now runs against **`recotem-docs`**, in both
+   the root tree and the `X.Y/` directory being released, since those two hold
+   the same pages and both ship. Do not skip it because there is nothing to
+   read in this repository.
+7. **Publishing infra** — confirm `publish.yml` (tag `v*` → PyPI) and
    `docker.yml` (tag `v[0-9]+.[0-9]+.[0-9]*` → GHCR) are present and that
    `pyproject.toml` metadata (name, description, readme, license, authors,
    classifiers, urls) is complete. Confirm the release gates specifically —
-   `.github/scripts/check-release-tag.sh` exists, `publish.yml`'s `guard` and
-   `test` jobs are still upstream of `build`, and `docker.yml`'s `guard` is
-   still upstream of `smoke` (and so of `trivy` and `build`, the only job that
-   pushes). They are what stops a bad tag before the irreversible upload; a
-   refactor that reorders `needs:` would remove the gate without failing any
-   test.
+   `.github/scripts/check-release-tag.sh` and
+   `.github/scripts/check-milestone-landed.sh` exist and are both still steps
+   of `publish.yml`'s `guard`, that `guard` and `test` are still upstream of
+   `build`, and that `docker.yml`'s `guard` is still upstream of `smoke` (and
+   so of `trivy` and `build`, the only job that pushes). They are what stops a
+   bad tag before the irreversible upload; a refactor that reorders `needs:`
+   would remove the gate without failing any test.
+
+   Run the milestone check here as well as in Phase 3 — it reads the GitHub
+   milestone rather than the tree, so unlike every other gate it can turn red
+   between a green audit and the tag without a single file changing:
+
+   ```bash
+   bash .github/scripts/check-milestone-landed.sh vX.Y.Z   # MUST print "OK: ..."
+   ```
+
+   It needs an authenticated `gh` and a full-history checkout, and it refuses a
+   shallow clone rather than guessing.
 
 Report blockers vs. nice-to-haves. Present findings to the user and confirm the
 target version and scope before changing anything.
@@ -163,10 +237,12 @@ Branch (e.g. `release/vX.Y.Z`) from up-to-date `main`, then:
    ```bash
    uv lock --check                                    # MUST exit 0
    ```
-2. **Bump the deployment image pins** to `X.Y.Z` across `helm/`,
-   `examples/k8s/`, and `docs/deployment/`. Use the verified commands in
-   `references/version-locations.md` — they distinguish real pins from
-   illustrative examples, which a blanket replace corrupts.
+2. **Bump the deployment image pins** to `X.Y.Z` across `helm/` and
+   `examples/k8s/`. Use the verified commands in
+   `references/version-locations.md`. Do **not** touch the `recotem.org/X.Y/`
+   documentation-site URLs here — they were bumped at the last dev bump and the
+   tree they describe is the one being shipped; moving them now points the
+   release at documentation for a version that does not exist.
 
    Then prove steps 1 and 2 together with the same script the `guard` job of
    both `publish.yml` and `docker.yml` runs at the tag:
@@ -175,18 +251,24 @@ Branch (e.g. `release/vX.Y.Z`) from up-to-date `main`, then:
    bash .github/scripts/check-release-tag.sh vX.Y.Z   # MUST print "OK: ..."
    ```
 
-   It fails closed and reads all four declarations together — `pyproject.toml`,
-   `src/recotem/version.py`, and `helm/recotem/Chart.yaml`'s `version:` and
-   `appVersion:` — so it catches a partial bump (`pyproject.toml` moved,
+   It fails closed and reads all five declarations together —
+   `pyproject.toml`, `src/recotem/version.py`, `helm/recotem/Chart.yaml`'s
+   `version:` and `appVersion:`, and `helm/recotem/values.yaml`'s
+   `image.tag` — so it catches a partial bump (`pyproject.toml` moved,
    `version.py` not; or the package moved and the chart did not) that a grep for
    a single literal cannot. Because it reads the chart, run it **after** step 2 —
    between the two steps it will correctly name the chart, and that is a real
    failure to fix by finishing step 2, not one to read past. Finding any of this
    here rather than at the tag is the whole point: at the tag the same failure
    costs a deleted tag and a re-tag.
-3. **Update `CHANGELOG.md`** — see `references/release-notes.md`. If an
-   `Unreleased` section for this version already exists, rename it; do not add a
-   second one.
+3. **Update the upgrading page — in `recotem-docs`, not here** — only if this
+   release requires operator action. Add a `## <prev> → <this>` section to
+   `X.Y/docs/upgrading.md` *and* `X.Y/ja/docs/upgrading.md` in that repo; the
+   two languages are added together. This is the one Phase 2 step that lands in
+   a different repository and therefore a different PR, so do not let the
+   release PR's checklist read as complete while it is outstanding. Nothing in
+   *this* tree records the change list; the GitHub Release does that in step 8
+   of Phase 3, and it links to this page.
 4. **Fold in agreed nice-to-haves** — doc inaccuracies, missing index links.
 
 Then run the full verification block in `references/version-locations.md` before
@@ -222,10 +304,20 @@ Commit, push, and open the PR with `gh pr create --base main`.
    bash .github/scripts/check-release-tag.sh vX.Y.Z        # MUST print "OK: ..."
    uv lock --check                                         # MUST exit 0
 
-   # The script covers pyproject, version.py, Chart.yaml and values.yaml.
-   # The remaining deployment pins are covered by nothing else, and Phase 2
-   # may be days and several dependabot merges behind this point, so re-run
-   # step 3 of the verification block in references/version-locations.md here.
+   # The second half of publish.yml's `guard`, which the line above does not
+   # cover: a PR can read MERGED on GitHub and still not be in this tree.
+   # Run it LAST — it is the only gate that reads the GitHub API rather than
+   # the tree, so it is the only one whose answer can change after a green
+   # Phase 2 without anybody touching a file.  docker.yml does NOT run it, so
+   # failing it at the tag leaves GHCR with the version and PyPI without it.
+   bash .github/scripts/check-milestone-landed.sh vX.Y.Z   # MUST print "OK: ..."
+
+   # The script covers pyproject, version.py, Chart.yaml, values.yaml, the
+   # remaining deployment pins under examples/, and every recotem.org/X.Y/
+   # documentation URL.  Phase 2 may still be days and several dependabot
+   # merges behind this point, so re-run step 3 of the verification block in
+   # references/version-locations.md here as an independent second opinion --
+   # it reads the same files with a different pattern.
    ```
    (Brace the variable: `"$SHA:src/..."` triggers zsh's `:s` history modifier
    and mangles the path; `"${SHA}:src/..."` is safe in both bash and zsh.)
@@ -278,9 +370,10 @@ Commit, push, and open the PR with `gh pr create --base main`.
    ```
 
    `docker.yml` scans **before** it pushes: `trivy` is `needs: smoke` and
-   `build` is `needs: [smoke, trivy]`, so a red Trivy **blocks** the push. The
-   image never reached GHCR and there is nothing published to un-publish — do
-   not cut a patch release to "replace" it. Two remedies, in order:
+   `build` is `needs: [test, smoke, trivy]`, so a red Trivy **blocks** the
+   push. The image never reached GHCR and there is nothing published to
+   un-publish — do not cut a patch release to "replace" it. Two remedies, in
+   order:
 
    - The Dockerfile runs `apt-get upgrade`, so if Debian has published the fix
      since the run, a plain `gh run rerun --repo codelibs/recotem <docker-run-id> --failed`
@@ -311,8 +404,9 @@ Commit, push, and open the PR with `gh pr create --base main`.
    ```
    Both must print `True`.
 
-8. **Create the GitHub Release** from the tag, marked latest, with notes derived
-   from the CHANGELOG section:
+8. **Create the GitHub Release** from the tag, marked latest. Write the notes
+   now, from `git log vPREV..main --oneline --no-merges` — see
+   `references/release-notes.md` for the template:
 
    ```bash
    gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <notes.md> --latest
@@ -330,149 +424,27 @@ lack push access, hand the change list to the user.
 
 Two different jobs live in this phase, and **the order between them matters**:
 
-1. **4A — Freeze & promote** (minor/major releases only). The unversioned root
-   tree is "current stable". Shipping a new minor means the root must stop
-   serving the old version's docs.
-2. **4B — Bump version pins** in whatever is now the live tree.
+1. **4A — Promote** (minor/major releases only). The unversioned root tree is
+   "current stable", so shipping a new minor means the root must stop serving
+   the old version's docs. The releasing version's `X.Y/` directory — its
+   in-development preview until now — is **copied** to the root and kept in
+   place as that version's permanent archive. Version directories are created
+   once and never deleted, because the shipped package points at
+   `https://recotem.org/X.Y/docs/…` for its whole support window.
+2. **4B — Bump version pins** in every live tree: the root *and* the `X.Y/`
+   directory, which holds the same pages.
 
-Do **4A before 4B**. Freezing after bumping copies the *new* version's pins into
-the archive that is supposed to document the *old* one.
+Do **4A before 4B**. At the 2.1.0 release that ordering is load-bearing: 4A
+additionally freezes the outgoing root into `2.0/` — a one-time step, because
+2.0 shipped before this model — and freezing after bumping would archive a
+`2.0/` claiming the version being released.
 
-### Phase 4A — Freeze the old stable, promote the new one
-
-Skip this for a patch release (`X.Y.Z` where `Z > 0`) — a patch does not create
-a new documentation line. Run it for every minor or major.
-
-The site model (`specs/2026-07-20-docs-versioning-design.md` §2–§3): the
-unversioned root (`/docs/ /guide/ /learn/` + `/ja/…`) is the current stable and
-the only indexed tree; every `X.Y/` directory is a noindexed, self-canonical
-archive or preview. At release, the outgoing stable is frozen into its own
-`X.Y/` directory and the incoming preview is promoted to the root, so **every
-canonical URL keeps working and starts serving the new version**.
-
-Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
-
-1. **Freeze the outgoing stable into `$OLD/`.** Copy the root tree, EN and JA,
-   into a new `$OLD/` directory laid out like the existing `1.0/`: version
-   directories are self-contained under the root locale, so JA goes to
-   `$OLD/ja/…`, not into a locale-routed path.
-
-   ```bash
-   mkdir -p 2.0/ja
-   cp -R docs guide learn index.md 2.0/
-   cp -R ja/docs ja/guide ja/learn ja/index.md 2.0/ja/
-   ```
-
-   Copy **every** root content directory, not just the ones the preview
-   happens to contain. `learn/` in particular exists at the root but **not**
-   under `2.1/`; if the freeze skips it, the archive has a hole and the
-   promote in step 2 must not touch it either.
-
-2. **Promote the preview to the root.** Replace only the directories the
-   preview actually carries, and delete the old ones first so a file removed
-   during 2.1 development does not survive the copy:
-
-   ```bash
-   rm -rf docs guide ja/docs ja/guide
-   cp -R 2.1/docs 2.1/guide ./
-   cp -R 2.1/ja/docs 2.1/ja/guide ja/
-   ```
-
-   **Do NOT copy `2.1/index.md` over the root `index.md`.** The root landing
-   page is a VitePress `layout: home` hero (`hero:` / `features:`
-   frontmatter); `2.1/index.md` is a plain preview landing page carrying an
-   "in-development preview" warning banner and links into `/2.1/…`. Overwriting
-   the hero replaces the site's front page with a preview notice. Same for
-   `ja/index.md` and `2.1/ja/index.md`. Leave `learn/` and `ja/learn/` in
-   place for the same reason the freeze had to copy them: the preview has no
-   `learn/`.
-
-3. **Rewrite the promoted tree's absolute version links.** The preview's pages
-   link with absolute `/2.1/…` URLs (~40 of them across the EN and JA guide,
-   `docs/data-sources/plugins.md`, and both index pages). Once promoted these
-   must point at the unversioned root, or the new stable docs link back into a
-   preview directory that is about to be deleted:
-
-   ```bash
-   grep -rl '/2\.1/' --include='*.md' docs guide ja/docs ja/guide \
-     | xargs perl -pi -e 's{/2\.1/ja/}{/ja/}g; s{/2\.1/}{/}g;'
-   grep -rn '/2\.1/' --include='*.md' docs guide ja/docs ja/guide   # MUST be empty
-   ```
-
-   Order matters in that substitution: rewrite `/2.1/ja/` before the bare
-   `/2.1/`, or the JA links lose their locale prefix.
-
-4. **Retire the preview directory.** `rm -rf 2.1`. Note the deploy is `scp`
-   without `--delete`, so the removed files linger server-side; that is
-   expected and harmless (they are noindexed), but do not treat a still-live
-   `/2.1/` URL as a failed release.
-
-5. **Update the VitePress wiring** (`.vitepress/config.ts`):
-
-   - **Sidebars.** The EN locale registers `/2.1/guide/`, `/2.1/docs/`,
-     `/2.1/ja/guide/`, `/2.1/ja/docs/`, and the JA locale registers the two
-     `/2.1/ja/…` keys again. Delete all six and add the frozen archive's:
-     `'/2.0/guide/': v2GuideSidebar('en', '/2.0')`, `'/2.0/docs/':
-     v2DocsSidebar('en', '/2.0')`, and the `/2.0/ja/…` pair in both locales —
-     mirroring exactly how the `/2.1/` keys were registered. The root
-     `'/guide/'` / `'/docs/'` / `'/learn/'` registrations already point at the
-     unversioned tree and need no change.
-   - **No noindex work is required.** `transformPageData` and
-     `sitemap.transformItems` already match every version directory generically
-     (`/^\d+\.\d+\//`), so the new `2.0/` tree is noindexed and out of the
-     sitemap the moment it exists.
-
-6. **Update the version switcher**
-   (`.vitepress/theme/VersionSwitcher.vue`). It hardcodes the version set. For
-   a 2.1 release: the `isV21` check becomes an `isV20` check on `2.0/`,
-   `currentVersion` returns `'2.1'` for the unversioned tree, `v21Link` becomes
-   `v20Link` (`/2.0/` and `/2.0/ja/`), **`isJa`'s `p.startsWith('2.1/ja/')`
-   becomes `p.startsWith('2.0/ja/')`**, and the three menu entries become
-   **2.1** (unversioned root, marked latest), **2.0** (`/2.0/…`), **1.0**
-   (`/1.0/…`). Check the `:class="{ active: … }"` bindings too — they key off
-   the same booleans and will silently highlight the wrong entry.
-
-   `isJa` is the one that gets missed, because its name carries no version.
-   Leave it on `2.1/ja/` and every page of the freshly frozen JA archive
-   evaluates `isJa === false`, so `latestLink` and `v1Link` resolve to `/` and
-   `/1.0/`: the switcher sends Japanese readers to the English tree. Do not
-   eyeball it — no version *path* for the promoted version may survive in this
-   file, and the frozen one must appear:
-
-   ```bash
-   grep -Fn '2.1/' .vitepress/theme/VersionSwitcher.vue   # MUST be empty
-   grep -Fc '2.0/' .vitepress/theme/VersionSwitcher.vue   # MUST be > 0
-   ```
-
-   Match on `2.1/` **with the trailing slash**, not on `2.1`: after the promote
-   `2.1` legitimately survives as the `currentVersion` string and as a menu
-   label — only the *paths* move.
-
-7. **Verify before opening the PR.**
-
-   ```bash
-   yarn docs:build
-   ```
-
-   The build's dead-link check is the gate that catches a missed link rewrite.
-   Then confirm in the built output that `/2.0/**` and `/1.0/**` carry
-   `noindex`, that the unversioned `/docs/**` does **not**, that the sitemap
-   excludes every `X.Y/` directory, and that the root front page still renders
-   the hero rather than a preview banner.
-
-### Phase 4B — Bump the version pins
-
-The docs repo carries its own copies of the deployment docs, whose version pins
-go stale after a release.
-
-- Branch there and bump the pins to `X.Y.Z`. `references/version-locations.md`
-  has the exact edit and the verification; it discovers the files to edit
-  rather than hardcoding them, because the set changes as version directories
-  come and go.
-- **Leave every archived `X.Y/` directory untouched** — `1.0/` documents the
-  legacy 1.x app, and a freshly frozen `2.0/` must keep documenting 2.0.
-- Verify no stale pin remains in any live (non-archive) tree, then open a PR
-  there too. If 4A ran, both jobs belong in the same PR.
+**The step-by-step for both jobs is in `references/docs-site-sync.md`** — the
+promote sequence, the landing-page edit that turns the kept directory into an
+archive, the VitePress wiring and version-switcher edits it touches, and the
+verification for each. Open it now if this release needs 4A, 4B, or both. The
+site's own statement of the version model lives in `recotem-docs/CLAUDE.md`;
+that file and `docs-site-sync.md` must agree.
 
 ## Phase 5 — Open the next dev cycle
 
@@ -486,20 +458,38 @@ post-release:
 - **Deployment manifests keep pinning the released `X.Y.Z` image tag** — they
   reference a published image, not the dev version. Do not bump those, and do
   not run the Phase 2 pin verification here; it would flag them.
+- **Bump the documentation-site URLs** to the new `X.Y` line — every
+  `https://recotem.org/X.Y/…` in `src/`, `tests/`, `examples/`, `helm/`,
+  `.claude/`, `README.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `pyproject.toml`,
+  `.dockerignore` and `.github/`. They are the one class of version string that
+  moves at the dev bump and *not* at release — the opposite cadence from the
+  deployment pins in the bullet above, which is why the two are easy to
+  transpose. Several of them ship where nobody can correct them afterwards: a
+  `DataSourceError` message, the JSON Schema `recotem schema` emits, the
+  `/v1/metrics` HELP text, `README.md` on PyPI. Commands, and the portability
+  traps they avoid, are in `references/version-locations.md`
+  ("Documentation-site URLs"). `check-release-tag.sh` refuses the *next* tag if
+  this is skipped, so a miss surfaces a whole cycle later, at the worst moment.
 - **Never tag a dev version.** Publishing is triggered by *tags*, not by version
   strings. A `.dev0` version in `pyproject.toml` is inert on its own, but
   pushing a `v2.1.0.dev0` tag *does* fire `publish.yml` (whose filter is `v*`)
   and `docker.yml`. Both `guard` jobs then refuse the tag, so nothing is
   uploaded — that is the gate doing its job, not a licence to push the tag. The
   bad tag still has to be deleted from the remote before the real one can go up.
-- **If Phase 4A ran, seed the next docs preview.** The promote consumed the
-  `X.Y/` preview directory, so the next cycle has nowhere to author. In
-  `recotem-docs`, create `X.(Y+1)/` as a copy of the newly promoted root tree
-  (`docs/`, `guide/`, and their `ja/` counterparts — the preview carries no
-  `learn/`), give it an in-development landing page like the one Phase 4A
-  retired, register its sidebars in `.vitepress/config.ts`, and add it to the
-  version switcher. It is noindexed automatically by the generic `/^\d+\.\d+\//`
-  rules. See `specs/2026-07-20-docs-versioning-design.md` §3–§4 in that repo.
+- **If Phase 4A ran, seed the next docs preview.** The just-released `X.Y/`
+  directory stays put as that version's permanent archive, so the next cycle
+  needs a directory of its own to author in. In `recotem-docs`, create
+  `X.(Y+1)/` as a copy of the newly promoted root tree (`docs/`, `guide/`, and
+  their `ja/` counterparts — the preview carries no `learn/`), rewrite its
+  absolute `](/docs/…)` / `](/guide/…)` links to stay inside it, give it an
+  in-development landing page — the one `X.Y/index.md` carried until Phase 4A
+  step 4 turned it into an archive notice is the model — register its sidebars
+  in `.vitepress/config.ts`, and add it to the version switcher. It is
+  noindexed automatically by the generic `/^\d+\.\d+\//` rules. The bump in the
+  bullet above and this directory must name the same `X.(Y+1)`: that is what
+  makes the URLs the dev tree now emits resolve. See
+  `specs/2026-07-20-docs-versioning-design.md` §3–§4 and `CLAUDE.md`
+  ("Version lifecycle") in that repo.
 - Branch + PR as usual.
 
 ## Common mistakes
@@ -513,13 +503,20 @@ post-release:
 | Verification printed nothing and you called it clean | A grep that only looks for an old literal cannot fail. Use the inverted block in `references/version-locations.md`. |
 | Deployment pins still on the previous release | The replace commands matched nothing and exited 0. The diff must be non-empty. |
 | Tag landed on the wrong commit | `git tag` without an explicit SHA tags whatever `main` is right now. |
-| `publish` red at *release tag guard* | The tag is not `vMAJOR.MINOR.PATCH`, or disagrees with `pyproject.toml` / `version.py` / `helm/recotem/Chart.yaml`. Nothing was built, and `docker` is red at its own guard for the same reason. Delete the tag, fix the tree, re-tag. Run `check-release-tag.sh` first next time. |
-| `docker` red at `trivy` | The scan gates the push (`build: needs: [smoke, trivy]`) — the image is *not* on GHCR. Re-run for an upstream-fixed CVE, or patch-release for a repo-side fix. Not a reason to retag. |
+| `publish` red at *release tag guard*, `docker` red too | `check-release-tag.sh` refused it: the tag is not `vMAJOR.MINOR.PATCH`; or it disagrees with `pyproject.toml` / `version.py` / `helm/recotem/Chart.yaml` / `helm/recotem/values.yaml`; or a deployment pin under `examples/` is stale; or a `recotem.org/X.Y/` documentation URL names a different line; or the tagged commit is not on `main`. The error names which. Nothing was built, and `docker` is red at its own guard for the same reason. Delete the tag, fix the tree, re-tag. Run `check-release-tag.sh` first next time. |
+| *release tag guard* names documentation-site URLs | The previous cycle's Phase 5 skipped the URL bump, so the tree still points at the old docs line. A real failure, not a false alarm — those URLs ship inside error messages, the JSON Schema and `README.md` on PyPI. It is the one thing this gate names that is **not** fixed by finishing Phase 2: the repair is the *previous* cycle's Phase 5 work, done late. Bump them with the block in `references/version-locations.md`. |
+| `publish` red at *release tag guard*, `docker` **green** | `check-milestone-landed.sh` refused it — a PR the milestone calls MERGED is not reachable from the tagged commit. `docker.yml`'s guard does not run this script, so its build proceeded: **GHCR has the version and PyPI does not.** Re-running `publish.yml` cannot help — the fix is a new commit on `main`, which the existing tag can never reach. See `references/failure-recovery.md`. |
+| `docker` red at `trivy` | The scan gates the push (`build: needs: [test, smoke, trivy]`) — the image is *not* on GHCR. Re-run for an upstream-fixed CVE, or patch-release for a repo-side fix. Not a reason to retag. |
 
 ## References
 
 - `references/version-locations.md` — every file that carries a version string,
-  the verified bump commands, and the verification block.
-- `references/release-notes.md` — how CHANGELOG entries accumulate, plus the
-  CHANGELOG section and GitHub Release note templates.
+  the verified bump commands, and the verification block. Two cadences live
+  there: deployment pins move at release, documentation-site URLs at the dev
+  bump.
+- `references/release-notes.md` — how the GitHub Release notes are written at
+  release time, the template, and where the upgrading page lives.
+- `references/docs-site-sync.md` — Phase 4 in full: promote the recotem-docs
+  version trees and keep the promoted directory as an archive (4A), and bump
+  that repo's pins (4B).
 - `references/failure-recovery.md` — what to do when a release goes wrong.

@@ -40,6 +40,7 @@ from typing import Any, Literal
 import fsspec
 import structlog
 
+from recotem._makedirs import makedirs_exist_ok
 from recotem.artifact.format import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     SIZE_CAP_MSG_MARKER,
@@ -274,7 +275,7 @@ def _write_atomic(
     """
     if is_local:
         dest_dir = os.path.dirname(dest) or "."
-        os.makedirs(dest_dir, exist_ok=True)
+        makedirs_exist_ok(dest_dir)
         fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as fh:

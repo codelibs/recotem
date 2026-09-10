@@ -1,0 +1,288 @@
+"""Pre-flight validation for ``training.storage_path``.
+
+``training.storage_path`` is handed straight to ``optuna.storages.RDBStorage``,
+which has no driver pre-flight of its own.  Two consequences, both of which
+this module exists to remove:
+
+1. **An unrecognised URL scheme is read as a filename.**  ``_make_storage``
+   classifies the value with a scheme alternation and treats everything that
+   does not match as a bare path, prefixing ``sqlite:///``.  So
+   ``mariadb+pymysql://host/db`` became the SQLite *filename*
+   ``mariadb+pymysql://host/db`` and the operator saw
+   ``(sqlite3.OperationalError) unable to open database file`` for a database
+   they never asked SQLite to open.  Adding ``mariadb`` to the alternation
+   (#261) fixes that one scheme; it does not fix the shape.  ``oracle://`` and
+   every other unsupported scheme still silently become filenames.  This module
+   inverts the rule: a value that *looks like a URL* must name a supported
+   dialect, and only a value that does not look like a URL is a path.
+
+2. **The failure lands mid-training, after the data is billed.**  ``run_search``
+   runs after fetch, cleansing and split, so a BigQuery- or SQL-backed recipe
+   pays for the whole scan and only then discovers that the study backend was
+   never going to open.  ``recotem validate`` -- the documented pre-flight gate
+   -- never read the field at all and printed ``Validation passed.``
+
+The driver table is imported from ``recotem.datasource.sql`` rather than
+restated here.  Two hand-maintained copies of a driver list drifting apart is
+precisely the defect #261 fixed inside ``search.py``; reintroducing a third
+copy one module over would be the same mistake with a wider blast radius.
+``training/`` already imports from ``datasource/`` (``pipeline.py``,
+``features.py``), so this adds no new dependency edge.
+
+Failures raise ``TrainingError(code="storage_path_unusable")``, which
+``_map_exception_to_exit`` maps to ``_EXIT_CONFIG`` (8).  Exit 8 rather than
+exit 2 because the failure is *environmental*, not textual: the identical
+recipe is valid on a host with ``recotem[postgres]`` installed and invalid on
+one without.  That is the rule the neighbouring ``output.path`` codes
+(``artifact_write_credentials`` / ``artifact_write_destination``) already
+follow -- a recipe path field whose failure depends on the deployment reports
+8, while its purely textual failures (rejected scheme, ``RECOTEM_ARTIFACT_ROOT``
+escape) report 2.  Exit 3 would be wrong for a different reason: ``storage_path``
+is the Optuna study backend, not a data source, and reporting 3 would tell a
+supervisor the data source is broken when it is not.
+"""
+
+from __future__ import annotations
+
+import re
+
+from recotem.training.errors import TrainingError
+
+# A value is treated as a URL only when it carries a ``<scheme>://`` prefix
+# whose scheme is at least two characters.  The two-character floor keeps a
+# Windows drive letter (``C://data/optuna.db``) on the filename path, where it
+# belongs; every dialect name recotem supports is far longer.
+#
+# The underscore is load-bearing.  A SQLAlchemy scheme is ``dialect+driver``
+# and driver names contain underscores -- ``cx_oracle``, ``pysqlite_numeric``,
+# ``mysqlconnector``.  Omitting it makes the pattern stop at the underscore, so
+# ``oracle+cx_oracle://host/db`` fails to look like a URL and falls through to
+# the filename branch -- reintroducing, for exactly the spellings that carry a
+# driver suffix, the same "URL silently becomes a SQLite filename" defect this
+# module exists to remove.
+_URL_SHAPED = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-_]+://")
+
+_CODE = "storage_path_unusable"
+
+
+def _fail(message: str) -> TrainingError:
+    return TrainingError(message, code=_CODE)
+
+
+def _userinfo_message(backend: str, *, has_password: bool) -> str:
+    """Explain the userinfo refusal, and name the way through for *backend*.
+
+    Never echoes any part of the value: the message is assembled from the
+    dialect name and a boolean, neither of which can carry a secret.
+
+    The remedy is dialect-specific because the environment support is. libpq
+    reads ``PGUSER`` and ``PGPASSFILE``, so a PostgreSQL study backend is fully
+    usable with no userinfo in the DSN -- verified end to end against a live
+    server.  pymysql reads no user variable at all and falls back to the OS
+    user, so for ``mysql`` / ``mariadb`` there is nothing to point the operator
+    at except the account the training process already runs as.  Saying that
+    plainly is better than repeating a generic "use env-driven auth" that has
+    no MySQL spelling.
+    """
+    what = "a password" if has_password else "a username"
+    lead = (
+        f"training.storage_path must not embed userinfo, and it embeds {what}. "
+        "Credentials in a study URL end up in SQLAlchemy exception traces, "
+        "which the log redaction processor cannot reach because it redacts by "
+        "dict key."
+    )
+    if backend == "postgresql":
+        return (
+            f"{lead} Supply both from the environment instead: PGUSER for the "
+            "user, PGPASSFILE / ~/.pgpass for the password, and write the URL "
+            "as postgresql+psycopg://host:port/dbname with no user@ part."
+        )
+    if backend in ("mysql", "mariadb"):
+        return (
+            f"{lead} pymysql reads no user or password environment variable, "
+            "so a mysql / mariadb study backend must accept the OS account the "
+            "training process runs as. If it cannot, use a PostgreSQL study "
+            "backend (PGUSER / PGPASSFILE) or a local SQLite path instead."
+        )
+    return (
+        f"{lead} Supply it from the environment or a credential file instead of "
+        "the recipe."
+    )
+
+
+def describe_storage_path(storage_path: str) -> str:
+    """Return a credential-free one-line description of *storage_path*.
+
+    ``recotem validate`` writes to stdout, and a study URL may carry userinfo
+    (``_make_storage`` refuses such a URL, but only at train time, so validate
+    can still be handed one).  Echoing the value would put a password on the
+    terminal and into any CI log that captures it, so only the dialect and
+    driver -- neither of which can contain a credential -- are reported.
+
+    Assumes :func:`validate_storage_path` has already accepted the value.
+    """
+    path = storage_path.strip()
+    if not path:
+        return "in-memory, no resume"
+    if not _URL_SHAPED.match(path):
+        return "sqlite, local file"
+
+    from sqlalchemy.engine.url import make_url  # noqa: PLC0415
+
+    url = make_url(path)
+    driver = url.get_driver_name()
+    return f"{url.get_backend_name()}, driver {driver!r}"
+
+
+def validate_storage_path(storage_path: str) -> None:
+    """Raise ``TrainingError`` if *storage_path* cannot open a study backend.
+
+    A no-op for the two forms that always work: the empty string (in-memory
+    storage) and a bare filesystem path (which ``_make_storage`` turns into a
+    SQLite URL, and SQLite's driver is the standard library).
+
+    Checks performed on a URL-shaped value, in the order an operator hits them:
+
+    * the URL parses at all;
+    * the dialect is one recotem supports as a study backend;
+    * the dialect is not one SQLAlchemy 2.x removed (``postgres://``);
+    * the DBAPI the URL actually routes to is importable on this host.
+
+    The last check is the one that matters most and the one Optuna does not
+    do.  A bare ``postgresql://`` routes to SQLAlchemy's *default* PostgreSQL
+    DBAPI -- psycopg2, which recotem does not install -- so it fails inside
+    Optuna with ``ImportError: Failed to import DB access module for the
+    specified storage URL``, naming neither the module nor the fix.
+    """
+    from sqlalchemy.engine.url import make_url  # noqa: PLC0415
+    from sqlalchemy.exc import ArgumentError  # noqa: PLC0415
+
+    from recotem.datasource.sql import (  # noqa: PLC0415
+        _BACKEND_RECOMMENDED_DSN,
+        _DIALECT_TO_EXTRA,
+        _DRIVER_MODULE,
+        _REMOVED_DIALECT_ALIASES,
+    )
+
+    path = storage_path.strip()
+    if not path:
+        return  # in-memory storage
+    if not _URL_SHAPED.match(path):
+        return  # bare filesystem path -> sqlite:///<path>, always available
+
+    try:
+        url = make_url(path)
+    except (ArgumentError, ValueError, TypeError) as exc:
+        # ``str(exc)`` is safe here: SQLAlchemy's parse failure is
+        # "Could not parse SQLAlchemy URL from given URL string" and does not
+        # echo the input.  It is omitted anyway -- the field name is the useful
+        # half, and the value may carry credentials.
+        raise _fail(
+            "training.storage_path is not a valid SQLAlchemy URL. Use a bare "
+            "filesystem path for SQLite, or one of: "
+            f"{sorted(_BACKEND_RECOMMENDED_DSN.values())}."
+        ) from exc
+
+    backend = url.get_backend_name()
+
+    replacement = _REMOVED_DIALECT_ALIASES.get(backend)
+    if replacement is not None:
+        raise _fail(
+            f"training.storage_path uses dialect {backend!r}, which SQLAlchemy "
+            "2.x removed; no +driver suffix can load it. Use "
+            f"{_BACKEND_RECOMMENDED_DSN[replacement]} instead."
+        )
+
+    if backend not in _BACKEND_RECOMMENDED_DSN:
+        raise _fail(
+            f"training.storage_path uses unsupported dialect {backend!r}. "
+            "Supported study backends are a bare filesystem path (SQLite) or "
+            f"one of: {sorted(_BACKEND_RECOMMENDED_DSN.values())} — each of "
+            "which needs its driver extra installed "
+            "(recotem[postgres] / recotem[mysql]). Note that an unsupported "
+            "scheme is NOT treated as a filename."
+        )
+
+    # Userinfo is refused here as well as in ``_make_storage``.
+    #
+    # Two reasons.  First, ``_make_storage`` runs inside ``run_search``, after
+    # fetch, cleansing and split -- the same "caught only once the scan is paid
+    # for" problem this module exists to remove, and ``describe_storage_path``'s
+    # docstring already flags it: "``_make_storage`` refuses such a URL, but
+    # only at train time, so validate can still be handed one."  Second, the
+    # refusal covers a *bare username*, not only ``user:pass``, and nothing said
+    # so -- every existing test uses ``user:pass@`` and the shipped message
+    # names ``(user:pass@host)``.  An operator following the documented
+    # ``~/.pgpass`` route writes ``postgresql+psycopg://recotem@host/db``,
+    # because ``~/.pgpass`` matches on user, and is told they embedded
+    # credentials they did not write.
+    #
+    # ``_make_storage`` keeps its own check: it is the function that hands the
+    # string to SQLAlchemy, it parses with ``urllib.parse`` rather than
+    # ``make_url``, and a guard on the value that actually reaches the driver
+    # should not depend on a caller having run a pre-flight first.
+    if url.username or url.password:
+        raise _fail(_userinfo_message(backend, has_password=bool(url.password)))
+
+    driver = url.get_driver_name()
+    if driver not in _DRIVER_MODULE:
+        raise _fail(
+            f"training.storage_path names unknown driver {driver!r} for "
+            f"dialect {backend!r}. recotem probes a fixed set of drivers and "
+            "will not import a name supplied by the recipe. Known drivers: "
+            f"{sorted(_DRIVER_MODULE)}. Write it as "
+            f"{_BACKEND_RECOMMENDED_DSN[backend]} instead."
+        )
+
+    driver_mod = _DRIVER_MODULE[driver]
+    if driver_mod is None:
+        return  # stdlib sqlite3
+
+    try:
+        __import__(driver_mod)
+    except ImportError as exc:
+        explicit = "+" in url.drivername
+        detail = (
+            f"training.storage_path names driver {driver!r} explicitly"
+            if explicit
+            else (
+                f"{backend}:// with no +driver suffix defaults to {driver!r}, "
+                "which recotem does not install"
+            )
+        )
+        extra = _DIALECT_TO_EXTRA.get(backend)
+        remedy = (
+            f"pip install 'recotem[{extra}]' provides it"
+            if extra
+            else f"install {driver_mod!r} yourself"
+        )
+        raise _fail(
+            f"cannot load the {driver!r} driver for training.storage_path "
+            f"dialect {backend!r}: {detail}. Write it as "
+            f"{_BACKEND_RECOMMENDED_DSN[backend]} and install the driver — "
+            f"{remedy}."
+        ) from exc
+    except (MemoryError, RecursionError):
+        raise
+    except Exception as exc:
+        # A driver that is *installed but broken* raises something other than
+        # ImportError from its own top-level code -- psycopg against a
+        # mismatched libpq, a DBAPI whose C accelerator fails to initialise, a
+        # package that refuses an unsupported platform.  Catching only
+        # ImportError let that escape the pre-flight entirely and reach the CLI
+        # as exit 1 with the driver's own text and nothing else:
+        #
+        #   $ recotem validate recipe.yaml     # psycopg raising RuntimeError
+        #   Storage path check failed: BROKEN-DRIVER: libpq version mismatch
+        #   exit 1
+        #
+        # Same DSN with the driver merely absent reports 8 and names the field,
+        # the driver and the extra.  The operator whose install is broken is the
+        # one who needs the field named, so the two cannot differ like that.
+        raise _fail(
+            f"the {driver!r} driver for training.storage_path dialect "
+            f"{backend!r} is installed but failed to import: "
+            f"{type(exc).__name__}: {exc}. This is the driver package itself, "
+            "not the recipe — reinstall it, or check it against the database "
+            "client library it links to."
+        ) from exc

@@ -1254,7 +1254,7 @@ def test_is_allowed_deny_takes_precedence_over_exact_allow_list_entry(
 
 
 def test_key_rotation_step4_retired_kid_artifact_rejected() -> None:
-    """Validate the four-step key rotation from docs/operations.md.
+    """Validate the four-step key rotation from https://recotem.org/2.2/docs/operations.html.
 
     Step 1: ring = {A}       — sign artifact with kid=A
     Step 2: ring = {B, A}    — old artifact still verifiable (A in ring)
@@ -1626,56 +1626,6 @@ def test_numpy_pickles_do_not_reference_numpy_dtypes_fqcns() -> None:
                 names.add(arg)
 
     assert [n for n in names if n.startswith("numpy.dtypes")] == []
-
-
-# ---------------------------------------------------------------------------
-# docs/security.md must agree with the code it documents
-# ---------------------------------------------------------------------------
-
-
-def _documented_allow_list_fqcns() -> set[str]:
-    """Parse the FQCN code block out of ``docs/security.md``.
-
-    Anchored on the sentence that introduces the block rather than on a line
-    number, so the parse survives the document growing around it.
-    """
-    from pathlib import Path
-
-    doc = Path(__file__).resolve().parents[2] / "docs" / "security.md"
-    text = doc.read_text(encoding="utf-8")
-
-    anchor = "The FQCN allow-list permits only these classes"
-    start = text.index(anchor)
-    fence_open = text.index("```", start)
-    body_start = text.index("\n", fence_open) + 1
-    fence_close = text.index("```", body_start)
-
-    return {
-        line.strip()
-        for line in text[body_start:fence_close].splitlines()
-        if line.strip()
-    }
-
-
-def test_security_doc_fqcn_list_matches_the_allow_list() -> None:
-    """The documented FQCN list must be exactly ``_ALLOWED_CLASSES``.
-
-    That list is the reader's map of what a Recotem artifact may deserialize,
-    so a stale entry is a false security claim rather than a cosmetic typo.
-    It has drifted before -- "docs(security): correct two allow-list claims
-    that the code does not make" was a whole change -- because nothing compared
-    the two, leaving drift invisible until someone happened to read both.
-    """
-    from recotem.artifact.signing import _ALLOWED_CLASSES
-
-    actual = {f"{module}.{name}" for module, name in _ALLOWED_CLASSES}
-    documented = _documented_allow_list_fqcns()
-
-    assert documented == actual, (
-        f"docs/security.md is out of sync with _ALLOWED_CLASSES.\n"
-        f"  documented but not allowed: {sorted(documented - actual)}\n"
-        f"  allowed but not documented: {sorted(actual - documented)}"
-    )
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 [project]
 name = "recotem"
-version = "2.1.0.dev0"
+version = "2.2.0.dev0"
 description = "Recipe-driven recommender training and serving on irspack."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -51,11 +51,23 @@ dependencies = [
     # FileResponse).  FastAPI <0.120 caps starlette below 0.49, so we also
     # bump the FastAPI floor to 0.120.
     "starlette>=1.0.0,<1.4",
-    "uvicorn[standard]>=0.30,<0.52",
+    "uvicorn[standard]>=0.30,<0.53",
     "pydantic>=2.7,<3",
-    "typer>=0.12,<0.27",
+    # Floor measured, not guessed.  0.12.0-0.12.3 cannot build this CLI at
+    # all: `env_var` in cli.py is annotated `list[str] | None` and those
+    # versions raise `RuntimeError: Type not yet supported: list[str] |
+    # None` before `--help` prints.  0.12.4-0.15.3 declare `click>=8.0.0`
+    # with no upper bound, so a clean install pairs them with click 8.5 and
+    # every command dies in `Parameter.make_metavar()`.  0.15.4 is the
+    # first release a fresh `pip install recotem` resolves into a working
+    # CLI.  tests/unit/test_packaging_metadata.py pins the measurement.
+    "typer>=0.15.4,<0.27",
     "urllib3>=2.7.0,<3",  # CVE-2026-44431, CVE-2026-44432
-    "pyyaml>=6.0,<7",
+    # 6.0 publishes no wheel for any interpreter this project supports and
+    # its sdist no longer builds (Cython 3), so `>=6.0` named a version
+    # that cannot be installed anywhere.  6.0.1 installs on 3.12/3.13/3.14;
+    # 6.0.3 is the first with a wheel for all three.
+    "pyyaml>=6.0.1,<7",
     "structlog>=24,<26",
     "fsspec>=2024.6,<2026",
     "pandas>=3.0.3,<4",
@@ -82,7 +94,7 @@ Homepage = "https://recotem.org"
 Documentation = "https://recotem.org"
 Repository = "https://github.com/codelibs/recotem"
 Issues = "https://github.com/codelibs/recotem/issues"
-Changelog = "https://github.com/codelibs/recotem/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/codelibs/recotem/releases"
 
 [project.optional-dependencies]
 bigquery = ["google-cloud-bigquery>=3.25,<4", "google-cloud-bigquery-storage>=2.38.0,<3", "db-dtypes>=1.2,<2"]
@@ -112,7 +124,7 @@ sqlite = ["sqlalchemy>=2,<3"]
 # interpreter axis is not implied by the platform axis: 3.14 is a supported
 # interpreter (see the classifiers above) with no lightfm-next wheel anywhere.
 # `tests/unit/test_packaging_metadata.py` pins that wheel matrix.
-# See docs/recipe-reference.md#algorithms.
+# See https://recotem.org/2.2/docs/recipe-reference.html#training.
 bprfm = ["lightfm-next==1.19.0"]
 all = ["recotem[bigquery,postgres,mysql,sqlite,s3,gcs,azure,metrics,bprfm]"]
 
@@ -135,9 +147,9 @@ packages = ["src/recotem"]
 [tool.hatch.build.targets.sdist]
 # Every pattern is anchored with a leading "/".  Hatchling's include patterns
 # are gitignore-style, so an unanchored "README.md" matches a README.md at ANY
-# depth: it pulled docs/README.md and all nine examples/*/README.md into the
-# sdist while "src/recotem" -- the only other pattern -- shipped none of the
-# recipe.yaml, CSV, or manifest files those READMEs tell the reader to run.
+# depth: it pulled all nine examples/*/README.md into the sdist while
+# "src/recotem" -- the only other pattern -- shipped none of the recipe.yaml,
+# CSV, or manifest files those READMEs tell the reader to run.
 # The result was nine example directories consisting of instructions for files
 # that were not there.  "/examples" ships the files as well.
 include = ["/src/recotem", "/examples", "/README.md", "/LICENSE"]

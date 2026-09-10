@@ -14,10 +14,21 @@ and writing artifacts to GCS.
 ## Prerequisites
 
 ```bash
-pip install "recotem[bigquery]"
+pip install "recotem[bigquery,gcs]"
 gcloud auth application-default login
 # Or set GOOGLE_APPLICATION_CREDENTIALS to a service-account key path.
 ```
+
+Two extras, not one. `bigquery` is what reads the GA4 export; `gcs` is what
+**writes** the artifact, because `output.path` in this recipe is a
+`gs://` URI and the `gcs` extra is what installs the `gcsfs` backend fsspec
+needs to reach it. Installing `recotem[bigquery]` alone leaves the write to
+fail *after* the BigQuery scan has been billed and the whole Optuna search
+has run. The official Docker image already bundles both, so this applies to
+the pip install only. If you change `output.path` to a local directory, drop
+the `gcs` extra; if you point it at S3 or Azure Blob instead, swap in
+`recotem[s3]` or `recotem[azure]` (see
+[Cloud storage extras](https://recotem.org/2.2/docs/data-sources/csv.html#cloud-storage-extras)).
 
 The service account / ADC identity needs:
 
@@ -28,12 +39,17 @@ The service account / ADC identity needs:
 ## Run
 
 ```bash
+# `recotem train` refuses to write an unsigned artifact: without a signing key
+# it exits 8 with `RECOTEM_SIGNING_KEYS is not set`.  In production this comes
+# from your scheduler's secret store — see "Adapting to your project" below.
+export $(uv run recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
+
 RECOTEM_RECIPE_GCP_PROJECT=my-gcp-project \
   uv run recotem train examples/ga4-bigquery/recipe.yaml
 ```
 
 The `RECOTEM_RECIPE_*` prefix is the only env-var family allowed inside
-recipe field expansion (see [docs/recipe-reference.md](../../docs/recipe-reference.md)).
+recipe field expansion (see [Recipe reference](https://recotem.org/2.2/docs/recipe-reference.html)).
 Credentials are intentionally NOT expanded — use ADC / Workload Identity
 instead.
 

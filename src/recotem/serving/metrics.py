@@ -3,10 +3,30 @@
 Exposes a small set of recorder functions that are no-ops when
 ``prometheus_client`` is not installed, so callers never need to guard.
 
-The ``/metrics`` endpoint itself is opt-in via the
-``RECOTEM_METRICS_ENABLED`` environment variable (any of ``1``, ``true``,
-``yes``, ``on``).  When the variable is unset or any other value, the
-endpoint returns 404 even if recorders are populating the registry.
+The endpoint itself is opt-in via the ``RECOTEM_METRICS_ENABLED``
+environment variable (any of ``1``, ``true``, ``yes``, ``on``).  When the
+variable is unset or any other value, it returns 404 even if recorders are
+populating the registry.
+
+Two things about it routinely surprise operators setting up a scrape:
+
+* **The path is ``/v1/metrics``, not ``/metrics``.**  The route is registered
+  on the same router as everything else, and ``app.py`` includes that router
+  with ``prefix="/v1"``.  A scrape of bare ``/metrics`` gets 404, which looks
+  exactly like the opt-in not having taken effect.
+* **It requires authentication.**  ``metrics_endpoint`` takes
+  ``Depends(_require_auth)``, so a scrape with no ``X-API-Key`` gets 401.
+  Prometheus needs the key configured (an ``X-API-Key`` entry under
+  ``http_headers`` in the scrape config), unless the server is running with no
+  ``RECOTEM_API_KEYS`` at all -- which forces the loopback-only bind.
+
+  It is *not* the case that every ``/v1`` route does.  Three do not:
+  ``/v1/health``, ``/v1/health/live`` and ``/v1/health/ready`` are deliberately
+  open so a kubelet can reach them without a key.  ``/v1/health/details``,
+  ``/v1/recipes``, ``/v1/recipes/{name}`` and the four recommend verbs all
+  require it, and so does this endpoint -- which is why an operator who reasons
+  "the probes work unauthenticated, so the scrape will too" gets a 401 that
+  looks like a bad key rather than a missing one.
 
 All metrics share the default ``prometheus_client`` registry, so
 ``generate_latest()`` would expose any other counter registered in the same
@@ -17,7 +37,7 @@ which serves no ``/v1/metrics`` endpoint, so
 scrapeable process and is deliberately absent from the inventory below.
 Its operable signal is the ``bigquery_storage_fallback`` log event.
 
-Metric inventory (matches docs/operations.md):
+Metric inventory (matches https://recotem.org/2.2/docs/operations.html):
 
 | Name                                               | Type       | Labels                  |
 |----------------------------------------------------|------------|-------------------------|
@@ -78,7 +98,7 @@ _WATCHER_STATE_DIVERGENCE: Any = None
 
 
 def metrics_enabled() -> bool:
-    """Return True iff ``/metrics`` should be exposed.
+    """Return True iff ``/v1/metrics`` should be exposed.
 
     Both conditions must hold: ``prometheus_client`` is importable AND
     ``RECOTEM_METRICS_ENABLED`` is set to a truthy value.  This makes
@@ -217,6 +237,18 @@ _LOAD_FAILURE_REASONS: frozenset[str] = frozenset(
         # from every reason above because the artifact itself is fine; it is
         # the wiring between recipe and file that is wrong.
         "recipe_name",
+        # Artifact refused by RECOTEM_MAX_ARTIFACT_BYTES or
+        # RECOTEM_MAX_PAYLOAD_BYTES. Distinct from "read" and "parse" -- both
+        # of which read as "the file is damaged" and send the operator to
+        # re-train or check their signing key -- because the remedy is to
+        # raise the cap or shrink the model.
+        #
+        # This entry is what makes the label reachable. Both call sites have
+        # returned "size_cap" since #239 (watcher) and #270 (startup), but
+        # omitting it here meant inc_artifact_load_failure's coercion below
+        # filed every over-cap artifact under "unexpected" -- the bucket that
+        # means "this build does not recognise this failure".
+        "size_cap",
     }
 )
 
@@ -227,9 +259,15 @@ def inc_artifact_load_failure(recipe: str, reason: str = "unexpected") -> None:
     *reason* must be one of the values in ``_LOAD_FAILURE_REASONS``
     (``read | parse | hmac | header_json | deserialize | metadata | yaml |
     unexpected | dir_scan | timeout | version_skew | feature_version |
-    feature_state | recipe_name``); any other value is silently coerced
-    to ``"unexpected"`` so callers cannot accidentally explode the cardinality
-    of the label.
+    feature_state | recipe_name | size_cap``); any other value is silently
+    coerced to ``"unexpected"`` so callers cannot accidentally explode the
+    cardinality of the label.
+
+    That coercion is a cardinality guard, not a validator: it is silent by
+    design, so a label the code emits but this set omits disappears into
+    ``"unexpected"`` with no error and no log line.
+    ``tests/unit/test_artifact_size_cap_label.py`` diffs the emitted labels
+    against this set for exactly that reason.
     """
     _ensure_initialized()
     if _ARTIFACT_LOAD_FAILURES is None:
@@ -420,7 +458,7 @@ def _ensure_v1_initialized() -> None:
         "value where any supplied token misses, or a non-finite numerical "
         "value (+-inf, or NaN reached via a string). A missing or "
         "unparseable numerical value still degrades silently and is NOT "
-        "counted here. See docs/api-reference.md#feature-aware-cold-start.",
+        "counted here. See https://recotem.org/2.2/docs/serving-api.html#feature-aware-cold-start.",
         ["recipe", "side", "column"],
     )
     _V1_FEATURE_UNKNOWN_COLUMN = Counter(
@@ -439,6 +477,23 @@ def _ensure_v1_initialized() -> None:
     )
 
 
+# Label used in place of a recipe name that is not registered on this server.
+#
+# The ``recipe`` label is safe for every registered name -- its cardinality is
+# the operator's recipes directory.  It is NOT safe for a name taken straight
+# off the request path: the route pattern only bounds the *shape* of the name
+# (``^[A-Za-z0-9_-]{1,64}$``), so a caller can mint an unbounded set of
+# ``recipe_not_found`` / ``validation_error`` series, and prometheus_client
+# never evicts one.  Collapsing every unregistered name onto a single label
+# keeps the counter's meaning (someone is calling a recipe that does not exist,
+# visible in the ``status`` label) while bounding the series count.
+#
+# The value is deliberately unrepresentable as a real recipe name -- ``<`` and
+# ``>`` are outside ``^[A-Za-z0-9_-]{1,64}$`` -- so it can never collide with a
+# recipe the operator actually deployed.
+UNKNOWN_RECIPE_LABEL = "<unknown>"
+
+
 def record_v1_request(
     recipe: str, verb: str, status: str, latency_seconds: float
 ) -> None:
@@ -453,7 +508,7 @@ def record_v1_request(
     ``features_not_supported`` / ``feature_value_unusable`` are the
     single-verb counterparts of the identically-named batch ``code`` labels
     on ``inc_batch_element_error``. They are client-caused 400s and must
-    stay OUT of ``"error"``, which docs/operations.md pages on-call for --
+    stay OUT of ``"error"``, which https://recotem.org/2.2/docs/operations.html pages on-call for --
     see that file's "Recommend error rate" row.
     """
     _ensure_v1_initialized()
@@ -533,7 +588,7 @@ def inc_feature_unknown_value(
     ``numerical`` value that is missing or fails to parse as a number at all
     still degrades to the standardized mean (0) with no signal -- that gap
     is deliberate and separate, not fixed by the non-finite case above. See
-    ``docs/api-reference.md#feature-aware-cold-start`` for the full
+    ``https://recotem.org/2.2/docs/serving-api.html#feature-aware-cold-start`` for the full
     breakdown.
     """
     _ensure_v1_initialized()

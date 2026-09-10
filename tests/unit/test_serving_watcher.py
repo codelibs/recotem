@@ -5126,55 +5126,67 @@ def test_sidecar_enoent_still_returns_false(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# C4: sidecar_unsupported resets when recipe YAML mtime changes
+# C4: sidecar_unsupported resets when the recipe YAML is re-parsed
 # ---------------------------------------------------------------------------
 
 
-def test_sidecar_unsupported_clears_on_yaml_mtime_change(
+def test_sidecar_unsupported_is_never_cleared_by_the_sidecar_check_itself(
     tmp_path: Path,
 ) -> None:
-    """When sidecar_unsupported=True and the recipe YAML mtime changes,
-    _check_sidecar_changed must clear the flag and re-evaluate (C4)."""
-    from unittest.mock import MagicMock, patch
+    """C4 recovery belongs to the rescan, and must not move back in here.
 
+    This test used to build the state around a ``MagicMock`` carrying a
+    ``_yaml_path`` attribute and assert that ``_check_sidecar_changed`` cleared
+    the latch once that file's mtime moved.  It passed, and it proved nothing:
+    ``Recipe`` is a pydantic model with ``extra="forbid"`` and no private
+    attributes, so no real recipe has ever carried ``_yaml_path`` or
+    ``yaml_path``.  The ``getattr`` chain answered ``None`` for every recipe
+    that has ever existed, the guard it fed always declined, and the recovery
+    never ran once in a live server -- the double was the only object in
+    existence for which the code worked.
+
+    The clearing now happens where the watcher already decides the YAML
+    changed, in ``_scan_recipes_dir``;
+    ``tests/unit/test_watcher_live_recipe_body.py`` covers the recovery itself
+    against a real recipe.  Pinned here is the other half of that split: with a
+    real recipe, this function declines and leaves the latch alone however the
+    YAML moves underneath it, so a reintroduced mtime probe would fail here.
+    """
+    import os
+
+    from recotem.recipe.loader import load_recipe
     from recotem.serving.watcher import _check_sidecar_changed, _RecipeWatchState
 
-    yaml_path = tmp_path / "recipe.yaml"
-    yaml_path.write_text("name: test\n")
-    artifact_path = str(tmp_path / "model.recotem")
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    yaml_path = _write_recipe_yaml(recipes_dir, "c4_test", artifact_path)
 
-    recipe = MagicMock()
-    recipe.name = "c4_test"
-    recipe._yaml_path = yaml_path
-
-    initial_mtime = yaml_path.stat().st_mtime
+    # A sidecar that exists and has genuinely changed, so a "False" below can
+    # only be the latch and not an absent or unchanged file.
+    sidecar_path = Path(str(artifact_path) + ".sha256")
+    sidecar_path.write_text("sha_v2\n")
 
     state = _RecipeWatchState(
-        recipe=recipe,
-        artifact_path=artifact_path,
+        recipe=load_recipe(yaml_path),
+        artifact_path=str(artifact_path),
+        last_sidecar_contents="sha_v1\n",
         sidecar_unsupported=True,
-        sidecar_unsupported_at_mtime=initial_mtime,
     )
 
-    # With same mtime, still unsupported — returns False immediately.
-    result = _check_sidecar_changed(state)
-    assert result is False, "No mtime change → sidecar_unsupported stays True"
+    assert _check_sidecar_changed(state) is False
     assert state.sidecar_unsupported is True
 
-    # Simulate mtime change by patching os.stat to return a newer mtime.
-    new_mtime = initial_mtime + 1.0
+    bumped = os.stat(yaml_path).st_mtime + 10
+    os.utime(yaml_path, (bumped, bumped))
 
-    class _FakeStat:
-        st_mtime = new_mtime
-
-    with patch("os.stat", return_value=_FakeStat()):
-        result2 = _check_sidecar_changed(state)
-
-    # After mtime change, sidecar_unsupported must be cleared.
-    assert state.sidecar_unsupported is False, (
-        "sidecar_unsupported must be cleared when recipe YAML mtime changes"
+    assert _check_sidecar_changed(state) is False, (
+        "the sidecar check has no view of the recipe file and must not grow one"
     )
-    assert state.sidecar_unsupported_at_mtime is None
+    assert state.sidecar_unsupported is True, (
+        "only the rescan clears the latch; clearing it here would need a recipe "
+        "attribute that no Recipe can carry"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -5284,7 +5296,7 @@ def test_hot_swap_version_skewed_artifact_keeps_serving_old_model(
 ) -> None:
     """A skewed hot-swap must degrade to "still serving the old model".
 
-    docs/operations.md promises operators that a version-skewed artifact
+    https://recotem.org/2.2/docs/operations.html promises operators that a version-skewed artifact
     appearing under a live serve degrades rather than causing an outage. Three
     things have to hold together for that promise to be true, and this pins all
     three against a REAL ModelRegistry / ModelEntry / ArtifactWatcher:
@@ -5388,7 +5400,7 @@ def test_hot_swap_version_skewed_artifact_keeps_serving_old_model(
     )
     assert entry.loaded is True, (
         "A refused hot-swap must leave the entry loaded — serve degrades to "
-        "'still serving the old model', not to an outage (docs/operations.md)"
+        "'still serving the old model', not to an outage (https://recotem.org/2.2/docs/operations.html)"
     )
     assert entry.last_load_error is not None, (
         "last_load_error must be set so /health/details surfaces the skew"
@@ -5431,7 +5443,7 @@ def test_malformed_recipe_leaves_valid_recipe_serving_and_health_ok(
 ) -> None:
     """A YAML syntax error in one file must not take the whole server down.
 
-    docs/operations.md (``recipe_load_error_skipped``) documents the file as
+    https://recotem.org/2.2/docs/operations.html (``recipe_load_error_skipped``) documents the file as
     "skipped".  The valid recipe alongside it must load and serve, and
     /v1/health must report ``ok`` (HTTP 200) because every *loadable* recipe
     is loaded — the unparseable file is reported under ``skipped`` instead of
@@ -5766,4 +5778,487 @@ def test_backoff_does_not_delay_a_replaced_artifact(
     assert registry.get("recovers").last_load_error is None, (
         "a replaced artifact was not picked up within 1s — the backoff is "
         "gating on time rather than on the identity of the failing bytes"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Retracting an error the watcher has since disproved
+# ---------------------------------------------------------------------------
+
+
+def _wait_until(pred, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _started_watcher(tmp_path: Path, name: str):
+    """Start a real watcher on a real artifact and wait for the first load."""
+    from recotem.recipe.loader import load_recipe
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path, name)
+    yaml_path = _write_recipe_yaml(recipes_dir, name, artifact_path)
+
+    registry = ModelRegistry()
+    entry = _make_entry(name)
+    entry.artifact_path = str(artifact_path)
+    registry.replace(name, entry)
+
+    recipe = load_recipe(yaml_path)
+    states = build_initial_states([recipe], {name: entry})
+    states[name].last_sha256 = ""  # force a real load on the first tick
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=_make_serve_config(),
+        key_ring=KeyRing(f"active:{ACTIVE_KEY_HEX}"),
+        initial_states=states,
+    )
+    watcher.start()
+    assert _wait_until(lambda: registry.get(name).last_load_error is None), (
+        "the fixture never reached a clean loaded state"
+    )
+    return watcher, registry, artifact_path, yaml_path
+
+
+def test_transient_stat_failure_is_retracted_when_the_file_returns(
+    tmp_path: Path,
+) -> None:
+    """A blip that makes the artifact briefly unreachable must not stick.
+
+    The artifact is moved aside and back, so its mtime, size and bytes are all
+    unchanged — only its reachability blipped, exactly as an S3 throttle, an
+    NFS stale handle or a PVC remount looks to the watcher.  Because the marker
+    is unchanged the poll never reaches the load path, which used to be the
+    only place ``last_load_error`` was ever cleared, so a single blip left the
+    recipe 503 ``degraded`` in ``/v1/health/details`` for the life of the
+    process while ``:recommend`` served normally.
+    """
+    import os
+
+    watcher, registry, artifact_path, _ = _started_watcher(tmp_path, "blip")
+    away = artifact_path.with_suffix(".away")
+    try:
+        before = os.stat(artifact_path)
+        os.rename(artifact_path, away)
+        assert _wait_until(lambda: registry.get("blip").last_load_error is not None), (
+            "the missing artifact was never reported"
+        )
+
+        os.rename(away, artifact_path)
+        after = os.stat(artifact_path)
+        assert (before.st_mtime, before.st_size) == (after.st_mtime, after.st_size)
+
+        cleared = _wait_until(
+            lambda: registry.get("blip").last_load_error is None, timeout=3.0
+        )
+    finally:
+        watcher.stop()
+        watcher.join(timeout=2.0)
+
+    assert cleared, (
+        "the artifact came back byte-identical and the load error was never "
+        "retracted — /v1/health/details stays degraded until the process is "
+        "restarted or a different artifact is written"
+    )
+    assert registry.get("blip").loaded is True
+
+
+def test_rollback_to_the_serving_bytes_retracts_the_load_error(
+    tmp_path: Path,
+) -> None:
+    """Rolling a bad artifact back to the bytes already in memory must recover.
+
+    Both spellings of the rollback are covered: an mtime-preserving restore
+    (``cp -p`` / ``rsync -t`` / a snapshot restore, which puts the original
+    marker back) and a fresh-mtime restore (which reaches the load path but
+    short-circuits on the sha256 comparison).  Neither used to clear the
+    annotation, so the documented "keep serving the old model and fix the
+    artifact" recovery left the recipe permanently degraded whenever the fix
+    was to put the previous artifact back.
+    """
+    import os
+
+    watcher, registry, artifact_path, _ = _started_watcher(tmp_path, "rollback")
+    good = artifact_path.read_bytes()
+    stat0 = os.stat(artifact_path)
+    try:
+        for label, preserve_mtime in (("cp -p", True), ("fresh mtime", False)):
+            artifact_path.write_bytes(b"NOTRECOT" + good[8:])
+            assert _wait_until(
+                lambda: registry.get("rollback").last_load_error is not None
+            ), f"[{label}] the broken artifact was never reported"
+
+            artifact_path.write_bytes(good)
+            if preserve_mtime:
+                os.utime(artifact_path, ns=(stat0.st_atime_ns, stat0.st_mtime_ns))
+            assert _wait_until(
+                lambda: registry.get("rollback").last_load_error is None,
+                timeout=3.0,
+            ), (
+                f"[{label}] the artifact was rolled back to the bytes already "
+                "being served and the load error was never retracted"
+            )
+    finally:
+        watcher.stop()
+        watcher.join(timeout=2.0)
+
+    assert registry.get("rollback").loaded is True
+
+
+def test_unchanged_artifact_does_not_retract_a_recipe_yaml_error(
+    tmp_path: Path,
+) -> None:
+    """A broken recipe YAML must survive the artifact-side retraction.
+
+    ``last_load_error`` is shared between the rescan-parse path and the
+    artifact paths, and the artifact says nothing about whether the YAML
+    parses.  The rescan re-writes the error at the start of every tick, so a
+    retraction that ignored ``yaml_rescan_error`` would make
+    ``/v1/health/details`` flap between ``ok`` and ``degraded`` instead of
+    reporting the broken file.
+    """
+    import os
+
+    watcher, registry, artifact_path, yaml_path = _started_watcher(
+        tmp_path, "brokenyaml"
+    )
+    good = artifact_path.read_bytes()
+    stat0 = os.stat(artifact_path)
+    try:
+        # Arm the retraction first: without an outstanding load failure the
+        # retraction is never even attempted, and the test would pass without
+        # exercising the exemption it exists to pin.
+        artifact_path.write_bytes(b"NOTRECOT" + good[8:])
+        assert _wait_until(
+            lambda: registry.get("brokenyaml").last_load_error is not None
+        ), "the broken artifact was never reported"
+
+        # Now break the YAML *and* roll the artifact back to the loaded bytes,
+        # so the artifact side has every reason to declare the fault over.
+        yaml_path.write_text("name: brokenyaml\nsource: [[[ not yaml\n")
+        artifact_path.write_bytes(good)
+        os.utime(artifact_path, ns=(stat0.st_atime_ns, stat0.st_mtime_ns))
+
+        # The rescan re-writes the YAML error at the top of every tick, so a
+        # retraction that ignored ``yaml_rescan_error`` shows up as flapping
+        # rather than as a permanently cleared error: sample across many ticks
+        # and require that it is never cleared.
+        deadline = time.monotonic() + 1.0
+        cleared_at_least_once = False
+        samples = 0
+        while time.monotonic() < deadline:
+            samples += 1
+            if registry.get("brokenyaml").last_load_error is None:
+                cleared_at_least_once = True
+                break
+            time.sleep(0.01)
+    finally:
+        watcher.stop()
+        watcher.join(timeout=2.0)
+
+    assert samples > 10, "not enough samples to observe several poll ticks"
+    assert not cleared_at_least_once, (
+        "an artifact rollback retracted a YAML parse error it knows nothing "
+        "about; /v1/health/details flaps instead of reporting the broken file"
+    )
+
+
+def test_reread_of_the_serving_bytes_retracts_the_error_on_the_same_poll(
+    tmp_path: Path,
+) -> None:
+    """The sha256 short-circuit itself must retract, not only the next tick.
+
+    ``_load_recipe`` returns early when the bytes it just read hash to the
+    artifact already in memory.  That branch is reached whenever a rollback
+    lands with a *new* marker, and it is the only place that has actually
+    proved the point by re-reading the bytes — the marker fast path infers it.
+    Driven directly (no watcher thread) so the assertion cannot be satisfied a
+    tick later by the other retraction site.
+    """
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving.watcher import _RecipeWatchState, sha256_bytes, stat_marker
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path, "sameposll")
+    yaml_path = _write_recipe_yaml(recipes_dir, "sameposll", artifact_path)
+
+    registry = ModelRegistry()
+    entry = _make_entry("sameposll")
+    entry.artifact_path = str(artifact_path)
+    registry.replace("sameposll", entry)
+
+    recipe = load_recipe(yaml_path)
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_sha256=sha256_bytes(artifact_path.read_bytes()),
+        last_marker=("stale-marker", 0),
+    )
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=_make_serve_config(),
+        key_ring=KeyRing(f"active:{ACTIVE_KEY_HEX}"),
+        initial_states={"sameposll": state},
+    )
+    # A load failed earlier; the annotation is still on the entry.
+    registry.set_load_error("sameposll", "HMAC verification failed for kid 'active'")
+
+    watcher._load_recipe(
+        "sameposll",
+        state,
+        force=False,
+        marker=stat_marker(str(artifact_path)),
+    )
+
+    assert registry.get("sameposll").last_load_error is None, (
+        "re-reading bytes that hash to the artifact already in memory left the "
+        "stale load error in place; the short-circuit returns before the "
+        "successful-load path that would otherwise clear it"
+    )
+
+
+def test_retraction_fires_once_per_fault_not_once_per_tick(tmp_path: Path) -> None:
+    """A retraction must disarm, so it cannot flap against another path's error.
+
+    ``last_load_error`` is shared: the recipes-dir scan writes it too, and it
+    re-writes it on every failing tick.  The marker fast path runs every tick
+    as well, so a retraction that stayed armed would clear that error again and
+    again and ``/v1/health/details`` would alternate between ``ok`` and
+    ``degraded`` instead of reporting the scan failure.
+    """
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving.watcher import _RecipeWatchState, stat_marker
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path, "onceonly")
+    yaml_path = _write_recipe_yaml(recipes_dir, "onceonly", artifact_path)
+
+    registry = ModelRegistry()
+    entry = _make_entry("onceonly")
+    entry.artifact_path = str(artifact_path)
+    registry.replace("onceonly", entry)
+
+    marker = stat_marker(str(artifact_path))
+    state = _RecipeWatchState(
+        recipe=load_recipe(yaml_path),
+        artifact_path=str(artifact_path),
+        last_marker=marker,
+    )
+    # A load failed earlier against different bytes, and the annotation stands.
+    state.failed_marker = ("some-other-marker", 1)
+    registry.set_load_error("onceonly", "read failed: artifact too short")
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=_make_serve_config(),
+        key_ring=KeyRing(f"active:{ACTIVE_KEY_HEX}"),
+        initial_states={"onceonly": state},
+    )
+
+    watcher._process_stat_result("onceonly", marker, None)
+    assert registry.get("onceonly").last_load_error is None
+
+    # Another path now records a failure of its own on the same field.
+    registry.set_load_error("onceonly", "recipes-dir scan failed: PermissionError")
+    watcher._process_stat_result("onceonly", marker, None)
+
+    assert registry.get("onceonly").last_load_error is not None, (
+        "the retraction stayed armed and cleared an error written by a "
+        "different path; /v1/health/details would flap every poll tick"
+    )
+
+
+def test_stat_timeout_is_retracted_by_the_next_successful_poll(tmp_path: Path) -> None:
+    """A timed-out stat must not outlive the timeout.
+
+    ``https://recotem.org/2.2/docs/operations.html`` says a timed-out stat marks the recipe "with a load
+    error until the next successful poll".  The timeout path records the
+    failure through ``_record_load_failure``, which arms the backoff against
+    the marker that is *already* loaded, so the next poll takes the marker fast
+    path — and the annotation used to sit there for the life of the process.
+    Driven synchronously so the assertion is about the branch, not about
+    thread timing.
+    """
+    from recotem.recipe.loader import load_recipe
+    from recotem.serving import watcher as _w
+    from recotem.serving.watcher import _RecipeWatchState, sha256_bytes, stat_marker
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    _write_valid_artifact(artifact_path, "hungstat")
+    yaml_path = _write_recipe_yaml(recipes_dir, "hungstat", artifact_path)
+
+    registry = ModelRegistry()
+    entry = _make_entry("hungstat")
+    entry.artifact_path = str(artifact_path)
+    registry.replace("hungstat", entry)
+
+    marker = stat_marker(str(artifact_path))
+    # The state a successful load leaves behind: marker settled, bytes known,
+    # and last_attempted_marker pointing at the marker that was loaded.
+    state = _RecipeWatchState(
+        recipe=load_recipe(yaml_path),
+        artifact_path=str(artifact_path),
+        last_marker=marker,
+        last_sha256=sha256_bytes(artifact_path.read_bytes()),
+    )
+    state.last_attempted_marker = marker
+
+    watcher = ArtifactWatcher(
+        registry=registry,
+        recipes_dir=recipes_dir,
+        serve_config=_make_serve_config(watch_interval=1.0),
+        key_ring=KeyRing(f"active:{ACTIVE_KEY_HEX}"),
+        initial_states={"hungstat": state},
+    )
+
+    real_stat = _w._stat_marker_with_error
+
+    def hanging_stat(path, recipe_name="<unknown>"):
+        time.sleep(2.5)  # > the 1.0s per-future timeout
+        return real_stat(path, recipe_name=recipe_name)
+
+    try:
+        _w._stat_marker_with_error = hanging_stat
+        watcher._poll_artifacts()
+    finally:
+        _w._stat_marker_with_error = real_stat
+
+    assert "timeout" in str(registry.get("hungstat").last_load_error), (
+        "the probe never produced a stat timeout"
+    )
+    assert state.failed_marker == marker, (
+        "the timeout armed the backoff against a different marker than the "
+        "one that is loaded — the provoking condition was not reproduced"
+    )
+
+    # The next poll stats successfully and sees the same, unchanged marker.
+    watcher._process_stat_result("hungstat", marker, None)
+    watcher.stop()
+
+    assert registry.get("hungstat").last_load_error is None, (
+        "a timed-out stat outlived the next successful poll; the recipe stays "
+        "degraded in /v1/health/details with nothing wrong"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A sidecar stat that cannot answer must not abandon the poll tick
+# ---------------------------------------------------------------------------
+
+
+def _stale_stat_on(target: str):
+    """An ``os.stat`` replacement that answers ESTALE for exactly one path.
+
+    The injection sits on ``os.stat`` rather than on ``Path.exists`` so the
+    mechanism under test — ``Path.exists`` re-raising a non-ignorable errno —
+    is the thing being exercised, not a stand-in for it.
+    """
+    import errno
+    import os
+
+    real = os.stat
+
+    def _stat(path, *args, **kwargs):
+        try:
+            same = os.fspath(path) == target
+        except Exception:
+            same = False
+        if same:
+            raise OSError(errno.ESTALE, "Stale file handle", target)
+        return real(path, *args, **kwargs)
+
+    return _stat
+
+
+def test_a_sidecar_stat_that_cannot_answer_is_declined(tmp_path: Path) -> None:
+    """``_check_sidecar_changed`` must answer False, not raise.
+
+    Its contract is "on any I/O error reading the sidecar, return False and let
+    the full-stat path decide".  ``Path.exists()`` only answers False for
+    pathlib's ignorable errnos and re-raises the rest, so the artifacts volume
+    going stale used to make the existence check raise instead of answer.
+    """
+    import os
+    from unittest.mock import patch
+
+    from recotem.serving.watcher import _check_sidecar_changed, _RecipeWatchState
+
+    artifact_path = tmp_path / "model.recotem"
+    artifact_path.write_bytes(b"placeholder")
+    sidecar = str(artifact_path) + ".sha256"
+    Path(sidecar).write_text("sha_v1\n")
+
+    recipe = MagicMock()
+    recipe.name = "stale_sidecar"
+    state = _RecipeWatchState(
+        recipe=recipe,
+        artifact_path=str(artifact_path),
+        last_sidecar_contents="sha_v1\n",
+    )
+
+    with patch.object(os, "stat", _stale_stat_on(sidecar)):
+        changed = _check_sidecar_changed(state)
+
+    assert changed is False, (
+        "a sidecar stat that raised was allowed to escape _check_sidecar_changed"
+    )
+
+
+def test_a_stale_sidecar_does_not_mark_every_recipe_unhealthy(
+    tmp_path: Path,
+) -> None:
+    """The escape is not scoped to one recipe — it abandons the whole tick.
+
+    ``_check_sidecar_changed`` is called from ``_process_stat_result``, inside
+    ``_poll_artifacts``.  An exception there is caught only by the poll loop's
+    catch-all, which increments ``_consecutive_errors`` on every tick and at
+    ``_unhealthy_threshold`` calls ``_mark_all_unhealthy`` — so a stale stat on
+    one recipe's ``.sha256`` file turns *every* recipe on the host into
+    ``503 degraded`` on ``/v1/health/details`` with ``last_load_error``
+    ``"watcher unhealthy"``, while the artifacts themselves are untouched and
+    ``:recommend`` keeps serving.
+    """
+    import os
+    from unittest.mock import patch
+
+    watcher, registry, artifact_path, _ = _started_watcher(tmp_path, "stale_tick")
+    sidecar = str(artifact_path) + ".sha256"
+    Path(sidecar).write_text("sha_v1\n")
+
+    try:
+        with patch.object(os, "stat", _stale_stat_on(sidecar)):
+            # More ticks than _unhealthy_threshold (5) at WATCH_INTERVAL.
+            became_unhealthy = _wait_until(
+                lambda: registry.get("stale_tick").last_load_error is not None,
+                timeout=2.0,
+            )
+            errors_seen = watcher._consecutive_errors
+    finally:
+        watcher.stop()
+        watcher.join(timeout=2.0)
+
+    assert not became_unhealthy, (
+        "a stale stat on the .sha256 sidecar escaped the poll tick and the "
+        "watcher marked the recipe unhealthy: "
+        f"{registry.get('stale_tick').last_load_error!r}"
+    )
+    assert errors_seen == 0, (
+        f"the poll loop counted {errors_seen} unhandled errors from a sidecar "
+        "stat that only needed to be declined"
     )

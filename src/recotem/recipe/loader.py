@@ -24,7 +24,7 @@ logger = structlog.get_logger(__name__)
 # Path-scheme policy
 # ---------------------------------------------------------------------------
 
-# Allow-list of write-supported schemes for output.path (see docs/recipe-reference.md).
+# Allow-list of write-supported schemes for output.path (see https://recotem.org/2.2/docs/recipe-reference.html).
 # Using an allow-list instead of a deny-list means unknown and novel schemes
 # (e.g. data:, javascript:, vendor-specific) are rejected by default rather
 # than admitted by oversight.
@@ -66,51 +66,89 @@ _NETWORK_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
 def _network_scheme(path: str) -> bool:
     """True iff *path* uses a scheme in `_NETWORK_SCHEMES`."""
-    return urlparse(path).scheme.lower() in _NETWORK_SCHEMES
+    return _effective_scheme(path) in _NETWORK_SCHEMES
 
 
-# Schemes for which a `user:pass@host` component is treated as embedded
-# credentials and must be rejected.
-#
-# GCS (`gs://`) uses `project@bucket` in its canonical URI syntax
-# (e.g. `gs://my-project@my-bucket/key`) and must NOT be subject to
-# userinfo rejection — the `@` character there separates the billing project
-# from the bucket name, not a credential.  GCS authentication is always via
-# ADC / GOOGLE_APPLICATION_CREDENTIALS.
+def _effective_scheme(path: str) -> str:
+    """Return the lowercased scheme *fsspec* will route ``path`` to.
+
+    ``urlparse`` alone is unsafe here: RFC 3986 forbids ``_`` in a scheme, so
+    ``urlparse("arrow_hdfs://h/x").scheme`` is ``""`` and the path looks like a
+    bare local path — but the datasource opens it with ``fsspec.open``, whose
+    parser splits on the first ``"://"`` and routes ``arrow_hdfs`` /
+    ``async_wrapper`` (the only two underscore protocols fsspec registers) to a
+    real remote backend. Validating the ``urlparse`` scheme therefore let an
+    un-allow-listed handler through even though the equivalent ``hdfs://`` form
+    is refused. Deriving the scheme the way fsspec's ``split_protocol`` does
+    closes that differential.
+
+    The ``len > 1`` guard mirrors fsspec so a Windows drive letter (``c:\\``)
+    is not mistaken for a protocol. Fail-closed: this can only surface a scheme
+    ``urlparse`` hid, never hide one it saw.
+    """
+    scheme = urlparse(path).scheme.lower()
+    if not scheme and "://" in path:
+        candidate = path.split("://", 1)[0]
+        if len(candidate) > 1:
+            return candidate.lower()
+    return scheme
+
+
+# Schemes for which ANY userinfo component — `user@host` as well as
+# `user:pass@host` — is treated as an embedded credential and rejected.
 #
 # S3 (`s3://`) does NOT use `@` in its canonical addressing syntax.  Any
 # `user:pass@host` pattern in an s3:// URI means embedded AWS access keys in
 # plaintext, which is explicitly prohibited.  Authentication must come from
 # environment-based mechanisms (instance profile, `AWS_*` env vars, etc.).
 #
-# `az://`, `abfs://` and `abfss://` are three protocol aliases for one adlfs
-# filesystem, and all three accept the canonical Azure form
-# `<container>@<account>.dfs.core.windows.net` (`.blob.` for Blob storage).
-# The `@` there separates the container from the account: it is addressing
-# syntax, not a credential.  They are handled by `_AZURE_SCHEMES` below rather
-# than by this set, which would reject the documented form outright.
+# `file://` has no `@` addressing syntax either.  `_validate_output_path`
+# already refuses `file://<netloc>/...` outright, but the input path had no
+# equivalent check, so `file://user:pass@/tmp/x.csv` loaded — see
+# `_ADDRESSING_AT_SCHEMES` below for why that mattered.
 #
-# Aligned with `_USERINFO_SCHEMES` in `_http_fetch.py`.
+# `az://`, `abfs://`, `abfss://` and `gs://` DO use `@` for addressing and are
+# handled by `_ADDRESSING_AT_SCHEMES` below, which rejects only a real
+# `user:pass@` pair.  Putting them in this set would reject the documented
+# forms outright.
+#
+# NOT aligned with `_USERINFO_SCHEMES` in `_http_fetch.py`, and it never was:
+# that set is `{http, https, ftp, ftps}` and this one has always also carried
+# `s3`.  The comment that used to claim alignment here was false, and the gap
+# it hid is the point of this block — `_http_fetch.redact_url_userinfo` is the
+# log-redaction gate, so a scheme missing from *its* set has its userinfo
+# logged verbatim.  The two sets answer different questions and are kept
+# deliberately separate; `redact_url_userinfo` now redacts on the presence of a
+# password regardless of scheme, so a divergence here can no longer become a
+# plaintext secret in a log line.
 _USERINFO_REJECT_SCHEMES: frozenset[str] = frozenset(
-    {"http", "https", "ftp", "ftps", "s3"}
+    {"http", "https", "ftp", "ftps", "s3", "file"}
 )
 
 # Schemes where a *bare* `something@host` is addressing syntax but a
 # `user:pass@host` is still an embedded credential.  Splitting these out keeps
 # the security intent (no plaintext key:secret in a recipe) without rejecting
 # `abfss://container@account.dfs.core.windows.net/path`, the form Azure's own
-# documentation uses.  urlparse reports `username='container', password=None`
-# for that URI and `password='...'` only when a `:` is actually present, so the
-# password component is the discriminator.
-_AZURE_SCHEMES: frozenset[str] = frozenset({"az", "abfs", "abfss"})
+# documentation uses, or `gs://project@bucket/key`, the gcsfs billing-project
+# override.  urlparse reports `username='container', password=None` for those
+# and `password='...'` only when a `:` is actually present, so the password
+# component is the discriminator.
+#
+# `gs` was previously exempt from the userinfo check *entirely* rather than
+# being password-gated, so `gs://user:pass@bucket/key` loaded.  gcsfs does not
+# authenticate that way — it reads `user:pass` as the billing project and the
+# fetch fails — but the failure comes after `csv_source_fetch_start` has
+# already logged the path, and neither redaction layer covered `gs`, so the
+# plaintext secret reached stdout six times per `recotem train`.
+_ADDRESSING_AT_SCHEMES: frozenset[str] = frozenset({"az", "abfs", "abfss", "gs"})
 
 
 def _check_userinfo(path: str, field_name: str) -> None:
     parsed = urlparse(path)
     scheme = (parsed.scheme or "").lower()
-    if scheme in _AZURE_SCHEMES:
-        # `container@account.dfs.core.windows.net` is addressing, not a
-        # credential — reject only a real `user:pass@` pair.
+    if scheme in _ADDRESSING_AT_SCHEMES:
+        # `container@account.dfs.core.windows.net` / `project@bucket` are
+        # addressing, not credentials — reject only a real `user:pass@` pair.
         if parsed.password:
             raise RecipeError(
                 f"'{field_name}' contains embedded credentials in the URI. "
@@ -119,13 +157,37 @@ def _check_userinfo(path: str, field_name: str) -> None:
             )
         return
     if scheme not in _USERINFO_REJECT_SCHEMES:
-        # Object-store and bare paths: `@` may be part of the addressing
-        # syntax (e.g. `gs://project@bucket/key`); skip the credentials check.
+        # Bare local paths and plugin schemes: no userinfo concept.
         return
     if parsed.username or parsed.password:
         raise RecipeError(
             f"'{field_name}' contains embedded credentials in the URI. "
             "Use environment-based authentication instead.",
+            category="security",
+        )
+
+
+def _reject_chained_scheme(path: str, field_name: str) -> None:
+    """Reject fsspec protocol chaining (``outer::inner://…``) on any path field.
+
+    Chained paths cannot be safely validated by scheme: ``urlparse`` reads only
+    the head (``file::s3://…`` parses as scheme ``file``), so a head that is on
+    the allow-list vouches for a chain whose tail was never inspected. That also
+    hides the userinfo check, because the credentials sit in the *tail* and
+    ``urlparse`` puts the whole tail in ``.path`` with an empty netloc —
+    ``file::s3://AKID:SECRET@bucket/key`` reports no username and no password.
+
+    Applied to ``output.path`` as well as the input paths. Skipping it there
+    accepted the chained form outright: ``recotem validate`` returned 0,
+    ``recotem train`` ran the whole search and then failed inside
+    ``os.replace`` as ``internal_error`` (exit 1, not the documented exit 8),
+    and the per-recipe lock had meanwhile written the plaintext secret into a
+    0755 directory name under the process's cwd.
+    """
+    if "::" in path:
+        raise RecipeError(
+            f"'{field_name}' uses a chained scheme (contains '::'). "
+            "Chained fsspec protocols are not permitted in recipes.",
             category="security",
         )
 
@@ -137,20 +199,11 @@ def _validate_input_path(path: str, field_name: str) -> None:
     paths (e.g. ``simplecache::https://…``) which cannot be safely validated
     via ``urlparse``.
     """
-    # Chained-scheme paths (fsspec protocol chaining syntax) are rejected
-    # because urlparse cannot extract the effective scheme from them and they
-    # may reference transient caching protocols wrapping disallowed backends.
-    if "::" in path:
-        raise RecipeError(
-            f"'{field_name}' uses a chained scheme (contains '::'). "
-            "Chained fsspec protocols are not permitted in recipes.",
-            category="security",
-        )
+    _reject_chained_scheme(path, field_name)
 
     _check_userinfo(path, field_name)
 
-    parsed = urlparse(path)
-    scheme = (parsed.scheme or "").lower()
+    scheme = _effective_scheme(path)
     if scheme not in _INPUT_ALLOWED_SCHEMES:
         allowed_display = ", ".join(
             sorted(f"{s}://" if s else "(bare path)" for s in _INPUT_ALLOWED_SCHEMES)
@@ -169,9 +222,10 @@ def _validate_output_path(path: str, field_name: str) -> None:
     schemes (e.g. ``data:``, ``javascript:``, vendor-specific) are rejected
     by default rather than admitted by oversight of a deny-list.
     """
+    _reject_chained_scheme(path, field_name)
     _check_userinfo(path, field_name)
     parsed = urlparse(path)
-    scheme = (parsed.scheme or "").lower()
+    scheme = _effective_scheme(path)
     if scheme not in _OUTPUT_ALLOWED_SCHEMES:
         allowed_display = ", ".join(
             sorted(f"{s}://" if s else "(bare path)" for s in _OUTPUT_ALLOWED_SCHEMES)

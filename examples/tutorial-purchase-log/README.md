@@ -4,13 +4,19 @@ Self-contained Recotem tutorial recipe. Fetches a small public CSV
 (≈37 KiB, ≈4 988 interactions) over HTTPS and trains an IALS + TopPop
 recommender against it.
 
-- Walkthrough: [docs/getting-started.md](../../docs/getting-started.md)
+- Walkthrough: [Getting started](https://recotem.org/2.2/guide/)
 - Source data: `https://raw.githubusercontent.com/codelibs/recotem/refs/tags/v1.0.0/frontend/e2e/test_data/purchase_log.csv`
 - sha256: `945fc769205a5976d38c5783500ae473afbb04608043b703951a699993c8f8be`
 
 Run from the repository root:
 
 ```bash
+# 1. Generate a signing key (once per machine) and export it.
+#    `recotem train` refuses to write an unsigned artifact: without this it
+#    exits 8 with `RECOTEM_SIGNING_KEYS is not set`.
+export $(uv run recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
+
+# 2. Train.
 mkdir -p artifacts
 uv run recotem train examples/tutorial-purchase-log/recipe.yaml
 ```

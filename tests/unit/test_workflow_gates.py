@@ -31,6 +31,25 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
+
+def workflow_paths() -> list[Path]:
+    """Every file GitHub Actions will run from `.github/workflows`.
+
+    Both extensions, not just `*.yml`: GitHub's workflow-syntax reference says
+    a workflow file "must have either a `.yml` or `.yaml` file extension", and
+    it runs both identically.  A `*.yml` glob therefore skips a `.yaml`
+    workflow silently -- the gates below would keep passing while an unchecked
+    workflow ran in CI.  Measured: a probe workflow granting `packages: write`
+    and running `uv sync --frozen` was invisible to every gate as `evil.yaml`
+    and failed two of them the moment it was renamed `evil.yml`.
+    """
+    return sorted(
+        path
+        for path in WORKFLOWS.iterdir()
+        if path.is_file() and path.suffix in {".yml", ".yaml"}
+    )
+
+
 # A job that grants no `permissions:` of its own inherits the workflow-level
 # block wholesale; GitHub does not intersect it with what the job uses.
 _NO_BLOCK = object()
@@ -128,7 +147,12 @@ def test_no_workflow_grants_packages_write_by_default() -> None:
     which only build and execute the image locally — held registry write, and
     so would any job added later.
     """
-    for path in sorted(WORKFLOWS.glob("*.yml")):
+    paths = workflow_paths()
+    assert paths, (
+        f"no workflow files found under {WORKFLOWS}; this gate iterates an "
+        "empty list and passes without checking anything"
+    )
+    for path in paths:
         permissions = _load(path.name).get("permissions") or {}
         assert "packages" not in permissions, (
             f"{path.name} grants `packages` at workflow level; every job "
@@ -152,9 +176,7 @@ def test_only_the_publishing_job_can_write_to_the_registry() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "workflow_file", sorted(p.name for p in WORKFLOWS.glob("*.yml"))
-)
+@pytest.mark.parametrize("workflow_file", [p.name for p in workflow_paths()])
 def test_pypi_publish_action_is_pinned_to_a_commit(workflow_file: str) -> None:
     """`@release/v1` is a branch: its tip decides what runs under OIDC."""
     for line in (WORKFLOWS / workflow_file).read_text().splitlines():
@@ -265,3 +287,84 @@ def test_reland_record_rows_are_well_formed() -> None:
         assert fields[0].strip().isdigit(), f"{record.name}:{lineno} bad original PR"
         assert fields[1].strip().isdigit(), f"{record.name}:{lineno} bad replacement PR"
         assert fields[2].strip(), f"{record.name}:{lineno} has no reason"
+
+
+# ---------------------------------------------------------------------------
+# The PR trigger must cover the trees the suite reads
+#
+# Much of this suite resolves REPO_ROOT and asserts against the *real*
+# examples/, helm/ and .github/ trees rather than a fixture.  A `paths:` filter
+# that omits one of those makes those tests unfalsifiable at PR time for
+# precisely the change they exist to police -- the suite is green because it
+# never ran, which is indistinguishable from green because it passed.
+#
+# Measured on PR #214, which changed a single file under the docs/ tree of the
+# day: `repos/codelibs/recotem/commits/<head>/check-runs` reports total_count=2,
+# both CodeQL.  No pytest, no ruff, no manifests, no e2e.
+#
+# That is how `ghcr.io/codelibs/recotem:2.0.0` reached docs/upgrading.md and
+# made the v2.1.0 tag unreachable through the documented release procedure
+# while every check was green.  #385 has since moved that tree out of this
+# repository, so docs/ has no row below and no entry in the filter: the table
+# names trees a test on main actually reads, and a row for a path that cannot
+# exist would pass whatever the filter said.
+# ---------------------------------------------------------------------------
+
+# One real path per tree, with a test on main that reads it.  The point is the
+# tree, not the file: each entry stands for every test that reaches into it.
+_TREES_THE_SUITE_READS = [
+    ("examples/k8s/cronjob.yaml", "test_k8s_manifests.py reads examples/k8s/"),
+    ("helm/recotem/values.yaml", "test_k8s_manifests.py renders the real chart"),
+    (".github/scripts/check-release-tag.sh", "test_check_release_tag.py runs it"),
+    (".github/workflows/publish.yml", "test_workflow_gates.py -- this file"),
+    (".github/relanded-prs.tsv", "test_reland_record_rows_are_well_formed"),
+    ("src/recotem/version.py", "the package under test"),
+    ("tests/unit/test_workflow_gates.py", "the suite itself"),
+    ("pyproject.toml", "test_packaging_metadata.py"),
+    ("uv.lock", "test_lockfile_validation.py"),
+]
+
+
+def _pr_paths(name: str) -> list[str]:
+    # YAML 1.1 parses a bare `on:` key as the boolean True, not the string.
+    trigger = _load(name)[True]
+    return list(trigger["pull_request"].get("paths", []))
+
+
+def _matches(path: str, pattern: str) -> bool:
+    """GitHub path-filter globbing: `**` crosses `/`, a single `*` does not."""
+    regex = re.escape(pattern).replace(r"\*\*", ".*").replace(r"\*", "[^/]*")
+    return re.fullmatch(regex, path) is not None
+
+
+def test_pr_trigger_covers_the_trees_the_suite_reads() -> None:
+    """Every tree the suite asserts against must be able to trigger it."""
+    paths = _pr_paths("test.yml")
+    missing = [
+        f"{path}  ({why})"
+        for path, why in _TREES_THE_SUITE_READS
+        if not any(_matches(path, pattern) for pattern in paths)
+    ]
+    assert not missing, (
+        "test.yml's pull_request paths do not cover trees this suite reads, so "
+        "a PR changing only one of them runs no tests at all:\n  "
+        + "\n  ".join(missing)
+        + f"\n\npaths: {paths}"
+    )
+
+
+def test_the_pr_trigger_is_still_a_filter() -> None:
+    """Anti-vacuity control for the test above.
+
+    Replacing the list with a blanket `**` would satisfy every assertion there
+    while asserting nothing about coverage.  A path no test reads must still
+    fail to match, so the filter is doing real work rather than being a
+    tautology.  If a test ever does read LICENSE, add it to the table above
+    and pick a different sentinel here -- deliberately, not by widening.
+    """
+    paths = _pr_paths("test.yml")
+    assert paths, "test.yml's pull_request trigger has no paths filter at all"
+    assert not any(_matches("LICENSE", pattern) for pattern in paths), (
+        "test.yml's pull_request paths match LICENSE, which no test reads — "
+        f"the filter has been widened to a tautology: {paths}"
+    )

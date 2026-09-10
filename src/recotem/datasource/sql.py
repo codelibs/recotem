@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import socket
 from typing import ClassVar, Literal
 
@@ -91,6 +92,70 @@ _PG_PLAINTEXT_SSLMODES: frozenset[str] = frozenset({"disable", "allow", "prefer"
 # chain from spinning.
 _MAX_CAUSE_DEPTH = 6
 
+# The MySQL / MariaDB spelling that actually turns TLS on.
+#
+# NOT ``?ssl=true``.  PyMySQL's ``ssl`` parameter takes an ``ssl.SSLContext``
+# or a mapping, and SQLAlchemy passes a URL query value through as the string
+# it was written as, so ``?ssl=true`` reaches ``Connection.__init__`` as
+# ``"true"`` and dies in PyMySQL's own ``ssl.get(key)`` with
+# ``AttributeError: 'str' object has no attribute 'get'`` -- no DBAPI error
+# underneath, so ``_error_label`` can only report the bare class name.  Any
+# non-empty scalar has the same effect (``ssl=1``, ``ssl=false``, ...); only
+# ``?ssl=`` with an empty value survives, because ``make_url`` drops it.
+#
+# ``ssl_ca`` / ``ssl_verify_cert`` are the per-option spellings SQLAlchemy's
+# PyMySQL dialect documents, and they do reach the server over TLS.
+#
+# ``ssl_ca`` alone is only sufficient when the server certificate names the
+# host the DSN connects to.  It does not when the server is using the
+# certificate it generated for itself, which is the posture an operator lands
+# in by turning on ``require_secure_transport`` and nothing else:
+#
+# * MySQL 8.4 writes ``ca.pem`` / ``server-cert.pem`` into its data directory,
+#   but that certificate's CN is ``MySQL_Server_<version>_Auto_Generated_
+#   Server_Certificate`` and carries no SAN, so SQLAlchemy's default
+#   ``check_hostname=True`` fails the handshake with ``CERTIFICATE_VERIFY_
+#   FAILED ... IP address mismatch``.  ``&ssl_check_hostname=false`` is what
+#   SQLAlchemy's own PyMySQL dialect documentation says to add, and it is what
+#   makes ``ssl_ca`` connect.
+# * MariaDB 11.8 generates its certificate in memory: ``@@ssl_ca`` and
+#   ``@@ssl_cert`` are NULL and no ``.pem`` is written anywhere.  There is no
+#   file for ``ssl_ca`` to name, so ``?ssl_check_hostname=false`` (or
+#   ``?ssl_verify_cert=false``) on its own is the only spelling that connects.
+#
+# Both of those turn certificate verification off while keeping the channel
+# encrypted, so they are a starting point, not a destination: pointing
+# ``ssl_ca`` at a CA you control is what authenticates the server.
+_MYSQL_TLS_HINT = (
+    "Add ?ssl_ca=/path/to/ca.pem to the DSN to force TLS (or "
+    "?ssl_verify_cert=true when the server certificate chains to the system "
+    "CA store).  If the server presents the certificate it generated for "
+    "itself, that certificate names no host: add &ssl_check_hostname=false "
+    "for MySQL, and use ?ssl_check_hostname=false on its own for MariaDB, "
+    "which writes no ca.pem to point at.  Both encrypt without "
+    "authenticating the server -- issue a certificate from a CA you control "
+    "to get both.  Plaintext connections to mysql/mariadb are subject to "
+    "credential interception on the wire.  Note that ?ssl=true is NOT a "
+    "usable spelling: PyMySQL's ssl parameter takes a mapping or an "
+    "SSLContext, never a string."
+)
+
+# ``sslmode=require`` encrypts but does not authenticate the server.  The two
+# stricter modes do, and both need a root certificate to check against: libpq
+# looks for ``~/.postgresql/root.crt`` when ``sslrootcert`` is unset and
+# refuses the connection when that file does not exist.  Naming the stricter
+# modes without naming ``sslrootcert`` sends an operator from a working
+# plaintext DSN to a DSN that cannot connect.
+_PG_TLS_HINT = (
+    "Add ?sslmode=require to the DSN to force TLS.  The stricter "
+    "verify-ca / verify-full also authenticate the server and need a root "
+    "certificate for it: add &sslrootcert=/path/to/root.crt (or "
+    "&sslrootcert=system to use the OS trust store), otherwise libpq looks "
+    "for ~/.postgresql/root.crt and refuses the connection when it is "
+    "absent.  Plaintext connections to postgres are subject to credential "
+    "interception on the wire."
+)
+
 
 def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
     """Emit a structured warning when the DSN does not configure TLS.
@@ -98,14 +163,39 @@ def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
     Heuristic check intended as an advisory, not an enforcement:
 
     * postgres / postgresql: warns if ``sslmode`` is absent or one of
-      ``disable`` / ``allow`` / ``prefer`` (the modes that permit plaintext).
+      ``disable`` / ``allow`` / ``prefer`` (the modes that do not *force* TLS).
     * mysql / mariadb: warns if no ``ssl`` / ``ssl_*`` query parameter is
-      present (driver default is plaintext).
+      present (nothing in the DSN forces TLS).
     * sqlite: not network-bearing; no check.
 
+    "Does not force TLS" is the claim, not "is plaintext".  Both drivers try
+    TLS opportunistically when the DSN says nothing -- psycopg defaults to
+    ``sslmode=prefer`` and PyMySQL to its PREFERRED mode -- so a warned
+    connection is frequently encrypted already; what it is not is guaranteed,
+    because both silently fall back to plaintext against a server that does
+    not offer TLS.
+
     Driver-specific TLS flags vary; the heuristic deliberately under-detects
-    rather than misclassify.  Operators can silence the warning by adding the
-    explicit TLS query parameter to the DSN.
+    rather than misclassify.
+
+    For mysql / mariadb the test is **presence** of an ``ssl_*`` key, not its
+    value, because that is what the driver keys off.  SQLAlchemy's PyMySQL
+    dialect folds ``ssl_ca`` / ``ssl_cert`` / ``ssl_key`` /
+    ``ssl_check_hostname`` into a single ``ssl`` mapping and passes
+    ``ssl_verify_cert`` through as a raw string; PyMySQL turns TLS on for a
+    non-empty ``ssl`` mapping or a truthy ``ssl_verify_cert``, and the string
+    ``"false"`` is truthy.  So ``?ssl_check_hostname=false`` and
+    ``?ssl_verify_cert=false`` both *force* TLS -- measured against a server
+    with ``have_ssl=DISABLED``, where a bare DSN connects and both of these
+    are refused by the driver.  Reading their value as "TLS turned off" made
+    the warning fire on the two spellings ``_MYSQL_TLS_HINT`` itself
+    prescribes for a MariaDB server presenting its own in-memory certificate,
+    which is the one posture where no other spelling exists: MariaDB writes no
+    ``ca.pem`` for ``ssl_ca`` to point at.  Empty values need no special case
+    -- ``make_url`` drops them, so a key present in *query* always has a
+    non-empty value.  A scalar ``?ssl=`` is refused before connect by the
+    check in ``SQLSource.__init__``, so it never reaches this check; ``ssl``
+    stays in the set only so a future caller cannot reintroduce the gap.
     """
     if dialect.startswith("postgres"):
         sslmode = (query.get("sslmode") or "").lower()
@@ -114,27 +204,25 @@ def _warn_if_tls_not_configured(dialect: str, query: dict[str, str]) -> None:
                 "sql_dsn_tls_not_configured",
                 dialect=dialect,
                 detected_sslmode=sslmode or "(absent)",
-                hint=(
-                    "Add ?sslmode=require (or verify-ca / verify-full) to the "
-                    "DSN to force TLS.  Plaintext connections to postgres are "
-                    "subject to credential interception on the wire."
-                ),
+                hint=_PG_TLS_HINT,
             )
     elif dialect in {"mysql", "mariadb"}:
-        # pymysql + drivers use one of these keys to indicate TLS.
-        ssl_keys = {"ssl", "ssl_ca", "ssl_cert", "ssl_key", "ssl_verify_cert"}
-        has_ssl = any(k in query for k in ssl_keys) and any(
-            (query.get(k) or "").lower() not in {"false", "0", ""} for k in ssl_keys
-        )
+        # pymysql + drivers use one of these keys to indicate TLS.  Presence
+        # is the signal, not the value -- see the docstring.
+        ssl_keys = {
+            "ssl",
+            "ssl_ca",
+            "ssl_cert",
+            "ssl_key",
+            "ssl_verify_cert",
+            "ssl_check_hostname",
+        }
+        has_ssl = any(k in query for k in ssl_keys)
         if not has_ssl:
             _log.warning(
                 "sql_dsn_tls_not_configured",
                 dialect=dialect,
-                hint=(
-                    "Add ?ssl=true (or ssl_ca=...) to the DSN to force TLS.  "
-                    "Plaintext connections to mysql/mariadb are subject to "
-                    "credential interception on the wire."
-                ),
+                hint=_MYSQL_TLS_HINT,
             )
 
 
@@ -163,7 +251,7 @@ def _server_is_mariadb(conn, dialect: str) -> bool:
 
     The DSN scheme is not authoritative about which server answers.
     ``mysql+pymysql://`` is the DSN form PyMySQL documents and the only
-    PyMySQL row in ``docs/data-sources/sql.md``, and it connects to a MariaDB
+    PyMySQL row in ``https://recotem.org/2.2/docs/data-sources/sql.html``, and it connects to a MariaDB
     server just as happily as to MySQL — so ``url.get_backend_name()`` reports
     ``"mysql"`` for a large share of real MariaDB deployments.
 
@@ -187,20 +275,123 @@ def _server_is_mariadb(conn, dialect: str) -> bool:
     return dialect == "mariadb"
 
 
+# Userinfo inside a URL that appears in free text: ``scheme://user:pass@host``.
+# Bounded character classes (no ``/``, ``@`` or whitespace on either side of
+# the colon) so the match cannot run past the authority section.
+_USERINFO_IN_TEXT = re.compile(r"(?<=://)[^\s/@]*:[^\s/@]*@")
+
+# Upper bound on the SQLAlchemy diagnostic appended by ``_error_label``.  Long
+# enough for the sentences SQLAlchemy actually writes and short enough that a
+# message quoting a large statement cannot flood the log line.
+_MAX_SA_DETAIL = 200
+
+
+# Exception types whose ``__str__`` is *argument validation* text rather than
+# text a database handed back.  Closed allow-list, and deliberately so: this
+# file already fails closed the same way for ``_DRIVER_MODULE`` and
+# ``_REMOVED_DIALECT_ALIASES``, and the alternative here -- "interpolate
+# whatever class turns up" -- is the shape ``_error_label`` exists to refuse.
+#
+# Every member is raised by the driver (or by ``ssl``) while it is still
+# checking the keyword arguments SQLAlchemy assembled, before a socket exists:
+#
+# * ``ValueError``  -- PyMySQL's ``port should be of type int``, reached by any
+#   DSN that routes with a query-string ``?port=`` (SQLAlchemy's MySQL dialect
+#   coerces the netloc port to ``int`` but leaves a query-string one a ``str``;
+#   libpq accepts a string port, so this is MySQL/MariaDB-only).
+# * ``TypeError``   -- an unexpected keyword argument from a query parameter
+#   the dialect passes straight through.
+# * ``OSError``     -- ``FileNotFoundError`` / ``PermissionError`` while
+#   building the TLS context from ``ssl_ca`` / ``ssl_cert`` / ``ssl_key``.
+#
+# A DBAPI error is never one of these, and cannot reach here anyway: the
+# ``orig is not None`` branch in ``_error_label`` claims it first.
+_SAFE_DETAIL_TYPES: tuple[type[BaseException], ...] = (ValueError, TypeError, OSError)
+
+
+def _redacted_detail(exc: Exception) -> str | None:
+    """Return *exc*'s own message, userinfo-stripped and length-capped.
+
+    Shared by the two callers that are allowed to surface a message at all, so
+    the redaction and the cap cannot drift apart between them.
+    """
+    detail = " ".join(str(exc).split())
+    if not detail:
+        return None
+    detail = _USERINFO_IN_TEXT.sub("***@", detail)
+    if len(detail) > _MAX_SA_DETAIL:
+        detail = detail[:_MAX_SA_DETAIL] + "…"
+    return detail
+
+
+def _sqlalchemy_detail(exc: Exception) -> str | None:
+    """Return SQLAlchemy's own message for *exc*, redacted, or ``None``.
+
+    Only ``sqlalchemy.exc.SQLAlchemyError`` instances qualify, and only those
+    with no DBAPI error beneath them.  That combination is precisely the set
+    whose ``__str__`` is text SQLAlchemy wrote itself rather than text a driver
+    handed it, which is what makes it safe to surface: the reason
+    ``_error_label`` refuses to interpolate ``str(exc)`` in general is that a
+    *driver* exception can embed DSN userinfo, and a driver exception always
+    arrives with an ``orig``.
+
+    Userinfo is stripped anyway.  Three samples is not a proof about every
+    SQLAlchemy exception type, and the redaction costs nothing.
+    """
+    try:
+        from sqlalchemy.exc import SQLAlchemyError  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - sqlalchemy is a hard dep here
+        return None
+    if not isinstance(exc, SQLAlchemyError):
+        return None
+    return _redacted_detail(exc)
+
+
 def _error_label(exc: Exception) -> str:
     """Name *exc* and, when present, the DBAPI error underneath it.
 
-    Only class names and the SQLSTATE are used.  Driver exception ``__str__``
-    can embed DSN userinfo and hostnames; a class name cannot, and SQLSTATE is
-    a fixed five-character code from the SQL standard (``42P01`` undefined
-    table, ``42501`` insufficient privilege, ...), so both stay safe to put in
-    an operator-visible message.  The code is length- and charset-checked
-    before use so a driver that puts something else in that attribute cannot
-    smuggle free text into the message.
+    When a DBAPI error is present, only class names and the SQLSTATE are used.
+    Driver exception ``__str__`` can embed DSN userinfo and hostnames; a class
+    name cannot, and SQLSTATE is a fixed five-character code from the SQL
+    standard (``42P01`` undefined table, ``42501`` insufficient privilege,
+    ...), so both stay safe to put in an operator-visible message.  The code is
+    length- and charset-checked before use so a driver that puts something else
+    in that attribute cannot smuggle free text into the message.
+
+    When there is **no** DBAPI error, the class name alone is usually not
+    actionable, and SQLAlchemy's own message is.  The case that made this worth
+    fixing: a ``mariadb+pymysql://`` DSN pointed at a MySQL server reported
+
+        probe failed for dialect 'mariadb': InvalidRequestError
+
+    and nothing else, while SQLAlchemy's message underneath said "MySQL version
+    8.4.11 is not a MariaDB variant" — which tells the operator exactly what to
+    change.  ``https://recotem.org/2.2/docs/data-sources/sql.html`` recommends ``mysql+pymysql://`` for
+    MariaDB servers, so assuming the mirror image works is an ordinary mistake
+    to make, and the operator was left with a bare class name for it.
+
+    The same argument covers a second, narrower set that is neither a DBAPI
+    error nor a ``SQLAlchemyError``: the driver's own argument validation
+    (``_SAFE_DETAIL_TYPES``).  Those reported as a bare class name too, and the
+    word they reported was never the word the operator needed:
+
+        probe failed for dialect 'mysql': ValueError
+        probe failed for dialect 'mysql': FileNotFoundError
+
+    while the messages underneath said ``port should be of type int`` and
+    ``[Errno 2] No such file or directory``.  Neither can carry DSN userinfo:
+    SQLAlchemy hands the driver ``user=`` and ``password=`` as separate keyword
+    arguments, so no URL exists at the point these are raised.  The redaction
+    runs anyway, for the same reason it runs on the SQLAlchemy branch.
     """
     orig = _dbapi_error(exc)
     if orig is None:
-        return type(exc).__name__
+        detail = _sqlalchemy_detail(exc)
+        if detail is None and isinstance(exc, _SAFE_DETAIL_TYPES):
+            detail = _redacted_detail(exc)
+        if detail is None:
+            return type(exc).__name__
+        return f"{type(exc).__name__}: {detail}"
     label = f"{type(exc).__name__} ({type(orig).__module__}.{type(orig).__name__})"
     sqlstate = getattr(orig, "sqlstate", None)
     if isinstance(sqlstate, str) and len(sqlstate) == 5 and sqlstate.isalnum():
@@ -325,6 +516,24 @@ class SQLSource:
                     f"pip install 'recotem[{extra}]' provides, or install "
                     f"{driver_mod!r} yourself."
                 ) from exc
+
+        # Refuse a scalar ``?ssl=`` on mysql / mariadb before anything connects.
+        #
+        # This is the spelling recotem itself recommended until now, so it is
+        # in operators' DSNs.  Left to the driver it produces
+        # ``AttributeError: 'str' object has no attribute 'get'`` from inside
+        # PyMySQL, with no DBAPI error underneath -- which ``_error_label``
+        # reports as the bare word ``AttributeError``, naming neither the DSN,
+        # the parameter, nor the fix.  Like the driver probe above this is a
+        # pure local check on the URL text: no I/O, so ordering it before the
+        # SSRF guard weakens nothing.
+        if backend in {"mysql", "mariadb"} and url.query.get("ssl"):
+            raise DataSourceError(
+                f"DSN for dialect {backend!r} sets ?ssl= to a scalar value; "
+                "the driver's ssl parameter takes a mapping or an SSLContext, "
+                "so any non-empty scalar fails inside the driver with an "
+                "unhelpful AttributeError. " + _MYSQL_TLS_HINT
+            )
 
         # SSRF guard: reject private/loopback/link-local hosts unless opted in.
         # The full resolved IP set (IPv4 + IPv6) is pinned so that a DNS

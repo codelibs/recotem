@@ -13,7 +13,6 @@ All domain errors are subclasses of ``TrainingError`` (exit 4), except for
 from __future__ import annotations
 
 import copy
-import hashlib
 import urllib.parse
 import uuid
 from collections.abc import Callable
@@ -30,6 +29,11 @@ from irspack.utils import df_to_sparse
 
 from recotem._exit_codes import _map_exception_to_exit  # shared with cli.py
 from recotem._features import FEATURE_STATE_VERSION, state_descriptor
+from recotem._recipe_hash import (
+    compute_recipe_hash,
+    json_default_for_hash,
+    normalize_paths_for_hash,
+)
 from recotem.recipe.errors import RecipeError
 from recotem.recipe.models import Recipe
 from recotem.training._compat import IDMappedRecommender, suppress_progress_bars
@@ -443,7 +447,7 @@ def _run_training_locked(
     # or on noise.  It is recorded rather than thresholded: the shipped
     # examples hold out 12, 60 and 803 interactions, so any cutoff that flags a
     # genuinely unreliable search also flags the tutorials.  See
-    # docs/operations.md#choosing-a-model-on-a-small-dataset for how to read it.
+    # https://recotem.org/2.2/docs/operations.html#choosing-a-model-on-a-small-dataset for how to read it.
     n_heldout_interactions = int(X_val_test.nnz)
     n_heldout_users = int(X_val_test.shape[0])
     data_stats["n_heldout_interactions"] = n_heldout_interactions
@@ -609,9 +613,15 @@ def _run_training_locked(
         # The model is trained and about to be discarded, so the failure must
         # name its own cause rather than arriving as an unmapped exit 1 under
         # a stack of object-store SDK frames.
+        driver_error = _artifact_write_driver_error(exc, recipe.output.path)
+        if driver_error is not None:
+            raise driver_error from exc
         credentials_error = _artifact_write_credentials_error(exc, recipe.output.path)
         if credentials_error is not None:
             raise credentials_error from exc
+        destination_error = _local_write_destination_error(exc, recipe.output.path)
+        if destination_error is not None:
+            raise destination_error from exc
         raise
 
     # Canonical end-of-train marker.
@@ -756,6 +766,28 @@ def _http_status_of(exc: BaseException) -> int | None:
     return None
 
 
+# Upper bound on the object-store SDK text quoted inside an artifact-write
+# error.  Long enough for the sentence the SDK actually leads with and short
+# enough that a multi-line error document cannot push recotem's own remedy off
+# the end of the message.
+#
+# The Azure blob SDK's ``__str__`` is eleven lines: the human sentence, then a
+# RequestId, a timestamp, an ErrorCode, and the whole XML error document
+# repeating all four.  Interpolated raw, recotem's "Training succeeded but the
+# model was not persisted — ..." landed on a line beginning ``</Error>.``.
+# ``datasource/sql.py`` already collapses and caps SQLAlchemy's text for the
+# same reason (``_MAX_SA_DETAIL``); this is that rule for the write path.
+_MAX_WRITE_DETAIL = 200
+
+
+def _write_error_detail(exc: BaseException) -> str:
+    """Return *exc*'s message as one whitespace-collapsed, length-capped line."""
+    detail = " ".join(str(exc).split())
+    if len(detail) > _MAX_WRITE_DETAIL:
+        detail = detail[:_MAX_WRITE_DETAIL] + "…"
+    return detail
+
+
 def _is_gcs_forbidden_oserror(exc: BaseException) -> bool:
     """True for gcsfs's bare ``OSError('Forbidden: ...')`` — a 403 with no status.
 
@@ -770,6 +802,77 @@ def _is_gcs_forbidden_oserror(exc: BaseException) -> bool:
     ``TimeoutError``) keep falling through to their existing classification.
     """
     return type(exc) is OSError and str(exc).startswith("Forbidden:")
+
+
+# The recotem extra that installs the fsspec backend for each remote
+# ``output.path`` scheme.  The recipe path validator admits exactly these
+# remote schemes for ``output.path`` (plus the two local forms), so the map is
+# total over what can reach the write.
+_OUTPUT_SCHEME_EXTRAS: dict[str, str] = {
+    "s3": "s3",
+    "gs": "gcs",
+    "gcs": "gcs",
+    "az": "azure",
+    "abfs": "azure",
+    "abfss": "azure",
+}
+
+
+def _artifact_write_driver_error(
+    exc: BaseException, output_path: str
+) -> TrainingError | None:
+    """Return a config-coded ``TrainingError`` when the fsspec backend is absent.
+
+    ``write_artifact`` resolves ``output.path`` through
+    ``fsspec.core.url_to_fs``, and fsspec answers an unregistered protocol by
+    importing the backend and re-raising the failure as ``ImportError`` --
+    "Please install gcsfs to access Google Storage" and its s3fs / adlfs
+    equivalents.  That is a configuration mistake no retry will fix, and it is
+    the *first* thing the write does, yet it used to be the one remote-write
+    failure that stayed an unmapped exit 1: the credential and destination
+    classifiers below both answer ``None`` for it, because an ``ImportError``
+    is neither.
+
+    It is also the most expensive one to learn late.  The whole Optuna search
+    has run by the time the write is attempted, and for a ``bigquery`` source
+    the scan has already been billed -- so the operator pays for the run twice
+    to discover that an extra was missing from `pip install`.
+
+    Exit 8 rather than 3: the exit code follows the layer, not the exception
+    type.  The same ``ImportError`` raised while *reading* ``source.path`` is a
+    ``DataSourceError`` (exit 3) because it happens inside the CSV source;
+    ``output.path`` is not a data source, and every other way this write fails
+    for a configuration reason -- absent credentials, a missing bucket, an
+    unwritable local directory, a destination that is a directory -- already
+    reports 8 from this same handler.
+
+    Scoped to remote outputs by ``_is_remote_output``: a local write resolves
+    to the built-in ``LocalFileSystem`` and cannot raise ``ImportError`` here,
+    so a local surprise keeps its current classification.
+    """
+    if not _is_remote_output(output_path):
+        return None
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ImportError):
+            scheme = urllib.parse.urlparse(str(output_path)).scheme.lower()
+            extra = _OUTPUT_SCHEME_EXTRAS.get(scheme)
+            remedy = (
+                f'install it with `pip install "recotem[{extra}]"`'
+                if extra is not None
+                else f"install the fsspec backend for '{scheme}://'"
+            )
+            return TrainingError(
+                f"could not write the artifact to {output_path!r}: the fsspec "
+                f"backend for '{scheme}://' is not installed ({cur}).  "
+                f"Training succeeded but the model was not persisted — "
+                f"{remedy} and re-run.",
+                code="artifact_write_driver",
+            )
+        cur = cur.__cause__ or cur.__context__
+    return None
 
 
 def _artifact_write_credentials_error(
@@ -827,7 +930,8 @@ def _artifact_write_credentials_error(
         if type(cur).__name__ in _CREDENTIAL_ERROR_NAMES:
             return TrainingError(
                 f"could not authenticate to write the artifact to "
-                f"{output_path!r}: {type(cur).__name__}: {cur}.  Training "
+                f"{output_path!r}: {type(cur).__name__}: "
+                f"{_write_error_detail(cur)}.  Training "
                 "succeeded but the model was not persisted — configure "
                 "credentials for the destination and re-run.",
                 code="artifact_write_credentials",
@@ -836,7 +940,8 @@ def _artifact_write_credentials_error(
         if remote and status == 401:
             return TrainingError(
                 f"could not authenticate to write the artifact to "
-                f"{output_path!r}: {type(cur).__name__}: {cur}.  Training "
+                f"{output_path!r}: {type(cur).__name__}: "
+                f"{_write_error_detail(cur)}.  Training "
                 "succeeded but the model was not persisted — configure "
                 "credentials for the destination and re-run.",
                 code="artifact_write_credentials",
@@ -849,7 +954,8 @@ def _artifact_write_credentials_error(
         ):
             return TrainingError(
                 f"could not write the artifact to {output_path!r}: "
-                f"{type(cur).__name__}: {cur}.  Training succeeded but the "
+                f"{type(cur).__name__}: {_write_error_detail(cur)}.  "
+                "Training succeeded but the "
                 "model was not persisted — check that the bucket or container "
                 "exists and that the credentials may write to it, then re-run.",
                 code="artifact_write_destination",
@@ -868,64 +974,108 @@ def _is_remote_output(output_path: str) -> bool:
     return len(scheme) > 1 and scheme != "file"
 
 
-def _normalize_paths_for_hash(obj: Any) -> Any:
-    """Recursively convert Path-like objects to POSIX strings for stable hashing.
+def _local_write_destination_error(
+    exc: BaseException, output_path: str
+) -> TrainingError | None:
+    """Return a config-coded ``TrainingError`` when ``output.path`` is a directory.
 
-    ``pathlib.Path`` (and its subclasses such as ``PurePosixPath`` and
-    ``PureWindowsPath``) serialise via ``str()`` to an OS-dependent
-    representation: POSIX gives ``/data/foo`` while Windows gives
-    ``\\data\\foo``.  Using ``Path.as_posix()`` normalises to the forward-
-    slash form on every platform so the same recipe always produces the same
-    hash regardless of where ``_compute_recipe_hash`` is called.
+    ``_artifact_write_credentials_error`` above states that a local
+    ``output.path`` cannot reach the write handler at all, "because
+    ``_write_atomic`` creates missing parents and the lock already refused an
+    unwritable directory".  One local shape defeats both halves of that: a
+    path that names an **existing directory**.  ``_write_atomic`` has no
+    parent to create, and the per-recipe lock is taken at
+    ``<output_path>.lock`` -- a *sibling* of the destination, not the
+    destination -- so ``isdir.recotem.lock`` is created happily and says
+    nothing about whether the artifact itself can be written.  The search then
+    runs to completion and ``os.replace`` raises ``IsADirectoryError``.
+
+    Measured on ``08b1672``: exit 1 (``_EXIT_UNKNOWN``, "unhandled / unmapped
+    exception") with ``code="internal_error"``, after fetch, cleansing, split
+    and the whole Optuna search -- so on a BigQuery- or SQL-backed recipe the
+    scan is billed before a recipe-content mistake that no retry can fix is
+    reported as a crash of recotem itself.  A read-only directory, the
+    neighbouring case, has always reported exit 8 via ``LockPermissionError``,
+    because there the lock's own sibling path is unwritable too.
+
+    Classified by asking the filesystem what is wrong rather than by matching
+    an errno, so the shape is named precisely and every *other* write failure
+    keeps its current classification.  A full disk, an I/O error or a stalled
+    mount is not a configuration error and must stay retryable -- the same
+    boundary ``_artifact_write_credentials_error``'s closing paragraph draws
+    for the remote side.  Scoped to local paths, mirroring that function's
+    scope to remote ones, so neither can silently relabel the other's
+    failures.  ``_local_output_path`` is what enforces that scope: it returns
+    ``None`` for every scheme ``_is_remote_output`` calls remote, and for a
+    Windows drive letter as well, so no second scheme test is needed here --
+    one was written and removed, because no mutation of it could change a
+    single answer.
+
+    Deliberately NOT widened to the adjacent case where an *ancestor* of
+    ``output.path`` is a regular file.  That one never reaches here: it raises
+    ``FileExistsError`` from ``lock.py``'s ``lock_path.parent.mkdir`` before
+    any data is fetched, and that call site already has an explicit errno
+    allow-list whose comment classes ``ENOTDIR``-shaped failures as "a genuine
+    system problem [that] keeps propagating".  Reclassifying it is a decision
+    for that boundary's owner, and it costs the operator seconds rather than a
+    billed scan.
+
+    Not checked in ``recotem validate``: it deliberately does not probe write
+    targets, so a lint job on one host can vet a recipe that trains on another
+    (see #321, where a filesystem pre-flight was tried and the existing suite
+    rejected it -- ``test_usable_storage_path_is_accepted`` asserts a
+    production path absent from CI is accepted).  The answer belongs at the
+    train-time mapping, which is where the house already puts the read-only
+    directory's exit 8.
     """
-    import pathlib  # noqa: PLC0415
+    if not isinstance(exc, OSError):
+        return None
 
-    if isinstance(obj, pathlib.PurePath):
-        return obj.as_posix()
-    if isinstance(obj, dict):
-        return {k: _normalize_paths_for_hash(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_normalize_paths_for_hash(v) for v in obj]
-    return obj
+    from recotem.recipe.loader import _local_output_path  # noqa: PLC0415
 
+    local = _local_output_path(str(output_path))
+    if local is None:
+        return None
 
-def _json_default_for_hash(obj: Any) -> Any:
-    """Custom JSON default serialiser for ``_compute_recipe_hash``.
+    # Deciding the classification costs one ``stat`` of ``output.path`` -- and
+    # that ``stat`` can fail for the same reason the write did.  ``Path.is_dir``
+    # swallows only ``ENOENT``/``ENOTDIR``/``EBADF``/``ELOOP`` and re-raises
+    # everything else, so on a network filesystem it raises rather than answers:
+    # measured on a ``ReadWriteMany`` NFS mount whose export changed identity,
+    # where it raised ``OSError [Errno 116] Stale file handle`` from inside the
+    # artifact write's ``except`` block and replaced the write's own exception
+    # ("During handling of the above exception, another exception occurred").
+    # The remote classifier above had already declined the path, so nothing else
+    # was left to run.
+    #
+    # An unanswerable question is not a "names a directory" answer.  Fall
+    # through and let the original write failure propagate unchanged, which is
+    # what this function does for every other unclassifiable case.
+    try:
+        names_a_directory = local.is_dir()
+    except OSError:
+        return None
+    if not names_a_directory:
+        return None
 
-    Converts ``pathlib.PurePath`` to a POSIX string before falling back to
-    ``str()`` for any other non-serialisable type.  This keeps the same
-    safety net as the previous ``default=str`` while guaranteeing that Paths
-    are never serialised with a OS-dependent separator.
-    """
-    import pathlib  # noqa: PLC0415
-
-    if isinstance(obj, pathlib.PurePath):
-        return obj.as_posix()
-    return str(obj)
-
-
-def _compute_recipe_hash(recipe: Recipe) -> str:
-    """Return a SHA-256 hex digest of the recipe's canonical YAML serialization.
-
-    Uses pydantic's ``model_dump`` -> sorted JSON to get a stable canonical
-    form.  No secrets are included (recipe YAML should never contain secrets).
-
-    Path normalisation: any ``pathlib.PurePath`` (including ``PureWindowsPath``)
-    found in the dump is converted to a POSIX forward-slash string via
-    ``as_posix()`` so the hash is identical on POSIX and Windows hosts given
-    the same recipe content.
-    """
-    import json  # noqa: PLC0415
-
-    raw = recipe.model_dump(mode="json", by_alias=False)
-    normalised = _normalize_paths_for_hash(raw)
-    canonical = json.dumps(
-        normalised,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=_json_default_for_hash,
+    return TrainingError(
+        f"output.path {str(output_path)!r} names an existing directory, so "
+        "the artifact cannot be written there. The per-recipe lock is taken "
+        "at '<output.path>.lock', a sibling of the destination, so it was "
+        f"created successfully and did not catch this: {type(exc).__name__}: "
+        f"{exc}.  Training succeeded but the model was not persisted — point "
+        "output.path at a file path and re-run.",
+        code="artifact_write_destination",
     )
-    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+# Moved to recotem._recipe_hash so serving/ can compare the header's
+# recipe_hash against the recipe it is about to serve under without importing
+# training/ (see CLAUDE.md). Re-exported here under the original private
+# spellings so existing importers keep working.
+_normalize_paths_for_hash = normalize_paths_for_hash
+_json_default_for_hash = json_default_for_hash
+_compute_recipe_hash = compute_recipe_hash
 
 
 def _assert_rows_present(df: pd.DataFrame, recipe: Recipe, type_name: str) -> None:
@@ -1041,7 +1191,7 @@ def _fetch_data(recipe: Recipe, run_id: str) -> pd.DataFrame:
     except Exception as exc:
         # Unexpected exceptions from the datasource path map to DataSourceError
         # (exit 3), not TrainingError (exit 4), per the documented exit-code
-        # contract in docs/operations.md.
+        # contract in https://recotem.org/2.2/docs/operations.html.
         logger.error(
             "datasource_unexpected_error",
             recipe=recipe.name,
@@ -1093,7 +1243,7 @@ def _cleanse(
                 # Numeric columns require an explicit time_unit to avoid
                 # silent ns-interpretation that maps Unix epoch seconds to
                 # dates near 1970-01-01 00:00:00 rather than their intended
-                # values.  See docs/recipe-reference.md.
+                # values.  See https://recotem.org/2.2/docs/recipe-reference.html.
                 time_unit = recipe.schema_.time_unit
                 if time_unit is None:
                     raise TrainingError(
@@ -1324,7 +1474,7 @@ def _train_final(
                 "search trial succeeded, because the final matrix differs "
                 "from every trial's matrix. Raising min_frequency on "
                 "high-cardinality feature columns usually resolves it; see "
-                "docs/operations.md.",
+                "https://recotem.org/2.2/docs/operations.html.",
                 code="feature_cholesky_error",
             ) from exc
         raise

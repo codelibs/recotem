@@ -16,10 +16,8 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from decimal import Decimal
 from fractions import Fraction
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -1457,7 +1455,7 @@ def test_min_frequency_counts_multi_label_occurrences_not_rows() -> None:
     """``min_frequency`` is a row count for ``categorical`` but an
     *occurrence* count for ``multi_label``: a single row's repeated tokens
     all count. ``tags="a|a|a"`` in ONE row must satisfy ``min_frequency=2``
-    and keep ``a`` -- pins docs/recipe-reference.md's documented semantics
+    and keep ``a`` -- pins https://recotem.org/2.2/docs/recipe-reference.html's documented semantics
     and guards against reverting to a row-count model for this encoding.
     """
     d = pd.DataFrame({"item_id": ["i1"], "tags": ["a|a|a"]}).set_index("item_id")
@@ -1484,7 +1482,7 @@ def test_dimension_cap_message_matches_the_measured_scaling(
     """The advice in the error must not contradict the sizing documentation.
 
     The message once said the cost was cubic; #208 corrected it and
-    `docs/operations.md` to a flat `dim^2.4`. Re-measuring across the whole
+    `https://recotem.org/2.2/docs/operations.html` to a flat `dim^2.4`. Re-measuring across the whole
     ladder showed no single power fits: a doubling costs 1.7-1.9x below the
     default 5,000 cap, 5.1x from 5,000 to 10,000 and 7.5x from 10,000 to
     20,000. The flat figure was right only in the middle, and it understated
@@ -1507,55 +1505,6 @@ def test_dimension_cap_message_matches_the_measured_scaling(
     assert "5.1x" in message and "7.5x" in message
     assert "10,000" in message and "20,000" in message
     assert "quadratic" in message
-
-
-def test_no_shipped_prose_still_calls_the_feature_cost_cubic() -> None:
-    """The correction must reach every file that states the cost, not just one.
-
-    #208 corrected `docs/operations.md` and the runtime message, and added the
-    test above to keep those two in step. `CLAUDE.md` states the same cost in
-    its `RECOTEM_MAX_FEATURE_DIM` row and was not covered, so it kept saying
-    "cubic" through a release. #220 corrected `CLAUDE.md` and widened this
-    check to `docs/`, and the same sentence survived in two more places the
-    list still did not name: `CHANGELOG.md`'s 2.1.0 section -- the release
-    notes for the release that ships the correction, 359 lines above the entry
-    announcing it -- and `get_max_feature_dim`'s own docstring in
-    `src/recotem/config.py`, next to the variable it describes.
-
-    So the list is now the whole surface a reader can reach: the top-level
-    prose files, every file under `docs/`, and the product source. The match is
-    a pattern rather than one literal string, so a reworded restatement of the
-    same wrong claim is caught too -- while a sentence that merely *uses* the
-    word (``"dilute the cubic decomposition"``) is not, because it does not say
-    the cost *is* cubic in anything.
-
-    ``"not the 8x a pure cubic would"`` used to be listed here as a second such
-    sentence. It is gone from the tree: the 10,000 -> 20,000 doubling measured
-    7.46x, so ruling the cubic out was itself the wrong claim, and
-    ``test_no_shipped_prose_rules_out_the_cubic_doubling_it_measures`` below now
-    keeps it gone.
-    """
-    root = Path(__file__).resolve().parents[2]
-    sources = [
-        root / "CLAUDE.md",
-        root / "README.md",
-        root / "CHANGELOG.md",
-        *sorted((root / "docs").rglob("*.md")),
-        *sorted((root / "src").rglob("*.py")),
-    ]
-    pattern = re.compile(r"cubic in\b", re.IGNORECASE)
-    offenders = [
-        f"{path.relative_to(root)}:{n}: {line.strip()}"
-        for path in sources
-        if path.exists()
-        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-        if pattern.search(line)
-    ]
-    assert not offenders, (
-        "these lines still describe the feature-dimension cost as cubic; the "
-        f"measured growth is super-linear with a rising exponent -- 5.1x per "
-        f"doubling at 5,000-10,000 and 7.5x at 10,000-20,000: {offenders}"
-    )
 
 
 def test_missing_source_column_raises(df: pd.DataFrame) -> None:
@@ -1788,7 +1737,7 @@ def test_multi_label_duplicate_tokens_encode_as_binary_not_count(
 ) -> None:
     """``tags="a|b|a"`` must put 1.0 on 'a', not 2.0.
 
-    docs/recipe-reference.md documents ``multi_label`` as "multi-hot"
+    https://recotem.org/2.2/docs/recipe-reference.html documents ``multi_label`` as "multi-hot"
     (binary), but scipy's COO->CSR conversion SUMS duplicate (row, col)
     entries -- appending one 1.0 per raw token occurrence (the pre-fix
     behavior) would silently turn a doubled tag into a weight of 2.0. This
@@ -1859,146 +1808,3 @@ def test_multi_label_tokenization_ignores_empty_and_whitespace_tokens(
     m, unknown = encode_one(state, {"genre": "action", "year": 2000.0, "tags": raw})
     np.testing.assert_allclose(m.toarray(), m_canonical.toarray())
     assert unknown == []
-
-
-def test_no_shipped_prose_rules_out_the_cubic_doubling_it_measures() -> None:
-    """The 10,000 -> 20,000 doubling costs 7.5x; prose must not deny the 8x.
-
-    #208 replaced "cubic in this number" with a flat `dim^2.4` and the gloss
-    "a doubling costs 5.1-5.8x, not the 8x a pure cubic would".  Re-measured
-    across the whole ladder on a 100k-row fixture, `parallelism: 1`, median of
-    three interleaved passes:
-
-        1,251 -> 2,501    1.74x   (exponent 0.80)
-        2,501 -> 5,001    1.85x   (exponent 0.89)
-        5,001 -> 10,001   5.07x   (exponent 2.34)
-        10,001 -> 20,001  7.46x   (exponent 2.90)
-
-    The gloss is right only for the middle step.  7.46x is the 8x it rules out,
-    and that step is the one an operator takes when the default 5,000 cap
-    refuses their catalogue -- so the sentence is wrong exactly where it is
-    read.  The page's own per-trial table already showed 7.0x and 10.2x per
-    doubling; the gloss narrowed it to the bottom of its own range.
-    """
-    root = Path(__file__).resolve().parents[2]
-    # The same surface `test_no_shipped_prose_still_calls_the_feature_cost_cubic`
-    # scans.  Scanning only `docs/` would be the defect this round saw most
-    # often: the identical sentence lives in `CHANGELOG.md`'s 2.1.0 section and
-    # in `get_max_feature_dim`'s own docstring, and a guard that misses those
-    # lets the release ship the corrected exponent and the superseded one side
-    # by side.
-    sources = [
-        root / "CLAUDE.md",
-        root / "README.md",
-        root / "CHANGELOG.md",
-        *sorted((root / "docs").rglob("*.md")),
-        *sorted((root / "src").rglob("*.py")),
-    ]
-    # A pattern, not a literal: `CHANGELOG.md` and `src/recotem/config.py`
-    # spelled it "not the 8x", `CLAUDE.md` spelled the identical claim "not
-    # the `dim^3`", and a scan for either alone leaves the other shipping.
-    ruling_out_cubic = re.compile(r"not the\s+`?(?:8|dim\^3|dim\*\*3)", re.IGNORECASE)
-    offenders = [
-        f"{path.relative_to(root)}"
-        for path in sources
-        if path.exists()
-        and ruling_out_cubic.search(path.read_text(encoding="utf-8").replace("\n", " "))
-    ]
-    assert not offenders, (
-        "these files rule out a cubic doubling for the feature dimension; the "
-        "10,000 -> 20,000 doubling measured 7.46x, which is that cubic: "
-        f"{offenders}"
-    )
-    ops = (root / "docs" / "operations.md").read_text(encoding="utf-8")
-    assert "7.46" in ops and "exponent itself\nrises" in ops, (
-        "docs/operations.md no longer carries the per-doubling measurements "
-        "that show the exponent rising with the dimension"
-    )
-
-
-# The three phrasings #208 introduced together, and the order they were caught
-# in: "cubic in this number" (#220), "not the 8x" (#243), and the flat
-# `dim^2.4` itself -- which is the number the other two were replaced *with*,
-# and so the one no guard was watching.
-# Deliberately NOT "replaced": it is symmetric about which figure is the stale
-# one.  "`dim^2.4` was replaced" is honest, "replaced with the measured
-# `dim^2.4`" asserts it -- and the second is the sentence that actually shipped
-# in CHANGELOG.md.  A marker has to name `dim^2.4` as the OLD value to count.
-_SUPERSEDED_MARKERS = (
-    "earlier revision",
-    "old `dim^2.4`",
-    "superseded",
-    "itself corrected",
-    "narrowed",
-)
-
-
-def test_no_shipped_prose_states_the_flat_dim24_cost_as_current() -> None:
-    """`dim^2.4` may be named as superseded, never asserted as the cost.
-
-    #243 corrected the sizing section, `config.py`, `_features.py` and the
-    `RECOTEM_MAX_FEATURE_DIM` CHANGELOG entry, and widened two guards -- one
-    for "cubic in", one for "not the 8x".  Neither watches the flat `dim^2.4`
-    string, so two assertions of it survived in the same release that refutes
-    them:
-
-        docs/operations.md  "raise the cap and pay the `dim^2.4` cost"
-        CHANGELOG.md        "already replaced with the measured `dim^2.4`"
-
-    The first was added by #232 -- *after* the correction round began -- into a
-    troubleshooting paragraph 24 lines above the table giving 7.46x.  That is
-    the failure mode the sibling guard's own comment names: "lets the release
-    ship the corrected exponent and the superseded one side by side".
-
-    The measured ladder (100k-row fixture, `parallelism: 1`, median of three):
-    1.74x / 1.85x / 5.07x / 7.46x per doubling.  A flat `dim^2.4` predicts
-    5.3x everywhere -- it over-states the two cheap steps and under-states the
-    10,000 -> 20,000 one by 41%, which is the step the default cap forces.
-
-    Honest mentions are allowed and must stay: the page explains at length that
-    its own earlier revision said `dim^2.4`.  A mention is honest when its
-    sentence also marks the figure as superseded.
-    """
-    root = Path(__file__).resolve().parents[2]
-    sources = [
-        root / "CLAUDE.md",
-        root / "README.md",
-        root / "CHANGELOG.md",
-        *sorted((root / "docs").rglob("*.md")),
-        *sorted((root / "src").rglob("*.py")),
-    ]
-    # Matches `dim^2.4`, dim**2.4 and a bare "dim 2.4", with or without ticks.
-    claim = re.compile(r"dim\s*(?:\^|\*\*)?\s*2\.4", re.IGNORECASE)
-
-    checked = 0
-    offenders: list[str] = []
-    for path in sources:
-        if not path.exists():
-            continue
-        text = path.read_text(encoding="utf-8")
-        for match in claim.finditer(text):
-            checked += 1
-            # The enclosing sentence, with newlines flattened: these are
-            # wrapped Markdown paragraphs, so the marker that makes a mention
-            # honest is routinely on a different line from the figure itself.
-            start = max(text.rfind(".", 0, match.start()) + 1, 0)
-            end = text.find(".", match.end())
-            sentence = " ".join(text[start : end if end != -1 else len(text)].split())
-            if any(m in sentence.lower() for m in _SUPERSEDED_MARKERS):
-                continue
-            lineno = text.count("\n", 0, match.start()) + 1
-            offenders.append(f"{path.relative_to(root)}:{lineno}: {sentence[:160]!r}")
-
-    assert checked, (
-        "no `dim^2.4` mention found in any shipped prose file -- the pattern "
-        "has stopped matching and this guard is watching nothing. If the "
-        "figure is genuinely gone from the tree, delete this test rather than "
-        "leaving it green over an empty scan."
-    )
-    assert not offenders, (
-        "these lines state the flat `dim^2.4` as the current feature-dimension "
-        "cost. The exponent rises with the dimension (5.07x per doubling from "
-        "5,000, 7.46x from 10,000), so a flat 2.4 under-states the step an "
-        "operator takes when the default cap refuses their catalogue. Say it "
-        "is superseded, or give the measured range:\n  " + "\n  ".join(offenders)
-    )

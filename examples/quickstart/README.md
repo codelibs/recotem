@@ -11,23 +11,26 @@ tiny synthetic CSV (60 users, 20 items, ~850 rows). No network, no extras.
 
 ## Run
 
-From the repository root:
+From the repository root. `uv sync` installs the CLI into `.venv` and does not
+put it on `PATH`, so the commands below use `uv run` to reach it (as the other
+examples do). If you installed with `pip install recotem` into an active
+virtualenv instead, drop the `uv run` prefix.
 
 ```bash
 # 1. Generate keys (once per machine). Copy the values into the exports below.
-recotem keygen --type signing --kid dev
-recotem keygen --type api     --kid dev
+uv run recotem keygen --type signing --kid dev
+uv run recotem keygen --type api     --kid dev
 
 export RECOTEM_SIGNING_KEYS="dev:<signing-hex64>"       # signing: env_entry value (the 64-char hex from keygen)
 export RECOTEM_API_KEYS="dev:sha256:<api-hash>"         # api:     env_entry value
 export RECOTEM_API_PLAINTEXT="<api-plaintext>"          # api:     plaintext, for curl
 
 # 2. Train
-recotem train examples/quickstart/recipe.yaml
+uv run recotem train examples/quickstart/recipe.yaml
 # → examples/quickstart/artifacts/top_picks.<sha>.recotem (signed)
 
 # 3. Serve (foreground)
-recotem serve --recipes examples/quickstart/
+uv run recotem serve --recipes examples/quickstart/
 
 # 4. Predict (in another terminal)
 curl -X POST http://localhost:8080/v1/recipes/top_picks:recommend \
@@ -41,7 +44,7 @@ curl -X POST http://localhost:8080/v1/recipes/top_picks:recommend \
 - Widen the algorithm search:
   `training.algorithms: [IALS, CosineKNN, TopPop]`
 - Add a `time_column` and switch to `split.scheme: time_user`
-- See [`docs/recipe-reference.md`](../../docs/recipe-reference.md) for every field.
+- See [Recipe reference](https://recotem.org/2.2/docs/recipe-reference.html) for every field.
 - See [`examples/csv-local`](../csv-local/README.md) for a richer local-CSV setup
   and [`examples/tutorial-purchase-log`](../tutorial-purchase-log/README.md) for
   the end-to-end Docker walkthrough.

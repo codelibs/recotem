@@ -637,6 +637,70 @@ def test_ssrf_hostaddr_overrides_host_for_rebinding(monkeypatch) -> None:
     assert src._rebinding_host == "8.8.8.8"
 
 
+@pytest.mark.parametrize("entry_point", ["probe", "fetch"])
+def test_rebinding_recheck_runs_before_connecting(monkeypatch, entry_point) -> None:
+    """``probe()`` and ``fetch()`` must both re-check DNS *before* connecting.
+
+    ``_check_rebinding`` itself is covered above, but every one of those tests
+    calls it directly, so nothing observed the two entry points that are
+    supposed to invoke it.  Deleting either call — or both — left the whole
+    suite green while the rebinding window silently reopened: the init-time
+    check would pass against the public address and the connect would then go
+    to whatever the second resolution returned.
+
+    Asserting that ``create_engine`` is never reached pins the ordering as well
+    as the call, so moving the re-check to after the connection is established
+    fails here too.
+    """
+    import socket
+    import sys
+    import types
+    from unittest.mock import patch
+
+    import sqlalchemy
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://public.example.com/db"
+    )
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        return_value=["8.8.8.8"],
+    ):
+        src = SQLSource(_make_cfg())
+
+    def rebound_getaddrinfo(host, port, *args, **kwargs):
+        # The cloud metadata service is the canonical rebinding target.
+        return [(socket.AF_INET, 0, 0, "", ("169.254.169.254", 0))]
+
+    connect_attempts: list[object] = []
+
+    def spy_create_engine(*args, **kwargs):
+        connect_attempts.append(args)
+        raise AssertionError("connected before the DNS-rebinding re-check")
+
+    with (
+        patch(
+            "recotem.datasource.sql.socket.getaddrinfo",
+            side_effect=rebound_getaddrinfo,
+        ),
+        patch.object(sqlalchemy, "create_engine", spy_create_engine),
+    ):
+        with pytest.raises(DataSourceError, match="(?i)rebind"):
+            if entry_point == "probe":
+                src.probe()
+            else:
+                src.fetch(_ctx())
+
+    assert not connect_attempts, (
+        f"{entry_point}() reached create_engine despite the rebound host; "
+        "the DNS-rebinding re-check is missing or runs too late"
+    )
+
+
 def test_ssrf_query_host_private_blocked_even_with_public_netloc(monkeypatch) -> None:
     """A DSN with a public netloc *and* a private ``?host=`` is rejected.
 
@@ -1928,8 +1992,8 @@ def test_tls_warning_mysql_without_ssl(monkeypatch) -> None:
     assert events, f"expected sql_dsn_tls_not_configured warning, got {logs!r}"
 
 
-def test_tls_warning_mysql_silent_with_ssl_true(monkeypatch) -> None:
-    """MySQL DSN with ssl=true does not warn."""
+def test_tls_warning_mysql_silent_with_ssl_ca(monkeypatch) -> None:
+    """MySQL DSN with ssl_ca=... does not warn."""
     import sys
     import types
 
@@ -1941,7 +2005,7 @@ def test_tls_warning_mysql_silent_with_ssl_true(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "pymysql", types.ModuleType("pymysql"))
     monkeypatch.setenv(
         "RECOTEM_RECIPE_DB_DSN",
-        "mysql+pymysql://u:p@db.example.com/orders?ssl=true",
+        "mysql+pymysql://u:p@db.example.com/orders?ssl_ca=/etc/ssl/ca.pem",
     )
 
     with structlog.testing.capture_logs() as logs:
@@ -1949,6 +2013,105 @@ def test_tls_warning_mysql_silent_with_ssl_true(monkeypatch) -> None:
 
     events = [r for r in logs if r["event"] == "sql_dsn_tls_not_configured"]
     assert not events
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "ssl_check_hostname=false",
+        "ssl_verify_cert=false",
+        "ssl_check_hostname=False",
+        "ssl_ca=/etc/ssl/ca.pem&ssl_check_hostname=false",
+    ],
+)
+@pytest.mark.parametrize("backend", ["mysql", "mariadb"])
+def test_tls_warning_silent_for_false_valued_ssl_options(
+    monkeypatch, backend, query
+) -> None:
+    """A ``false``-valued ``ssl_*`` option still forces TLS, so it must not warn.
+
+    SQLAlchemy's PyMySQL dialect folds ``ssl_check_hostname`` into the ``ssl``
+    mapping and passes ``ssl_verify_cert`` through as a raw string; PyMySQL
+    turns TLS on for a non-empty mapping or a truthy string, and ``"false"``
+    is truthy.  Both spellings are refused by the driver against a server with
+    ``have_ssl=DISABLED`` while a bare DSN connects -- they force TLS.
+
+    They are also the only spellings that connect to a MariaDB server
+    presenting its own in-memory certificate, which writes no ``ca.pem`` for
+    ``ssl_ca`` to name, so warning on them left that posture with no way to
+    silence the warning.
+    """
+    import sys
+    import types
+
+    import structlog
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "pymysql", types.ModuleType("pymysql"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        f"{backend}+pymysql://u:p@db.example.com/orders?{query}",
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        SQLSource(_make_cfg())
+
+    events = [r for r in logs if r["event"] == "sql_dsn_tls_not_configured"]
+    assert not events, f"unexpected TLS warning for ?{query}: {events!r}"
+
+
+@pytest.mark.parametrize("value", ["true", "1", "false", "TRUE"])
+@pytest.mark.parametrize("backend", ["mysql", "mariadb"])
+def test_scalar_ssl_query_param_is_refused(monkeypatch, backend, value) -> None:
+    """A scalar ``?ssl=`` is refused before anything connects.
+
+    PyMySQL's ``ssl`` parameter takes a mapping or an ``ssl.SSLContext``.
+    SQLAlchemy hands a URL query value through as a string, so any non-empty
+    scalar reaches ``Connection.__init__`` as text and dies in PyMySQL's own
+    ``ssl.get(key)`` with ``AttributeError: 'str' object has no attribute
+    'get'`` -- a message that names neither the parameter nor the fix.
+    """
+    import sys
+    import types
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "pymysql", types.ModuleType("pymysql"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        f"{backend}+pymysql://u:p@db.example.com/orders?ssl={value}",
+    )
+
+    with pytest.raises(DataSourceError) as excinfo:
+        SQLSource(_make_cfg())
+
+    message = str(excinfo.value)
+    assert "?ssl=" in message
+    assert "ssl_ca=" in message
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["", "?ssl=", "?ssl_ca=/etc/ssl/ca.pem", "?ssl_verify_cert=true"],
+)
+def test_non_scalar_ssl_spellings_are_accepted(monkeypatch, query) -> None:
+    """The refusal is narrow: an empty ``ssl=`` and every ``ssl_*`` key pass."""
+    import sys
+    import types
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.setenv("RECOTEM_SQL_ALLOW_PRIVATE", "1")
+    monkeypatch.setitem(sys.modules, "pymysql", types.ModuleType("pymysql"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN",
+        f"mysql+pymysql://u:p@db.example.com/orders{query}",
+    )
+
+    SQLSource(_make_cfg())
 
 
 def test_tls_warning_silent_for_sqlite(monkeypatch) -> None:
@@ -2169,7 +2332,14 @@ def test_error_label_names_the_dbapi_error_without_leaking_the_dsn() -> None:
     assert "s3cret" not in label
     assert "alice" not in label
 
-    assert _error_label(ValueError("boom")) == "ValueError"
+    # ``ValueError`` is inside ``_SAFE_DETAIL_TYPES``: it is driver *argument
+    # validation* text, raised before a socket exists and with no URL in scope,
+    # so its message is surfaced.  See test_sql_error_label_driver_args.py.
+    assert _error_label(ValueError("boom")) == "ValueError: boom"
+    # A type outside that allow-list still withholds its message, which is the
+    # rule this test is about — the same rule as the wrapper case above,
+    # applied where there is no ``orig`` to name instead.
+    assert _error_label(RuntimeError("boom")) == "RuntimeError"
 
 
 def test_read_only_failure_message_carries_the_driver_error_class(
@@ -2291,7 +2461,7 @@ def test_error_label_walks_the_cause_chain_and_adds_sqlstate() -> None:
 # Measured against mariadb:11.8.9 and mysql:8.4.11: the two variables are
 # disjoint and each server rejects the other's with
 # ``ERROR 1193 (HY000) Unknown system variable``.  A ``mysql+pymysql://`` DSN
-# (the only PyMySQL DSN in docs/data-sources/sql.md) pointed at MariaDB used to
+# (the only PyMySQL DSN in https://recotem.org/2.2/docs/data-sources/sql.html) pointed at MariaDB used to
 # take the MySQL branch and abort the whole fetch.
 
 

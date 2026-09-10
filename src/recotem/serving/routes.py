@@ -4,6 +4,7 @@ The router is mounted at ``/v1`` by ``serving/app.py`` and exposes the
 ``:recommend``, ``:recommend-related``, ``:batch-recommend``,
 ``:batch-recommend-related`` colon-verb endpoints alongside the
 ``/recipes`` discovery, ``/health``, and (optional) ``/metrics`` routes.
+All of them are mounted under the ``/v1`` prefix by ``app.py``.
 """
 
 from __future__ import annotations
@@ -292,7 +293,7 @@ def _resolve_recommend(
     # learned embedding was fit to their real interactions and strictly
     # dominates a profile prior, so rejecting would break the natural
     # client pattern of always sending the profile and letting the server
-    # decide. Cross-referenced from docs/api-reference.md#feature-aware-cold-start
+    # decide. Cross-referenced from https://recotem.org/2.2/docs/serving-api.html#feature-aware-cold-start
     # ("A known `user_id` with `user_features` supplied is not an error.").
     try:
         return entry.recommender.get_recommendation_for_known_user_id(
@@ -522,12 +523,23 @@ def make_router(
     def _request_metrics(recipe: str, verb: str, kid: str) -> Iterator[list[str]]:
         start = time.monotonic()
         structlog.contextvars.bind_contextvars(recipe=recipe, kid=kid)
+        # The metric label is resolved here, before the body runs, because the
+        # verbs enter this block *before* _resolve_entry decides whether the
+        # name exists -- so the raw path segment would otherwise become a
+        # Prometheus label.  Log fields keep the caller's name verbatim (logs
+        # are not cardinality-bounded and the operator needs it to diagnose);
+        # only the metric label is collapsed.  See UNKNOWN_RECIPE_LABEL.
+        metric_recipe = (
+            recipe
+            if registry.get(recipe) is not None
+            else _metrics.UNKNOWN_RECIPE_LABEL
+        )
         status_holder: list[str] = ["error"]
         try:
             yield status_holder
         finally:
             _metrics.record_v1_request(
-                recipe, verb, status_holder[0], time.monotonic() - start
+                metric_recipe, verb, status_holder[0], time.monotonic() - start
             )
             structlog.contextvars.unbind_contextvars("recipe", "kid")
 
@@ -654,7 +666,20 @@ def make_router(
 
         A cold fleet (nothing loaded) still fails, which is what keeps the
         documented first-install guarantee: ``serve`` does not enter the Service
-        before ``train`` has produced something.  The shipped chart and
+        before ``train`` has produced something.  An *empty* registry is that
+        same cold fleet and fails too.  It used to pass -- ``total == 0`` short
+        -circuited the check on the theory that an empty registry is the
+        boot-time state before the watcher's first poll, and that answering 503
+        would deadlock startup against registration.  Neither holds here: the
+        recipes directory is read synchronously in ``create_app`` before uvicorn
+        accepts a connection, so an empty registry means the directory really
+        holds no ``*.yaml`` file; and registration needs no traffic, which is
+        exactly why the documented first-install flow works (503, train writes
+        the artifact, the watcher picks it up, the probe passes).  Meanwhile a
+        recipes ConfigMap whose keys are not ``*.yaml``, an objectStore sync
+        container that exited 0 having copied nothing, or an empty PVC produced
+        a fleet that was ``1/1`` Ready, in the Service, with zero restarts and
+        no event -- answering 404 to every request.  The shipped chart and
         ``examples/k8s/`` therefore point the startupProbe here too.  Do not
         point one at ``/health``: a failing startup probe *restarts* the
         container rather than withholding traffic, so the stricter "every recipe
@@ -663,7 +688,7 @@ def make_router(
         converge.  ``/health`` is for alerting.
         """
         loaded_count, total, skipped_count = registry.health_counts()
-        ready = total == 0 or loaded_count > 0
+        ready = loaded_count > 0
         if not ready:
             response.status_code = 503
         body: dict[str, Any] = {

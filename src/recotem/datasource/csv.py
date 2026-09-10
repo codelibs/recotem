@@ -20,6 +20,7 @@ from recotem._http_fetch import (
     redact_url_userinfo,
     verify_sha256,
 )
+from recotem._log_safe import escape_control_chars
 from recotem._size_cap import SizeCapExceededError, SizeCapProbeError, check_size_cap
 from recotem.config import (
     get_http_allow_private,
@@ -36,6 +37,23 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _redact_url_userinfo = redact_url_userinfo
+
+
+def _log_safe_path(path: str) -> str:
+    """Render a recipe-supplied path for a log field or an error message.
+
+    Two separate hazards, composed here so every caller gets both:
+    ``redact_url_userinfo`` removes embedded credentials, and
+    ``escape_control_chars`` neutralises terminal control sequences.  The
+    second matters because this value reaches an operator's terminal through
+    ``csv_source_fetch_start`` and through the ``DataSourceError`` text that
+    ``recotem train`` / ``recotem validate`` print, and a recipe is authored by
+    whoever can write the recipes directory -- no signing key or API key is
+    involved.
+    """
+    return escape_control_chars(redact_url_userinfo(path))
+
+
 _infer_compression = infer_compression
 
 
@@ -242,7 +260,7 @@ class CSVSource:
         import pandas as pd
 
         cfg = self._config
-        safe_path = _redact_url_userinfo(cfg.path)
+        safe_path = _log_safe_path(cfg.path)
         if urlparse(cfg.path).scheme.lower() in _NETWORK_SCHEMES:
             return False
 
@@ -279,7 +297,7 @@ class CSVSource:
         cfg = self._config
         scheme = urlparse(cfg.path).scheme.lower()
         is_network = scheme in _NETWORK_SCHEMES
-        safe_path = _redact_url_userinfo(cfg.path)
+        safe_path = _log_safe_path(cfg.path)
 
         logger.info(
             "csv_source_fetch_start",
@@ -494,7 +512,7 @@ class ParquetSource:
         import pyarrow.parquet as pq
 
         cfg = self._config
-        safe_path = _redact_url_userinfo(cfg.path)
+        safe_path = _log_safe_path(cfg.path)
         if urlparse(cfg.path).scheme.lower() in _NETWORK_SCHEMES:
             return False
 
@@ -525,7 +543,7 @@ class ParquetSource:
         cfg = self._config
         scheme = urlparse(cfg.path).scheme.lower()
         is_network = scheme in _NETWORK_SCHEMES
-        safe_path = _redact_url_userinfo(cfg.path)
+        safe_path = _log_safe_path(cfg.path)
 
         logger.info(
             "parquet_source_fetch_start",

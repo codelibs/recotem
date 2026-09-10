@@ -852,42 +852,80 @@ def test_drain_seconds_used_as_uvicorn_graceful_shutdown_timeout(
     """The drain_seconds from ServeConfig is forwarded to uvicorn as
     timeout_graceful_shutdown so in-flight requests have time to complete.
 
-    We verify this structurally via the CLI module rather than actually
-    starting uvicorn (which would bind a real port).
+    Asserted on the keyword uvicorn actually receives, with ``uvicorn.run``
+    patched so no port is bound.  This used to grep ``inspect.getsource`` for
+    the two names, which stayed green when the argument was commented out --
+    and nothing else in the suite covers this wiring, so the drain window could
+    be silently disconnected from uvicorn's graceful shutdown.
     """
-    import inspect
+    from unittest.mock import patch
 
-    from recotem.cli import serve as serve_command
+    from typer.testing import CliRunner
 
-    source = inspect.getsource(serve_command)
-    assert "timeout_graceful_shutdown" in source, (
-        "cli.serve must pass drain_seconds to uvicorn.run "
-        "as timeout_graceful_shutdown so in-flight requests are drained on SIGTERM"
+    from recotem.cli import app as cli_app
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", "active:" + "aa" * 32)
+    monkeypatch.setenv("RECOTEM_ENV", "test")
+    monkeypatch.setenv("RECOTEM_DRAIN_SECONDS", "17")
+
+    with patch("uvicorn.run") as run_mock:
+        result = CliRunner().invoke(
+            cli_app,
+            ["serve", "--recipes", str(recipes_dir), "--insecure-no-auth"],
+        )
+
+    assert result.exit_code == 0, f"serve exited {result.exit_code}: {result.stdout}"
+    assert run_mock.call_count == 1, (
+        f"cli.serve must call uvicorn.run exactly once; got {run_mock.call_count}"
     )
-    assert "drain_seconds" in source, (
-        "cli.serve must reference cfg.drain_seconds when calling uvicorn.run"
+    assert run_mock.call_args.kwargs.get("timeout_graceful_shutdown") == 17, (
+        "cli.serve must forward cfg.drain_seconds to uvicorn as "
+        f"timeout_graceful_shutdown; got {run_mock.call_args.kwargs!r}"
     )
 
 
-def test_watcher_join_timeout_uses_drain_seconds_clamped(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("drain_seconds", "expected_timeout"),
+    [(300, 5.0), (3, 3.0), (1, 1.0)],
+)
+def test_watcher_join_timeout_uses_drain_seconds_clamped(
+    tmp_path: Path, drain_seconds: int, expected_timeout: float
+) -> None:
     """The watcher join timeout is clamped to max(1, min(5, drain_seconds)).
 
-    This test verifies that very large drain_seconds values (e.g. 300s) are
-    clamped so the watcher join does not block process exit indefinitely.
+    Asserted on the timeout ``ArtifactWatcher.join`` actually receives across
+    the whole formula: the upper clamp (300 -> 5), the pass-through (3 -> 3)
+    and the lower clamp (1 -> 1).  This used to grep ``inspect.getsource`` for
+    the literal ``min(5.0``, which stayed green with the upper bound deleted --
+    and nothing else in the suite covers the clamp, so a 300 s drain window
+    could have blocked process exit for 300 s past the orchestrator's grace
+    period.
     """
-    # Confirm the formula is applied in app.py source
-    import inspect
+    from unittest.mock import patch
 
-    from recotem.serving import app as app_mod
+    from fastapi.testclient import TestClient
 
-    source = inspect.getsource(app_mod.create_app)
-    # The clamp logic should reference min/max around 5.0 and drain_seconds
-    assert "min(5.0" in source or "min(5," in source, (
-        "Watcher join timeout must be clamped with min(5.0, ...) "
-        "to prevent blocking process exit on large drain_seconds"
+    from recotem.serving.app import create_app
+    from recotem.serving.watcher import ArtifactWatcher
+
+    cfg = _minimal_config(tmp_path)
+    cfg.drain_seconds = drain_seconds
+
+    app = create_app(cfg)
+
+    with patch.object(ArtifactWatcher, "join", autospec=True) as join_mock:
+        with TestClient(app):
+            pass
+
+    assert join_mock.call_count == 1, (
+        f"the watcher must be joined exactly once on shutdown; "
+        f"got {join_mock.call_count}"
     )
-    assert "drain_seconds" in source, (
-        "Watcher join timeout must reference drain_seconds"
+    assert join_mock.call_args.kwargs.get("timeout") == expected_timeout, (
+        f"drain_seconds={drain_seconds} must clamp the watcher join timeout to "
+        f"{expected_timeout}; got {join_mock.call_args.kwargs!r}"
     )
 
 
@@ -1202,15 +1240,20 @@ def test_lifespan_completes_within_drain_window(tmp_path: Path) -> None:
     """The lifespan context exits well within twice the drain window.
 
     With drain_seconds=1, the lifespan shutdown (watcher stop + join + log)
-    must complete within 2 seconds.  Uses asyncio.wait_for so an unexpectedly
-    hung shutdown surfaces as a TimeoutError rather than a hanging test.
+    must complete quickly.  The watcher join timeout is clamped to
+    max(1, min(5, drain_seconds)) = 1 s and the watcher thread itself is a
+    daemon so the join never blocks forever.
 
-    The watcher join timeout is clamped to max(1, min(5, drain_seconds)) = 1 s
-    and the watcher thread itself is a daemon so the join never blocks forever.
+    Driven through ``TestClient``, which really runs the ASGI lifespan.  An
+    ``httpx2`` ``AsyncClient`` over ``ASGITransport`` does not: entering and
+    exiting one never calls the app at all, so a timing assertion made around
+    it holds no matter how slow shutdown is.  The ``serve_shutdown`` assertion
+    below is what keeps that from silently recurring.
     """
-    import asyncio
+    import time
 
-    from httpx2 import ASGITransport, AsyncClient
+    import structlog.testing
+    from fastapi.testclient import TestClient
 
     from recotem.serving.app import create_app
 
@@ -1221,16 +1264,22 @@ def test_lifespan_completes_within_drain_window(tmp_path: Path) -> None:
 
     app = create_app(cfg)
 
-    async def _run() -> None:
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://testserver"
-        ) as _client:
-            # The ASGI lifespan is started on __aenter__ and torn down on __aexit__.
+    with structlog.testing.capture_logs() as captured:
+        started = time.monotonic()
+        with TestClient(app):
             pass
+        elapsed = time.monotonic() - started
 
+    assert any(e.get("event") == "serve_shutdown" for e in captured), (
+        "lifespan shutdown never ran, so the timing assertion below would be "
+        f"vacuous; captured events: {[e.get('event') for e in captured]}"
+    )
     # Allow 4 s (drain_seconds=1 → watcher_join_timeout=1 s; total shutdown
     # should be well under 4 s even on a loaded CI runner).
-    asyncio.run(asyncio.wait_for(_run(), timeout=4.0))
+    assert elapsed < 4.0, (
+        f"lifespan startup + shutdown took {elapsed:.2f}s with drain_seconds=1; "
+        "expected well under 4s (the watcher join timeout alone is 1s)"
+    )
 
 
 def test_insecure_no_auth_http_request_without_key_returns_200(
@@ -1847,11 +1896,16 @@ def test_banner_task_cancelled_cleanly_on_shutdown(tmp_path: Path) -> None:
     We run a full lifespan cycle with insecure_no_auth=True and assert that
     no asyncio warnings about pending tasks are emitted during shutdown.
     (A missing `await banner_task` after `cancel()` triggers that warning.)
+
+    Driven through ``TestClient``, which really runs the ASGI lifespan.  An
+    ``httpx2`` ``AsyncClient`` over ``ASGITransport`` does not call the app at
+    all, so this ran no shutdown code to warn about.  The ``serve_shutdown``
+    assertion below is what keeps that from silently recurring.
     """
-    import asyncio
     import warnings
 
-    from httpx2 import ASGITransport, AsyncClient
+    import structlog.testing
+    from fastapi.testclient import TestClient
 
     from recotem.serving.app import create_app
 
@@ -1862,17 +1916,18 @@ def test_banner_task_cancelled_cleanly_on_shutdown(tmp_path: Path) -> None:
 
     app = create_app(cfg)
 
-    async def _run() -> None:
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://testserver"
-        ):
-            pass  # lifespan starts on __aenter__, shuts down on __aexit__
-
     # If banner_task.cancel() is not followed by `await banner_task`, asyncio
     # will emit a ResourceWarning "Task was destroyed but it is pending!" on GC.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", ResourceWarning)
-        asyncio.run(_run())
+    with structlog.testing.capture_logs() as captured:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            with TestClient(app):
+                pass  # lifespan starts on __enter__, shuts down on __exit__
+
+    assert any(e.get("event") == "serve_shutdown" for e in captured), (
+        "lifespan shutdown never ran, so the warning assertion below would be "
+        f"vacuous; captured events: {[e.get('event') for e in captured]}"
+    )
 
     pending_task_warnings = [
         w
@@ -2515,3 +2570,59 @@ def test_request_id_replaced_when_client_supplies_empty_value(
     assert response.status_code == 200
     returned = response.headers.get("x-request-id", "")
     assert returned, "Empty X-Request-ID must be replaced by a server-generated value"
+
+
+# ---------------------------------------------------------------------------
+# An empty recipes directory is a delivery mistake, and must say so
+# ---------------------------------------------------------------------------
+
+
+def test_empty_recipes_directory_logs_a_warning(tmp_path: Path) -> None:
+    """`create_app` WARNs, naming the directory, when it finds no *.yaml.
+
+    Before this, the only trace was `recipes_directory_loaded_lenient
+    ok=0 errors=0` and `startup_artifact_load_complete total_recipes=0`, both
+    INFO and neither saying anything is wrong -- so a ConfigMap whose keys are
+    not `*.yaml`, an objectStore sync that copied nothing, or an empty PVC
+    produced a server that 404'd every request with nothing in the log.
+    """
+    import structlog
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)  # points at an empty recipes dir
+    (Path(cfg.recipes_dir) / "notes.txt").write_text("not a recipe", encoding="utf-8")
+
+    with structlog.testing.capture_logs() as cap:
+        create_app(cfg)
+
+    empty = [e for e in cap if e.get("event") == "recipes_directory_empty"]
+    assert empty, (
+        "an empty recipes directory must WARN; events seen: "
+        f"{sorted({e.get('event') for e in cap})}"
+    )
+    assert empty[0]["log_level"] == "warning"
+    assert str(Path(cfg.recipes_dir)) in empty[0]["recipes_dir"]
+
+
+def test_empty_recipes_directory_serves_unready(tmp_path: Path) -> None:
+    """End to end: a serve app over a recipe-less directory answers 503.
+
+    This is the whole-app companion to
+    `test_ready_returns_503_when_registry_empty`: it exercises the real
+    `create_app` path a pod runs, not a hand-built registry.
+    """
+    from fastapi.testclient import TestClient
+
+    from recotem.serving.app import create_app
+
+    cfg = _minimal_config(tmp_path)
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        r = client.get("/v1/health/ready")
+
+    assert r.status_code == 503, f"got {r.status_code} {r.text}"
+    body = r.json()
+    assert body["status"] == "unready"
+    assert body["total"] == 0
+    assert body["loaded"] == 0

@@ -192,11 +192,21 @@ def test_helm_chart_splits_the_three_probes() -> None:
     probe paths, so reverting the chart's readiness and liveness back to
     ``/v1/health`` left the whole suite and the manifest gate green.
 
-    This test is the one that actually runs in the ``pytest`` job. Its sibling
-    in ``tests/unit/test_k8s_manifests.py`` renders with ``helm template`` and
-    is therefore ``@requires_helm``-skipped there, so the line scan below is
-    the only chart probe assertion that executes on a source PR -- which is
-    why the expectations here have to be kept in step with that file by hand.
+    This scan and its ``helm template`` sibling in
+    ``tests/unit/test_k8s_manifests.py`` BOTH run in the ``pytest`` job: that
+    job installs no helm, but the ``ubuntu-24.04`` runner image ships one, so
+    ``@requires_helm`` does not skip there.  Measured on main, CI reports
+    ``3144 passed, 4 deselected`` with zero skips.  (An earlier revision of
+    this docstring said the sibling was skipped and that the scan below was the
+    only chart probe assertion running on a source PR.  It is not, and a
+    contributor who believed it would keep two files in step by hand for no
+    reason.)
+
+    The two are still worth keeping in step, because the runner image is an
+    undeclared dependency -- see
+    ``test_ci_actually_has_the_tools_these_skips_are_gated_on`` in that file,
+    which fails the build if CI ever loses helm rather than letting the
+    rendered-chart tests skip quietly.
     """
     paths = _template_probe_paths(
         (_ROOT / "helm" / "recotem" / "templates" / "deployment.yaml").read_text()
@@ -240,7 +250,6 @@ def test_container_healthchecks_use_the_readiness_endpoint() -> None:
     sources = {
         "Dockerfile": _ROOT / "Dockerfile",
         "compose.yaml": _ROOT / "compose.yaml",
-        "docs/deployment/docker.md": _ROOT / "docs" / "deployment" / "docker.md",
     }
     seen = 0
     for label, path in sources.items():
@@ -254,7 +263,7 @@ def test_container_healthchecks_use_the_readiness_endpoint() -> None:
                 "that is still serving every loaded model unhealthy, and the "
                 f"replacement fails identically. Use {_READY}."
             )
-    assert seen >= 3, f"expected the shipped healthcheck probes, found {seen}"
+    assert seen >= 2, f"expected the shipped healthcheck probes, found {seen}"
 
 
 def test_shipped_allowed_hosts_example_keeps_localhost() -> None:
@@ -269,7 +278,6 @@ def test_shipped_allowed_hosts_example_keeps_localhost() -> None:
     """
     sources = [
         _ROOT / "examples" / "k8s" / "serve-deployment.yaml",
-        _ROOT / "docs" / "deployment" / "k8s.md",
     ]
     seen = 0
     for path in sources:
@@ -283,4 +291,4 @@ def test_shipped_allowed_hosts_example_keeps_localhost() -> None:
                 f"{path.name}: {line.strip()} omits localhost; copying it fails "
                 "every probe with HTTP 400 and CrashLoops the Deployment"
             )
-    assert seen >= 2, f"expected the shipped ALLOWED_HOSTS examples, found {seen}"
+    assert seen >= 1, f"expected the shipped ALLOWED_HOSTS examples, found {seen}"

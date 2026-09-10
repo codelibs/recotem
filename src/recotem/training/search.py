@@ -24,6 +24,10 @@ from optuna.samplers import TPESampler
 
 # _compat applies IPython stub before irspack imports (see _compat.py).
 import recotem.training._compat  # noqa: F401
+from recotem.training._storage_url import (
+    describe_storage_path,
+    validate_storage_path,
+)
 from recotem.training.algorithms import (
     get_recommender_cls,
     is_feature_capable,
@@ -110,6 +114,27 @@ class SearchResult:
 # Optuna storage factory
 # ---------------------------------------------------------------------------
 
+# Scheme prefixes that make a ``training.storage_path`` a *server* URL rather
+# than a filesystem path.  ``mariadb`` belongs here for the same reason
+# ``mysql`` does -- it is a real SQLAlchemy backend name, and recotem's own SQL
+# data source accepts ``mariadb+pymysql://`` -- so an operator who writes one
+# storage_path after the other reasonably expects both spellings to be read the
+# same way.
+#
+# Two call sites classify a storage_path and they must agree.  Omitting
+# ``mariadb`` made both misread it as a bare filename: ``_make_storage``
+# prefixed it to ``sqlite:///mariadb+pymysql://...`` and handed that to SQLite
+# (failing with "unable to open database file", which names neither the real
+# problem nor the fix), and the parallelism guard classified it as SQLite and
+# silently downgraded ``parallelism`` to 1 citing a SQLite limitation that did
+# not apply.  It also skipped the credential refusal below, because that check
+# lives inside the URL branch -- so a storage_path carrying ``user:pass@host``
+# was quietly turned into a *filename containing the password* instead of being
+# rejected.  Keeping one list is what stops the two sites drifting apart again.
+_RDB_URL_SCHEMES = ("postgresql", "postgres", "mysql", "mariadb")
+_STORAGE_URL_RE = re.compile(rf"^({'|'.join((*_RDB_URL_SCHEMES, 'sqlite'))})\b")
+_SERVER_URL_RE = re.compile(rf"^({'|'.join(_RDB_URL_SCHEMES)})\b")
+
 
 def _make_storage(storage_path: str) -> optuna.storages.BaseStorage | None:
     """Return an Optuna storage instance for *storage_path*, or ``None`` for
@@ -132,7 +157,7 @@ def _make_storage(storage_path: str) -> optuna.storages.BaseStorage | None:
         return None
 
     # Postgres or other SQLAlchemy-backed URL
-    if re.match(r"^(postgresql|postgres|mysql|sqlite)\b", path):
+    if _STORAGE_URL_RE.match(path):
         parsed = urlparse(path)
         if parsed.username or parsed.password:
             raise SearchError(
@@ -312,12 +337,12 @@ def run_search(
     # SQLite's WAL mode cannot be safely used across threads within a single
     # process when multiple threads simultaneously call ``study.optimize``.
     # Detect SQLite (bare path → sqlite:///, explicit sqlite:// prefix, or any
-    # non-Postgres/MySQL URL-shaped path) and downgrade parallelism to 1.
+    # non-server URL-shaped path) and downgrade parallelism to 1.
     # In-memory storage (storage_path=None or "") is not affected.
     if storage_path and parallelism > 1:
         _sp = storage_path.strip()
-        _is_pg_mysql = bool(re.match(r"^(postgresql|postgres|mysql)\b", _sp))
-        _is_sqlite = not _is_pg_mysql  # everything else is SQLite or file-based
+        _is_server_url = bool(_SERVER_URL_RE.match(_sp))
+        _is_sqlite = not _is_server_url  # everything else is SQLite or file-based
         if _is_sqlite:
             logger.warning(
                 "env_var_clamped",
@@ -382,7 +407,50 @@ def run_search(
         )
     class_names = active_classes
 
-    storage = _make_storage(storage_path)
+    # Refuse a study backend that cannot open, BEFORE Optuna is asked for one.
+    # Placed at the single production call site rather than inside
+    # ``_make_storage`` so the low-level constructor keeps its current shape.
+    # Without this the failure surfaces from inside Optuna as an unmapped
+    # exception (exit 1) -- and only here, after the data has been fetched,
+    # cleansed and split, so the scan is already paid for.
+    validate_storage_path(storage_path)
+
+    # ``validate_storage_path`` answers everything decidable without touching
+    # the backend: the URL parses, the dialect is supported, the driver
+    # imports.  What it deliberately cannot answer is whether the backend
+    # *opens* -- that depends on a directory, a permission bit, a running
+    # server, a password -- and ``recotem validate`` must stay a text-and-driver
+    # check so a lint job on one host can vet a recipe that trains on another.
+    #
+    # So the residual class arrives here, and it arrived as exit 1.  Measured on
+    # a tree at 08b1672, all after fetch/cleanse/split had already run:
+    #
+    #   storage_path: /no/such/dir/study.db      (sqlite3.OperationalError)
+    #                                            unable to open database file
+    #   storage_path: <a read-only directory>    same
+    #   storage_path: postgresql+psycopg://      (psycopg.OperationalError)
+    #                 <a host that is down>      connection failed
+    #
+    # Each is a configuration failure of ``training.storage_path``, and each
+    # reached the operator as ``_EXIT_UNKNOWN`` -- "unhandled exception" --
+    # naming neither the recipe field nor the fix, which supervisor and CronJob
+    # retry logic reads as a recotem crash and retries forever.  ``output.path``,
+    # the other write target in a recipe, already reports 8 for exactly this
+    # (``artifact_write_destination``); this makes the study backend agree.
+    try:
+        storage = _make_storage(storage_path)
+    except TrainingError:  # SearchError included; already mapped
+        raise
+    except (MemoryError, RecursionError):
+        raise
+    except Exception as exc:
+        raise TrainingError(
+            "training.storage_path could not open a study backend "
+            f"({describe_storage_path(storage_path)}): {exc}. The driver "
+            "loaded, so this is the backend itself — a missing or unwritable "
+            "directory for SQLite, or an unreachable / refusing server.",
+            code="storage_path_unusable",
+        ) from exc
     study_name = f"recotem_{recipe_name}_{run_id}"
 
     sampler = TPESampler(seed=random_seed)

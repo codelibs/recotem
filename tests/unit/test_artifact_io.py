@@ -391,16 +391,130 @@ def test_write_artifact_toctou_symlink_swap_rejected(
 
     monkeypatch.setattr(_os, "fsync", _evil_fsync)
 
-    with pytest.raises((ArtifactError, OSError)):
-        # _write_atomic must either detect the escape and raise ArtifactError,
-        # or raise OSError because the temp file's parent (inside_dir) no longer
-        # exists as a real directory after the symlink swap.
+    # ArtifactError specifically, not (ArtifactError, OSError).  The swap also
+    # destroys the directory holding the temp file, so ``os.replace`` would
+    # raise OSError on its own -- accepting either exception let the test pass
+    # whether or not the containment re-check ran at all, which is what it
+    # exists to prove.  ``_write_atomic`` calls the check *before*
+    # ``os.replace``, so on a tree that still has the guard the ArtifactError
+    # always wins the race to be raised.
+    with pytest.raises(ArtifactError, match="RECOTEM_ARTIFACT_ROOT"):
         _write_atomic(
             None,  # type: ignore[arg-type] — not used for local FS path
             dest,
             b"dummy artifact bytes",
             is_local=True,
         )
+
+    assert not list(outside_dir.iterdir()), (
+        "the containment re-check must refuse before os.replace, so no bytes "
+        f"may land outside the artifact root; found {list(outside_dir.iterdir())}"
+    )
+
+
+def test_write_artifact_refuses_symlinked_parent_out_of_artifact_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``write_artifact`` itself must enforce RECOTEM_ARTIFACT_ROOT containment.
+
+    The recipe loader validates ``output.path`` at load time; the write-time
+    re-check in ``_write_atomic`` exists because a directory under the root can
+    become a symlink out of it between those two moments.  Every other test
+    around this guard calls ``_assert_output_root_containment`` directly, so
+    deleting its *call site* changed nothing they measure -- and the write then
+    completes, landing artifact bytes outside the root.
+
+    The symlink is in place before the call here (rather than swapped in at
+    fsync time as in the TOCTOU test above) so that the temp file remains
+    writable and renameable: the containment re-check is then the only thing
+    that can refuse, and a pass cannot be borrowed from an incidental OSError.
+    """
+    artifact_root = tmp_path / "root"
+    artifact_root.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (artifact_root / "models").symlink_to(outside_dir, target_is_directory=True)
+
+    monkeypatch.setenv("RECOTEM_ARTIFACT_ROOT", str(artifact_root))
+    dest = artifact_root / "models" / "model.recotem"
+
+    with pytest.raises(ArtifactError, match="RECOTEM_ARTIFACT_ROOT"):
+        write_artifact(
+            {"payload": "x"},
+            {"recipe_name": "probe"},
+            _make_keyring(),
+            str(dest),
+            versioning="always_overwrite",
+        )
+
+    assert list(outside_dir.iterdir()) == [], (
+        "artifact bytes escaped RECOTEM_ARTIFACT_ROOT through a symlinked "
+        f"parent: {list(outside_dir.iterdir())}"
+    )
+
+
+def test_write_artifact_refuses_dest_that_is_itself_a_symlink_out_of_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The final path component is checked too, not only its parent directory.
+
+    ``_assert_output_root_containment`` resolves the parent *and* the
+    destination.  The parent-symlink case above cannot tell the two apart: the
+    temp file is created inside the same escaped directory, so a check pointed
+    at the temp path instead of at ``dest`` would refuse there as well.  Here
+    the directory is a genuine in-root directory -- only ``dest`` itself is a
+    symlink out -- so a check that does not resolve ``dest`` lets the write
+    through and the bytes follow the symlink.
+    """
+    artifact_root = tmp_path / "root"
+    (artifact_root / "models").mkdir(parents=True)
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+
+    dest = artifact_root / "models" / "model.recotem"
+    dest.symlink_to(outside_dir / "model.recotem")
+
+    monkeypatch.setenv("RECOTEM_ARTIFACT_ROOT", str(artifact_root))
+
+    with pytest.raises(ArtifactError, match="RECOTEM_ARTIFACT_ROOT"):
+        write_artifact(
+            {"payload": "x"},
+            {"recipe_name": "probe"},
+            _make_keyring(),
+            str(dest),
+            versioning="always_overwrite",
+        )
+
+    assert not (outside_dir / "model.recotem").exists(), (
+        "artifact bytes escaped RECOTEM_ARTIFACT_ROOT through a symlinked "
+        "destination file"
+    )
+
+
+def test_write_artifact_accepts_real_directory_inside_artifact_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control for the test above: the same call succeeds without the symlink.
+
+    Without this, the sibling test would also pass against a ``write_artifact``
+    that refused every write.
+    """
+    artifact_root = tmp_path / "root"
+    (artifact_root / "models").mkdir(parents=True)
+
+    monkeypatch.setenv("RECOTEM_ARTIFACT_ROOT", str(artifact_root))
+    dest = artifact_root / "models" / "model.recotem"
+
+    written = write_artifact(
+        {"payload": "x"},
+        {"recipe_name": "probe"},
+        _make_keyring(),
+        str(dest),
+        versioning="always_overwrite",
+    )
+
+    assert Path(written) == dest
+    assert dest.exists()
 
 
 def test_assert_output_root_containment_no_op_without_env(tmp_path: Path) -> None:
@@ -829,7 +943,7 @@ def test_header_len_is_outside_the_hmac_scope_and_caught_one_layer_later(
 
     Pinned deliberately: the boundary can only be shifted, never used to inject
     a byte, so closing it would cost an artifact-format version bump for no
-    reachable gain.  CLAUDE.md and docs/security.md describe it this way; this
+    reachable gain.  CLAUDE.md and https://recotem.org/2.2/docs/security.html describe it this way; this
     test fails if the behaviour drifts from the description.
     """
     import struct
@@ -962,3 +1076,70 @@ def test_write_is_silent_when_the_artifact_fits_the_serve_caps(
     """
     events = _write_and_capture(tmp_path, {"blob": "x" * 4096})
     assert not [e for e in events if e["event"].endswith("_exceeds_serve_cap")]
+
+
+# ---------------------------------------------------------------------------
+# A transient stat failure on the destination directory must not lose the write
+# ---------------------------------------------------------------------------
+
+
+def test_write_atomic_survives_one_stale_isdir_on_the_destination_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single failing ``isdir`` must not discard a completed training run.
+
+    ``os.makedirs(dir, exist_ok=True)`` re-raises the ``FileExistsError`` from
+    its ``mkdir`` whenever the one ``os.path.isdir`` call that follows returns
+    False, and ``os.path.isdir`` returns False for any ``OSError``.  On an
+    NFS-backed artifacts volume that call is the first metadata access after
+    minutes of pure-CPU tuning and can answer ``ESTALE`` once, so the write
+    that carries the trained model dies on a directory that is present and
+    readable.  Measured on a real cluster: five consecutive runs discarded.
+    """
+    import os as _os
+
+    from recotem.artifact.io import _write_atomic
+
+    dest_dir = tmp_path / "artifacts"
+    dest_dir.mkdir()
+    dest = str(dest_dir / "model.recotem")
+
+    real_isdir = _os.path.isdir
+    calls: list[str] = []
+
+    def _flaky_isdir(path: str) -> bool:
+        calls.append(str(path))
+        # Fail exactly once for the destination directory, as a stale NFS
+        # handle does, then answer correctly from the next call on.
+        if str(path) == str(dest_dir) and calls.count(str(dest_dir)) == 1:
+            return False
+        return real_isdir(path)
+
+    monkeypatch.setattr(_os.path, "isdir", _flaky_isdir)
+
+    _write_atomic(None, dest, b"payload", is_local=True)  # type: ignore[arg-type]
+
+    assert Path(dest).read_bytes() == b"payload"
+    # The tolerance path must actually have been exercised: makedirs asks once
+    # and is answered False, the re-check asks again.
+    assert calls.count(str(dest_dir)) >= 2, calls
+
+
+def test_makedirs_exist_ok_still_raises_when_the_path_is_not_a_directory(
+    tmp_path: Path,
+) -> None:
+    """The tolerance must not swallow a real collision.
+
+    Asserted against the helper rather than through ``_write_atomic``: a
+    ``dest_dir`` that is an ordinary file makes the *later* ``mkstemp`` raise
+    ``NotADirectoryError`` too, so a ``_write_atomic``-level assertion passes
+    even when the guard swallows everything.  This calls the guard directly so
+    the failure it is responsible for is the one being measured.
+    """
+    from recotem._makedirs import makedirs_exist_ok
+
+    collision = tmp_path / "artifacts"
+    collision.write_text("i am a file, not a directory")
+
+    with pytest.raises(FileExistsError):
+        makedirs_exist_ok(str(collision))

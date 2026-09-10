@@ -158,8 +158,9 @@ _COLUMN_SAMPLE_MAX_CHARS = 64
 # an ordinary raw request value (e.g. 1e4) into an astronomically large
 # standardized one. That is a false-positive amplifier, not a real signal:
 # it makes an unremarkable client value trip the serve-time cold-start
-# solver's own numerical-stability guard (see docs/api-reference.md#feature-
-# aware-cold-start) for a reason the client cannot see or control.
+# solver's own numerical-stability guard, for a reason the client cannot see
+# or control.  See
+# https://recotem.org/2.2/docs/serving-api.html#feature-aware-cold-start
 #
 # The floor is RELATIVE to the column's own scale (`max(abs(mean), 1.0)`),
 # not an absolute constant, so it means the same thing whether the column's
@@ -875,7 +876,7 @@ def _row_values(state: dict, values: dict) -> tuple[list[int], list[float], list
             toks = _tokens(raw, spec["delimiter"])
             # Dedupe per row so a repeated token (e.g. "rock|pop|rock")
             # contributes exactly one 1.0 to its dimension, not one per
-            # occurrence. docs/recipe-reference.md documents this encoding as
+            # occurrence. https://recotem.org/2.2/docs/recipe-reference.html documents this encoding as
             # "multi-hot" (binary), but scipy's COO->CSR conversion SUMS
             # duplicate (row, col) entries, so appending one 1.0 per raw
             # token would silently double (or more) the weight of a

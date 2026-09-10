@@ -17,6 +17,33 @@ Exit code table
 |    7 | _EXIT_HTTP_FETCH    | HttpFetchError                             |
 |    8 | _EXIT_CONFIG        | ConfigError / config-coded TrainingError   |
 
+Three of these are narrower than the exception name suggests, and each was a
+support question before it was written down:
+
+* **6 is conditional on a flag.**  A contested per-recipe training lock exits 6
+  only when ``--fail-on-busy`` was passed.  The default is to log
+  ``recipe_lock_contended_skipping`` and exit **0**, so an overlapping schedule
+  looks like a successful run that produced no artifact.
+* **7 is scoped to the HTTP fetch pipeline.**  The SSRF guard, the sha256 pin,
+  the scheme-changing-redirect check and the byte cap all report 7 when reached
+  through ``http://`` / ``https://``.  Reached through any other transport --
+  a sha256 pin on a local or object-store path, a SQL DSN host the guard
+  refuses -- the same checks report **3**.  So exit 7 never means "a database
+  refused to connect", which is what CronJob retry logic keys on.
+* **8 covers more than ConfigError.**  It also carries every ``TrainingError``
+  whose ``code`` names a configuration problem the run cannot fix by retrying:
+  ``artifact_write_destination`` (the output path names an existing directory,
+  or the bucket/container is absent), ``artifact_write_credentials`` (remote
+  credentials do not resolve or are refused), and ``storage_path_unusable``
+  (the Optuna study backend cannot be opened).  A malformed
+  ``RECOTEM_SIGNING_KEYS`` is 8 as well, via ``KeyRingConfigError`` -- not 5,
+  despite being about signing.  ``recotem serve`` bind failures are 8 too; the
+  translation from uvicorn's own sentinel is explained at the ``except
+  SystemExit`` branch in ``recotem/cli.py``.
+
+The operator-facing version of this table, with the remedy for each code, is
+published at https://recotem.org/2.2/docs/exit-codes.html.
+
 Design note on imports
 ----------------------
 All exception-class imports inside ``_map_exception_to_exit`` are deferred to
@@ -74,6 +101,22 @@ def _map_exception_to_exit(exc: BaseException) -> int:  # noqa: C901
     # remote ``output.path`` whose bucket/container is absent or whose
     # credentials were resolved and then refused — a rotated key, a typo in a
     # bucket name — which used to reach the operator as an unmapped exit 1.
+    #
+    # ``storage_path_unusable`` is the same shape one field over: a
+    # ``training.storage_path`` whose dialect or DBAPI cannot be loaded on this
+    # host.  It is environmental rather than textual — the identical recipe is
+    # valid where ``recotem[postgres]`` is installed and invalid where it is
+    # not — which is what puts it here rather than on _EXIT_RECIPE with
+    # ``output.path``'s scheme and artifact-root violations.  It too used to
+    # reach the operator as an unmapped exit 1, from inside Optuna.
+    #
+    # ``artifact_write_driver`` is that same environmental shape back on
+    # ``output.path``: a remote destination whose fsspec backend is not
+    # installed (``recotem[s3]`` / ``[gcs]`` / ``[azure]``).  It is *not*
+    # _EXIT_DATASOURCE even though the identical ImportError on ``source.path``
+    # is — that one is raised inside the CSV source and is a genuine
+    # ``DataSourceError``, while ``output.path`` is not a data source and every
+    # other configuration failure of this write already reports here.
     try:
         from recotem.training.errors import (
             TrainingError as _TrainingError,  # noqa: PLC0415
@@ -83,6 +126,8 @@ def _map_exception_to_exit(exc: BaseException) -> int:  # noqa: C901
             "signing_key_missing",
             "artifact_write_credentials",
             "artifact_write_destination",
+            "artifact_write_driver",
+            "storage_path_unusable",
         ):
             return _EXIT_CONFIG
     except (ImportError, AttributeError):

@@ -50,12 +50,6 @@ import yaml
 _ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOWS = _ROOT / ".github" / "workflows"
 _DOCKERFILE = _ROOT / "Dockerfile"
-_SKILL = _ROOT / ".claude" / "skills" / "release-recotem"
-_PROCEDURE_DOCS = (
-    _SKILL / "SKILL.md",
-    _SKILL / "references" / "version-locations.md",
-)
-
 # A `uv sync` invocation and the rest of its command.  Shell line
 # continuations are joined first, so the Dockerfile's multi-line `RUN ... uv
 # sync \\ --extra ... \\ --locked` is seen as one command; comments are
@@ -71,10 +65,25 @@ def _strip_comments(text: str) -> str:
     return re.sub(r"\\\s*\n\s*", " ", body)
 
 
+def _workflow_paths() -> list[Path]:
+    """Every file GitHub Actions will run from `.github/workflows`.
+
+    Both extensions: GitHub's workflow-syntax reference says a workflow file
+    "must have either a `.yml` or `.yaml` file extension".  A `*.yml` glob
+    silently skips a `.yaml` workflow, so a `uv sync --frozen` added in one
+    would never reach the assertion below.
+    """
+    return sorted(
+        path
+        for path in _WORKFLOWS.iterdir()
+        if path.is_file() and path.suffix in {".yml", ".yaml"}
+    )
+
+
 def _workflow_sync_commands() -> list[tuple[str, str, str]]:
     """(workflow, job, command) for every `uv sync` in every workflow."""
     found: list[tuple[str, str, str]] = []
-    for path in sorted(_WORKFLOWS.glob("*.yml")):
+    for path in _workflow_paths():
         workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
         for job, spec in (workflow.get("jobs") or {}).items():
             for step in spec.get("steps") or []:
@@ -132,19 +141,3 @@ def test_ci_runs_an_explicit_lockfile_check() -> None:
         "message names the lockfile as the problem rather than reporting an "
         "install error."
     )
-
-
-def test_release_procedure_does_not_credit_frozen_with_the_lockfile_check() -> None:
-    """`uv sync --frozen` is named in the procedure only to claim it checks.
-
-    Both documents mentioned it exactly once, in the sentence crediting it with
-    catching a stale lockfile at the tag.  Nothing syncs with `--frozen` any
-    more, so the string should not come back.
-    """
-    for doc in _PROCEDURE_DOCS:
-        text = doc.read_text(encoding="utf-8")
-        assert "uv sync --frozen" not in text, (
-            f"{doc.relative_to(_ROOT)} credits `uv sync --frozen` with the "
-            "uv.lock check. It exits 0 on a stale lockfile, and on one missing "
-            "a declared dependency."
-        )

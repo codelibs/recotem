@@ -3210,3 +3210,385 @@ def test_azure_user_password_uri_still_rejected(
     """A real user:pass@ pair is still an embedded credential and still fails."""
     with pytest.raises(RecipeError, match="embedded credentials"):
         load_recipe(_azure_recipe(tmp_path, name, path))
+
+
+# ---------------------------------------------------------------------------
+# S-U: underscore-scheme allow-list bypass (urlparse vs fsspec differential)
+# ---------------------------------------------------------------------------
+#
+# RFC 3986 forbids "_" in a URI scheme, so urlparse("arrow_hdfs://h/x").scheme
+# is "" and the path reads as a bare local path -- but the datasource opens it
+# with fsspec.open, whose parser splits on the first "://" and routes the only
+# two underscore protocols fsspec registers (arrow_hdfs -> pyarrow HDFS,
+# async_wrapper) to a real remote backend. Before the fix the scheme allow-list
+# (which validated the urlparse scheme) let these through even though the
+# equivalent hdfs:// form was refused. These tests die if _validate_*_path is
+# reverted to `urlparse(path).scheme` because then the underscore forms are no
+# longer rejected.
+
+
+@pytest.mark.parametrize(
+    "bypass_path",
+    [
+        "arrow_hdfs://namenode.example:8020/etc/x.csv",
+        "async_wrapper://whatever/x.csv",
+        "ARROW_HDFS://Namenode/x.csv",  # case-insensitive too
+    ],
+)
+def test_input_underscore_scheme_rejected(tmp_path: Path, bypass_path: str) -> None:
+    """Underscore-scheme inputs must be rejected, not read as bare local paths."""
+    from recotem.recipe.loader import _validate_input_path
+
+    with pytest.raises(RecipeError, match="not supported for input"):
+        _validate_input_path(bypass_path, "source.path")
+
+
+@pytest.mark.parametrize(
+    "bypass_path",
+    [
+        "arrow_hdfs://namenode.example:8020/out.recotem",
+        "async_wrapper://whatever/out.recotem",
+    ],
+)
+def test_output_underscore_scheme_rejected(tmp_path: Path, bypass_path: str) -> None:
+    """Underscore-scheme outputs must be rejected by the output allow-list."""
+    from recotem.recipe.loader import _validate_output_path
+
+    with pytest.raises(RecipeError, match="not supported"):
+        _validate_output_path(bypass_path, "output.path")
+
+
+def test_underscore_scheme_rejected_end_to_end(tmp_path: Path) -> None:
+    """A full recipe whose source.path is arrow_hdfs:// must fail to load."""
+    out = tmp_path / "out.recotem"
+    content = f"""\
+name: underscore_scheme
+source:
+  type: csv
+  path: arrow_hdfs://namenode.example:8020/etc/x.csv
+schema:
+  user_column: user_id
+  item_column: item_id
+training:
+  algorithms: [TopPop]
+  n_trials: 1
+output:
+  path: {out}
+"""
+    p = _write_recipe(tmp_path, content)
+    with pytest.raises(RecipeError, match="not supported for input"):
+        load_recipe(p)
+
+
+def test_effective_scheme_matches_fsspec_dispatch() -> None:
+    """_effective_scheme must agree with how fsspec splits the protocol.
+
+    This is the invariant the fix rests on: the validator and the datasource
+    reader (fsspec.open) must derive the same scheme, or an allow-listed check
+    can be bypassed by a form fsspec routes differently than urlparse.
+    """
+    from fsspec.core import split_protocol
+
+    from recotem.recipe.loader import _effective_scheme
+
+    for path in (
+        "arrow_hdfs://h/x",
+        "async_wrapper://h/x",
+        "s3://bucket/key",
+        "http://example.com/x",
+        "gs://project@bucket/key",
+    ):
+        proto, _ = split_protocol(path)
+        assert _effective_scheme(path) == (proto or "").lower(), path
+
+    # Bare paths and file:/// have no fsspec protocol; effective scheme is
+    # "" or "file" respectively and must stay that way.
+    assert _effective_scheme("/tmp/local.csv") == ""
+    assert _effective_scheme("file:///abs/x.csv") == "file"
+
+
+def test_effective_scheme_is_fail_closed_not_fail_open() -> None:
+    """The helper only ever surfaces a scheme urlparse hid; it never hides one.
+
+    Concretely: every legitimate allowed scheme urlparse already resolves must
+    be preserved unchanged, so the fix cannot newly-reject a valid recipe.
+    """
+    from urllib.parse import urlparse
+
+    from recotem.recipe.loader import _effective_scheme
+
+    for path in (
+        "s3://bucket/key",
+        "gs://bucket/key",
+        "az://container@acct.dfs.core.windows.net/p",
+        "http://example.com/x",
+        "https://example.com/x",
+        "file:///abs/x",
+        "/bare/local/path",
+    ):
+        up = urlparse(path).scheme.lower()
+        # For every path urlparse already understood, the effective scheme is
+        # identical (no regression); the helper only diverges when urlparse
+        # returned "" AND a real "://" protocol was hidden by an illegal char.
+        assert _effective_scheme(path) == up, path
+
+
+@pytest.mark.parametrize(
+    "field_name,validator_name",
+    [
+        ("source.path", "_validate_input_path"),
+        ("output.path", "_validate_output_path"),
+    ],
+)
+@pytest.mark.parametrize(
+    "canonical,underscore_alias",
+    [
+        ("hdfs://namenode.example:8020/x", "arrow_hdfs://namenode.example:8020/x"),
+    ],
+)
+def test_underscore_alias_refused_exactly_like_its_canonical_spelling(
+    field_name: str, validator_name: str, canonical: str, underscore_alias: str
+) -> None:
+    """The paired contrast that *is* the bug: same backend, two spellings.
+
+    ``hdfs://`` and ``arrow_hdfs://`` resolve to the SAME fsspec class
+    (``fsspec.implementations.arrow.HadoopFileSystem``). Before the fix the
+    canonical spelling was refused by the allow-list while its underscore alias
+    was waved through, because urlparse cannot see a scheme containing "_".
+    Asserting both in one test is what makes this a bypass test rather than a
+    test about one string: the canonical leg proves the allow-list is live and
+    working, and the alias leg proves it no longer misses this spelling.
+
+    Both legs must REJECT. Reverting the validator to `urlparse(path).scheme`
+    leaves the canonical leg passing and kills only the alias leg.
+    """
+    import fsspec
+    from fsspec.core import split_protocol
+
+    import recotem.recipe.loader as loader_mod
+
+    validator = getattr(loader_mod, validator_name)
+
+    # Same underlying backend: this is why one may not be refused without the other.
+    assert fsspec.get_filesystem_class(
+        split_protocol(canonical)[0]
+    ) is fsspec.get_filesystem_class(split_protocol(underscore_alias)[0]), (
+        "precondition: the two spellings must name the same fsspec backend"
+    )
+
+    with pytest.raises(RecipeError):
+        validator(canonical, field_name)
+    with pytest.raises(RecipeError):
+        validator(underscore_alias, field_name)
+
+
+@pytest.mark.parametrize(
+    "validator_name", ["_validate_input_path", "_validate_output_path"]
+)
+def test_async_wrapper_alias_refused_by_both_validators(validator_name: str) -> None:
+    """async_wrapper is the other underscore protocol fsspec registers."""
+    import recotem.recipe.loader as loader_mod
+
+    validator = getattr(loader_mod, validator_name)
+    with pytest.raises(RecipeError):
+        validator("async_wrapper://whatever/x", "path")
+
+
+def test_output_allowlist_is_still_a_strict_subset_after_the_fix() -> None:
+    """Regression fence: the output list must keep rejecting what it rejected.
+
+    The underscore bypass defeated the OUTPUT allow-list too, so an artifact
+    could be written to an attacker-chosen backend. Fixing that must not
+    loosen (or tighten) the documented subset.
+    """
+    from recotem.recipe.loader import _validate_input_path, _validate_output_path
+
+    # Output rejects these; input accepts http/https.
+    for bad in ("http://h/x", "https://h/x", "ftp://h/x", "memory://x", "hdfs://h/x"):
+        with pytest.raises(RecipeError):
+            _validate_output_path(bad, "output.path")
+    for good_in in ("http://e/x", "https://e/x"):
+        _validate_input_path(good_in, "source.path")  # must not raise
+
+    # Both accept these.
+    for good in ("s3://b/k", "gs://b/k", "file:///abs/x", "/tmp/bare.recotem"):
+        _validate_input_path(good, "source.path")
+        _validate_output_path(good, "output.path")
+
+    # Chained protocols stay rejected on the input side.
+    with pytest.raises(RecipeError, match="chained scheme"):
+        _validate_input_path("simplecache::https://e/x", "source.path")
+
+
+# ---------------------------------------------------------------------------
+# Chained fsspec protocols on output.path
+# ---------------------------------------------------------------------------
+
+
+CHAINED_WITH_ALLOWED_HEAD = [
+    "file::s3://bucket/key.recotem",
+    "s3::http://evil.example.com/x.recotem",
+    "gs::hdfs://evil.example.com:8020/x.recotem",
+    "file::hdfs://evil.example.com:8020/x.recotem",
+    "az::hdfs://evil.example.com:8020/x.recotem",
+]
+
+
+def test_output_path_rejects_chained_scheme_with_allow_listed_head() -> None:
+    """``::`` must be refused on output.path, not only on the input paths.
+
+    The head of a chain is the only part ``urlparse`` sees, so an allow-listed
+    head vouched for a tail that was never checked. ``source.path`` refused
+    every ``::`` form; ``output.path`` refused only the ones whose head was
+    itself off the allow-list (``simplecache::``), which made it accept a
+    strictly larger set than the input side that documentation calls a subset
+    of it.
+    """
+    from recotem.recipe.loader import _validate_input_path, _validate_output_path
+
+    # Anti-vacuity.  Every assertion below is inside a loop over this list, so
+    # emptying it leaves the test green with nothing exercised -- measured at
+    # 156 passed, guard otherwise intact.  This assert bounds that hole; it does
+    # not close it.  The list can still be *thinned* rather than switched off,
+    # and thinning is not caught here at all: a reverted output call site fails
+    # 3 tests with the list full and 2 with it empty, because two
+    # literal-string tests below catch the revert independently of this list.
+    assert CHAINED_WITH_ALLOWED_HEAD, (
+        "the chained-path list is empty; this guard is watching nothing"
+    )
+
+    for path in CHAINED_WITH_ALLOWED_HEAD:
+        with pytest.raises(RecipeError, match="chained scheme"):
+            _validate_output_path(path, "output.path")
+        # The input side already refused these; assert it still does, so a
+        # future edit cannot "align" the two by loosening the input side.
+        with pytest.raises(RecipeError, match="chained scheme"):
+            _validate_input_path(path, "source.path")
+
+    # Positive control: the unchained forms of the same heads stay accepted,
+    # so the new rejection is about the chain and not about those schemes.
+    for path in ("file:///abs/x.recotem", "s3://bucket/key.recotem"):
+        _validate_output_path(path, "output.path")
+
+
+def test_output_path_chained_scheme_cannot_smuggle_credentials() -> None:
+    """A chain hides userinfo from ``_check_userinfo``.
+
+    ``urlparse("file::s3://AKID:SECRET@bucket/key")`` reports scheme ``file``,
+    an empty netloc and the whole tail in ``.path``, so ``username`` and
+    ``password`` are both ``None`` and the embedded-credential rule never
+    fires on this form. The chain rejection is therefore the *only* thing
+    standing between a recipe and an accepted secret-bearing ``output.path``;
+    which of the two checks runs first does not matter, because the userinfo
+    check does not raise here at all.
+    """
+    from recotem.recipe.loader import _validate_output_path
+
+    with pytest.raises(RecipeError, match="chained scheme"):
+        _validate_output_path(
+            "file::s3://AKIAEXAMPLE:supersecret@bucket/k.recotem", "output.path"
+        )
+
+    # Positive control: the unchained form is refused by the credential rule,
+    # proving that rule is live and that the chain is what was bypassing it.
+    with pytest.raises(RecipeError, match="embedded credentials"):
+        _validate_output_path(
+            "s3://AKIAEXAMPLE:supersecret@bucket/k.recotem", "output.path"
+        )
+
+
+def test_load_recipe_rejects_chained_output_path(tmp_path: Path) -> None:
+    """End to end: ``load_recipe`` must refuse, so ``validate`` cannot exit 0.
+
+    Before the fix ``recotem validate`` returned 0 for this recipe and
+    ``recotem train`` ran the entire search before failing in ``os.replace``.
+    """
+    p = _write_recipe(
+        tmp_path,
+        MINIMAL_RECIPE_TEMPLATE.format(
+            name="chained_out",
+            output_path="file::s3://AKIAEXAMPLE:supersecret@bucket/k.recotem",
+        ),
+    )
+    with pytest.raises(RecipeError, match="chained scheme"):
+        load_recipe(p)
+
+    # Positive control: the same recipe with a bare local output loads.
+    ok = _write_recipe(
+        tmp_path,
+        MINIMAL_RECIPE_TEMPLATE.format(
+            name="plain_out", output_path=str(tmp_path / "ok.recotem")
+        ),
+        filename="ok.yaml",
+    )
+    assert load_recipe(ok).output.path.endswith("ok.recotem")
+
+
+# ---------------------------------------------------------------------------
+# Userinfo on the addressing-@ schemes (gs) and on file://
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("scheme", ["gs", "az", "abfs", "abfss"])
+def test_addressing_at_scheme_rejects_password_accepts_bare(scheme: str) -> None:
+    """`project@bucket` / `container@account` is addressing; `user:pass@` is not.
+
+    `gs` used to be exempt from the userinfo check entirely rather than
+    password-gated, so `gs://user:pass@bucket/key` loaded. gcsfs does not
+    authenticate that way, but the fetch failure arrives *after*
+    ``csv_source_fetch_start`` has logged the path, and neither redaction layer
+    covered `gs`.
+    """
+    from recotem.recipe.loader import _validate_input_path, _validate_output_path
+
+    for validate, field in (
+        (_validate_input_path, "source.path"),
+        (_validate_output_path, "output.path"),
+    ):
+        with pytest.raises(RecipeError, match="embedded credentials"):
+            validate(f"{scheme}://user:hunter2@host/container/k.csv", field)
+        # Positive control: the bare addressing form must still be accepted,
+        # so the rejection above is about the password and not the `@`.
+        validate(f"{scheme}://container@host/k.csv", field)
+
+
+def test_file_uri_with_userinfo_rejected_on_input() -> None:
+    """`file://user:pass@/tmp/x.csv` must not load.
+
+    `_validate_output_path` already refused `file://<netloc>/...` via its
+    ambiguity check, but the input path had no equivalent, so a `file://` URI
+    carrying a password was accepted on `source.path`.
+    """
+    from recotem.recipe.loader import _validate_input_path, _validate_output_path
+
+    with pytest.raises(RecipeError, match="embedded credentials"):
+        _validate_input_path("file://svcacct:hunter2@/tmp/data.csv", "source.path")
+    with pytest.raises(RecipeError):
+        _validate_output_path("file://svcacct:hunter2@/tmp/out.recotem", "output.path")
+
+    # Positive control: ordinary file:// URIs are unaffected.
+    _validate_input_path("file:///tmp/data.csv", "source.path")
+    _validate_output_path("file:///tmp/out.recotem", "output.path")
+
+
+def test_load_recipe_rejects_gs_userinfo_before_any_log_line(tmp_path: Path) -> None:
+    """End to end: the recipe must be refused at load, not at fetch.
+
+    The ordering is the whole point. `recotem train` on this recipe used to
+    reach ``csv_source_fetch_start`` -- which logs the path -- and only then
+    fail in gcsfs with `Invalid bucket name`, exit 3. The secret was already
+    out. It must now be a `RecipeError` (exit 2) with nothing fetched.
+    """
+    secret = "Winter2026-AzureKey"
+    p = _write_recipe(
+        tmp_path,
+        MINIMAL_RECIPE_TEMPLATE.format(
+            name="gs_userinfo", output_path=str(tmp_path / "o.recotem")
+        ).replace(
+            "path: /tmp/data.csv", f'path: "gs://svcacct:{secret}@my-bucket/i.csv"'
+        ),
+    )
+    with pytest.raises(RecipeError, match="embedded credentials") as exc:
+        load_recipe(p)
+    # The refusal itself must not quote the secret back at the operator.
+    assert secret not in str(exc.value)

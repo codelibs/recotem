@@ -1,6 +1,6 @@
 """Verify ``recotem_v1_requests_total`` labels are set by the route handler.
 
-The metric ``status`` label values documented in ``docs/operations.md``
+The metric ``status`` label values documented in ``https://recotem.org/2.2/docs/operations.html``
 must be reachable from the HTTP handler — otherwise alert rules filtering
 on ``status="unavailable"`` / ``status="unknown_user"`` /
 ``status="recipe_not_found"`` silently never fire.  This file exercises
@@ -165,7 +165,15 @@ def test_recommend_records_recipe_not_found_when_missing() -> None:
     r = client.post("/v1/recipes/ghost:recommend", json={"user_id": "u1"})
     assert r.status_code == 404
     assert r.json()["code"] == "RECIPE_NOT_FOUND"
-    assert _label_value("recommend", "recipe_not_found", recipe="ghost") == 1.0
+    # The status is recorded, but under the bounded label -- the name came off
+    # the request path, so labelling it verbatim is a cardinality DoS.
+    assert (
+        _label_value(
+            "recommend", "recipe_not_found", recipe=_metrics.UNKNOWN_RECIPE_LABEL
+        )
+        == 1.0
+    )
+    assert _label_value("recommend", "recipe_not_found", recipe="ghost") == 0.0
 
 
 def test_recommend_related_records_unknown_seed_items() -> None:
@@ -210,7 +218,7 @@ def test_recommend_related_records_no_candidates() -> None:
 # ``user_features``/``item_features`` to a model that cannot act on them
 # (FEATURES_NOT_SUPPORTED), or sending a value that cannot be standardized
 # (FEATURE_VALUE_UNUSABLE). ``_request_metrics`` defaults the label to
-# "error", which docs/operations.md's "Recommend error rate" row pages
+# "error", which https://recotem.org/2.2/docs/operations.html's "Recommend error rate" row pages
 # on-call at 10% — a threshold reserved for genuine 500s. These tests pin
 # the two branches to their own labels so a client cannot page on-call.
 
@@ -341,7 +349,11 @@ def test_recipe_not_found_metric_across_verbs(verb: str, path: str, body: dict) 
     r = client.post(f"/v1/recipes/{path}", json=body)
     assert r.status_code == 404
     assert r.json()["code"] == "RECIPE_NOT_FOUND"
-    assert _label_value(verb, "recipe_not_found", recipe="ghost") == 1.0
+    assert (
+        _label_value(verb, "recipe_not_found", recipe=_metrics.UNKNOWN_RECIPE_LABEL)
+        == 1.0
+    )
+    assert _label_value(verb, "recipe_not_found", recipe="ghost") == 0.0
 
 
 # ---------------------------------------------------------------------------

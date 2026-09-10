@@ -8,7 +8,7 @@ resolved in that same phase.  So a request that is ultimately rejected with
 caller can drive that allocation.  ``RECOTEM_MAX_BODY_BYTES`` bounds the raw
 bytes but not the several-fold expansion of a JSON body into Python objects.
 
-``docs/security.md`` documents this and tells operators to cap the body at the
+``https://recotem.org/2.2/docs/security.html`` documents this and tells operators to cap the body at the
 proxy as well.  This test guards both:
 
 * the runtime ordering (a no-key request with an invalid JSON body is answered
@@ -36,7 +36,6 @@ from recotem.serving.registry import ModelEntry, ModelRegistry
 from tests.conftest import build_v1_app
 
 _ROOT = Path(__file__).resolve().parents[2]
-_SECURITY_DOC = _ROOT / "docs" / "security.md"
 
 
 def _hash_key(plaintext: str) -> str:
@@ -100,41 +99,6 @@ def test_valid_body_without_key_is_401() -> None:
     )
     assert resp.status_code == 401
     assert resp.json()["code"] == "MISSING_API_KEY"
-
-
-# --- doc guard: security.md keeps the corrected guidance ----------------------
-
-
-def test_security_doc_states_allocation_precedes_auth() -> None:
-    text = _SECURITY_DOC.read_text(encoding="utf-8")
-    assert "precedes authentication" in text, (
-        "docs/security.md must state that the request-body allocation precedes "
-        "authentication (an unauthenticated caller can drive it)."
-    )
-
-
-def test_security_doc_nginx_config_caps_body_size() -> None:
-    text = _SECURITY_DOC.read_text(encoding="utf-8")
-    assert "client_max_body_size" in text, (
-        "the recommended nginx config in docs/security.md must cap the request "
-        "body at the proxy, before recotem buffers/parses it pre-auth."
-    )
-
-
-def test_security_doc_nginx_config_bounds_concurrency() -> None:
-    """The ceiling is peak concurrency x body size, so a body cap is only half.
-
-    Resident memory is reused rather than returned to the OS, so a long request
-    sequence does not climb — but simultaneous requests do.  A rate limit alone
-    does not bound that, which is why the recommended config also carries a
-    concurrent-connection limit.
-    """
-    text = _SECURITY_DOC.read_text(encoding="utf-8")
-    assert "limit_conn" in text, (
-        "the recommended nginx config in docs/security.md must bound "
-        "simultaneous in-flight requests: the pre-auth allocation ceiling is "
-        "peak concurrency x body size, which a rate limit alone does not cap."
-    )
 
 
 if __name__ == "__main__":  # pragma: no cover

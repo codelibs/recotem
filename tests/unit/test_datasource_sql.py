@@ -637,6 +637,70 @@ def test_ssrf_hostaddr_overrides_host_for_rebinding(monkeypatch) -> None:
     assert src._rebinding_host == "8.8.8.8"
 
 
+@pytest.mark.parametrize("entry_point", ["probe", "fetch"])
+def test_rebinding_recheck_runs_before_connecting(monkeypatch, entry_point) -> None:
+    """``probe()`` and ``fetch()`` must both re-check DNS *before* connecting.
+
+    ``_check_rebinding`` itself is covered above, but every one of those tests
+    calls it directly, so nothing observed the two entry points that are
+    supposed to invoke it.  Deleting either call — or both — left the whole
+    suite green while the rebinding window silently reopened: the init-time
+    check would pass against the public address and the connect would then go
+    to whatever the second resolution returned.
+
+    Asserting that ``create_engine`` is never reached pins the ordering as well
+    as the call, so moving the re-check to after the connection is established
+    fails here too.
+    """
+    import socket
+    import sys
+    import types
+    from unittest.mock import patch
+
+    import sqlalchemy
+
+    from recotem.datasource.sql import SQLSource
+
+    monkeypatch.delenv("RECOTEM_SQL_ALLOW_PRIVATE", raising=False)
+    monkeypatch.setitem(sys.modules, "psycopg", types.ModuleType("psycopg"))
+    monkeypatch.setenv(
+        "RECOTEM_RECIPE_DB_DSN", "postgresql+psycopg://public.example.com/db"
+    )
+    with patch(
+        "recotem.datasource.sql.assert_host_public",
+        return_value=["8.8.8.8"],
+    ):
+        src = SQLSource(_make_cfg())
+
+    def rebound_getaddrinfo(host, port, *args, **kwargs):
+        # The cloud metadata service is the canonical rebinding target.
+        return [(socket.AF_INET, 0, 0, "", ("169.254.169.254", 0))]
+
+    connect_attempts: list[object] = []
+
+    def spy_create_engine(*args, **kwargs):
+        connect_attempts.append(args)
+        raise AssertionError("connected before the DNS-rebinding re-check")
+
+    with (
+        patch(
+            "recotem.datasource.sql.socket.getaddrinfo",
+            side_effect=rebound_getaddrinfo,
+        ),
+        patch.object(sqlalchemy, "create_engine", spy_create_engine),
+    ):
+        with pytest.raises(DataSourceError, match="(?i)rebind"):
+            if entry_point == "probe":
+                src.probe()
+            else:
+                src.fetch(_ctx())
+
+    assert not connect_attempts, (
+        f"{entry_point}() reached create_engine despite the rebound host; "
+        "the DNS-rebinding re-check is missing or runs too late"
+    )
+
+
 def test_ssrf_query_host_private_blocked_even_with_public_netloc(monkeypatch) -> None:
     """A DSN with a public netloc *and* a private ``?host=`` is rejected.
 

@@ -1202,15 +1202,20 @@ def test_lifespan_completes_within_drain_window(tmp_path: Path) -> None:
     """The lifespan context exits well within twice the drain window.
 
     With drain_seconds=1, the lifespan shutdown (watcher stop + join + log)
-    must complete within 2 seconds.  Uses asyncio.wait_for so an unexpectedly
-    hung shutdown surfaces as a TimeoutError rather than a hanging test.
+    must complete quickly.  The watcher join timeout is clamped to
+    max(1, min(5, drain_seconds)) = 1 s and the watcher thread itself is a
+    daemon so the join never blocks forever.
 
-    The watcher join timeout is clamped to max(1, min(5, drain_seconds)) = 1 s
-    and the watcher thread itself is a daemon so the join never blocks forever.
+    Driven through ``TestClient``, which really runs the ASGI lifespan.  An
+    ``httpx2`` ``AsyncClient`` over ``ASGITransport`` does not: entering and
+    exiting one never calls the app at all, so a timing assertion made around
+    it holds no matter how slow shutdown is.  The ``serve_shutdown`` assertion
+    below is what keeps that from silently recurring.
     """
-    import asyncio
+    import time
 
-    from httpx2 import ASGITransport, AsyncClient
+    import structlog.testing
+    from fastapi.testclient import TestClient
 
     from recotem.serving.app import create_app
 
@@ -1221,16 +1226,22 @@ def test_lifespan_completes_within_drain_window(tmp_path: Path) -> None:
 
     app = create_app(cfg)
 
-    async def _run() -> None:
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://testserver"
-        ) as _client:
-            # The ASGI lifespan is started on __aenter__ and torn down on __aexit__.
+    with structlog.testing.capture_logs() as captured:
+        started = time.monotonic()
+        with TestClient(app):
             pass
+        elapsed = time.monotonic() - started
 
+    assert any(e.get("event") == "serve_shutdown" for e in captured), (
+        "lifespan shutdown never ran, so the timing assertion below would be "
+        f"vacuous; captured events: {[e.get('event') for e in captured]}"
+    )
     # Allow 4 s (drain_seconds=1 → watcher_join_timeout=1 s; total shutdown
     # should be well under 4 s even on a loaded CI runner).
-    asyncio.run(asyncio.wait_for(_run(), timeout=4.0))
+    assert elapsed < 4.0, (
+        f"lifespan startup + shutdown took {elapsed:.2f}s with drain_seconds=1; "
+        "expected well under 4s (the watcher join timeout alone is 1s)"
+    )
 
 
 def test_insecure_no_auth_http_request_without_key_returns_200(
@@ -1847,11 +1858,16 @@ def test_banner_task_cancelled_cleanly_on_shutdown(tmp_path: Path) -> None:
     We run a full lifespan cycle with insecure_no_auth=True and assert that
     no asyncio warnings about pending tasks are emitted during shutdown.
     (A missing `await banner_task` after `cancel()` triggers that warning.)
+
+    Driven through ``TestClient``, which really runs the ASGI lifespan.  An
+    ``httpx2`` ``AsyncClient`` over ``ASGITransport`` does not call the app at
+    all, so this ran no shutdown code to warn about.  The ``serve_shutdown``
+    assertion below is what keeps that from silently recurring.
     """
-    import asyncio
     import warnings
 
-    from httpx2 import ASGITransport, AsyncClient
+    import structlog.testing
+    from fastapi.testclient import TestClient
 
     from recotem.serving.app import create_app
 
@@ -1862,17 +1878,18 @@ def test_banner_task_cancelled_cleanly_on_shutdown(tmp_path: Path) -> None:
 
     app = create_app(cfg)
 
-    async def _run() -> None:
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://testserver"
-        ):
-            pass  # lifespan starts on __aenter__, shuts down on __aexit__
-
     # If banner_task.cancel() is not followed by `await banner_task`, asyncio
     # will emit a ResourceWarning "Task was destroyed but it is pending!" on GC.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", ResourceWarning)
-        asyncio.run(_run())
+    with structlog.testing.capture_logs() as captured:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            with TestClient(app):
+                pass  # lifespan starts on __enter__, shuts down on __exit__
+
+    assert any(e.get("event") == "serve_shutdown" for e in captured), (
+        "lifespan shutdown never ran, so the warning assertion below would be "
+        f"vacuous; captured events: {[e.get('event') for e in captured]}"
+    )
 
     pending_task_warnings = [
         w

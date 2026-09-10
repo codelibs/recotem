@@ -60,7 +60,7 @@ def test_missing_no_expand_fields_raises_datasource_error() -> None:
         validate_plugin_contract(cls)
     msg = str(exc_info.value)
     assert "no_expand_fields" in msg
-    assert "recotem.org/2.1/docs/plugin-authoring.html" in msg
+    assert "recotem.org/2.2/docs/plugin-authoring.html" in msg
 
 
 def test_missing_no_expand_fields_error_names_the_class() -> None:
@@ -97,7 +97,7 @@ def test_non_frozenset_no_expand_fields_raises_datasource_error(bad_value) -> No
     msg = str(exc_info.value)
     assert "no_expand_fields" in msg
     assert "frozenset" in msg
-    assert "recotem.org/2.1/docs/plugin-authoring.html" in msg
+    assert "recotem.org/2.2/docs/plugin-authoring.html" in msg
 
 
 def test_non_frozenset_error_includes_actual_type_name() -> None:
@@ -273,7 +273,7 @@ def test_config_without_type_field_error_suggests_literal_declaration() -> None:
         validate_plugin_contract(cls)
     assert 'type: Literal["test"] = "test"' in exc_info.value.message
     assert (
-        "https://recotem.org/2.1/docs/plugin-authoring.html" in exc_info.value.message
+        "https://recotem.org/2.2/docs/plugin-authoring.html" in exc_info.value.message
     )
 
 

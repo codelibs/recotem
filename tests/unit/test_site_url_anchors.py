@@ -124,7 +124,7 @@ def test_no_emitted_site_anchor_contains_an_underscore() -> None:
 _PLANTED_BAD = (
     "raise E(\n"
     '    f"... the remedy for {name} is documented at "\n'
-    '    f"https://recotem.org/2.1/docs/operations.html"\n'
+    '    f"https://recotem.org/2.2/docs/operations.html"\n'
     '    f"#recotem-train-exits-4-with-feature_axis_error"\n'
     ")\n"
 )

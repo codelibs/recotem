@@ -16,7 +16,7 @@ independent, layered controls:
    (numpy / scipy reshuffle their reconstruction helpers across releases,
    so a strict FQCN list would break on every dep bump); a deny-list
    removes the high-risk submodules within those prefixes.  See
-   ``https://recotem.org/2.1/docs/security.html`` for the full threat model.
+   ``https://recotem.org/2.2/docs/security.html`` for the full threat model.
 4. Required signing key for both train and serve; a misconfigured deployment
    fails closed rather than loading arbitrary files.
 
@@ -65,7 +65,7 @@ class KeyRingConfigError(ArtifactError, ConfigError):
 
 
 # ---------------------------------------------------------------------------
-# FQCN allow-list (hand-enumerated; see https://recotem.org/2.1/docs/security.html)
+# FQCN allow-list (hand-enumerated; see https://recotem.org/2.2/docs/security.html)
 # ---------------------------------------------------------------------------
 
 _ALLOWED_CLASSES: frozenset[tuple[str, str]] = frozenset(

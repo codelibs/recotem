@@ -260,7 +260,7 @@ artifacts:
 # `Error from server (NotFound)` — on the one command whose job is to rescue a
 # crash-looping first install.
 #
-# See https://recotem.org/2.1/docs/deployment/kubernetes.html "First install: seed an artifact before serve
+# See https://recotem.org/2.2/docs/deployment/kubernetes.html "First install: seed an artifact before serve
 # starts" for the alternatives (bundled bootstrap Job, out-of-cluster train).
 train:
   enabled: false

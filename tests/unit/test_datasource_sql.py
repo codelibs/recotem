@@ -2397,7 +2397,7 @@ def test_error_label_walks_the_cause_chain_and_adds_sqlstate() -> None:
 # Measured against mariadb:11.8.9 and mysql:8.4.11: the two variables are
 # disjoint and each server rejects the other's with
 # ``ERROR 1193 (HY000) Unknown system variable``.  A ``mysql+pymysql://`` DSN
-# (the only PyMySQL DSN in https://recotem.org/2.1/docs/data-sources/sql.html) pointed at MariaDB used to
+# (the only PyMySQL DSN in https://recotem.org/2.2/docs/data-sources/sql.html) pointed at MariaDB used to
 # take the MySQL branch and abort the whole fetch.
 
 

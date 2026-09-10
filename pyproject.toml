@@ -1,6 +1,6 @@
 [project]
 name = "recotem"
-version = "2.1.0"
+version = "2.2.0.dev0"
 description = "Recipe-driven recommender training and serving on irspack."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -124,7 +124,7 @@ sqlite = ["sqlalchemy>=2,<3"]
 # interpreter axis is not implied by the platform axis: 3.14 is a supported
 # interpreter (see the classifiers above) with no lightfm-next wheel anywhere.
 # `tests/unit/test_packaging_metadata.py` pins that wheel matrix.
-# See https://recotem.org/2.1/docs/recipe-reference.html#training.
+# See https://recotem.org/2.2/docs/recipe-reference.html#training.
 bprfm = ["lightfm-next==1.19.0"]
 all = ["recotem[bigquery,postgres,mysql,sqlite,s3,gcs,azure,metrics,bprfm]"]
 

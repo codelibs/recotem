@@ -57,5 +57,5 @@ No billing dry run; `validate` probes connectivity and the statement.
 pre-aggregate in SQL. `connect_timeout_seconds` / `statement_timeout_seconds`
 bound a slow or runaway query.
 
-See `https://recotem.org/2.1/docs/data-sources/sql.html` for the full reference, including the
+See `https://recotem.org/2.2/docs/data-sources/sql.html` for the full reference, including the
 memory-bound caveat and the per-driver SSRF host forms.

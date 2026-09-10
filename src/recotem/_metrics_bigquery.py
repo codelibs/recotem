@@ -16,7 +16,7 @@ depending on ``recotem.serving``.
 
    The operable signal for a Storage Read API fallback is the structured log
    event ``bigquery_storage_fallback`` emitted by
-   ``recotem.datasource.bigquery``.  See ``https://recotem.org/2.1/docs/operations.html``.
+   ``recotem.datasource.bigquery``.  See ``https://recotem.org/2.2/docs/operations.html``.
 
 The counter is a no-op when ``prometheus_client`` is not installed, following
 the same pattern as ``recotem.serving.metrics``.

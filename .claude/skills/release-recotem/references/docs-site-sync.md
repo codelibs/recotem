@@ -206,7 +206,7 @@ Releasing 2.1.0 (`OLD=2.0`, `NEW=2.1`), from the `recotem-docs` root:
    `2.1/ja/` and every page of the kept 2.1 archive does. Either way
    `latestLink` and `v1Link` resolve to `/` and `/1.0/` and the switcher sends
    Japanese readers to the English tree. The 2.1 half is the one that is read:
-   `recotem.org/2.1/…` is what the product bakes into shipped source, so that
+   `recotem.org/2.2/…` is what the product bakes into shipped source, so that
    archive carries this version's traffic for its whole support window.
 
    Do not eyeball it. No version *path* for the promoted version may survive

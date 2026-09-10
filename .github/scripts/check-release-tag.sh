@@ -355,7 +355,7 @@ PIN_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${GREP_SKIP_BYTECODE[@]}" "${PIN_RE
 # file.  That page named PREVIOUS releases -- `ghcr.io/codelibs/recotem:2.0.0`
 # as the subject of a sentence, not as something a reader deploys -- so
 # scanning it made the gate and the release mutually unsatisfiable.  Its
-# successor is https://recotem.org/2.1/docs/upgrading.html, outside this repository
+# successor is https://recotem.org/2.2/docs/upgrading.html, outside this repository
 # and outside this scan, so no filter is needed to keep the two satisfiable.
 LABEL_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${GREP_SKIP_BYTECODE[@]}" "${LABEL_RE}" \
   examples 2>/dev/null || true)"
@@ -537,7 +537,7 @@ done < <(printf '%s\n' "${SITE_HITS}")
 # other end exists -- a `.html` URL naming a deleted page still passes here.
 #
 # The scheme is optional in the pattern.  Three of the occurrences this was
-# written for are `assert "recotem.org/2.1/docs/….html" in msg` in the test
+# written for are `assert "recotem.org/2.2/docs/….html" in msg` in the test
 # suite, with no `https://`, and they are the ones most likely to rot silently:
 # the extensionless literal is a *prefix* of the suffixed one, so such an
 # assertion keeps passing after the product string is corrected, and stops

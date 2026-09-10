@@ -293,7 +293,7 @@ def _resolve_recommend(
     # learned embedding was fit to their real interactions and strictly
     # dominates a profile prior, so rejecting would break the natural
     # client pattern of always sending the profile and letting the server
-    # decide. Cross-referenced from https://recotem.org/2.1/docs/serving-api.html#feature-aware-cold-start
+    # decide. Cross-referenced from https://recotem.org/2.2/docs/serving-api.html#feature-aware-cold-start
     # ("A known `user_id` with `user_features` supplied is not an error.").
     try:
         return entry.recommender.get_recommendation_for_known_user_id(

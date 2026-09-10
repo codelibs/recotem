@@ -19,9 +19,19 @@ Covered:
   either key is refused rather than skipped;
 - `values.yaml`'s `image.tag` is checked, because that -- not `appVersion` --
   is the image a chart install actually pulls;
-- the pinned `ghcr.io/codelibs/recotem:X.Y.Z` references under `examples/` and
-  `docs/`, and the `app.kubernetes.io/version` label in `examples/k8s/`, are
-  checked too, and a scan that matches nothing is refused rather than passed.
+- the pinned `ghcr.io/codelibs/recotem:X.Y.Z` references and the
+  `app.kubernetes.io/version` labels under `examples/` are checked too, and a
+  scan that matches nothing is refused rather than passed;
+- every `recotem.org/MAJOR.MINOR/` documentation URL in the tree names the
+  release's MAJOR.MINOR, since those URLs ship inside artefacts nobody can
+  correct afterwards -- error message text, the JSON Schema, the
+  `/v1/metrics` HELP string, `README.md` as rendered on PyPI.
+
+There is no `docs/` tree in this repository any more: the documentation lives
+at recotem.org, in the separate recotem-docs repository, which bumps its own
+copies.  The scans that used to read `docs/` -- the pin scan, the label scan,
+the `values.yaml`-excerpt scan and the `docs/upgrading.md` exemption -- went
+with it, and the documentation-site URL scan took the excerpt scan's place.
 """
 
 from __future__ import annotations
@@ -42,6 +52,19 @@ requires_bash = pytest.mark.skipif(_BASH is None, reason="bash not on PATH")
 
 pytestmark = requires_bash
 
+# The documentation line the fixtures sit on, and one that is deliberately not
+# it.  Both are spelled as a bare MAJOR.MINOR and pasted into a URL where they
+# are used, so that no whole `recotem.org/<major>.<minor>/` is ever written out
+# in this file -- `tests` is one of the roots section 4b scans, so such a
+# literal is a hit the real gate reads.  Measured: with the stale one spelled
+# out in an assertion, `check-release-tag.sh v2.1.0` run on this repository
+# reported this very file as carrying a documentation URL naming another
+# version, and refused the tag.  The matching one is no safer: the dev bump
+# rewrites every such URL in the tree, so it would retarget an assertion at a
+# version the fixture beside it never wrote.
+RELEASE_MM = "2.1"
+STALE_MM = "2.0"
+
 
 def _make_tree(
     root: Path,
@@ -52,25 +75,35 @@ def _make_tree(
     chart_app_version: str | None = "2.1.0",
     values_image_tag: str | None = "2.1.0",
     example_pin: str | None = "2.1.0",
-    docs_pin: str | None = "2.1.0",
     version_label: str | None = "2.1.0",
-    docs_version_label: str | None = "2.1.0",
-    docs_values_tag: str | None = "2.1.0",
+    site_url_version: str | None = RELEASE_MM,
 ) -> Path:
     """Build a minimal tree the script can read, and return its script path.
 
     The script derives REPO_ROOT from its own location, so the copy has to sit
     at `<root>/.github/scripts/` for the relative lookups to resolve.  `None`
     for any field omits that declaration entirely.
+
+    `site_url_version` is a MAJOR.MINOR, not a full version: the documentation
+    site publishes one line per minor release, so a patch keeps the previous
+    segment.  It is applied to the whole tree at once, the copied script
+    included -- `.github/` is one of the roots the script scans, and the
+    script's own comments cite a versioned recotem.org URL, so a fixture that
+    left it alone would carry a second, contradicting version this test file
+    never set.  `None` therefore has to strip that URL as well to reach a tree
+    with no site URL anywhere, which is the vacuity guard's case.
     """
     (root / ".github" / "scripts").mkdir(parents=True)
-    (root / "src" / "recotem").mkdir(parents=True)
+    (root / "src" / "recotem" / "datasource").mkdir(parents=True)
     (root / "helm" / "recotem").mkdir(parents=True)
     (root / "examples" / "k8s").mkdir(parents=True)
-    (root / "docs" / "deployment").mkdir(parents=True)
 
     script = root / ".github" / "scripts" / SCRIPT.name
-    shutil.copy(SCRIPT, script)
+    script.write_text(
+        _set_site_url_version(SCRIPT.read_text(encoding="utf-8"), site_url_version),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
 
     body = '[project]\nname = "recotem"\n'
     if pyproject is not None:
@@ -98,9 +131,9 @@ def _make_tree(
     values += "  pullPolicy: IfNotPresent\n"
     (root / "helm" / "recotem" / "values.yaml").write_text(values, encoding="utf-8")
 
-    # Deployment pins.  `:latest` sits alongside the pinned reference in both
-    # files so the scan has to leave a deliberately-floating tag alone; it is
-    # what compose.yaml and the getting-started docs use on purpose.
+    # Deployment pins.  A `:latest` sidecar sits alongside the pinned reference
+    # so the scan has to leave a deliberately-floating tag alone; it is what
+    # compose.yaml and the getting-started page use on purpose.
     deployment = "spec:\n  template:\n    metadata:\n      labels:\n"
     if version_label is not None:
         deployment += f'        app.kubernetes.io/version: "{version_label}"\n'
@@ -108,25 +141,65 @@ def _make_tree(
     deployment += "        - name: serve\n"
     if example_pin is not None:
         deployment += f"          image: ghcr.io/codelibs/recotem:{example_pin}\n"
+    deployment += "        - name: warmup\n"
+    deployment += "          image: ghcr.io/codelibs/recotem:latest\n"
     (root / "examples" / "k8s" / "serve-deployment.yaml").write_text(
         deployment, encoding="utf-8"
     )
 
-    docs = "# Kubernetes\n\nPull the image:\n\n"
-    docs += "    docker run --rm ghcr.io/codelibs/recotem:latest --help\n\n"
-    if docs_pin is not None:
-        docs += f"          image: ghcr.io/codelibs/recotem:{docs_pin}\n"
-    # The deployment doc carries two more version declarations the release
-    # bumps and the gate used not to read: a copy of the k8s version label,
-    # and a copy-pasteable values.yaml excerpt.
-    if docs_version_label is not None:
-        docs += f'    app.kubernetes.io/version: "{docs_version_label}"\n'
-    if docs_values_tag is not None:
-        docs += "\n```yaml\nimage:\n  repository: ghcr.io/codelibs/recotem\n"
-        docs += f'  tag: "{docs_values_tag}"\n```\n'
-    (root / "docs" / "deployment" / "k8s.md").write_text(docs, encoding="utf-8")
+    # A documentation-site URL of the kind section 4b exists for: one that
+    # ships inside an error message, where a reader cannot correct it and this
+    # repository cannot correct it after the fact.
+    if site_url_version is not None:
+        (root / "src" / "recotem" / "datasource" / "csv.py").write_text(
+            "def _fail() -> None:\n"
+            "    raise DataSourceError(\n"
+            '        "CSV source could not be read; see "\n'
+            f'        "https://recotem.org/{site_url_version}'
+            '/docs/data-sources/csv.html"\n'
+            "    )\n",
+            encoding="utf-8",
+        )
 
     return script
+
+
+def _set_site_url_version(text: str, version: str | None) -> str:
+    """Rewrite every `recotem.org/MAJOR.MINOR/` in `text`, or strip the segment.
+
+    Mirrors `SITE_RE` in the script so a fixture cannot drift from what the
+    scan actually matches.
+    """
+    if version is None:
+        return re.sub(r"recotem\.org/[0-9]+\.[0-9]+/", "recotem.org/", text)
+    return re.sub(r"recotem\.org/[0-9]+\.[0-9]+/", f"recotem.org/{version}/", text)
+
+
+def _site_roots() -> list[str]:
+    """The paths section 4b scans, read off the script itself.
+
+    A hand-copied list is how the release-ready fixture below came to cover
+    six of ten roots while reading as if it covered the tree.
+    """
+    text = SCRIPT.read_text(encoding="utf-8")
+    match = re.search(r"^SITE_ROOTS=\(([^)]*)\)", text, re.M)
+    assert match, "SITE_ROOTS is no longer a literal array in the script"
+    roots = match.group(1).split()
+    assert roots, "SITE_ROOTS parsed as empty -- the pattern is broken"
+    return roots
+
+
+def _current_site_url_version() -> str:
+    """The documentation line this tree belongs to: MAJOR.MINOR of its version.
+
+    Read from the package version rather than by grepping the tree for a
+    `recotem.org/X.Y/` URL, because a tree carrying a *stale* URL is exactly
+    the case the caller must not normalise away.
+    """
+    text = (REPO_ROOT / "src" / "recotem" / "version.py").read_text(encoding="utf-8")
+    match = re.search(r'^__version__ = "(\d+)\.(\d+)\.', text, re.M)
+    assert match, "could not read MAJOR.MINOR from src/recotem/version.py"
+    return f"{match.group(1)}.{match.group(2)}"
 
 
 def _run(script: Path, tag: str) -> subprocess.CompletedProcess[str]:
@@ -409,6 +482,63 @@ def test_success_message_does_not_overclaim(tmp_path: Path) -> None:
     assert "version-locations.md" in proc.stdout
 
 
+def test_success_message_says_urls_are_not_fetched(tmp_path: Path) -> None:
+    """Section 4b reads the version segment; it never asks if the page exists.
+
+    The distinction is not academic.  Measured on an otherwise release-ready
+    tree, with two edits to the same line of README.md: a site URL on an older
+    documentation line whose page is served (HTTP 200) is refused, rc=1; a URL
+    on the released line naming a page that does not exist (HTTP 404) passes,
+    rc=0.  So the gate is green while every URL it inspected is dead -- which
+    is the state the tree was in when the local docs/ tree became site URLs.
+    The success message has to say which of the two it established, or it is
+    read as a link check that was never run.
+
+    The URLs above are described rather than written out: `tests` is one of the
+    roots section 4b scans, and a spelled-out URL naming another documentation
+    line is, to that plain grep, indistinguishable from a real stale pointer.
+    Writing one here refuses the tag -- see the module docstring.
+    """
+    script = _make_tree(tmp_path)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    # states what WAS established: the segment names the released line
+    assert f"names the {RELEASE_MM} line" in out
+    # and states what was not
+    assert "RESOLVE" in out
+    assert "404" in out
+
+
+def test_a_url_that_names_the_right_line_but_cannot_resolve_still_passes(
+    tmp_path: Path,
+) -> None:
+    """Pin the documented limitation, so narrowing it stays a deliberate act.
+
+    If a future change makes section 4b fetch, this test fails and its docstring
+    says what to decide: a release gate that reaches the network cannot publish
+    while the documentation site is down, and this script gates both
+    publish.yml and docker.yml.
+    """
+    script = _make_tree(tmp_path, site_url_version="2.1")
+    root = script.parent.parent.parent
+    csv_py = root / "src" / "recotem" / "datasource" / "csv.py"
+    csv_py.write_text(
+        csv_py.read_text(encoding="utf-8").replace(
+            "/docs/data-sources/csv", "/docs/no-such-page-here"
+        ),
+        encoding="utf-8",
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, (
+        "section 4b now refuses a URL on the correct line whose page does not "
+        "exist.  If that is intended, decide first whether a release may be "
+        "blocked by the documentation site being unreachable:\n"
+        + proc.stdout
+        + proc.stderr
+    )
+
+
 def test_real_values_declares_an_image_tag(tmp_path: Path) -> None:
     """The shipped chart keeps the shape the extractor parses.
 
@@ -453,14 +583,6 @@ def test_stale_examples_k8s_pin_is_refused(tmp_path: Path) -> None:
     assert "ghcr.io/codelibs/recotem:2.0.0" in proc.stdout
 
 
-def test_stale_docs_pin_is_refused(tmp_path: Path) -> None:
-    """docs/deployment/k8s.md is what a reader copies, so it is checked too."""
-    script = _make_tree(tmp_path, docs_pin="2.0.0")
-    proc = _run(script, "v2.1.0")
-    assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "docs/deployment/k8s.md" in proc.stdout
-
-
 def test_stale_version_label_is_refused(tmp_path: Path) -> None:
     """`app.kubernetes.io/version` is a version declaration like any other."""
     script = _make_tree(tmp_path, version_label="2.0.0")
@@ -471,15 +593,12 @@ def test_stale_version_label_is_refused(tmp_path: Path) -> None:
 
 def test_every_stale_pin_is_named_in_one_run(tmp_path: Path) -> None:
     """One run, one fix pass -- the same contract the version pins have."""
-    script = _make_tree(
-        tmp_path, example_pin="2.0.0", docs_pin="1.9.9", version_label="2.0.0"
-    )
+    script = _make_tree(tmp_path, example_pin="2.0.0", version_label="1.9.9")
     proc = _run(script, "v2.1.0")
     assert proc.returncode == 1
     for expected in (
-        "examples/k8s/serve-deployment.yaml",
-        "docs/deployment/k8s.md",
-        "app.kubernetes.io/version",
+        "ghcr.io/codelibs/recotem:2.0.0",
+        'app.kubernetes.io/version: "1.9.9"',
     ):
         assert expected in proc.stdout, f"{expected!r} missing from:\n{proc.stdout}"
 
@@ -487,8 +606,8 @@ def test_every_stale_pin_is_named_in_one_run(tmp_path: Path) -> None:
 def test_latest_tag_is_not_treated_as_a_pin(tmp_path: Path) -> None:
     """`:latest` tracks the moving tag on purpose and must not be flagged.
 
-    The docs fixture carries a `:latest` reference alongside its pinned one; a
-    scan that refused it would make every release unable to pass.
+    The examples fixture carries a `:latest` container alongside its pinned
+    one; a scan that refused it would make every release unable to pass.
     """
     script = _make_tree(tmp_path)
     proc = _run(script, "v2.1.0")
@@ -504,7 +623,7 @@ def test_no_pin_anywhere_is_refused_rather_than_passed(tmp_path: Path) -> None:
     vouching for pins it never looked at.  Same reasoning as the empty
     `image.tag` case above.
     """
-    script = _make_tree(tmp_path, example_pin=None, docs_pin=None)
+    script = _make_tree(tmp_path, example_pin=None)
     proc = _run(script, "v2.1.0")
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "No pinned" in proc.stdout
@@ -514,21 +633,147 @@ def test_repo_deployment_pins_are_where_the_script_looks(tmp_path: Path) -> None
     """Pins the script scans for must actually exist in this repository.
 
     The synthetic-tree cases above would all still pass if `examples/k8s/` were
-    restructured so the real pins moved out of the scanned paths.  This one
-    reads the repository.
+    restructured so the real pins moved out of the scanned path.  This one
+    reads the repository.  `examples/` is the whole scan now: the deployment
+    page that used to carry a second copy of these pins lives in recotem-docs,
+    which bumps them in its own release phase.
     """
     hits = []
-    for rel in ("examples", "docs"):
-        for path in (REPO_ROOT / rel).rglob("*"):
-            if not path.is_file() or path.suffix not in {".yaml", ".yml", ".md"}:
-                continue
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            if re.search(r"ghcr\.io/codelibs/recotem:[0-9]+\.[0-9]+\.[0-9]+", text):
-                hits.append(path.relative_to(REPO_ROOT))
+    for path in (REPO_ROOT / "examples").rglob("*"):
+        if not path.is_file() or path.suffix not in {".yaml", ".yml", ".md"}:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if re.search(r"ghcr\.io/codelibs/recotem:[0-9]+\.[0-9]+\.[0-9]+", text):
+            hits.append(path.relative_to(REPO_ROOT))
     assert hits, (
         "no pinned ghcr.io/codelibs/recotem:X.Y.Z reference found under "
-        "examples/ or docs/. The script refuses this case at release time; if "
-        "the pins genuinely moved, teach the script where they went."
+        "examples/. The script refuses this case at release time; if the pins "
+        "genuinely moved, teach the script where they went."
+    )
+
+
+def _bump(path: Path, pattern: str, repl: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    new, count = re.subn(pattern, repl, text, flags=re.M)
+    assert count, f"{path}: nothing matched {pattern!r} -- the bump is broken"
+    path.write_text(new, encoding="utf-8")
+
+
+def test_a_release_ready_copy_of_this_repository_passes(tmp_path: Path) -> None:
+    """The real tree, bumped the way a release bumps it, must satisfy the gate.
+
+    Every other case here builds a synthetic tree, deliberately -- so the suite
+    does not go red while the project's own version is mid-bump.  The gap that
+    leaves is that nothing measures the *real* tree until a tag is pushed, and
+    by then the tag exists and has to be deleted and re-pushed.  A docs PR
+    reached main that way: it added `ghcr.io/codelibs/recotem:2.0.0` to
+    `docs/upgrading.md`, a path the pin scan read at the time, and `v2.1.0`
+    became unreachable via the documented procedure with nothing on any PR to
+    say so.
+
+    Bumping to a synthetic version keeps this version-agnostic: it asserts the
+    tree is *bumpable*, not what it happens to be pinned to today.  Only
+    version-shaped values move, mirroring the script's own `is_version_pin`, so
+    `:latest` stays a moving reference here exactly as it does at a release.
+    """
+    release = "9.9.9"
+    release_mm = "9.9"
+    root = tmp_path / "tree"
+    (root / ".github").mkdir(parents=True)
+    shutil.copytree(REPO_ROOT / ".github" / "scripts", root / ".github" / "scripts")
+    # Every root section 4b scans, not a subset.  The copy used to carry
+    # `helm examples pyproject.toml README.md src/recotem/version.py` alone,
+    # which left `.claude`, `CLAUDE.md`, `CONTRIBUTING.md`, the rest of `src`
+    # and all of `tests` outside the fixture -- so a stale documentation URL in
+    # any of them passed here and refused the real tag.  Read the roots off the
+    # script rather than restating them, so the fixture cannot drift from the
+    # scan again.
+    # `__pycache__` is skipped so the copy is the clean checkout CI tags from.
+    # Bytecode embeds these URLs in compiled docstrings, and a rewrite cannot
+    # reach inside it -- a developer's stale .pyc would fail this test for a
+    # reason no release has.
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
+    for rel in _site_roots():
+        src = REPO_ROOT / rel
+        if not src.exists():
+            continue
+        if src.is_dir():
+            shutil.copytree(src, root / rel, dirs_exist_ok=True, ignore=ignore)
+        else:
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(src, root / rel)
+    (root / "src" / "recotem").mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO_ROOT / "pyproject.toml", root / "pyproject.toml")
+    # README.md is copied for section 4b rather than for any pin: it is one of
+    # the places a stale documentation URL ships where nobody can correct it,
+    # since PyPI renders whatever the release uploaded.
+    shutil.copy(REPO_ROOT / "README.md", root / "README.md")
+    shutil.copy(
+        REPO_ROOT / "src" / "recotem" / "version.py",
+        root / "src" / "recotem" / "version.py",
+    )
+
+    _bump(root / "pyproject.toml", r'^version = "[^"]+"', f'version = "{release}"')
+    _bump(
+        root / "src" / "recotem" / "version.py",
+        r'^__version__ = "[^"]+"',
+        f'__version__ = "{release}"',
+    )
+    chart = root / "helm" / "recotem" / "Chart.yaml"
+    _bump(chart, r"^version: .+$", f"version: {release}")
+    _bump(chart, r'^appVersion: "[^"]*"$', f'appVersion: "{release}"')
+    _bump(
+        root / "helm" / "recotem" / "values.yaml",
+        r'^(\s+tag: )"[0-9][^"]*"',
+        rf'\g<1>"{release}"',
+    )
+
+    for path in (root / "examples").rglob("*"):
+        if not path.is_file() or path.suffix not in {".yaml", ".yml", ".md"}:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        new = re.sub(
+            r"(ghcr\.io/codelibs/recotem:)v?[0-9][A-Za-z0-9_.-]*",
+            rf"\g<1>{release}",
+            text,
+        )
+        new = re.sub(
+            r'(app\.kubernetes\.io/version: )"[0-9][^"]*"',
+            rf'\g<1>"{release}"',
+            new,
+        )
+        if new != text:
+            path.write_text(new, encoding="utf-8")
+
+    # Section 4b's URLs are bumped at the dev bump rather than at release, but
+    # a release-ready tree is one where that already happened -- so the copy
+    # gets the same rewrite the dev bump performs, across every file, not just
+    # the ones carrying a deployment pin.  MAJOR.MINOR only: a patch release
+    # does not create a documentation line.
+    #
+    # It rewrites only the line the tree *belongs to*, exactly as the runbook's
+    # `s{recotem\.org/\Q${OLD_MM}\E/}{...}` does.  A blanket
+    # `recotem\.org/[0-9]+\.[0-9]+/` rewrite would also normalise a URL naming
+    # some *other* line -- the one thing section 4b exists to refuse -- so the
+    # fixture would erase the defect before the script could see it, and this
+    # test would pass on a tree the real gate refuses.  Measured: with the
+    # blanket form, copying `.claude` in was not enough to make this test fail
+    # on a tree carrying a genuinely stale URL.
+    current_mm = _current_site_url_version()
+    for path in root.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        new = text.replace(f"recotem.org/{current_mm}/", f"recotem.org/{release_mm}/")
+        if new != text:
+            path.write_text(new, encoding="utf-8")
+
+    proc = _run(root / ".github" / "scripts" / SCRIPT.name, f"v{release}")
+    assert proc.returncode == 0, (
+        "a release-ready copy of this repository does not satisfy the release "
+        "gate, so pushing the tag would fail after the tag already exists:\n"
+        + proc.stdout
+        + proc.stderr
     )
 
 
@@ -618,9 +863,8 @@ def test_no_version_label_anywhere_is_refused_rather_than_passed(
 
     Deleting every `app.kubernetes.io/version` label reduced that half of the
     check to nothing while the script still reported OK for the release.
-    The scan now covers `docs/` as well as `examples/`, so "every" means both.
     """
-    script = _make_tree(tmp_path, version_label=None, docs_version_label=None)
+    script = _make_tree(tmp_path, version_label=None)
     proc = _run(script, "v2.1.0")
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "app.kubernetes.io/version" in proc.stdout
@@ -886,57 +1130,223 @@ def test_moving_references_are_still_exempt(tmp_path: Path) -> None:
 
     Without this, accepting a `v` prefix could be "fixed" by accepting
     everything, which would fail the release on the `:latest` references
-    compose.yaml and the getting-started docs carry on purpose.
+    compose.yaml and the getting-started page carry on purpose.
     """
     script = _make_tree(tmp_path)
-    docs = tmp_path / "docs" / "deployment" / "k8s.md"
-    docs.write_text(
-        docs.read_text(encoding="utf-8")
-        + "    ghcr.io/codelibs/recotem:main\n"
-        + "    ghcr.io/codelibs/recotem:sha-abc1234\n",
+    manifest = tmp_path / "examples" / "k8s" / "serve-deployment.yaml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + "        - name: nightly\n"
+        + "          image: ghcr.io/codelibs/recotem:main\n"
+        + "        - name: pinned-by-digest\n"
+        + "          image: ghcr.io/codelibs/recotem:sha-abc1234\n",
         encoding="utf-8",
     )
     proc = _run(script, "v2.1.0")
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
-def test_a_stale_version_label_under_docs_is_refused(tmp_path: Path) -> None:
-    """The label scan read `examples` while the pin scan read `examples docs`.
+# ---------------------------------------------------------------------------
+# Documentation-site URLs (section 4b)
+#
+# This repository carries no `docs/` tree: the documentation lives at
+# recotem.org, in the recotem-docs repository.  What is left here are versioned
+# URLs into that site, and several of them ship where a reader cannot correct
+# them and this repository cannot correct them afterwards -- the text of a
+# DataSourceError, the JSON Schema `recotem schema` emits for IDEs, the HELP
+# string served at /v1/metrics, README.md as rendered on PyPI.  A stale segment
+# there sends a user to another version's documentation.
+#
+# These URLs are bumped at the DEV bump, not at release -- the opposite cadence
+# to the deployment pins -- which is why a release-time gate is what notices
+# that the dev bump skipped them.
+# ---------------------------------------------------------------------------
 
-    `docs/deployment/k8s.md` carries its own copy of the k8s version label, so
-    that asymmetry meant the script could exit 0 while the deployment doc still
-    declared the previous release -- with a success message claiming coverage
-    "under examples/ and docs/".
+
+def test_a_site_url_naming_another_version_is_refused(tmp_path: Path) -> None:
+    """The stale-documentation-line case, with the offending hit named.
+
+    The fix is a rewrite of specific lines, so the report has to say which:
+    `grep -o` output is `path:line:match`, and all three parts are load-bearing
+    for an operator who has to bump them before re-tagging.
     """
-    script = _make_tree(tmp_path, docs_version_label="2.0.0")
+    script = _make_tree(tmp_path, site_url_version=STALE_MM)
     proc = _run(script, "v2.1.0")
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "k8s.md" in proc.stdout, proc.stdout
-    assert '"2.0.0"' in proc.stdout, proc.stdout
+    assert "Documentation-site URLs naming another version:" in proc.stdout
+    hit = f"src/recotem/datasource/csv.py:4:recotem.org/{STALE_MM}/"
+    assert hit in proc.stdout, proc.stdout
 
 
-def test_a_stale_values_excerpt_under_docs_is_refused(tmp_path: Path) -> None:
-    """The second unread location in the same file.
+def test_site_urls_on_the_released_line_pass(tmp_path: Path) -> None:
+    """Control: the same tree one minor line later is what a release looks like.
 
-    `docs/deployment/k8s.md` also carries a copy-pasteable `values.yaml`
-    excerpt. The `image.tag` reader in section 3 is hard-wired to
-    `helm/recotem/values.yaml`, and the excerpt has no `ghcr.io/` prefix for
-    the pin scan to match, so nothing read it.
+    Without it, the case above would also pass if section 4b refused every
+    tree it scanned.
     """
-    script = _make_tree(tmp_path, docs_values_tag="2.0.0")
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert f"names the {RELEASE_MM} line" in proc.stdout
+
+
+def test_a_patch_release_keeps_the_minor_documentation_line(tmp_path: Path) -> None:
+    """v2.1.1 must accept `/2.1/`, because a patch publishes no new doc line.
+
+    The comparison a full-version check would make -- `2.1` against `2.1.1` --
+    fails on every patch release, which is most of them, and the advice the
+    script prints would tell an operator to rewrite every URL in the tree to a
+    documentation line that does not exist.
+    """
+    script = _make_tree(
+        tmp_path,
+        pyproject="2.1.1",
+        version_py="2.1.1",
+        chart_version="2.1.1",
+        chart_app_version="2.1.1",
+        values_image_tag="2.1.1",
+        example_pin="2.1.1",
+        version_label="2.1.1",
+        site_url_version=RELEASE_MM,
+    )
+    proc = _run(script, "v2.1.1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert f"names the {RELEASE_MM} line" in proc.stdout
+
+
+def test_no_site_url_anywhere_is_refused_rather_than_passed(tmp_path: Path) -> None:
+    """The third scan gets the vacuity guard the other two have.
+
+    Section 4b replaced the `values.yaml`-excerpt scan that died with `docs/`,
+    and it is only worth that if it cannot itself decay to nothing: a rename at
+    the site, or a switch to unversioned URLs, must be reported rather than
+    silently shrinking what the success message vouches for.
+    """
+    script = _make_tree(tmp_path, site_url_version=None)
     proc = _run(script, "v2.1.0")
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "k8s.md" in proc.stdout, proc.stdout
+    assert "No 'recotem.org/X.Y/' documentation URL found" in proc.stdout
 
 
-def test_no_values_excerpt_anywhere_is_refused_rather_than_passed(
+def test_a_stale_site_url_and_a_stale_pin_are_reported_in_one_run(
     tmp_path: Path,
 ) -> None:
-    """The excerpt scan gets the same vacuity guard as the other two."""
-    script = _make_tree(tmp_path, docs_values_tag=None)
+    """Section 6's contract, extended to the class of failure 4b added.
+
+    A gate that exits at the first class of failure costs a tag delete and a
+    re-push per round trip on the tag-triggered release path, and a tree stale
+    in both ways is the ordinary state when a dev bump was skipped.
+    """
+    script = _make_tree(tmp_path, example_pin="2.0.0", site_url_version=STALE_MM)
     proc = _run(script, "v2.1.0")
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "values.yaml excerpt" in proc.stdout, proc.stdout
+    for expected in (
+        "ghcr.io/codelibs/recotem:2.0.0",
+        f"src/recotem/datasource/csv.py:4:recotem.org/{STALE_MM}/",
+    ):
+        assert expected in proc.stdout, f"{expected!r} missing from:\n{proc.stdout}"
+
+
+# ---------------------------------------------------------------------------
+# Documentation-site URLs must carry `.html` (section 4c)
+#
+# The version segment is only half of what makes one of these resolve.
+# recotem.org is a VitePress build with `cleanUrls: false`, served off disk by
+# nginx with no try_files fallback, so a page URL without the suffix is a hard
+# 404 -- in exactly the artefacts section 4b exists for, which nobody can
+# correct after upload.  Directory URLs are the deliberate exception: nginx
+# resolves them to index.html, and appending `.html` there would break them.
+#
+# What 4c does NOT check is whether the page on the other end exists.  A
+# `.html` URL naming a deleted page passes here, by design: the check is a
+# string test so that a slow or unreachable docs site cannot make the project
+# unreleasable.
+# ---------------------------------------------------------------------------
+
+
+def _write_site_url(root: Path, url: str) -> None:
+    """Replace the fixture's shipped-in-an-error-message URL with *url*."""
+    (root / "src" / "recotem" / "datasource" / "csv.py").write_text(
+        "def _fail() -> None:\n"
+        "    raise DataSourceError(\n"
+        '        "CSV source could not be read; see "\n'
+        f'        "{url}"\n'
+        "    )\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_page_url_without_the_html_suffix_is_refused(tmp_path: Path) -> None:
+    """The 404 case: a page URL on the right line, but unreachable."""
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_site_url(tmp_path, f"https://recotem.org/{RELEASE_MM}/docs/security")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "missing the '.html' suffix" in proc.stdout
+    assert f"https://recotem.org/{RELEASE_MM}/docs/security" in proc.stdout
+
+
+def test_a_page_url_with_the_html_suffix_passes(tmp_path: Path) -> None:
+    """Control: the same tree with the suffix present is accepted.
+
+    Without it the case above would also pass if 4c refused every tree.
+    """
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_site_url(tmp_path, f"https://recotem.org/{RELEASE_MM}/docs/security.html")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_an_anchor_does_not_hide_a_missing_suffix(tmp_path: Path) -> None:
+    """`…/security#kid-rotation` is the same 404; the anchor must not excuse it.
+
+    The suffix belongs before the fragment, which is the half an author is most
+    likely to get wrong -- the URL still *looks* deep-linked.
+    """
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_site_url(
+        tmp_path, f"https://recotem.org/{RELEASE_MM}/docs/security#kid-rotation"
+    )
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "missing the '.html' suffix" in proc.stdout
+
+
+def test_a_scheme_less_reference_is_still_checked(tmp_path: Path) -> None:
+    """A bare host-and-path reference, with no scheme, must still be caught.
+
+    Three occurrences in this repository's own test suite are exactly that
+    shape -- an ``assert`` on the host, the version segment and a page name,
+    with no scheme in front -- and they are the ones most likely to rot
+    unnoticed: the extensionless literal is a *prefix* of the suffixed one, so
+    the assertion keeps passing after the product string is corrected, and
+    quietly stops being able to catch the regression it was written for.
+
+    Described in words rather than shown, and assembled from ``RELEASE_MM``
+    below, for the same reason every other fixture in this file is: ``tests`` is
+    one of the roots the real gate scans, so a spelled-out example here is a hit
+    the gate reads.  This test's first draft proved it by making the gate report
+    its own docstring.
+    """
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_site_url(tmp_path, f"recotem.org/{RELEASE_MM}/docs/plugin-authoring")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "missing the '.html' suffix" in proc.stdout
+
+
+def test_a_directory_url_is_not_reported_as_missing_the_suffix(
+    tmp_path: Path,
+) -> None:
+    """`…/docs/` and `…/guide/` resolve to index.html and must stay bare.
+
+    A check that demanded the suffix everywhere would order an operator to
+    break the five URLs in the tree that currently work.
+    """
+    script = _make_tree(tmp_path, site_url_version=RELEASE_MM)
+    _write_site_url(tmp_path, f"https://recotem.org/{RELEASE_MM}/guide/")
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -1044,3 +1454,128 @@ def test_an_untracked_file_outside_the_checked_paths_does_not_block(
     proc = _run(script, "v2.1.0")
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_this_repository_carries_no_stale_site_url() -> None:
+    """Read the real tree, and read it the way section 4b does.
+
+    ``test_a_release_ready_copy_of_this_repository_passes`` is the only other
+    case that touches the repository, and it cannot see this class of failure
+    for two reasons.  It copies six of the ten roots section 4b scans --
+    ``.claude``, ``tests``, ``CLAUDE.md`` and ``CONTRIBUTING.md`` are not among
+    them -- and before running the gate it rewrites *every* ``recotem.org/X.Y/``
+    in the copy to the synthetic release, which turns a stale URL into a fresh
+    one.  That is the right shape for the deployment pins, which move at
+    release; it is the wrong shape for these URLs, which move at the dev bump
+    and must already be correct by the time a tag is pushed.
+
+    So check the invariant directly instead of running the script: no file
+    under any scanned root may name a documentation line other than this
+    tree's own.  Version-agnostic -- the expected MAJOR.MINOR is read from
+    ``src/recotem/version.py`` -- so this does not go red during a bump.
+
+    Measured before this test existed: exactly one file in the tree carried a
+    concrete non-current URL, and ``check-release-tag.sh v2.1.0`` on an
+    otherwise release-ready copy exited 1 on it.  That gate runs inside
+    ``publish.yml`` and, on tag runs, ``docker.yml`` -- both triggered by the
+    tag -- so the failure would have arrived after the tag was pushed.
+    """
+    version_py = (REPO_ROOT / "src" / "recotem" / "version.py").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r'__version__ = "(\d+)\.(\d+)', version_py)
+    assert match, "could not read MAJOR.MINOR from src/recotem/version.py"
+    expected_mm = f"{match.group(1)}.{match.group(2)}"
+
+    # Mirrors SITE_ROOTS in the script.  A root added there and not here makes
+    # this test vouch for less than the gate checks, so keep them in step.
+    roots = (
+        "src",
+        "tests",
+        "examples",
+        "helm",
+        ".claude",
+        ".github",
+        "README.md",
+        "CLAUDE.md",
+        "CONTRIBUTING.md",
+        "pyproject.toml",
+    )
+    pattern = re.compile(r"recotem\.org/(\d+\.\d+)/")
+
+    def _files() -> list[Path]:
+        out: list[Path] = []
+        for rel in roots:
+            path = REPO_ROOT / rel
+            if path.is_file():
+                out.append(path)
+            elif path.is_dir():
+                out.extend(
+                    p
+                    for p in path.rglob("*")
+                    if p.is_file()
+                    and not p.is_symlink()
+                    and "__pycache__" not in p.parts
+                )
+        return out
+
+    stale: list[str] = []
+    total = 0
+    for path in _files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for found in pattern.finditer(line):
+                total += 1
+                if found.group(1) != expected_mm:
+                    rel_path = path.relative_to(REPO_ROOT)
+                    stale.append(f"{rel_path}:{lineno}: {found.group(0)}")
+
+    # The gate's own vacuity guard, restated: finding nothing means the scan
+    # stopped matching, not that there is nothing to check.
+    assert total, (
+        "no recotem.org/MAJOR.MINOR/ URL found under any scanned root, so this "
+        "test is vouching for nothing. Either the URLs moved or the pattern "
+        "stopped matching what the script matches."
+    )
+    assert not stale, (
+        f"these name a documentation line other than {expected_mm}, which is "
+        "what check-release-tag.sh refuses a tag over -- and it runs on the "
+        "tag, so the refusal arrives after the tag exists:\n  " + "\n  ".join(stale)
+    )
+
+
+def test_compiled_modules_beside_the_source_do_not_fail_the_scan(
+    tmp_path: Path,
+) -> None:
+    """A `__pycache__` in the tree must not be read as a stale URL.
+
+    `src` and `tests` are scanned roots, and the docstrings this scan reads get
+    compiled into the `.pyc` files that sit beside every module once the suite
+    has run.  grep matches them, and with `-o` prints `Binary file <path>
+    matches` rather than a URL -- a line with no `recotem.org/` in it, which the
+    loop then reads as a MAJOR.MINOR of its own and reports as stale.
+
+    CI checks out clean, so this never fires there.  The local invocation the
+    script's own usage line documents (`bash .github/scripts/check-release-tag.sh
+    v2.1.0   # before tagging`) fires it every time, which is precisely when a
+    maintainer is trying to learn whether the tag will be refused -- and the
+    answer they get is one spurious failure per compiled module.
+    """
+    script = _make_tree(tmp_path)
+    cache = tmp_path / "src" / "recotem" / "datasource" / "__pycache__"
+    cache.mkdir(parents=True)
+    # A NUL byte is what makes grep call a file binary; the URL beside it is
+    # what a real .pyc carries, since the scan's own targets are docstrings.
+    (cache / "csv.cpython-313.pyc").write_bytes(
+        b"\x00\x01\x02recotem.org/" + RELEASE_MM.encode() + b"/docs/x\x00"
+    )
+
+    proc = _run(script, "v2.1.0")
+    assert proc.returncode == 0, (
+        "a __pycache__ directory beside the source made the release gate refuse "
+        "an otherwise release-ready tree:\n" + proc.stdout + proc.stderr
+    )
+    assert "Binary file" not in proc.stdout, proc.stdout

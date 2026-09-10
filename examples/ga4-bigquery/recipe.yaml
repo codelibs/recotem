@@ -5,9 +5,15 @@
 #   https://support.google.com/analytics/answer/7029846
 #
 # Prerequisites:
-#   pip install recotem[bigquery]
+#   pip install "recotem[bigquery,gcs]"
 #   gcloud auth application-default login   # or use a Service Account key via
 #                                           # GOOGLE_APPLICATION_CREDENTIALS
+#
+#   Two extras, not one.  `bigquery` reads the GA4 export; `gcs` installs the
+#   gcsfs backend fsspec needs to WRITE the `gs://` output.path at the bottom
+#   of this file.  With `recotem[bigquery]` alone the write fails (exit 8)
+#   after the BigQuery scan has been billed and the whole Optuna search has
+#   run.  See README.md in this directory.
 #
 # Train:
 #   RECOTEM_RECIPE_GCP_PROJECT=my-gcp-project \

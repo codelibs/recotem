@@ -33,6 +33,7 @@ Tests:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -52,6 +53,42 @@ _DASH = shutil.which("dash")
 
 requires_helm = pytest.mark.skipif(_HELM is None, reason="helm not on PATH")
 requires_dash = pytest.mark.skipif(_DASH is None, reason="dash not on PATH")
+
+
+def test_ci_actually_has_the_tools_these_skips_are_gated_on() -> None:
+    """In CI a missing tool must fail, not silently skip the rendered-chart tests.
+
+    ``requires_helm`` gates every assertion in this file that renders the chart
+    with ``helm template`` rather than scanning its text.  Skipping is right
+    locally, where not every contributor has helm.  In CI it is the worst
+    outcome: the job stays green while the chart goes unrendered, and the
+    summary line says ``passed`` with no mention of what did not run.
+
+    Nothing installs helm in the ``pytest`` job of ``test.yml`` -- only the
+    ``manifests`` job of ``manifests.yml`` does.  The ``pytest`` job gets helm
+    from the ``ubuntu-24.04`` runner image, a dependency nobody declared and
+    GitHub can drop in any image release.  Measured on main: CI reports
+    ``3144 passed, 4 deselected`` with **zero** skips, so the gated tests do
+    run today; with helm off ``PATH`` this file and
+    ``test_health_probe_endpoints.py`` together give ``19 passed, 30 skipped``.
+
+    This asserts the tools exist whenever ``CI`` is set, so losing them is a red
+    build naming the tool rather than a quiet drop in coverage.  ``dash`` is
+    included for the same reason: it is what proves the entrypoint script runs
+    under the runtime image's ``/bin/sh``.
+    """
+    if not os.environ.get("CI"):
+        pytest.skip("not running in CI; local skips are intentional")
+    missing = [
+        name for name, path in (("helm", _HELM), ("dash", _DASH)) if path is None
+    ]
+    assert not missing, (
+        f"{missing} not on PATH in CI. These gate the skipif marks in this "
+        "file -- 30 test items for helm alone, measured -- so without them the "
+        "job goes green having rendered nothing. Install them in the workflow "
+        "step rather than relying on the runner image, which is where they come "
+        "from today and is not a declared dependency."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +571,7 @@ def test_allowed_hosts_always_admits_the_probe_host(
     log shows only ordinary rejected requests.
 
     The ingress-derived branch always prepended `localhost`; the operator
-    override branch did not, and `docs/deployment/k8s.md` tells operators to
+    override branch did not, and `https://recotem.org/2.2/docs/deployment/kubernetes.html` tells operators to
     use exactly that branch.
     """
     docs = _load_all_strict(_helm_template(*set_args))
@@ -635,7 +672,7 @@ def test_example_spread_constraint_does_not_deadlock_a_read_write_once_volume() 
 #
 # /v1/health/ready still 503s on a cold store, so pointing the startup probe
 # there keeps the first-install guarantee that these tests and
-# docs/deployment/k8s.md both describe.
+# https://recotem.org/2.2/docs/deployment/kubernetes.html both describe.
 # ---------------------------------------------------------------------------
 
 # The strict endpoint answers "is EVERY recipe present?".  No probe may read
@@ -936,7 +973,7 @@ def test_object_store_init_container_security_context_is_operator_overridable() 
 #
 # Kubernetes injects one legacy Docker-link variable per Service in the
 # namespace, named <SERVICE>_PORT and valued `tcp://<clusterIP>:<port>`.  The
-# chart's Service is `recotem` by default (docs/deployment/k8s.md installs the
+# chart's Service is `recotem` by default (https://recotem.org/2.2/docs/deployment/kubernetes.html installs the
 # release under that name), so every pod created after it inherits
 # `RECOTEM_PORT=tcp://10.96.139.23:8080`.  RECOTEM_PORT is fatal when it does
 # not parse, so measured in that namespace:
@@ -1051,7 +1088,7 @@ def test_allow_kubelet_probes_warning_names_the_client_traffic_loss() -> None:
 # written against the caps resolved in ITS OWN environment, so an operator who
 # lowers a cap on serve alone leaves the train job on the default: it writes an
 # over-cap artifact, exits 0 with no warning, and serve refuses it
-# (`reason: size_cap`, /v1/health/ready 503). `docs/deployment/k8s.md` tells
+# (`reason: size_cap`, /v1/health/ready 503). `https://recotem.org/2.2/docs/deployment/kubernetes.html` tells
 # operators to lower `RECOTEM_MAX_PAYLOAD_BYTES`, which is the walk-in.
 # ---------------------------------------------------------------------------
 

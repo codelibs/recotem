@@ -57,6 +57,149 @@ catches a stale lockfile at the tag. `--frozen` does not — it installs from th
 lockfile without validating it against `pyproject.toml` and exits 0 on a bump
 that forgot `uv lock`.
 
+## Documentation-site URLs — bump at the DEV bump (Phase 5), NOT at release
+
+This repository carries no `docs/` tree. Every documentation pointer in it is a
+**versioned** URL into the site: `https://recotem.org/X.Y/docs/<page>`. Those
+URLs and the deployment pins in the next section are mirror images, and the two
+cadences are opposite — which is why the two sections sit next to each other:
+
+| | names | moves at |
+|---|---|---|
+| documentation-site URL | the docs line *this tree* belongs to | the **dev bump** (Phase 5) |
+| deployment image pin | a *published image* | **release** (Phase 2), only ever to a released version |
+
+The segment is `MAJOR.MINOR`, never the full release: a patch does not create a
+documentation line, so 2.1.1 still points at `/2.1/`. The moment
+`pyproject.toml` becomes `X.(Y+1).0.dev0`, every URL still naming `X.Y`
+describes the previous line — so the bump belongs in the **same commit as the
+`.dev0` bump**, never at release, where the tree is still the version being
+shipped.
+
+Several of these URLs ship where nobody can correct them afterwards: the text of
+a `DataSourceError`, the JSON Schema `recotem schema` emits for IDEs, the HELP
+string served at `/v1/metrics`, and `README.md` as rendered on PyPI. A stale
+segment there points a reader at another version's documentation for the whole
+life of that release. That is why the URLs are versioned at all, and why
+`recotem-docs` keeps every `X.Y/` directory forever rather than deleting it at
+promote (see `references/docs-site-sync.md`).
+
+`check-release-tag.sh` reads these at the tag and refuses one that disagrees
+with the tag's own `MAJOR.MINOR`, so a skipped Phase 5 bump is caught by the
+release it would otherwise mislabel rather than published. Do not restate its
+`SITE_ROOTS` here — read them, because a copy of that list is how this
+paragraph came to name `.github/scripts/` as unwatched when it is watched:
+
+```bash
+grep -m1 '^SITE_ROOTS=' .github/scripts/check-release-tag.sh
+```
+
+The commands below scan the whole tree, which is a deliberate superset — a URL
+outside those roots is bumped here but watched by nothing, so leaving it to a
+hand-maintained root list is how one goes stale. Measured on this tree by
+planting a `/9.9/` URL in each candidate and running all three gate scripts,
+exactly one such location survives today: **`.dockerignore`**. `.github` is a
+`SITE_ROOT`, so `.github/scripts/` and `.github/workflows/` are covered.
+
+### Bump the site URLs (Phase 5 only)
+
+Same portability rules as the pin bump below — `perl -pi -e` rather than
+`sed -i`, and an array subscripted `[@]` rather than an unquoted variable. That
+second rule bites here in a new place: the *exclusion flags* have to be an array
+too. As a string, `grep … $GO .` is one argument under `zsh`, so grep reads
+`--exclude-dir=.git --exclude-dir=.venv --exclude-dir=__pycache__` as a single
+directory name, matches nothing, and **silently excludes nothing** — measured on
+this tree as 70 files instead of 69, the extra one being
+`.venv/lib/python3.13/site-packages/recotem-2.1.0.dev0.dist-info/METADATA`,
+which `perl -pi` would then rewrite inside the virtualenv. Two further traps are
+specific to this scan:
+
+- **Do not reach for `grep -rlZ … | xargs -0`.** GNU grep's `-Z` is `--null`,
+  so on Linux it looks like the safe way to pass filenames. macOS ships BSD
+  grep 2.6.0-FreeBSD, where **`-Z` is `--decompress`** ("behave as zgrep"): the
+  list comes out newline-separated, `xargs -0` hands the whole blob to `perl`
+  as one filename, and the run ends
+
+  ```
+  Can't open ./README.md
+  ./examples/k8s/README.md
+  ./src/recotem/models.py
+  : No such file or directory.
+  ```
+
+  **with the pipeline exiting 0 and not one file changed** — measured. The
+  `while IFS= read -r` array below needs no `-Z` and behaves identically in
+  `bash` and `zsh`.
+- **Pass `-I` and exclude `__pycache__`.** `__pycache__/*.pyc` embeds these URLs
+  in compiled docstrings and error strings, so a plain `grep -rl` returns tens
+  of bytecode caches on top of the ~70 files that carry the source (measured:
+  112 against 69, and the ratio moves with whatever was last imported).
+  `perl -pi` would rewrite them, and the survey is poisoned too: for a binary
+  hit BSD grep prints `Binary file … matches` instead of the match, so
+  `…cpython-313-pytest-9.1.1.pyc` contributes a `9.1` to `sort -u` — which is
+  how a two-value `OLD_MM` reaches the guard below.
+
+```bash
+# An array, not a string: see above. `-I` skips binaries.
+GO=(-I --exclude-dir=.git --exclude-dir=.venv --exclude-dir=__pycache__)
+
+# Read OLD_MM off the tree; do not assume it. More than one value means the
+# tree already names two docs lines, which the bump would only half-fix.
+OLD_MM=$(grep -rhoE 'recotem\.org/[0-9]+\.[0-9]+/' "${GO[@]}" . \
+         | grep -oE '[0-9]+\.[0-9]+' | sort -u)
+NEW_MM=2.2      # substitute: MAJOR.MINOR of the dev version Phase 5 just set
+
+[ "$(printf '%s\n' "$OLD_MM" | wc -l | tr -d ' ')" -eq 1 ] || {
+  echo "FAIL: the tree names more than one docs line:"; echo "$OLD_MM"
+  echo "Find them, then decide: a genuinely stale URL is bumped with the rest;"
+  echo "a test fixture that spells a stale URL literally has to stop doing so,"
+  echo "because neither this command nor check-release-tag.sh can tell it from"
+  echo "the real thing."; exit 1; }
+[ "$OLD_MM" != "$NEW_MM" ] || { echo "FAIL: substitute NEW_MM first"; exit 1; }
+OLD_RE=$(printf '%s' "$OLD_MM" | sed 's/\./\\./g')   # the dot is a literal
+
+# Survey first — read the pages, not just the count. A URL whose page was
+# renamed on the site is a 404 that this bump happily carries forward.
+grep -rnoE 'recotem\.org/[0-9]+\.[0-9]+/[^) "]*' "${GO[@]}" . | sort
+
+# Bump
+URLS=()
+while IFS= read -r f; do URLS+=("$f"); done < <(
+  grep -rlE "recotem\.org/${OLD_RE}/" "${GO[@]}" . | sort)
+(( ${#URLS[@]} )) || { echo "FAIL: nothing matched — the pattern is broken"; exit 1; }
+printf 'will bump: %s\n' "${URLS[@]}"
+
+perl -pi -e "s{recotem\.org/\Q${OLD_MM}\E/}{recotem.org/${NEW_MM}/}g" "${URLS[@]}"
+
+# Verify — both lines are required
+git diff --stat                                     # MUST be non-empty
+STALE=$(grep -rnE "recotem\.org/${OLD_RE}/" "${GO[@]}" . || true)
+[ -z "$STALE" ] || { echo "FAIL: URLs still on $OLD_MM:"; echo "$STALE"; exit 1; }
+echo "OK: every documentation-site URL now names $NEW_MM"
+```
+
+**An empty `git diff --stat` is a failure, not a pass** — the same rule the pin
+bump states below, and the reason the survey is printed rather than counted.
+
+One consequence of the gate's `tests` root is worth knowing before it costs a
+tag: a test that asserts on a *stale* site URL by spelling it out — an
+expected-output assertion containing `recotem.org/` followed by a literal
+older `MAJOR.MINOR` — is, to both this command and `check-release-tag.sh`,
+indistinguishable from a stale URL. The scan is a plain grep; it has no notion
+of a string being quoted inside a test. Build such fixtures so the literal
+never appears in the file.
+
+That rule binds this paragraph too, which is why it describes the shape in
+words instead of showing it. Spelling the example out cost exactly one tag:
+`check-release-tag.sh v2.1.0` refused the release naming this file, because
+the illustration was itself the only stale URL in the tree.
+
+The release skill's own files deliberately carry **no** concrete
+`recotem.org/<number>/` string — only `X.Y` placeholders and `${OLD_MM}` /
+`${NEW_MM}` variables. Writing a real one here would put this runbook inside the
+blast radius of the command it documents, and inside the gate's `.claude` root,
+for URLs that are templates rather than pointers.
+
 ## Deployment image tags — bump at release, NOT for dev cycles
 
 These pin a *published* Docker image, so they only ever move to a real released
@@ -72,19 +215,21 @@ it, so `appVersion` is a fallback that never fires); it was added to the guard
 after a tagged release was shown to pass with it left on the previous version.
 
 The script also scans the deployment pins outside the chart: every
-`ghcr.io/codelibs/recotem:X.Y.Z` under `examples/` **and** `docs/`, every
-`app.kubernetes.io/version` label under both, and the copy-pasteable
-`values.yaml` excerpt in `docs/deployment/k8s.md` (a bare `tag: "X.Y.Z"` key
-inside a fenced block). Each of those three scans is also refused when it
-matches nothing at all, so moving a pin out of the scanned paths is a failure
-rather than a silent pass. Rows 3–6 below are therefore covered in full.
+`ghcr.io/codelibs/recotem:X.Y.Z` and every `app.kubernetes.io/version` label
+under `examples/`. Both scans are refused when they match nothing at all, so
+moving a pin out of the scanned path is a failure rather than a silent pass.
+**Every row of the table below is therefore covered in full.**
 
-**One** version string is still checked by **step 3 of the block below and by
-nothing else** — the script does not see it, so that step is not optional:
-
-| Not machine-checked | Why the script misses it |
-|---|---|
-| `docs/deployment/docker.md` the "already pin `X.Y.Z`" sentence | prose, matching no pattern the script scans for |
+Both scans used to read `examples docs`, and a third — an anchored
+`tag: "X.Y.Z"` — existed only to reach the copy-pasteable `values.yaml` excerpt
+in `docs/deployment/k8s.md`, the one pin in that tree with no `ghcr.io/` prefix
+to match. That tree is gone; the deployment pages live in `recotem-docs` now and
+their pins are bumped there, in Phase 4B. The excerpt scan was not simply
+dropped: deleting `docs/` took it from exactly one hit to zero, which its own
+vacuity guard would have read as "this check stopped matching" and used to
+refuse every future tag. It was **replaced** by the documentation-site URL scan
+described in the section above, so the number of things the script vouches for
+did not quietly shrink by one.
 
 | File | What to change |
 |------|----------------|
@@ -93,22 +238,15 @@ nothing else** — the script does not see it, so that step is not optional:
 | `examples/k8s/serve-deployment.yaml` | `image:` tag + `app.kubernetes.io/version` label |
 | `examples/k8s/cronjob.yaml` | `image:` tag |
 | `examples/k8s/bootstrap-job.yaml` | `image:` tag |
-| `docs/deployment/k8s.md` | `image:` tags + the `values.yaml` excerpt |
-| `docs/deployment/docker.md` | the "already pin ..." sentence — **only that one** |
 
-### Real pins vs. illustrative examples
-
-`docs/deployment/docker.md` contains version strings that are *examples*, not
-pins, and they must not be bumped:
-
-- the tag table: ``| `2.0.0`, `2.0.1`, ... (semver `MAJOR.MINOR.PATCH`)`` — a
-  blanket replace turns this into ``| `2.1.0`, `2.0.1`, ...``, which is nonsense.
-- the same paragraph's "always pin to a semver tag (e.g. `2.0.0`)" — an
-  illustration of the *form*, not a claim about the current release.
-
-Only "The Helm chart and `examples/k8s/` already pin `2.0.0`" is a factual claim
-that must track the release. **A blanket `s/$PREV/$NEW/g` over this file is
-wrong.** The commands below are targeted for that reason.
+The two locations that used to complicate this list both left with `docs/`:
+`docs/upgrading.md`, whose pins named the release being upgraded *from* and so
+were exempted from the scan, and `docs/deployment/docker.md`, whose "already pin
+`X.Y.Z`" sentence sat on a line with an illustrative `e.g. 2.0.0` that a blanket
+`s/$PREV/$NEW/g` corrupted. Both hazards now live only in `recotem-docs`, and
+the Phase 4B section at the end of this file still carries the targeted `perl`
+and the warning against a blanket replace for them. Do not reintroduce either
+concern here.
 
 ### Bump the pins
 
@@ -124,8 +262,7 @@ string. An array subscripted with `[@]` behaves identically in both shells.
 ```bash
 PINS=(helm/recotem/values.yaml helm/recotem/Chart.yaml \
       examples/k8s/serve-deployment.yaml examples/k8s/cronjob.yaml \
-      examples/k8s/bootstrap-job.yaml \
-      docs/deployment/k8s.md)
+      examples/k8s/bootstrap-job.yaml)
 
 # guards: refuse to run on an unsubstituted placeholder or a wrong PREV
 [ "$NEW" != "X.Y.Z" ] || { echo "substitute NEW first"; exit 1; }
@@ -140,10 +277,7 @@ perl -pi -e "s/^version: \Q$PREV\E$/version: $NEW/; \
              s/^appVersion: \"\Q$PREV\E\"$/appVersion: \"$NEW\"/" \
   helm/recotem/Chart.yaml
 
-perl -pi -e "s/\Qalready pin \`$PREV\`\E/already pin \`$NEW\`/g" \
-  docs/deployment/docker.md
-
-git diff --stat "${PINS[@]}" docs/deployment/docker.md   # MUST be non-empty
+git diff --stat "${PINS[@]}"   # MUST be non-empty
 ```
 
 **An empty diff means the replacement missed — that is a failure, not a pass.**
@@ -165,29 +299,33 @@ manifests on the last released version, and this block would flag them.
 # 1. every package-version location agrees.
 #    check-release-tag.sh is authoritative for pyproject.toml, version.py,
 #    helm/recotem/Chart.yaml (version: and appVersion:) and
-#    helm/recotem/values.yaml (image.tag), plus the ghcr.io pins under
-#    examples/ and docs/ and the app.kubernetes.io/version label under
-#    examples/: it is the same script the `guard` job of both publish.yml and
+#    helm/recotem/values.yaml (image.tag), plus the ghcr.io pins and the
+#    app.kubernetes.io/version label under examples/, and — on a different
+#    cadence, see "Documentation-site URLs" above — every recotem.org/X.Y/ URL
+#    in the tree: it is the same script the `guard` job of both publish.yml and
 #    docker.yml runs at the tag, it fails closed, and it checks every one of
 #    them against the tag *together* — so it catches a partial bump
 #    (pyproject.toml moved, version.py not; or the package moved and the chart
 #    did not) that greps read by eye do not. uv.lock is not in its scope;
-#    `uv lock --check` covers that.  Step 3 is still required: see the
-#    "not machine-checked" table above for the one string it alone catches.
+#    `uv lock --check` covers that.
 bash .github/scripts/check-release-tag.sh "v$NEW"   # MUST print "OK: ..."
 uv lock --check                                     # MUST exit 0
 
 # 2. the installed package reports the right version
 uv run python -c "from recotem.version import __version__; print(__version__)"
 
-# 3. every deployment pin equals the release version
+# 3. every deployment pin equals the release version.
+#    Since docs/ was deleted this no longer catches anything the script misses
+#    — every row of the table above is now machine-checked. Keep it anyway: it
+#    reads the same files with a *different* pattern and a hand-written file
+#    list, so it is the check that notices if a scan root or regex in the
+#    script is ever narrowed while still matching enough to clear the script's
+#    own vacuity guard. It costs a second.
 PINS=(helm/recotem/values.yaml helm/recotem/Chart.yaml \
       examples/k8s/serve-deployment.yaml examples/k8s/cronjob.yaml \
-      examples/k8s/bootstrap-job.yaml \
-      docs/deployment/k8s.md docs/deployment/docker.md)
+      examples/k8s/bootstrap-job.yaml)
 PAT='ghcr\.io/codelibs/recotem:[0-9][^ "]*|^ *tag: "[0-9][^"]*"|^version: [0-9][^ ]*'
 PAT="$PAT"'|^appVersion: "[0-9][^"]*"|app\.kubernetes\.io/version: "[0-9][^"]*"'
-PAT="$PAT"'|already pin `[0-9][^`]*`'
 
 ALL=$(grep -onE "$PAT" "${PINS[@]}")
 [ -n "$ALL" ] || { echo "FAIL: no pins matched — the check itself is broken"; exit 1; }
@@ -215,23 +353,29 @@ In the separate `recotem-docs` repo the same pins live in EN + JA:
   tags and the `values.yaml` excerpt
 
 **These four are only the root tree.** The same four files are duplicated in
-every version directory — the in-development preview (`2.1/docs/deployment/…`,
-`2.1/ja/docs/deployment/…`) carries its own copies, and so will any future
-preview. A hardcoded four-file list silently leaves the preview tree pinned to
-the previous release, and the preview is exactly what Phase 4A promotes to the
-root at the next minor — so a pin missed here becomes the root's pin one
-release later.
+every version directory. A hardcoded four-file list silently leaves those
+copies pinned to the previous release — and under the version-directory
+lifecycle (`references/docs-site-sync.md`) that matters twice over: the
+release's own `X.Y/` directory is a *duplicate of the root*, served for the
+whole support window at the URLs this repository bakes into shipped source, and
+the `X.(Y+1)/` preview is what Phase 4A promotes to the root at the next minor,
+so a pin missed there becomes the root's pin one release later.
 
 Do not hand-maintain the file list. Derive it, and derive it from the same
 pattern the verification uses, so the two cannot disagree:
 
 ```bash
-# Every frozen/archived version directory. These keep the version they
-# document and must NOT be rewritten. Each minor/major release adds the
-# directory its Phase 4A freezes: `2\.0` is already listed for the 2.1
-# release's freeze, so a 2.1 release adds nothing here — the next minor, which
-# freezes 2.1, adds `2\.1`. The STRAY assertion below fails if this list has
-# fallen behind, so it does not have to be remembered.
+# Every archived version directory: one whose line the root has already moved
+# past. These keep the version they document and must NOT be rewritten.
+#
+# The rule is "strictly below the release's X.Y", not "everything versioned".
+# A version directory is created once and never deleted, so `X.Y/` still exists
+# while X.Y is the current stable — as a duplicate of the root, documenting the
+# very release being made. It is LIVE and must be bumped with the root; it
+# becomes an archive only when the next minor moves the root past it.
+#
+# So: releasing 2.1.0 or any 2.1.x → archives are 1.0 and 2.0. Releasing 2.2.0
+# → 2.1 joins them.
 ARCHIVE_RE='(^|/)(1\.0|2\.0)/'
 
 PAT='recotem:[0-9][^ "]*|tag: "[0-9][^"]*"|already pin `[0-9][^`]*`|すでに `[0-9][^`]*` にピン留め'
@@ -245,19 +389,19 @@ while IFS= read -r f; do DOCS+=("$f"); done < <(
 (( ${#DOCS[@]} )) || { echo "FAIL: no pinned docs found — discovery is broken"; exit 1; }
 printf 'will bump: %s\n' "${DOCS[@]}"
 
-# Phase 4B runs AFTER Phase 4A — freezing after bumping copies the new
-# version's pins into the archive that is supposed to document the old one
-# (SKILL.md, Phase 4). Assert the order instead of trusting it: once 4A has
-# promoted the preview into the root and deleted it, no version directory may
-# remain in the live set. At a patch release 4A is skipped and the preview is
-# legitimately still live — that is the only case where STRAY is non-empty.
-# This also fires when ARCHIVE_RE has fallen behind, since a freshly frozen
-# directory it does not match lands in DOCS too.
-STRAY=$(printf '%s\n' "${DOCS[@]}" | sed 's#^\./##' | grep -E '^[0-9]+\.[0-9]+/' || true)
-case "$NEW" in
-  *.0) [ -z "$STRAY" ] || { echo "FAIL: run Phase 4A first, or ARCHIVE_RE is missing an archive:"; echo "$STRAY"; exit 1; } ;;
-  *)   [ -n "$STRAY" ] || echo "note: no preview tree in the live set — expected one at a patch release" ;;
-esac
+# The release's own X.Y/ directory MUST be in the live set. It is a duplicate
+# of the root and it is what the product's baked recotem.org/X.Y/ URLs resolve
+# to for this release's entire support window, so a pin left behind there is
+# read by exactly the operators running this version. Its absence means either
+# ARCHIVE_RE wrongly archives the directory being released, or the directory
+# does not exist — which for a minor release means Phase 4A has not run.
+MM=$(printf '%s' "$NEW" | cut -d. -f1,2)   # cut, not ${NEW%.*}: NEW is X.Y.Z here
+LIVE_DIRS=$(printf '%s\n' "${DOCS[@]}" | sed 's#^\./##' \
+            | grep -oE '^[0-9]+\.[0-9]+/' | sort -u)
+echo "live version directories: ${LIVE_DIRS:-<none>}"
+printf '%s\n' "$LIVE_DIRS" | grep -qxF "$MM/" || {
+  echo "FAIL: $MM/ is not in the live set — ARCHIVE_RE archives it, or it does not exist"
+  exit 1; }
 
 perl -pi -e "s/\Qrecotem:$PREV\E/recotem:$NEW/g; \
              s/\Qtag: \"$PREV\"\E/tag: \"$NEW\"/g; \
@@ -274,15 +418,22 @@ kind, not from when you happen to run the bump:
 
 | Release | Phase 4A | Live trees | Files |
 |---|---|---|---|
-| minor / major (`X.Y.0`) | ran | root only (the preview was promoted and deleted) | 4 |
-| patch (`X.Y.Z`, `Z > 0`) | skipped | root + the still-live `X.(Y+1)/` preview | 8 |
+| minor / major (`X.Y.0`) | ran | root + the just-promoted `X.Y/` (the `X.(Y+1)/` preview does not exist yet — Phase 5 seeds it) | 8 |
+| patch (`X.Y.Z`, `Z > 0`) | skipped | root + `X.Y/` + the `X.(Y+1)/` preview | 12 |
 
 Four files per tree: `docs/deployment/docker.md`,
 `docs/deployment/kubernetes.md`, and their `ja/` counterparts. A different count
 means a tree is being skipped or an extra one has been picked up — stop and read
-the list before bumping. **Never "fix" the `STRAY` failure by running the bump
-before Phase 4A**: that is the forbidden order, and it is invisible afterwards
-(see below).
+the list before bumping.
+
+Note what the order buys and what it no longer buys. Since a version directory
+is kept rather than deleted, 4B bumps the root **and** `X.Y/`, and 4A's promote
+copies one over the other — so running 4B first no longer loses the pin bump the
+way it once did. **One hazard survives, and it is the one that matters at the
+2.1.0 release:** the one-time freeze of the outgoing root into `2.0/`. A freeze
+run after the bump archives a `2.0/` that claims the version being released, and
+`git diff` cannot see it because the frozen directory is brand new and untracked.
+That is what the `LEAKED` check below is for; do not skip it.
 
 The `docker.md` files share the "already pin" / "すでに...ピン留め" sentence with
 an illustrative "e.g. `2.0.0`" / "例: `2.0.0`" on the same line — the targeted
@@ -312,10 +463,12 @@ echo "OK: no committed archive was rewritten"
 
 # ...and no archive may CONTAIN $NEW. An archive documents the version in its
 # own name, so $NEW inside one means Phase 4A froze a root that this bump had
-# already rewritten — the forbidden order. `git diff` cannot see that: the
-# frozen directory is brand new and still untracked, so it has no diff, and
-# ARCHIVE_RE keeps it out of the live check above. Without this both guards
-# print OK over an archive claiming the wrong version.
+# already rewritten — the forbidden order. That freeze happens exactly once,
+# at the 2.1.0 release (see docs-site-sync.md), which is also the only release
+# where this check can fire. `git diff` cannot see it: the frozen directory is
+# brand new and still untracked, so it has no diff, and ARCHIVE_RE keeps it out
+# of the live check above. Without this both guards print OK over an archive
+# claiming the wrong version.
 ARCHIVED=$(grep -rnoE "$PAT" --include='*.md' . | grep -v node_modules | grep -E "$ARCHIVE_RE" || true)
 LEAKED=$(printf '%s\n' "$ARCHIVED" | grep -F "$NEW" || true)
 [ -z "$LEAKED" ] || { echo "FAIL: an archive carries $NEW (was the freeze run after the bump?):"; echo "$LEAKED"; exit 1; }

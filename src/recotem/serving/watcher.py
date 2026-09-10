@@ -39,6 +39,7 @@ import structlog
 
 from recotem._artifact_identity import (
     RECIPE_NAME_MSG_PREFIX,
+    check_artifact_recipe_hash,
     check_artifact_recipe_name,
 )
 from recotem._features import (
@@ -200,6 +201,15 @@ class _RecipeWatchState:
 
     recipe: Any  # Recipe
     artifact_path: str
+    #: The most recently *parsed* body of this recipe's YAML, refreshed on
+    #: every successful rescan.  ``recipe`` above is deliberately NOT
+    #: refreshed: it is the body the currently-served model was built from,
+    #: and re-pointing ``output.path`` or ``item_metadata`` underneath a live
+    #: model is a behaviour change, not a warning fix.  This field exists so
+    #: the drift warning can compare the artifact against the recipe *as it
+    #: is on disk right now* without altering what is served.  ``None`` until
+    #: the first rescan after startup, where ``recipe`` is still current.
+    latest_recipe: Any = None
     last_marker: Any = None
     last_sha256: str = ""
     #: Last-known contents of the ``.sha256`` sidecar pointer file.
@@ -250,6 +260,15 @@ class _RecipeWatchState:
     #: successful YAML reparse says nothing about a broken artifact, so blanket
     #: clearing would hide a genuine load failure from ``/v1/health/details``.
     yaml_rescan_error: bool = False
+    #: True while the outstanding ``last_load_error`` came from the *stat* side
+    #: — the file was missing, the stat raised, or the stat future timed out —
+    #: rather than from reading or building the artifact.  A stat failure says
+    #: nothing about the bytes, so a later successful stat on the unchanged
+    #: marker is proof enough that it has passed and the error may be retracted.
+    #: A *load* failure is not retractable that way: the marker being unchanged
+    #: means the same bytes are still there, so it stays until a read proves
+    #: otherwise.  See ``_retract_stale_error``.
+    stat_error_outstanding: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -723,6 +742,14 @@ class ArtifactWatcher(threading.Thread):
                 # stub (artifact_path=""), update the state now that the YAML
                 # parsed successfully so _poll_artifacts uses the correct path.
                 existing_state = self._states[recipe.name]
+                # The YAML parsed, so this is the recipe as it is on disk now.
+                # Record it for the drift comparison regardless of which
+                # recovery branch below does or does not fire; without this the
+                # comparison keeps using the body read at process start and is
+                # wrong in both directions (it warns after a retrain that made
+                # the two agree, and stays silent when an edit made them
+                # disagree).
+                existing_state.latest_recipe = recipe
                 if not existing_state.artifact_path and recipe.output.path:
                     logger.info(
                         "recipe_yaml_failure_recovered",
@@ -887,6 +914,9 @@ class ArtifactWatcher(threading.Thread):
                         _failed_recipe,
                         f"stat timeout after {_per_future_timeout:.0f}s",
                         reason="timeout",
+                        # A timed-out stat says nothing about the bytes; the
+                        # next stat that answers in time retracts it.
+                        stat_class=True,
                     )
                     fut.cancel()
                 pending = set()
@@ -945,6 +975,7 @@ class ArtifactWatcher(threading.Thread):
                 if entry is not None and entry.last_load_error is None:
                     logger.warning("artifact_disappeared", name=name)
             self._registry.set_load_error(name, error_msg)
+            state.stat_error_outstanding = True
             _metrics.inc_artifact_load_failure(name, reason="read")
             return
 
@@ -965,6 +996,27 @@ class ArtifactWatcher(threading.Thread):
             # poll and then returns to the original ETag on the next
             # poll would re-trigger a full reload unnecessarily.
             state.last_marker = marker
+            # Retract an outstanding error the marker has just disproved.
+            # ``last_marker`` only ever advances on a successful load, so
+            # reaching here means the file is once again the artifact in
+            # memory.  Two faults end that way and neither reaches the load
+            # path that would otherwise clear the annotation:
+            #
+            #   * a transient stat failure (S3 throttle, NFS stale handle, PVC
+            #     remount, a path briefly absent) — the stat that just
+            #     succeeded is the whole of what it claimed was wrong; and
+            #   * a broken artifact rolled back with an mtime-preserving copy
+            #     (``cp -p``, ``rsync -t``, a snapshot restore), which puts the
+            #     original marker back.
+            #
+            # A load failure recorded against *this* marker is excluded: the
+            # sidecar path can trigger a read without the marker moving, and
+            # there the same marker really does still mean the same broken
+            # bytes.
+            if state.stat_error_outstanding or (
+                state.failed_marker is not None and state.failed_marker != marker
+            ):
+                self._retract_stale_error(name, state, reason="marker_restored")
             sidecar_changed = _check_sidecar_changed(state)
             if not sidecar_changed:
                 return
@@ -1024,10 +1076,23 @@ class ArtifactWatcher(threading.Thread):
             if marker is not None:
                 state.last_marker = marker
             self._clear_load_backoff(state)
+            # These bytes hash to the artifact that is already serving, so
+            # whatever the last failure was — a broken artifact that has since
+            # been rolled back, a transient read error — it is over, and the
+            # entry in memory is the artifact on disk.  Retract the annotation:
+            # this short-circuit returns before ``_build_entry``, so the
+            # successful-load path below never runs and nothing else would.
+            self._retract_stale_error(name, state, reason="bytes_unchanged")
             return
 
         try:
-            entry = self._build_entry(name, state.recipe, data, artifact_path)
+            entry = self._build_entry(
+                name,
+                state.recipe,
+                data,
+                artifact_path,
+                drift_recipe=state.latest_recipe or state.recipe,
+            )
         except ArtifactError as exc:
             kid_log, kid_reason = _extract_kid_safe(data)
             if kid_reason is not None:
@@ -1108,6 +1173,9 @@ class ArtifactWatcher(threading.Thread):
         state.last_sha256 = sha256
         state.last_marker = new_marker
         self._clear_load_backoff(state)
+        # The fresh entry carries last_load_error=None, so any outstanding
+        # stat-side annotation is gone with it.
+        state.stat_error_outstanding = False
         # Reset post-HMAC deserialization failure streak on successful load.
         self._post_hmac_failure_streak.pop(name, None)
         # Clear the repeat-suppression signature so the next failure — even an
@@ -1124,9 +1192,22 @@ class ArtifactWatcher(threading.Thread):
         )
 
     def _build_entry(
-        self, name: str, recipe: Any, data: bytes, artifact_path: str
+        self,
+        name: str,
+        recipe: Any,
+        data: bytes,
+        artifact_path: str,
+        *,
+        drift_recipe: Any = None,
     ) -> ModelEntry:
-        """Parse, verify, deserialize data and return a fresh ModelEntry."""
+        """Parse, verify, deserialize data and return a fresh ModelEntry.
+
+        *recipe* is the body this model is being built from -- it decides
+        ``item_metadata`` and everything else that reaches the entry.
+        *drift_recipe* is compared against the artifact's ``recipe_hash`` and
+        is only ever read for that warning; it defaults to *recipe* so the
+        startup path, which has no separate on-disk body yet, is unchanged.
+        """
         from recotem.artifact.format import parse_header_from_bytes
         from recotem.artifact.signing import unpickle_payload, verify_hmac
 
@@ -1170,6 +1251,15 @@ class ArtifactWatcher(threading.Thread):
         # matter what the rest of the header says, and the check needs only
         # the dict already in hand — no payload, no version lookup.
         check_artifact_recipe_name(header_dict, name=name)
+        # Mirrored from the startup path deliberately: an artifact that
+        # arrives by hot-swap after a recipe edit is the same staleness,
+        # and a check wired into only one of the two load paths is the
+        # divergence #270 had to correct.
+        check_artifact_recipe_hash(
+            header_dict,
+            recipe=drift_recipe if drift_recipe is not None else recipe,
+            name=name,
+        )
 
         # Preflight the irspack version before deserializing: a skewed artifact
         # fails inside the C++ __setstate__ with an error that names neither
@@ -1261,6 +1351,61 @@ class ArtifactWatcher(threading.Thread):
         state._last_failure_signature = signature
         return True
 
+    def _retract_stale_error(
+        self, name: str, state: _RecipeWatchState, *, reason: str
+    ) -> None:
+        """Clear a ``last_load_error`` the watcher has since proved obsolete.
+
+        ``last_load_error`` used to be written by every failure path and
+        cleared by exactly one: a *successful* load, which replaces the whole
+        entry.  Both of the watcher's "nothing to do" fast paths return before
+        that, so a recipe whose fault had passed kept reporting the fault:
+
+        * a transient stat failure, then a successful stat on the same marker —
+          the poll never reaches the load path at all; and
+        * a broken artifact rolled back to the bytes already in memory — the
+          load path is reached but short-circuits on the sha256 comparison.
+
+        In both cases ``/v1/health/details`` answered 503 ``degraded`` for the
+        life of the process while ``/v1/recipes/{name}:recommend`` served
+        normally, and the only remedies were writing a *different* artifact or
+        restarting.
+
+        Two outstanding errors are deliberately left alone.  ``yaml_rescan_error``
+        marks a recipe whose YAML stopped parsing: nothing about the artifact
+        speaks to that, and only a successful reparse may retract it (the same
+        asymmetry that flag already documents in the other direction).  The
+        ``_mark_all_unhealthy`` sentinel has its own recovery path
+        (``_clear_watcher_unhealthy_errors``) keyed to the poll-loop error
+        streak, so retracting it here would race that bookkeeping.
+        """
+        if state.yaml_rescan_error:
+            return
+        entry = self._registry.get(name)
+        if entry is None or entry.last_load_error is None:
+            return
+        if entry.last_load_error == self._WATCHER_UNHEALTHY_SENTINEL:
+            return
+        previous = entry.last_load_error
+        self._registry.set_load_error(name, None)
+        state.stat_error_outstanding = False
+        # Disarm, so a retraction fires once per fault rather than on every
+        # tick for as long as the marker stays put.  Without this the fast
+        # path's ``failed_marker != marker`` test keeps holding, and an error
+        # some other path re-writes each tick -- a recipes-dir scan failure,
+        # say -- would be cleared each tick too, flapping /v1/health/details
+        # instead of reporting it.  The backoff this drops is moot here: the
+        # marker that failed is no longer the one on disk.
+        self._clear_load_backoff(state)
+        # Let the next failure log at ERROR again even if it is identical.
+        state._last_failure_signature = None
+        logger.info(
+            "artifact_load_error_cleared",
+            name=name,
+            reason=reason,
+            previous_error=previous[:200],
+        )
+
     def _mark_error(self, name: str, error: str) -> None:
         """Mark last_load_error on the existing registry entry (if any).
 
@@ -1291,7 +1436,7 @@ class ArtifactWatcher(threading.Thread):
         next tick re-reads the artifact in full, and for a fault that is *not*
         transient (a kid that is not in the key ring, an irspack version skew,
         a truncated object) that repeats for as long as the artifact stays
-        broken.  ``docs/operations.md`` describes exactly that steady state as
+        broken.  ``https://recotem.org/2.2/docs/operations.html`` describes exactly that steady state as
         survivable — "a skewed artifact sits harmless in a running fleet" — so
         it can persist for days, at one full object-store GET per tick.
 
@@ -1354,12 +1499,24 @@ class ArtifactWatcher(threading.Thread):
         state.retry_not_before = 0.0
 
     def _record_load_failure(
-        self, name: str, error: str, reason: str = "unexpected"
+        self,
+        name: str,
+        error: str,
+        reason: str = "unexpected",
+        *,
+        stat_class: bool = False,
     ) -> None:
         """Mark the entry's load error and increment the failure metrics.
 
         *reason* labels the failure step for ``recotem_artifact_load_failures_total``.
+
+        *stat_class* says the failure came from the stat side rather than from
+        the bytes, so a later successful stat on an unchanged marker may
+        retract it — see ``_RecipeWatchState.stat_error_outstanding``.
         """
+        state = self._states.get(name)
+        if state is not None:
+            state.stat_error_outstanding = stat_class
         self._mark_error(name, error)
         _metrics.inc_artifact_load_failure(name, reason=reason)
         _metrics.record_swap(name, ok=False)
@@ -1571,7 +1728,29 @@ def _check_sidecar_changed(state: _RecipeWatchState) -> bool:
         state.sidecar_unsupported_at_mtime = yaml_mtime2
         return False
 
-    if not sidecar_path.exists():
+    try:
+        sidecar_present = sidecar_path.exists()
+    except OSError as exc:
+        # ``Path.exists()`` answers False only for pathlib's ignorable errnos
+        # (ENOENT / ENOTDIR / EBADF / ELOOP) and *re-raises* every other one,
+        # so a stale NFS handle or a PVC remount on the artifacts volume makes
+        # this line raise rather than answer.  The escape is not scoped to this
+        # recipe: the caller is inside ``_poll_artifacts``, so the whole tick is
+        # abandoned, ``_consecutive_errors`` climbs on every tick, and at
+        # ``_unhealthy_threshold`` ``_mark_all_unhealthy`` marks *every* recipe
+        # "watcher unhealthy" — over a sidecar that says nothing about any of
+        # them.  An unanswerable question is not a "sidecar changed" answer;
+        # decline it, which is what this function already documents for every
+        # other sidecar I/O error and what the sibling ``exists()`` in
+        # ``build_initial_states`` already does.
+        logger.warning(
+            "sidecar_stat_failed",
+            path=str(artifact_path),
+            exc_type=type(exc).__name__,
+        )
+        return False
+
+    if not sidecar_present:
         state.sidecar_io_error_count = 0
         return False
 

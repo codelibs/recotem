@@ -261,11 +261,28 @@ _COMPRESSION_MAP: dict[str, str] = {
 def redact_url_userinfo(path: str) -> str:
     """Strip any userinfo from URL-shaped *path* before logging.
 
-    Only redacts for HTTP(S) / FTP(S); object-store schemes like
-    ``gs://bucket@project/...`` use ``@`` in their idiomatic syntax.
+    Two rules, because ``@`` means different things to different schemes:
+
+    - **A password component is redacted on every scheme.**  A colon inside
+      userinfo is a secret whatever the scheme is, and this function is the
+      gate every source-path log line passes through
+      (``datasource/csv.py``, ``metadata/loader.py``, ``_size_cap.py``).
+      Scoping the redaction to a scheme list meant that a scheme absent from
+      it — ``gs``, ``az``, ``abfs``, ``abfss``, ``s3`` — had its password
+      logged verbatim.  The structlog processor behind this is not a
+      backstop for that case: ``_DSN_USERINFO_RE`` covers HTTP and SQL
+      schemes only, and the entropy scrubbers are shape-based, so a
+      human-chosen password is not caught at all and a real Azure account key
+      is caught only when standard-base64 ``+`` / ``/`` happen not to break
+      it into runs shorter than 43 characters.
+    - **A bare ``user@host`` is redacted only for HTTP(S) / FTP(S).**  For
+      object stores that ``@`` is addressing syntax — ``gs://project@bucket``
+      names a billing project, ``abfss://container@account`` names a
+      container — and blanking it would remove information an operator reads
+      logs for, without protecting anything.
     """
     parsed = urlparse(path)
-    if parsed.scheme.lower() not in _USERINFO_SCHEMES:
+    if not parsed.password and parsed.scheme.lower() not in _USERINFO_SCHEMES:
         return path
     if not parsed.username and not parsed.password:
         return path

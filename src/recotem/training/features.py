@@ -66,7 +66,7 @@ all. Reading the id column as a string at the SOURCE is the real remedy, and
 it is what the error message points the operator to -- but the mechanism is
 source-specific (``dtype: {id: str}`` exists only on ``csv``; ``bigquery`` /
 ``sql`` need a ``CAST(... AS STRING)`` in the query, and ``parquet`` a schema
-fix), so the message links the per-source matrix in ``docs/operations.md``
+fix), so the message links the per-source matrix at ``https://recotem.org/2.2/docs/operations.html``
 rather than naming a key that a non-``csv`` source does not have. The check is
 what makes the need for it visible instead of silent.
 """
@@ -398,8 +398,12 @@ def _check_axis_coverage(
             f"features.{which}.id_column naming the wrong column. The remedy is "
             f"to ensure the id column is read as a string at the SOURCE; the "
             f"exact mechanism is source-specific (csv, bigquery, sql, and "
-            f"parquet each differ) -- see docs/operations.md#recotem-train-"
-            f"exits-4-with-feature_axis_error.",
+            f"parquet each differ) -- see "
+            f"https://recotem.org/2.2/docs/operations.html"
+            # The site's heading is "recotem train exits 4 with
+            # feature_axis_error"; its generated slug folds the underscore to a
+            # hyphen, so the anchor is NOT spelled the way the code is.
+            f"#recotem-train-exits-4-with-feature-axis-error.",
             code="feature_axis_error",
         )
 

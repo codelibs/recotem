@@ -4,7 +4,7 @@ Trains an `IALSRecommender` with an item-side `features:` block, then serves
 a cold-start recommendation for an item the model never saw during
 training. Small enough to run in a few seconds; no network access required.
 
-Field reference: [docs/recipe-reference.md#features](../../docs/recipe-reference.md#features).
+Field reference: [Recipe reference — `features`](https://recotem.org/2.2/docs/recipe-reference.html#features).
 
 ## Files
 
@@ -22,24 +22,28 @@ Field reference: [docs/recipe-reference.md#features](../../docs/recipe-reference
 
 ## Run
 
-From the repository root:
+From the repository root. `uv sync` installs the CLI into `.venv` and does not
+put it on `PATH`, so the commands below use `uv run` to reach it (as the other
+examples do). If you installed with `pip install recotem` into an active
+virtualenv instead, drop the `uv run` prefix.
 
 ```bash
 # 1. Generate keys (once per machine). Copy the values into the exports below.
-recotem keygen --type signing --kid dev
-recotem keygen --type api     --kid dev
+uv run recotem keygen --type signing --kid dev
+uv run recotem keygen --type api     --kid dev
 
 export RECOTEM_SIGNING_KEYS="dev:<signing-hex64>"       # signing: env_entry value
 export RECOTEM_API_KEYS="dev:sha256:<api-hash>"         # api:     env_entry value
 export RECOTEM_API_PLAINTEXT="<api-plaintext>"          # api:     plaintext, for curl
 
 # 2. Validate — probes both the interaction source AND features.item.source
-recotem validate examples/feature-aware/recipe.yaml
+uv run recotem validate examples/feature-aware/recipe.yaml
 ```
 
 ```
 Recipe 'feature_aware_demo': schema OK
 Algorithms: OK (IALSRecommender)
+Optuna storage: OK (in-memory, no resume)
 DataSource: probe OK (csv) [source]
 Schema columns: OK (csv) [source]
 DataSource: probe OK (csv) [features.item.source]
@@ -49,13 +53,13 @@ Validation passed.
 ```bash
 # 3. Train
 mkdir -p artifacts
-recotem train examples/feature-aware/recipe.yaml
+uv run recotem train examples/feature-aware/recipe.yaml
 # → ./artifacts/feature_aware_demo.<sha>.recotem (signed)
 ```
 
 ```bash
 # 4. Inspect the header — confirm the "features" block is present
-recotem inspect ./artifacts/feature_aware_demo.recotem
+uv run recotem inspect ./artifacts/feature_aware_demo.recotem
 ```
 
 Example output (the structural fields below — `best_class`, `n_items: 14`,
@@ -97,7 +101,7 @@ tell the two apart without sending a request.
 
 `best_params` carries `lambda_item_feature` alongside iALS's usual
 hyperparameters — this is recotem's own tuned range, not irspack's (see
-[recipe-reference.md](../../docs/recipe-reference.md#features)). `n_items:
+[Recipe reference — features](https://recotem.org/2.2/docs/recipe-reference.html#features)). `n_items:
 14` (not 15): item `i15` never appears in `interactions.csv`, so it is not
 part of the trained id-map — that is what makes it a genuine cold item for
 step 7 below. `n_features: 13` is item `i15`'s only footprint in this
@@ -106,7 +110,7 @@ that number, even though it is otherwise invisible to training.
 
 ```bash
 # 5. Serve (foreground)
-recotem serve --recipes examples/feature-aware/ --port 8080
+uv run recotem serve --recipes examples/feature-aware/ --port 8080
 ```
 
 ```bash
@@ -178,7 +182,7 @@ reachable.
   and the `features` header block respectively.
 - Case C cold-start (`:recommend-related` + `item_features` for an unseen
   seed item) — see
-  [api-reference.md#feature-aware-cold-start](../../docs/api-reference.md#feature-aware-cold-start)
+  [API reference — feature-aware cold start](https://recotem.org/2.2/docs/serving-api.html#feature-aware-cold-start)
   for the full case A/B/C table, including the user-feature cases this
   example does not exercise (no `features.user` block here).
 

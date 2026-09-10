@@ -151,7 +151,7 @@ output:
     # (verify_sha256 lives in _http_fetch.py).  Even though the CSV source
     # wraps it as DataSourceError, _map_exception_to_exit walks the
     # __cause__ chain so the canonical exit code 7 is preserved for
-    # CronJob retry semantics.  See docs/operations.md exit-code table.
+    # CronJob retry semantics.  See https://recotem.org/2.2/docs/operations.html exit-code table.
     assert proc.returncode == 7, (
         f"expected exit 7 (HttpFetchError, sha256 mismatch on network fetch), "
         f"got {proc.returncode}:\nstdout: {proc.stdout}\nstderr: {proc.stderr}"

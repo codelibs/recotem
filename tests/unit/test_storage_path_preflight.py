@@ -35,6 +35,8 @@ from recotem.training._storage_url import (
 )
 from recotem.training.errors import TrainingError
 
+_SIGNING = "dev:" + "ab" * 32
+
 # Spellings that must be ACCEPTED: the two always-available forms, plus every
 # dialect+driver combination the installed extras really provide.
 ACCEPTED = [
@@ -353,4 +355,317 @@ def test_unsupported_dialect_message_mentions_the_extras() -> None:
     assert "recotem[postgres]" in message and "recotem[mysql]" in message, (
         "listing the supported DSN forms without saying they need a driver "
         f"extra reproduces the gap this check exists to close; got: {message}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The residual class: the driver loads, the backend does not open.
+#
+# ``validate_storage_path`` answers everything decidable from text plus a local
+# import.  Whether the backend *opens* -- a directory that exists, a permission
+# bit, a running server -- it deliberately does not touch, because
+# ``recotem validate`` has to stay a text-and-driver check so a lint job on one
+# host can vet a recipe that trains on another.  (``output.path``, the other
+# write target in a recipe, is handled the same way: validate does not probe it,
+# and an unwritable destination reports 8 at train time.)
+#
+# So that class lands in ``run_search``, and it landed there as exit 1.
+# Measured on 08b1672, after fetch / cleanse / split had already run:
+#
+#   /no/such/dir/study.db        -> exit 1  (sqlite3.OperationalError)
+#   <a directory>                -> exit 1  (sqlite3.OperationalError)
+#   <a read-only directory>      -> exit 1  (sqlite3.OperationalError)
+#   postgresql+psycopg://<down>  -> exit 1  (psycopg.OperationalError)
+#
+# Exit 1 is "unhandled exception", so a CronJob retry policy reads a recipe
+# typo as a recotem crash. Only the SQLite spellings are exercised here: they
+# are deterministic and need no network.
+# ---------------------------------------------------------------------------
+
+
+def _trainable_recipe(tmp_path, storage_path: str, name: str):
+    """Like ``_recipe`` but with per-user depth enough for the split to run.
+
+    ``_recipe`` exists for ``validate``, which never splits; its 12 users have
+    3 items each and ``train`` on it exits 4 with a split error before the
+    study backend is ever built.  These tests need ``train`` to reach
+    ``run_search``, so every user gets 12 items.
+    """
+    csv = tmp_path / f"{name}.csv"
+    rows = "\n".join(f"u{u},i{i}" for u in range(20) for i in range(12))
+    csv.write_text("user_id,item_id\n" + rows + "\n")
+    yaml_path = tmp_path / f"{name}.yaml"
+    yaml_path.write_text(
+        f"name: {name}\n"
+        "source:\n"
+        "  type: csv\n"
+        f"  path: {csv}\n"
+        "schema:\n"
+        "  user_column: user_id\n"
+        "  item_column: item_id\n"
+        "training:\n"
+        "  algorithms: [TopPop]\n"
+        "  cutoff: 3\n"
+        "  n_trials: 1\n"
+        f'  storage_path: "{storage_path}"\n'
+        "output:\n"
+        f"  path: {tmp_path / (name + '.recotem')}\n"
+    )
+    return yaml_path
+
+
+@pytest.mark.parametrize(
+    ("subpath", "label"),
+    [
+        ("missing_dir/study.db", "a directory that does not exist"),
+        ("", "a path that is a directory"),
+    ],
+)
+def test_train_exits_8_when_the_sqlite_study_file_cannot_open(
+    tmp_path, subpath: str, label: str
+) -> None:
+    """An unopenable study file is a config error (8), not a crash (1)."""
+    from typer.testing import CliRunner
+
+    from recotem.cli import app
+
+    storage = str(tmp_path / subpath) if subpath else str(tmp_path)
+    yaml_path = _trainable_recipe(tmp_path, storage, "unopenable")
+    result = CliRunner().invoke(
+        app,
+        ["train", str(yaml_path)],
+        env={"RECOTEM_SIGNING_KEYS": _SIGNING},
+    )
+
+    assert result.exit_code != _EXIT_UNKNOWN, (
+        f"{label} must not report as an unhandled exception; "
+        f"got exit 1. Output:\n{result.output}"
+    )
+    assert result.exit_code == _EXIT_CONFIG, (
+        f"{label} must report exit 8; got {result.exit_code}. Output:\n{result.output}"
+    )
+    assert "training.storage_path" in result.output, (
+        "the failure must name the recipe field the operator has to fix; "
+        f"got:\n{result.output}"
+    )
+
+
+def test_train_succeeds_with_a_writable_study_file(tmp_path) -> None:
+    """Positive control: the same recipe with an openable path still trains.
+
+    Without this, a wrapper that turned *every* ``_make_storage`` outcome into
+    exit 8 would pass the test above.
+    """
+    from typer.testing import CliRunner
+
+    from recotem.cli import app
+
+    yaml_path = _trainable_recipe(tmp_path, str(tmp_path / "study.db"), "openable")
+    result = CliRunner().invoke(
+        app,
+        ["train", str(yaml_path)],
+        env={"RECOTEM_SIGNING_KEYS": _SIGNING},
+    )
+
+    assert result.exit_code == 0, f"Output:\n{result.output}"
+    assert (tmp_path / "study.db").exists(), (
+        "the study file must actually have been created"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Userinfo: refused before the scan, and described accurately.
+#
+# ``_make_storage`` has always refused a study URL carrying userinfo, but only
+# from inside ``run_search`` -- after fetch, cleansing and split.  Measured on
+# 08b1672: ``recotem validate`` printed ``Validation passed.`` for
+# ``postgresql+psycopg://recotem@127.0.0.1:19501/recotem`` and ``train`` then
+# exited 4.
+#
+# The refusal also covers a *bare username*, which nothing said.  Every existing
+# test uses ``user:pass@`` and the shipped message names ``(user:pass@host)``.
+# An operator following the documented ~/.pgpass route writes exactly the
+# username-only form, because ~/.pgpass matches on user.
+#
+# Verified against live servers while writing this: PostgreSQL works end to end
+# with PGUSER + PGPASSFILE and no userinfo in the DSN; MariaDB 11.8.9 works only
+# when the server knows the OS account, because pymysql reads no user variable.
+# That is why the remedy is dialect-specific.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "expect_word"),
+    [
+        ("postgresql+psycopg://recotem@host:5432/db", "a username"),
+        ("postgresql+psycopg://recotem:hunter2@host:5432/db", "a password"),
+        ("mariadb+pymysql://optuna@host:3306/db", "a username"),
+        ("mysql+pymysql://optuna:hunter2@host:3306/db", "a password"),
+    ],
+)
+def test_userinfo_is_refused_and_named_precisely(url: str, expect_word: str) -> None:
+    """A username-only URL must not be reported as an embedded password."""
+    with pytest.raises(TrainingError) as excinfo:
+        validate_storage_path(url)
+
+    message = str(excinfo.value)
+    assert excinfo.value.code == "storage_path_unusable"
+    assert expect_word in message, (
+        f"{url!r} must be described as embedding {expect_word}; got: {message}"
+    )
+    wrong = "a password" if expect_word == "a username" else "a username"
+    assert wrong not in message, (
+        f"{url!r} must not be described as embedding {wrong}; got: {message}"
+    )
+    assert "hunter2" not in message and "recotem@" not in message, (
+        f"the refusal must not echo the value; got: {message}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("url", "needle"),
+    [
+        ("postgresql+psycopg://recotem@host/db", "PGUSER"),
+        ("mariadb+pymysql://optuna@host/db", "OS account"),
+        ("mysql+pymysql://optuna@host/db", "OS account"),
+    ],
+)
+def test_userinfo_refusal_names_the_remedy_for_that_dialect(
+    url: str, needle: str
+) -> None:
+    """Generic "use env-driven auth" advice has no MySQL spelling.
+
+    libpq reads PGUSER; pymysql reads nothing, so the only thing to point a
+    MySQL / MariaDB operator at is the OS account the process runs as.
+    """
+    with pytest.raises(TrainingError) as excinfo:
+        validate_storage_path(url)
+    assert needle in str(excinfo.value), (
+        f"{url!r} must name {needle!r} as the way through; got: {excinfo.value}"
+    )
+
+
+def test_validate_refuses_userinfo_before_any_data_is_fetched(tmp_path) -> None:
+    """The point of moving the check: ``validate`` catches it, not ``train``.
+
+    Before this, validate exited 0 on the same recipe and the refusal arrived
+    from inside ``run_search``, after the scan had been paid for.
+    """
+    from typer.testing import CliRunner
+
+    from recotem.cli import app
+
+    yaml_path = _recipe(tmp_path, "postgresql+psycopg://recotem@h/db", "userinfo_sp")
+    result = CliRunner().invoke(app, ["validate", str(yaml_path)])
+
+    assert result.exit_code == _EXIT_CONFIG, (
+        "validate must refuse a storage_path carrying userinfo with exit 8; "
+        f"got {result.exit_code}. Output:\n{result.output}"
+    )
+    assert "Validation passed" not in result.output
+    assert "recotem@" not in result.output, (
+        f"validate must not echo the userinfo; got:\n{result.output}"
+    )
+
+
+def test_userinfo_free_server_url_still_validates(tmp_path) -> None:
+    """Positive control: the supported spelling is untouched.
+
+    Without this, a check that refused every server URL would pass the tests
+    above. Exercised end to end against a live PostgreSQL server separately;
+    here it only has to reach exit 0, since psycopg is installed.
+    """
+    from typer.testing import CliRunner
+
+    from recotem.cli import app
+
+    yaml_path = _recipe(tmp_path, "postgresql+psycopg://h:5432/db", "nouserinfo_sp")
+    result = CliRunner().invoke(app, ["validate", str(yaml_path)])
+
+    assert result.exit_code == 0, f"Output:\n{result.output}"
+    assert "Optuna storage: OK" in result.output
+
+
+# ---------------------------------------------------------------------------
+# A driver that is installed but broken.
+#
+# The import probe caught only ImportError, so a driver whose own top-level code
+# raises anything else -- psycopg against a mismatched libpq, a DBAPI whose C
+# accelerator fails to initialise, a package refusing an unsupported platform --
+# escaped the pre-flight and reached the CLI as exit 1 carrying the driver's
+# text and nothing else.
+#
+# Measured on 08b1672 in a bare `pip install recotem` venv, same DSN, only the
+# driver's failure mode changed:
+#
+#   psycopg absent (ImportError)         -> validate 8 / train 8, names the
+#                                           field, the driver and the extra
+#   psycopg present, raises RuntimeError -> validate 1 / train 1,
+#                                           "BROKEN-DRIVER: libpq version mismatch"
+#
+# The operator whose install is broken is the one who most needs the field
+# named, so the two cannot differ like that.
+# ---------------------------------------------------------------------------
+
+
+def test_broken_driver_is_reported_as_a_storage_path_failure(monkeypatch) -> None:
+    """A non-ImportError from the driver must still be exit 8, not exit 1."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _explode(name, *args, **kwargs):
+        if name == "psycopg":
+            raise RuntimeError("libpq version mismatch")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _explode)
+
+    with pytest.raises(TrainingError) as excinfo:
+        validate_storage_path("postgresql+psycopg://host:5432/db")
+
+    assert excinfo.value.code == "storage_path_unusable"
+    code = _map_exception_to_exit(excinfo.value)
+    assert code == _EXIT_CONFIG, f"mapped to exit {code}, want 8"
+    assert code != _EXIT_UNKNOWN
+
+    message = str(excinfo.value)
+    assert "training.storage_path" in message, (
+        f"the failure must name the recipe field; got: {message}"
+    )
+    assert "installed but failed to import" in message, (
+        f"a broken install must be distinguished from a missing one; got: {message}"
+    )
+    assert "RuntimeError" in message and "libpq version mismatch" in message, (
+        f"the driver's own diagnosis must survive; got: {message}"
+    )
+
+
+def test_missing_driver_still_says_missing_not_broken(monkeypatch) -> None:
+    """Positive control: the absent case keeps its own wording and its extra.
+
+    Without this, collapsing both arms into one "failed to import" message
+    would pass the test above while losing `pip install recotem[postgres]`,
+    which is the only actionable half for the far more common case.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _absent(name, *args, **kwargs):
+        if name == "psycopg":
+            raise ImportError("No module named 'psycopg'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _absent)
+
+    with pytest.raises(TrainingError) as excinfo:
+        validate_storage_path("postgresql+psycopg://host:5432/db")
+
+    message = str(excinfo.value)
+    assert "recotem[postgres]" in message, (
+        f"a missing driver must still name the extra; got: {message}"
+    )
+    assert "installed but failed to import" not in message, (
+        f"an absent driver must not be described as broken; got: {message}"
     )

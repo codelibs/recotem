@@ -1455,7 +1455,7 @@ def test_min_frequency_counts_multi_label_occurrences_not_rows() -> None:
     """``min_frequency`` is a row count for ``categorical`` but an
     *occurrence* count for ``multi_label``: a single row's repeated tokens
     all count. ``tags="a|a|a"`` in ONE row must satisfy ``min_frequency=2``
-    and keep ``a`` -- pins docs/recipe-reference.md's documented semantics
+    and keep ``a`` -- pins https://recotem.org/2.2/docs/recipe-reference.html's documented semantics
     and guards against reverting to a row-count model for this encoding.
     """
     d = pd.DataFrame({"item_id": ["i1"], "tags": ["a|a|a"]}).set_index("item_id")
@@ -1482,7 +1482,7 @@ def test_dimension_cap_message_matches_the_measured_scaling(
     """The advice in the error must not contradict the sizing documentation.
 
     The message once said the cost was cubic; #208 corrected it and
-    `docs/operations.md` to a flat `dim^2.4`. Re-measuring across the whole
+    `https://recotem.org/2.2/docs/operations.html` to a flat `dim^2.4`. Re-measuring across the whole
     ladder showed no single power fits: a doubling costs 1.7-1.9x below the
     default 5,000 cap, 5.1x from 5,000 to 10,000 and 7.5x from 10,000 to
     20,000. The flat figure was right only in the middle, and it understated
@@ -1737,7 +1737,7 @@ def test_multi_label_duplicate_tokens_encode_as_binary_not_count(
 ) -> None:
     """``tags="a|b|a"`` must put 1.0 on 'a', not 2.0.
 
-    docs/recipe-reference.md documents ``multi_label`` as "multi-hot"
+    https://recotem.org/2.2/docs/recipe-reference.html documents ``multi_label`` as "multi-hot"
     (binary), but scipy's COO->CSR conversion SUMS duplicate (row, col)
     entries -- appending one 1.0 per raw token occurrence (the pre-fix
     behavior) would silently turn a doubled tag into a weight of 2.0. This

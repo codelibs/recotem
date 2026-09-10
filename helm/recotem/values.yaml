@@ -7,7 +7,7 @@
 # ── image ─────────────────────────────────────────────────────────────────────
 image:
   repository: ghcr.io/codelibs/recotem
-  tag: "2.0.0"
+  tag: "2.1.0"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -245,10 +245,22 @@ artifacts:
 # unless you seed the store yourself:
 #
 #   helm upgrade --install ... --set train.enabled=true     # no --wait
-#   kubectl -n <ns> create job bootstrap-0 --from=cronjob/<release>-train
+#   CJ=$(kubectl -n <ns> get cronjob \
+#          -l app.kubernetes.io/instance=<release>,app.kubernetes.io/component=train \
+#          -o name)
+#   kubectl -n <ns> create job bootstrap-0 --from="${CJ}"
 #   kubectl -n <ns> wait --for=condition=complete job/bootstrap-0 --timeout=30m
 #
-# See docs/deployment/k8s.md "First install: seed an artifact before serve
+# The CronJob is looked up by label rather than spelled out because its name is
+# the chart's fullname plus `-train`, and the fullname is the release name only
+# when the release name already contains "recotem" (see recotem.fullname in
+# _helpers.tpl).  `--from=cronjob/<release>-train` is therefore wrong for the
+# common case: `helm install prod recotem/recotem` renders
+# `prod-recotem-train`, and the guessed `cronjob/prod-train` fails with
+# `Error from server (NotFound)` — on the one command whose job is to rescue a
+# crash-looping first install.
+#
+# See https://recotem.org/2.2/docs/deployment/kubernetes.html "First install: seed an artifact before serve
 # starts" for the alternatives (bundled bootstrap Job, out-of-cluster train).
 train:
   enabled: false

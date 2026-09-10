@@ -3,7 +3,7 @@
 Truncation (200 chars) plus URI redaction used to be a call-site discipline
 that only ``serving/app.py``'s startup loader observed.  The watcher's
 hot-swap path wrote the raw string straight through
-``ModelRegistry.set_load_error``, so the bound ``docs/operations.md``
+``ModelRegistry.set_load_error``, so the bound ``https://recotem.org/2.2/docs/operations.html``
 documents held only until the first rescan replaced the sanitized string
 with the raw one — and ``_irspack_compat.py`` front-loads its remedy into a
 200-char budget that the steady state was not enforcing.

@@ -39,12 +39,16 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from recotem._artifact_identity import check_artifact_recipe_name
+from recotem._artifact_identity import (
+    check_artifact_recipe_hash,
+    check_artifact_recipe_name,
+)
 from recotem._features import (
     check_artifact_feature_state,
     check_artifact_feature_version,
 )
 from recotem._irspack_compat import check_artifact_irspack_version
+from recotem._log_safe import escape_control_chars
 from recotem.artifact.format import (
     SIZE_CAP_MSG_MARKER,
     ArtifactError,
@@ -628,8 +632,17 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
     ) -> JSONResponse:
         match = _V1_VERB_PATH_RE.match(request.url.path)
         if match is not None:
+            # Same bound as the router's _request_metrics: the name here comes
+            # from the request path and is only shape-checked by the regex, so
+            # an unregistered one must not become a Prometheus label of its
+            # own.  See recotem.serving.metrics.UNKNOWN_RECIPE_LABEL.
+            _name = match.group("name")
             _metrics.record_v1_request(
-                recipe=match.group("name"),
+                recipe=(
+                    _name
+                    if registry.get(_name) is not None
+                    else _metrics.UNKNOWN_RECIPE_LABEL
+                ),
                 verb=match.group("verb"),
                 status="validation_error",
                 latency_seconds=0.0,
@@ -651,7 +664,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         # can grep by request_id and see which field failed without raw input.
         logger.warning(
             "validation_failed",
-            path=request.url.path,
+            path=escape_control_chars(request.url.path),
             method=request.method,
             request_id=request_id,
             error_count=len(sanitized_errors),
@@ -687,7 +700,7 @@ def create_app(serve_config: ServeConfig) -> FastAPI:
         request_id = getattr(request.state, "request_id", "")
         logger.exception(
             "unhandled_500",
-            path=str(request.url.path),
+            path=escape_control_chars(str(request.url.path)),
             request_id=request_id,
             exc_type=type(exc).__name__,
         )
@@ -1041,6 +1054,12 @@ def _try_load_artifact(
             error=str(exc),
         )
         return _failed_entry(recipe, str(exc)), "recipe_name"
+
+    # Same two values, one step weaker: the name must match, the content need
+    # not. A recipe edited without a retrain still serves its last model, which
+    # is correct -- but nothing said so, and /v1/recipes/{name} reports the
+    # artifact's algorithms and cutoff as though they were the recipe's.
+    check_artifact_recipe_hash(header_dict, recipe=recipe, name=recipe.name)
 
     # Preflight the irspack version before deserializing: an unverified
     # (algorithm, version) combination may fail inside the C++ __setstate__

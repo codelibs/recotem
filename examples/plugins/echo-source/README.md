@@ -74,6 +74,10 @@ output:
 Then:
 
 ```bash
+# `recotem train` refuses to write an unsigned artifact: without a signing key
+# it exits 8 with `RECOTEM_SIGNING_KEYS is not set`.
+export $(uv run recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
+
 mkdir -p artifacts
 uv run recotem train recipe.yaml
 ```
@@ -92,5 +96,5 @@ uv run recotem train recipe.yaml
 Copy this directory, rename `recotem-echo-source` /
 `recotem_echo:EchoSource` / `type_name = "echo"` to fit your data source,
 and replace `fetch()` with your real data fetch. The
-[plugin-authoring docs](../../../docs/plugin-authoring.md) walk through the
+[plugin-authoring docs](https://recotem.org/2.2/docs/plugin-authoring.html) walk through the
 full contract.

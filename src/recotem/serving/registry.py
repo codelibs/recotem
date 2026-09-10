@@ -44,7 +44,7 @@ from typing import Any
 _URI_RE = re.compile(r"\b(s3|gs|az|abfs|abfss|https?)://[^\s,;'\"]\S*")
 
 #: Error strings are operator-facing summaries, not transcripts.  200 chars is
-#: also a published contract: ``docs/operations.md`` tells operators the value
+#: also a published contract: ``https://recotem.org/2.2/docs/operations.html`` tells operators the value
 #: reaching ``/v1/health/details`` is bounded, and ``_irspack_compat.py``
 #: deliberately front-loads its remedy so the useful half survives the cut.
 _MAX_LOAD_ERROR_CHARS = 200
@@ -118,7 +118,7 @@ class ModelEntry:
         syntax error, schema violation).  Such a file declares no recipe —
         it has no name, no artifact, and nothing to serve — so it is
         deliberately excluded from the readiness counts returned by
-        :meth:`ModelRegistry.health_counts`.  ``docs/operations.md``
+        :meth:`ModelRegistry.health_counts`.  ``https://recotem.org/2.2/docs/operations.html``
         (``recipe_load_error_skipped``) documents this as "the recipe is
         skipped": a typo in one file must not take the whole server out of
         rotation.  The entry is still registered (keyed by file stem) so it

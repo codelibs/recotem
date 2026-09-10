@@ -14,6 +14,12 @@ shipped alongside the recipe. No network access required.
 From the repository root:
 
 ```bash
+# 1. Generate a signing key (once per machine) and export it.
+#    `recotem train` refuses to write an unsigned artifact: without this it
+#    exits 8 with `RECOTEM_SIGNING_KEYS is not set`.
+export $(uv run recotem keygen --type signing | grep '^env_entry=' | sed 's/^env_entry=//')
+
+# 2. Train.
 mkdir -p artifacts
 uv run recotem train examples/csv-local/recipe.yaml
 ```
@@ -38,4 +44,4 @@ Use this example when you want to develop offline, or to study the recipe
 schema without an HTTPS round-trip. The
 [tutorial-purchase-log](../tutorial-purchase-log/README.md) example is the
 runnable end-to-end walkthrough that the [getting-started
-guide](../../docs/getting-started.md) is built around.
+guide](https://recotem.org/2.2/guide/) is built around.

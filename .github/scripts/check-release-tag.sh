@@ -23,7 +23,9 @@
 # fires.  Checking appVersion alone let a release tagged vX.Y.Z ship a chart
 # whose manifests pull the *previous* image, with this script reporting OK.
 #
-#        - examples/k8s/ and docs/    pinned ghcr.io/codelibs/recotem:X.Y.Z
+#        - examples/k8s/              pinned ghcr.io/codelibs/recotem:X.Y.Z
+#        - src/, README.md, examples/, .claude/
+#                                     recotem.org/MAJOR.MINOR/ documentation URLs
 #
 # The deployment pins are checked for a reason that was measured rather than
 # assumed.  They used to be excluded as "illustrative rather than
@@ -36,8 +38,8 @@
 #
 # giving `exec /opt/venv/bin/recotem: no such file or directory`, a failed
 # bootstrap Job and CrashLoopBackOff on every replica.  A release that bumps the
-# chart and leaves these behind hands that image to everyone who follows the
-# deployment docs, and it is not visible from the package version.
+# chart and leaves these behind hands that image to everyone who applies those
+# manifests, and it is not visible from the package version.
 #
 # `:latest` references are deliberately exempt -- compose.yaml and the
 # getting-started docs track the moving tag on purpose.
@@ -152,7 +154,6 @@ if [ -n "${GIT_TOPLEVEL}" ] && [ "${GIT_TOPLEVEL}" = "${REPO_ROOT}" ]; then
             helm/recotem/Chart.yaml \
             helm/recotem/values.yaml \
             examples \
-            docs \
             2>/dev/null || true
     )"
     if [ -n "${DIRTY}" ]; then
@@ -325,30 +326,39 @@ add_mismatch() {
 # compared equal to the tag and passed -- a pin naming an image that was never
 # published.  Matching the whole tag and classifying it below closes that.
 #
-# The label scan reads `examples docs`, not `examples`.  It used to read only
-# `examples` while the pin scan next to it read both -- so `docs/deployment/
-# k8s.md:318` could sit at `app.kubernetes.io/version: "2.0.0"` through a whole
-# release with this script exiting 0 and its success message claiming coverage
-# "under examples/ and docs/".  Measured on a tree with every location the
-# script reads bumped to 2.1.0 and that one line left behind: rc=0.  The
-# release runbook's own `perl` block does bump that file, so this is a check
-# that reported OK about a location it never read, not a stale label that was
-# certain to ship -- but the point of the check is to be the thing that notices.
+# The pin and label scans read `examples` only.  They used to read `examples
+# docs`, and a third scan (`EXCERPT_RE`, an anchored `tag: "X.Y.Z"`) existed
+# solely to reach the copy-pasteable `values.yaml` block in
+# docs/deployment/k8s.md -- the one location in that file with no `ghcr.io/`
+# prefix for PIN_RE to match.  That whole tree is gone: the documentation now
+# lives at recotem.org, in the recotem-docs repository, whose own release
+# procedure bumps its copies (Phase 4B).  Deleting docs/ took the excerpt scan
+# from exactly one hit to zero, which the vacuity guard below correctly reads
+# as "this check stopped matching" -- it would refuse every future tag.
 #
-# `EXCERPT_RE` is the third form: `docs/deployment/k8s.md` carries a
-# copy-pasteable `values.yaml` excerpt whose `tag:` the runbook bumps as well.
-# The `image.tag` reader in section 3 is hard-wired to helm/recotem/values.yaml,
-# and this one has no `ghcr.io/` prefix for PIN_RE to match, so it was the
-# second location in the same file that nothing verified.  Anchored to the line
-# start so a `tag:` nested under some other key is not swept in; today it
-# matches exactly one line in the whole of examples/ and docs/.
+# Section 4b replaces it rather than dropping it, so the number of things this
+# script vouches for does not quietly shrink by one.
 PIN_RE='ghcr\.io/codelibs/recotem:[A-Za-z0-9_][A-Za-z0-9_.-]*'
 LABEL_RE='app\.kubernetes\.io/version: *"[^"]*"'
-EXCERPT_RE='^[[:space:]]+tag: *"[^"]*"'
 
-PIN_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${PIN_RE}" examples docs 2>/dev/null || true)"
-LABEL_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${LABEL_RE}" examples docs 2>/dev/null || true)"
-EXCERPT_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${EXCERPT_RE}" examples docs 2>/dev/null || true)"
+# Skip compiled bytecode in every scan below, not just section 4b's.
+# `examples/plugins/echo-source` is an installable package, so `examples` grows
+# a `__pycache__` on any machine that has exercised the plugin walkthrough --
+# and a binary hit prints "Binary file ... matches" rather than the match,
+# which reaches the vacuity guards and the stale lists as if it were a pin.
+GREP_SKIP_BYTECODE=(-I --exclude-dir=__pycache__ --exclude=*.pyc)
+
+PIN_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${GREP_SKIP_BYTECODE[@]}" "${PIN_RE}" \
+  examples 2>/dev/null || true)"
+
+# The `docs/upgrading.md` exemption that used to sit here is gone with the
+# file.  That page named PREVIOUS releases -- `ghcr.io/codelibs/recotem:2.0.0`
+# as the subject of a sentence, not as something a reader deploys -- so
+# scanning it made the gate and the release mutually unsatisfiable.  Its
+# successor is https://recotem.org/2.2/docs/upgrading.html, outside this repository
+# and outside this scan, so no filter is needed to keep the two satisfiable.
+LABEL_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${GREP_SKIP_BYTECODE[@]}" "${LABEL_RE}" \
+  examples 2>/dev/null || true)"
 
 # Both hit shapes end in the tag, one after a ':' and one inside quotes:
 #   examples/k8s/cronjob.yaml:60:ghcr.io/codelibs/recotem:2.0.0
@@ -361,8 +371,8 @@ pin_version() {
 
 # A tag that starts with a digit is a version pin and must equal the release.
 # Anything else -- `latest`, `main`, `sha-abc1234` -- is a deliberately moving
-# reference and is left alone; `:latest` in compose.yaml and the getting-started
-# docs is the reason that exemption exists.
+# reference and is left alone; `:latest` in compose.yaml is the reason that
+# exemption exists.
 #
 # `vX.Y.Z` counts too.  Keying only on a leading digit read `recotem:v2.0.0` as
 # a moving reference and skipped it -- so a stale pin written the way the git
@@ -389,7 +399,6 @@ pin_matches_expected() {
 # guards below test what they claim to.
 VERSION_PIN_COUNT=0
 VERSION_LABEL_COUNT=0
-VERSION_EXCERPT_COUNT=0
 STALE_PINS=()
 classify() {
     local hit="$1" kind="$2" tag
@@ -398,7 +407,6 @@ classify() {
     is_version_pin "${tag}" || return 0
     case "${kind}" in
         label)   VERSION_LABEL_COUNT=$((VERSION_LABEL_COUNT + 1)) ;;
-        excerpt) VERSION_EXCERPT_COUNT=$((VERSION_EXCERPT_COUNT + 1)) ;;
         *)       VERSION_PIN_COUNT=$((VERSION_PIN_COUNT + 1)) ;;
     esac
     # Collected as array elements, not as one newline-joined string, so `fail`
@@ -408,7 +416,6 @@ classify() {
 
 while IFS= read -r hit; do classify "${hit}" pin; done   < <(printf '%s\n' "${PIN_HITS}")
 while IFS= read -r hit; do classify "${hit}" label; done < <(printf '%s\n' "${LABEL_HITS}")
-while IFS= read -r hit; do classify "${hit}" excerpt; done < <(printf '%s\n' "${EXCERPT_HITS}")
 
 # A scan that finds nothing is refused rather than passed.  The release
 # procedure bumps these pins, so zero hits means the pattern stopped matching,
@@ -416,7 +423,7 @@ while IFS= read -r hit; do classify "${hit}" excerpt; done < <(printf '%s\n' "${
 # missing one, because the success message below would vouch for pins nobody
 # looked at.  Same reasoning as the empty `image.tag` case above.
 [ "${VERSION_PIN_COUNT}" -gt 0 ] || \
-    fail "No pinned 'ghcr.io/codelibs/recotem:X.Y.Z' reference found under examples/ or docs/." \
+    fail "No pinned 'ghcr.io/codelibs/recotem:X.Y.Z' reference found under examples/." \
          "The release procedure bumps these, so finding none means this check stopped" \
          "matching rather than that there is nothing to check.  Refused rather than" \
          "skipped: a vacuous check would make this script's success message untrue."
@@ -425,17 +432,141 @@ while IFS= read -r hit; do classify "${hit}" excerpt; done < <(printf '%s\n' "${
 # `app.kubernetes.io/version` label from examples/k8s/ silently reduced that
 # half of the check to nothing while the script still reported OK.
 [ "${VERSION_LABEL_COUNT}" -gt 0 ] || \
-    fail "No 'app.kubernetes.io/version: \"X.Y.Z\"' label found under examples/ or docs/." \
+    fail "No 'app.kubernetes.io/version: \"X.Y.Z\"' label found under examples/." \
          "It is a version declaration the release procedure bumps, so finding none" \
          "means this check stopped matching rather than that there is nothing to" \
          "check.  Refused rather than skipped, for the same reason as the image pins."
 
-# And the same guard again for the values.yaml excerpt in the deployment docs.
-[ "${VERSION_EXCERPT_COUNT}" -gt 0 ] || \
-    fail "No 'tag: \"X.Y.Z\"' values.yaml excerpt found under examples/ or docs/." \
-         "docs/deployment/k8s.md carries a copy-pasteable values.yaml block whose" \
-         "tag the release procedure bumps; finding none means this check stopped" \
-         "matching rather than that there is nothing to check."
+# ---------------------------------------------------------------------------
+# 4b. Documentation-site URLs
+# ---------------------------------------------------------------------------
+# This repository carries no docs/ tree.  Every documentation pointer is a
+# versioned URL into recotem.org, and several of them ship inside artefacts a
+# reader cannot edit and this repository cannot correct after the fact: the
+# text of a DataSourceError, the JSON Schema `recotem schema` emits for IDEs,
+# the HELP string served at /v1/metrics, README.md as rendered on PyPI.  A
+# stale version segment there points a user at another version's documentation.
+#
+# What this section checks is the VERSION SEGMENT and nothing else.  It does
+# not fetch, so it cannot tell a live page from a dead one.  Measured, two
+# edits to the same line of README.md on an otherwise release-ready tree: a
+# URL on an older documentation line whose page is served (HTTP 200) is
+# refused, rc=1; a URL on the released line naming a page that does not exist
+# (HTTP 404) passes, rc=0.  (Described rather than written out: this file is
+# under .github, one of SITE_ROOTS below, so a spelled-out URL naming another
+# line is a hit this very scan reads -- and refuses the tag over.)
+#
+# That is the whole reason a tree can carry a documentation URL naming the
+# correct line and still 404 for every reader -- which is what happened when
+# the local docs/ tree was replaced by site URLs: every page link in the
+# repository was extensionless, the site serves .html, and this scan was green
+# throughout because each one named /2.1/.
+#
+# Fetching here was considered and rejected: it would make a release
+# unpublishable whenever the documentation site is down or slow, and this
+# script gates both publish.yml and docker.yml.  A link check belongs
+# somewhere that can be red without blocking a release.  The success message
+# below therefore says what was and was not established, rather than implying
+# the links were followed.
+#
+# The segment is MAJOR.MINOR, not the full release: a patch does not create a
+# documentation line, so v2.1.1 still points at /2.1/.  These URLs are bumped
+# at the DEV bump (Phase 5), not at release -- the opposite cadence to the
+# deployment pins above -- which is exactly why a release-time gate is the
+# thing that notices when the bump was skipped.
+SITE_ROOTS=(src tests examples helm .claude .github README.md CLAUDE.md CONTRIBUTING.md pyproject.toml)
+SITE_RE='recotem\.org/[0-9]+\.[0-9]+/'
+# -I and the __pycache__ exclusion, for the same reason the bump command in
+# references/version-locations.md carries them: *.pyc embeds these URLs in
+# compiled docstrings and error strings, and for a binary hit grep prints
+# "Binary file ... matches" instead of the match.  CI tags a fresh checkout and
+# never sees one, but the runbook tells the releaser to run this locally --
+# straight after `uv run pytest tests`, which generates exactly that bytecode.
+# Measured on a release-ready tree: rc=0, plant one .pyc carrying the previous
+# documentation line, rc=1 naming a file the releaser cannot edit; delete it,
+# rc=0 again.  A stale build artifact must not be able to refuse a correct tag,
+# and a "Binary file ... matches" line names nothing anyone can fix.
+SITE_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${GREP_SKIP_BYTECODE[@]}" "${SITE_RE}" \
+  "${SITE_ROOTS[@]}" 2>/dev/null || true)"
+
+EXPECTED_MM="${EXPECTED%.*}"
+VERSION_SITE_COUNT=0
+STALE_SITE_URLS=()
+while IFS= read -r hit; do
+    [ -n "${hit}" ] || continue
+    VERSION_SITE_COUNT=$((VERSION_SITE_COUNT + 1))
+    HIT_MM="${hit##*recotem.org/}"
+    HIT_MM="${HIT_MM%/}"
+    [ "${HIT_MM}" = "${EXPECTED_MM}" ] || STALE_SITE_URLS+=("  ${hit}")
+done < <(printf '%s\n' "${SITE_HITS}")
+
+# The same vacuity guard as the two above, and for the same reason: this scan
+# replaced the values.yaml-excerpt scan that died with docs/, so a silent zero
+# here would shrink what this script vouches for without saying so.
+[ "${VERSION_SITE_COUNT}" -gt 0 ] || \
+    fail "No 'recotem.org/X.Y/' documentation URL found in the tree." \
+         "Error messages, the JSON Schema, the /v1/metrics HELP text and README.md" \
+         "all carry one, so finding none means this check stopped matching rather" \
+         "than that there is nothing to check.  Refused rather than skipped, for the" \
+         "same reason as the image pins."
+
+# ---------------------------------------------------------------------------
+# 4c. Documentation-site URLs must carry the '.html' suffix
+# ---------------------------------------------------------------------------
+# The version segment above is only half of what makes one of these URLs
+# resolve.  recotem.org is a VitePress site built with `cleanUrls: false` --
+# its own canonical, hreflang and sitemap generation encodes that choice -- and
+# nginx serves the build off disk with no try_files fallback.  So a *page* URL
+# without `.html` is a hard 404, with no redirect to soften it:
+#
+#   .../docs/security        -> 404
+#   .../docs/security.html   -> 200
+#
+# (Written elided rather than in full: this file is one of the roots the scan
+# below reads, so a spelled-out counter-example would report itself.)
+#
+# Directory URLs are the exception and must NOT get the suffix: nginx resolves
+# `…/docs/` and `…/guide/` to their index.html.
+#
+# This is the same class of damage as a stale version segment, and it lands in
+# the same places nobody can correct afterwards -- so it gets the same gate.
+# The check is a string test, not a network fetch: this script gates publish.yml
+# and docker.yml, and a slow or unreachable docs site must not be able to make
+# the project unreleasable.  A 404 caused by a missing suffix is a property of
+# the string alone.  What it therefore does NOT check is whether the page on the
+# other end exists -- a `.html` URL naming a deleted page still passes here.
+#
+# The scheme is optional in the pattern.  Three of the occurrences this was
+# written for are `assert "recotem.org/2.2/docs/….html" in msg` in the test
+# suite, with no `https://`, and they are the ones most likely to rot silently:
+# the extensionless literal is a *prefix* of the suffixed one, so such an
+# assertion keeps passing after the product string is corrected, and stops
+# being able to catch the regression it was written for.
+SUFFIX_RE='(https://)?recotem\.org/[0-9]+\.[0-9]+/[A-Za-z0-9_/-]+(\.html)?'
+SUFFIX_HITS="$(cd "${REPO_ROOT}" && grep -rIhoE "${SUFFIX_RE}" "${SITE_ROOTS[@]}" 2>/dev/null || true)"
+
+SUFFIX_COUNT=0
+EXTLESS_SITE_URLS=()
+while IFS= read -r url; do
+    [ -n "${url}" ] || continue
+    SUFFIX_COUNT=$((SUFFIX_COUNT + 1))
+    case "${url}" in
+        */|*.html) ;;
+        *) EXTLESS_SITE_URLS+=("  ${url}") ;;
+    esac
+done < <(printf '%s\n' "${SUFFIX_HITS}" | sort -u)
+
+# Vacuity guard, for the same reason as every other scan in this section.
+[ "${SUFFIX_COUNT}" -gt 0 ] || \
+    fail "No 'recotem.org/X.Y/...' documentation URL found in the tree." \
+         "Section 4b found ${VERSION_SITE_COUNT} version segments, so finding no full" \
+         "URL here means this scan stopped matching rather than that there is nothing" \
+         "to check."
+
+# The offenders are reported in section 6 alongside the stale pins and the
+# stale version segments, not with a `fail` here.  Calling `fail` would exit
+# before either of those was printed, which is the exact round trip -- one tag
+# delete and re-push per class of failure -- that section 6 exists to prevent.
 
 # ---------------------------------------------------------------------------
 # 5. The commit being tagged must be on main
@@ -550,15 +681,47 @@ if [ "${#STALE_PINS[@]}" -gt 0 ]; then
              "${STALE_PINS[@]}" \
              "" \
              "These are not illustrative.  Applying examples/k8s/ verbatim deploys the" \
-             "image named there, and docs/deployment/k8s.md is what a reader copies. The" \
-             "published 2.0.0 arm64 image cannot start at all -- its console script carries" \
-             "the build-stage shebang '#!/build/.venv/bin/python' -- so a release still" \
-             "pointing at it is a CrashLoopBackOff for every arm64 reader of those docs." \
+             "image named there.  The published 2.0.0 arm64 image cannot start at all --" \
+             "its console script carries the build-stage shebang" \
+             "'#!/build/.venv/bin/python' -- so a release still pointing at it is a" \
+             "CrashLoopBackOff for everyone who applies those manifests." \
              "" \
              "To fix, set every reference above to ${EXPECTED} (or pick another number):" \
-             "  git grep -nE 'ghcr[.]io/codelibs/recotem:[0-9]+[.][0-9]+[.][0-9]+' examples docs" \
-             "  git grep -n  'app.kubernetes.io/version' examples docs" \
-             "  git grep -nE '^ +tag: \"[0-9]' examples docs" \
+             "  git grep -nE 'ghcr[.]io/codelibs/recotem:[0-9]+[.][0-9]+[.][0-9]+' examples" \
+             "  git grep -n  'app.kubernetes.io/version' examples" \
+             "" \
+             "The deployment docs carry their own copies of these pins; they live in the" \
+             "recotem-docs repository and are bumped there, in Phase 4B of the release." \
+             "")
+fi
+if [ "${#STALE_SITE_URLS[@]}" -gt 0 ]; then
+    REPORT+=("Documentation-site URLs naming another version:" \
+             "${STALE_SITE_URLS[@]}" \
+             "" \
+             "These point a reader at ${EXPECTED_MM%%.*}.x documentation for a version that is not" \
+             "the one being released.  Some of them ship where nobody can correct them" \
+             "later -- a DataSourceError message, the JSON Schema 'recotem schema' emits," \
+             "the /v1/metrics HELP string, README.md as rendered on PyPI." \
+             "" \
+             "These are bumped at the DEV bump, not at release, so reaching this point" \
+             "means Phase 5 of the previous cycle skipped them.  To fix, set every URL" \
+             "above to /${EXPECTED_MM}/:" \
+             "  git grep -nE 'recotem[.]org/[0-9]+[.][0-9]+/'" \
+             "")
+fi
+if [ "${#EXTLESS_SITE_URLS[@]}" -gt 0 ]; then
+    REPORT+=("Documentation-site page URLs missing the '.html' suffix:" \
+             "${EXTLESS_SITE_URLS[@]}" \
+             "" \
+             "recotem.org is built with cleanUrls: false and served off disk with no" \
+             "try_files fallback, so each of these is a 404 with no redirect -- in the" \
+             "same artefacts as above, which nobody can correct after the upload." \
+             "" \
+             "Append '.html' to the page name, keeping any '#anchor' after it:" \
+             "  https://recotem.org/${EXPECTED_MM}/docs/security.html#kid-rotation" \
+             "" \
+             "Directory URLs ('.../docs/', '.../guide/') resolve to index.html and are" \
+             "correct without it; they are not reported here." \
              "")
 fi
 if [ -n "${MISMATCH}" ]; then
@@ -603,7 +766,8 @@ fi
 
 echo "OK: ${TAG} is a final release and matches pyproject.toml,"
 echo "    src/recotem/version.py, helm/recotem/Chart.yaml, helm/recotem/values.yaml,"
-echo "    and every pinned image reference under examples/ and docs/."
+echo "    every pinned image reference under examples/, and every recotem.org/"
+echo "    documentation URL in the tree names the ${EXPECTED_MM} line."
 # Say which tree the lines above describe.  Without this the success message
 # reads the same whether it inspected the commit or an uncommitted edit of it —
 # and the next line makes a claim about HEAD, so the two must not be confused.
@@ -616,6 +780,8 @@ else
     echo "    which may not be the ones ${TAG} would publish, and whether the"
     echo "    tagged commit is on main was NOT checked."
 fi
-echo "    Not checked here: uv.lock (run 'uv lock --check'), and version strings"
+echo "    Not checked here: whether those documentation URLs RESOLVE — no page"
+echo "    is fetched, so a URL naming the right line still passes when it 404s."
+echo "    Also not checked: uv.lock (run 'uv lock --check'), and version strings"
 echo "    outside those files — see the verification block in"
 echo "    .claude/skills/release-recotem/references/version-locations.md."

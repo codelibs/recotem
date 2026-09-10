@@ -664,6 +664,107 @@ def test_bq_require_storage_api_disables_fallback(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Strict mode must diagnose the failure it actually got.
+#
+# ``RECOTEM_BQ_REQUIRE_STORAGE_API=1`` decides whether a REST fallback is
+# offered.  It must not decide what the failure *is*: a 503 from an
+# unreachable bigquerystorage endpoint answered with "Grant
+# bigquery.readSessions.create" sends the operator to their platform team for
+# an IAM grant that is already correct.  Measured live by pointing ``grpc_proxy``
+# at a closed port: the query completed, the gRPC download raised
+# ServiceUnavailable, and strict mode gave IAM advice while the non-strict path
+# on the identical exception correctly refused to.
+#
+# The two cases are asserted together so the pair fails in either direction --
+# dropping the IAM advice where it belongs is as wrong as emitting it where it
+# does not.
+# ---------------------------------------------------------------------------
+
+
+def _fetch_under_strict_mode(monkeypatch, exc_factory):
+    """Run ``fetch`` with strict mode on, the download raising a real
+    ``GoogleAPICallError`` built by *exc_factory*.
+
+    The factory receives the mocked ``GoogleAPICallError`` base so the raised
+    exception reaches ``_recover_from_storage_failure`` rather than the generic
+    ``except Exception`` arm — subclassing is what makes this a Storage Read API
+    transport failure instead of an unclassified one.
+    """
+    (
+        mock_bq,
+        mock_exceptions,
+        mock_api_core,
+        _mock_client,
+        mock_query_job,
+        mock_api_error_cls,
+    ) = _make_mock_bq_modules()
+
+    mock_query_job.download = _always_raise(exc_factory(mock_api_error_cls))
+    monkeypatch.setenv("RECOTEM_BQ_REQUIRE_STORAGE_API", "1")
+
+    with patch.dict(
+        sys.modules, _patched_modules(mock_bq, mock_exceptions, mock_api_core)
+    ):
+        if "recotem.datasource.bigquery" in sys.modules:
+            del sys.modules["recotem.datasource.bigquery"]
+
+        from recotem.datasource.bigquery import BigQueryConfig, BigQuerySource
+
+        cfg = BigQueryConfig(type="bigquery", query="SELECT 1")
+        source = BigQuerySource.__new__(BigQuerySource)
+        source._config = cfg
+
+        with pytest.raises(DataSourceError) as exc_info:
+            source.fetch(_ctx())
+
+    return str(exc_info.value)
+
+
+def test_strict_mode_non_iam_storage_failure_omits_readsessions_advice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 503 under strict mode must not be answered with an IAM grant."""
+    msg = _fetch_under_strict_mode(
+        monkeypatch,
+        lambda base: type("ServiceUnavailable", (base,), {"code": 503})(
+            "503 failed to connect to all addresses"
+        ),
+    )
+
+    assert "Grant bigquery.readSessions.create" not in msg, (
+        f"A connectivity failure must not be answered with an IAM grant; got: {msg!r}"
+    )
+    assert "not an IAM failure" in msg, (
+        f"Strict mode must say the failure is not IAM-shaped; got: {msg!r}"
+    )
+    assert "ServiceUnavailable" in msg, (
+        f"The failure class must be named so the root cause is visible; got: {msg!r}"
+    )
+    assert "RECOTEM_BQ_REQUIRE_STORAGE_API" in msg, (
+        f"Strict mode must name the variable that refused the fallback; got: {msg!r}"
+    )
+
+
+def test_strict_mode_iam_storage_failure_keeps_readsessions_advice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive control: a genuine 403 still gets the IAM remedy."""
+    msg = _fetch_under_strict_mode(
+        monkeypatch,
+        lambda base: type("PermissionDenied", (base,), {"code": 403})(
+            "403 Permission bigquery.readSessions.create denied"
+        ),
+    )
+
+    assert "Grant bigquery.readSessions.create" in msg, (
+        f"An IAM-shaped failure must keep the IAM remedy; got: {msg!r}"
+    )
+    assert "not an IAM failure" not in msg, (
+        f"A 403 must not be described as non-IAM; got: {msg!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # MAJOR-2: recotem_bigquery_storage_fallback_total counter incremented
 # ---------------------------------------------------------------------------
 

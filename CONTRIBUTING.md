@@ -40,7 +40,10 @@ uv run recotem keygen --type signing
 
 ## Making a change
 
-1. **Find or write a spec** under `docs/superpowers/specs/`. Substantive
+1. **Find or write a spec** under `docs/` locally. That directory is
+   gitignored — the published documentation lives at https://recotem.org
+   (repo: [codelibs/recotem-docs](https://github.com/codelibs/recotem-docs)) —
+   so a spec stays a working document and is never committed here. Substantive
    changes start as a design doc reviewed before any code lands.
 2. **Branch off `main`**: `git checkout -b feat/your-thing`.
 3. **Implement + test**. Every public-facing behavior gets a unit test, every
@@ -49,8 +52,14 @@ uv run recotem keygen --type signing
 4. **Lint + format**. CI runs `ruff check` and `ruff format --check`.
 5. **Run the e2e script** if your change affects the train→serve path:
    ```bash
-   bash tests/e2e/run.sh
+   uv run bash tests/e2e/run.sh
    ```
+   The `uv run` is load-bearing: the script calls the `recotem` console
+   script, which `uv sync` installs into `.venv` and not onto `PATH`. Under
+   bare `bash` it exits 127 with `recotem: command not found` immediately
+   after `[e2e] Generating API key...`, which reads like a keygen failure
+   rather than a `PATH` problem. Drop the prefix only inside an activated
+   virtualenv.
 6. **Open a PR**. The PR template asks for: what changed, why, how it was
    tested, and any spec doc that was updated.
 
@@ -71,20 +80,25 @@ default. Run them with `uv run pytest tests -m slow`.
 - Ruff is authoritative. Line length 88. Configured rules live in
   `pyproject.toml`.
 - Prefer plain `dataclass` over `pydantic` for purely internal data structures.
-- Avoid `from __future__ import annotations` in files that FastAPI introspects
-  for dependency injection.
+- `from __future__ import annotations` is used everywhere, including the
+  serving router. What that costs is one rule in `serving/routes.py`: write a
+  FastAPI dependency argument as `kid: str = Depends(_require_auth)`, never as
+  `Annotated[str, Depends(_require_auth)]`, so `Depends` is resolved as a
+  runtime default rather than as a stringified annotation.
 - `recotem.training` and `recotem.serving` must not import each other.
 - Public symbols are exported from each module's `__init__.py` and stay stable.
 - structlog logger per module: `logger = structlog.get_logger(__name__)`.
 - Never log API keys, signing keys, or cloud creds. The redaction processor
-  in `recotem.serving.log_redaction` is the safety net, not an excuse.
+  in `recotem.log_redaction` is the safety net, not an excuse. It lives at the
+  top level, not under `recotem.serving`, so a `train`-only invocation does not
+  pull in the serving package.
 
 ## Adding a DataSource plugin
 
 A third-party DataSource plugin is a small package that declares an entry
 point and provides a class with `type_name`, `Config`, `extras_required`, and
 a `fetch(self, ctx) -> pd.DataFrame` method. See
-`docs/plugin-authoring.md` for the walkthrough and
+`https://recotem.org/2.2/docs/plugin-authoring.html` for the walkthrough and
 `examples/plugins/echo-source/` for a runnable template.
 
 ## Security

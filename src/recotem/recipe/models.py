@@ -104,7 +104,7 @@ class TrainingConfig(BaseModel, extra="forbid"):
             "training thread keeps running until it finishes naturally "
             "(CPU/memory remain spent). Use parallelism=1 and a generous "
             "timeout, or rely on TrainingConfig.timeout_seconds for a hard "
-            "overall cap. See docs/recipe-reference.md."
+            "overall cap. See https://recotem.org/2.2/docs/recipe-reference.html."
         ),
     )
     timeout_seconds: int | None = Field(default=None, ge=1)

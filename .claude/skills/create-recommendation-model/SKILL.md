@@ -99,7 +99,7 @@ Pick the source, then read the matching reference and gather the inputs it lists
 | BigQuery — GA4 export **or** a custom dataset | `references/bigquery.md` | project, table, date range, how `item_id` is encoded, ADC/IAM |
 | CSV or Parquet file (local / S3 / GCS / Azure / HTTP) | `references/files.md` | path + scheme, column names, delimiter/sha256 |
 | SQL database (Postgres / MySQL / SQLite) | `references/sql.md` | DSN env var, query, row volume |
-| Custom source plugin | see `docs/plugin-authoring.md` | the plugin's own config fields |
+| Custom source plugin | see `https://recotem.org/2.2/docs/plugin-authoring.html` | the plugin's own config fields |
 
 ## Step 2 — Write the recipe
 
@@ -299,4 +299,4 @@ in this on-screen handoff only (never commit them).
 | Serve health `degraded`, `:recommend` → 503 `RECIPE_UNAVAILABLE` | Artifact failed to load — check the serve log; ensure the signing key matches and the artifact deserializes. |
 
 See the CLI exit-code table and algorithm list in the project `CLAUDE.md`, and
-`docs/data-sources/` for the full per-source reference.
+`https://recotem.org/2.2/docs/data-sources/` for the full per-source reference.

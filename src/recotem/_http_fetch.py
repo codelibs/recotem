@@ -154,7 +154,7 @@ def _is_address_internal(addr: ipaddress._BaseAddress) -> bool:
     the IPv6-level properties for these addresses would produce false positives.
     Evaluating the unwrapped IPv4 directly avoids the ambiguity entirely.
     The bogon check also uses the unwrapped IPv4 for mapped addresses.
-    See https://recotem.org/2.1/docs/security.html ("IPv4-mapped IPv6 inputs are
+    See https://recotem.org/2.2/docs/security.html ("IPv4-mapped IPv6 inputs are
     explicitly unwrapped").
     """
     # Primary check for IPv4-mapped IPv6 addresses (``::ffff:a.b.c.d``):

@@ -13,17 +13,25 @@ repos:
         args: [--branch, main]
       - id: trailing-whitespace
       - id: check-added-large-files
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.4
-    hooks:
-      - id: ruff
-        args: [--fix]
-      - id: ruff-format
+  # Ruff runs through `uv run`, not through ruff-pre-commit, so the hook and
+  # CI resolve the SAME ruff from uv.lock.  A pinned `rev:` here is a second
+  # version of the linter that drifts from the one in pyproject.toml, and the
+  # drift is invisible until someone edits a file that the two versions
+  # disagree about: v0.9.4 still carried UP038, which the ruff this project
+  # resolves has removed, so `uv run ruff check` passed on a file the hook
+  # rejected.  `--force-exclude` keeps pyproject's exclusions honoured when
+  # pre-commit passes filenames explicitly, matching what ruff-pre-commit did.
   - repo: local
     hooks:
-      - id: eslint
-        name: eslint
-        entry: sh -c 'cd frontend && npm run lint'
+      - id: ruff
+        name: ruff
+        entry: uv run ruff check --fix --force-exclude
         language: system
-        pass_filenames: false
-        files: ^frontend/src/.*\.(ts|vue)$
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ruff-format
+        name: ruff-format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true

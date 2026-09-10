@@ -1,6 +1,6 @@
 """Integration test: `recotem train` must not write progress bars to a pipe.
 
-``recotem train recipe.yaml > train.log`` — the idiom ``https://recotem.org/2.1/docs/deployment/cron-systemd.html``
+``recotem train recipe.yaml > train.log`` — the idiom ``https://recotem.org/2.2/docs/deployment/cron-systemd.html``
 is built on — used to capture nothing but carriage returns and block-drawing
 characters, while all 47 structured log events went to stderr and escaped to
 the operator's terminal.  The bars come from fastprogress (transitively via

@@ -95,7 +95,7 @@ if [[ "${TUTORIAL_MODE}" == "1" ]]; then
     RECIPE="examples/tutorial-purchase-log/recipe.yaml"
     RECIPE_NAME="purchase_log"
     # The tutorial CSV uses numeric user_ids ("1", "2", ...) — match the
-    # documented curl example in https://recotem.org/2.1/guide/.
+    # documented curl example in https://recotem.org/2.2/guide/.
     PREDICT_USER_ID="1"
     # The tutorial recipe writes to ./artifacts/purchase_log.recotem (CWD-relative).
     mkdir -p artifacts

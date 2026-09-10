@@ -97,7 +97,7 @@ curl -X POST http://localhost:8080/v1/recipes/news_articles:recommend \
 ## Recipe model
 
 A recipe is the single source of truth: 1 YAML = 1 model = 1 `/v1/recipes/{name}:recommend` (plus the related/batch verbs).
-See `https://recotem.org/2.1/docs/recipe-reference.html` for the full schema. Highlights:
+See `https://recotem.org/2.2/docs/recipe-reference.html` for the full schema. Highlights:
 
 - `source.type` is a discriminator (`csv` | `parquet` | `bigquery` | `sql` | plugins).
 - Env-var expansion is restricted to `${RECOTEM_RECIPE_*}` and never applied
@@ -121,7 +121,7 @@ See `https://recotem.org/2.1/docs/recipe-reference.html` for the full schema. Hi
   each declare a `source` (same datasource registry as the top-level
   `source`), an `id_column`, and a `columns` list of `{name, encoding,
   delimiter?, min_frequency?}` (`categorical` | `numerical` | `multi_label`).
-  See `https://recotem.org/2.1/docs/recipe-reference.html#features`.
+  See `https://recotem.org/2.2/docs/recipe-reference.html#features`.
 
 ## Artifact format
 
@@ -147,7 +147,7 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
   in depth: HMAC verify before any byte is interpreted, plus a hand-enumerated
   FQCN allow-list augmented by a narrow `numpy.*` / `scipy.sparse.*` module-
   prefix allow-list (with a deny-list for high-risk submodules) during load.
-  See `https://recotem.org/2.1/docs/security.html`.
+  See `https://recotem.org/2.2/docs/security.html`.
 
 ## Documentation policy
 
@@ -158,7 +158,7 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
   `../recotem-docs`. When a change alters documented behaviour, the doc fix is a
   PR there, against the in-development version directory (`2.1/docs/…`,
   `2.1/guide/…`) **and its `2.1/ja/…` twin** — that site ships both languages.
-- **Links to it are versioned**: `https://recotem.org/2.1/docs/<page>`. The
+- **Links to it are versioned**: `https://recotem.org/2.2/docs/<page>`. The
   segment is MAJOR.MINOR, and it is bumped in this repo at the **dev bump**, not
   at release. `.github/scripts/check-release-tag.sh` refuses a tag whose version
   disagrees with the URLs in the tree, because several of them ship where nobody
@@ -176,7 +176,7 @@ Binary container `magic | version | reserved | kid | hmac | header_json | payloa
   written at release time from `git log vPREV..main`. A PR does not add a
   changelog entry.
 - Operator-facing upgrade steps go in the recotem-docs page published at
-  https://recotem.org/2.1/docs/upgrading.html (edit `2.1/docs/upgrading.md` and
+  https://recotem.org/2.2/docs/upgrading.html (edit `2.1/docs/upgrading.md` and
   `2.1/ja/docs/upgrading.md` there), under a `## <prev> → <this>` heading — that
   page outlives the release notes.
 
@@ -220,7 +220,7 @@ It also records the three codes that are narrower than their name suggests
 several `TrainingError` codes). Why a `serve` bind failure is 8 and not
 uvicorn's own 3 is at the `except SystemExit` branch in `src/recotem/cli.py`.
 
-Operator-facing version: https://recotem.org/2.1/docs/exit-codes.html
+Operator-facing version: https://recotem.org/2.2/docs/exit-codes.html
 
 ## Test commands
 
@@ -246,7 +246,7 @@ than a PATH problem.
 mis-set (the rest warn and silently use the default), and names the reading
 site for the ones this module does not own.
 
-Operator-facing version: https://recotem.org/2.1/docs/environment-variables.html
+Operator-facing version: https://recotem.org/2.2/docs/environment-variables.html
 
 ## CI
 
@@ -260,7 +260,7 @@ Operator-facing version: https://recotem.org/2.1/docs/environment-variables.html
 
 All published at https://recotem.org — source in `../recotem-docs`, under `2.1/`.
 
-- Getting started: https://recotem.org/2.1/guide/
-- Operations runbook: https://recotem.org/2.1/docs/operations.html
-- Security model: https://recotem.org/2.1/docs/security.html
-- Upgrade paths: https://recotem.org/2.1/docs/upgrading.html
+- Getting started: https://recotem.org/2.2/guide/
+- Operations runbook: https://recotem.org/2.2/docs/operations.html
+- Security model: https://recotem.org/2.2/docs/security.html
+- Upgrade paths: https://recotem.org/2.2/docs/upgrading.html

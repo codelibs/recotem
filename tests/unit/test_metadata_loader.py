@@ -226,7 +226,7 @@ def test_parquet_metadata_loads_correctly(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # HTTP fetch: sha256 verification, byte cap, redirect controls
 # (mirrors the controls already enforced for source.path; see
-#  https://recotem.org/2.1/docs/recipe-reference.html and https://recotem.org/2.1/docs/security.html.)
+#  https://recotem.org/2.2/docs/recipe-reference.html and https://recotem.org/2.2/docs/security.html.)
 # ---------------------------------------------------------------------------
 
 

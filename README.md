@@ -60,7 +60,7 @@ moving parts to a recipe file and a binary artifact:
 
 - **CSV / Parquet** — local files or any fsspec-reachable URL (S3, GCS, Azure, HTTPS).
 - **BigQuery** — SQL queries with Storage Read API support.
-- **SQL** (PostgreSQL / MySQL / MariaDB / SQLite) — via SQLAlchemy 2. See [SQL data sources](https://recotem.org/2.1/docs/data-sources/sql.html).
+- **SQL** (PostgreSQL / MySQL / MariaDB / SQLite) — via SQLAlchemy 2. See [SQL data sources](https://recotem.org/2.2/docs/data-sources/sql.html).
 - **Custom plugins** — implement the `DataSource` Protocol and register via `recotem.datasources` entry-points.
 
 ## Install
@@ -175,7 +175,7 @@ trains TopPop, so the scores above are raw interaction counts.
 The recipe itself is 11 lines — every other field has a sensible default.
 See [`examples/quickstart/recipe.yaml`](examples/quickstart/recipe.yaml)
 for the source of truth and
-[Recipe reference](https://recotem.org/2.1/docs/recipe-reference.html) for the full schema.
+[Recipe reference](https://recotem.org/2.2/docs/recipe-reference.html) for the full schema.
 
 ### Which env var is needed where?
 
@@ -213,13 +213,13 @@ on file mtime.
 
 Full documentation site: **[recotem.org](https://recotem.org)**.
 
-- [Getting started](https://recotem.org/2.1/guide/) — Docker Compose / pip walkthrough end-to-end
-- [Recipe reference](https://recotem.org/2.1/docs/recipe-reference.html) — every field documented
-- [API reference](https://recotem.org/2.1/docs/serving-api.html) — `/v1` endpoints and the request/response shape of every inference verb, including the batch ones
-- [Operations](https://recotem.org/2.1/docs/operations.html) — key rotation, sizing, troubleshooting
-- [Security](https://recotem.org/2.1/docs/security.html) — threat model, IAM scopes, secrets handling
-- [Plugin authoring](https://recotem.org/2.1/docs/plugin-authoring.html) — write a custom data source
-- [Documentation index](https://recotem.org/2.1/docs/)
+- [Getting started](https://recotem.org/2.2/guide/) — Docker Compose / pip walkthrough end-to-end
+- [Recipe reference](https://recotem.org/2.2/docs/recipe-reference.html) — every field documented
+- [API reference](https://recotem.org/2.2/docs/serving-api.html) — `/v1` endpoints and the request/response shape of every inference verb, including the batch ones
+- [Operations](https://recotem.org/2.2/docs/operations.html) — key rotation, sizing, troubleshooting
+- [Security](https://recotem.org/2.2/docs/security.html) — threat model, IAM scopes, secrets handling
+- [Plugin authoring](https://recotem.org/2.2/docs/plugin-authoring.html) — write a custom data source
+- [Documentation index](https://recotem.org/2.2/docs/)
 
 ## Contributing
 

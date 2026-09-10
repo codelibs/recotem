@@ -23,7 +23,7 @@ used.  Left alone it is logged once per process through structlog's
 
 The warning is accurate but not actionable: on macOS there is no OpenMP build
 to switch to, and single-threaded BPRFM training is the documented macOS
-behaviour (see https://recotem.org/2.1/docs/recipe-reference.html#training).  The Linux images build
+behaviour (see https://recotem.org/2.2/docs/recipe-reference.html#training).  The Linux images build
 lightfm from source *with* OpenMP, so the warning never fires there.
 
 The filter is scoped to this one message so that every other ``UserWarning``

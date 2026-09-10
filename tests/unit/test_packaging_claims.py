@@ -3,7 +3,7 @@
 `[tool.hatch.build.targets.sdist] include` used to read
 ``["src/recotem", "README.md", "LICENSE"]``.  Hatchling's include patterns are
 gitignore-style, so an unanchored ``README.md`` matches a ``README.md`` at ANY
-depth: the sdist shipped ``https://recotem.org/2.1/docs/`` and all nine
+depth: the sdist shipped ``https://recotem.org/2.2/docs/`` and all nine
 ``examples/*/README.md`` -- and, because no pattern named ``examples``, none of
 the ``recipe.yaml``, CSV, or manifest files those READMEs instruct the reader
 to run.  Nine example directories consisting only of instructions for files
@@ -100,7 +100,7 @@ def test_sdist_include_patterns_are_anchored_and_cover_examples() -> None:
         "these sdist include patterns are unanchored, so hatchling matches "
         f"them at every depth, not just the repository root: {unanchored}. "
         "Prefix each with '/'. An unanchored 'README.md' is what pulled "
-        "https://recotem.org/2.1/docs/ and nine examples/*/README.md into the sdist while "
+        "https://recotem.org/2.2/docs/ and nine examples/*/README.md into the sdist while "
         "shipping none of the files those READMEs describe."
     )
 

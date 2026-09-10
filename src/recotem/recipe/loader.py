@@ -24,7 +24,7 @@ logger = structlog.get_logger(__name__)
 # Path-scheme policy
 # ---------------------------------------------------------------------------
 
-# Allow-list of write-supported schemes for output.path (see https://recotem.org/2.1/docs/recipe-reference.html).
+# Allow-list of write-supported schemes for output.path (see https://recotem.org/2.2/docs/recipe-reference.html).
 # Using an allow-list instead of a deny-list means unknown and novel schemes
 # (e.g. data:, javascript:, vendor-specific) are rejected by default rather
 # than admitted by oversight.

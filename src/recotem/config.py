@@ -90,7 +90,7 @@ Variables read outside this module -- ``RECOTEM_METRICS_ENABLED``
 (``_irspack_compat.py``), ``RECOTEM_SQL_ALLOW_PRIVATE`` (``datasource/sql.py``)
 and the ``RECOTEM_RECIPE_*`` expansion prefix (``recipe/envvars.py``) -- are
 documented at their reading site. The operator-facing table for all of them is
-published at https://recotem.org/2.1/docs/environment-variables.html.
+published at https://recotem.org/2.2/docs/environment-variables.html.
 """
 
 from __future__ import annotations
@@ -626,7 +626,7 @@ def get_max_feature_dim() -> int:
     cap refuses their catalogue.  Memory grows quadratically.  Measured per
     trial on a 100k-row fixture:
     5k -> 2.4 s / 200 MB; 10k -> 12 s / 771 MB; 20k -> 70 s / 3 GB; the lower
-    times in https://recotem.org/2.1/docs/operations.html's table come from a small fixture.  Both
+    times in https://recotem.org/2.2/docs/operations.html's table come from a small fixture.  Both
     multiply with training.parallelism.
     """
     return _clamped_int_env(

@@ -1,7 +1,7 @@
 """``validate`` and ``train`` must report the same exit code for the same failure.
 
 Measured on `main`: a plugin whose ``__init__`` raises ``ImportError`` — the
-exact case ``https://recotem.org/2.1/docs/plugin-authoring.html`` tells authors to guard against — gave
+exact case ``https://recotem.org/2.2/docs/plugin-authoring.html`` tells authors to guard against — gave
 
     recotem train     -> exit 3   "Data fetch failed: No module named 'x'"
     recotem validate  -> exit 1   "DataSource probe failed [source]: No module named 'x'"

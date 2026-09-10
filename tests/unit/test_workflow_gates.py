@@ -31,6 +31,25 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
+
+def workflow_paths() -> list[Path]:
+    """Every file GitHub Actions will run from `.github/workflows`.
+
+    Both extensions, not just `*.yml`: GitHub's workflow-syntax reference says
+    a workflow file "must have either a `.yml` or `.yaml` file extension", and
+    it runs both identically.  A `*.yml` glob therefore skips a `.yaml`
+    workflow silently -- the gates below would keep passing while an unchecked
+    workflow ran in CI.  Measured: a probe workflow granting `packages: write`
+    and running `uv sync --frozen` was invisible to every gate as `evil.yaml`
+    and failed two of them the moment it was renamed `evil.yml`.
+    """
+    return sorted(
+        path
+        for path in WORKFLOWS.iterdir()
+        if path.is_file() and path.suffix in {".yml", ".yaml"}
+    )
+
+
 # A job that grants no `permissions:` of its own inherits the workflow-level
 # block wholesale; GitHub does not intersect it with what the job uses.
 _NO_BLOCK = object()
@@ -128,7 +147,12 @@ def test_no_workflow_grants_packages_write_by_default() -> None:
     which only build and execute the image locally — held registry write, and
     so would any job added later.
     """
-    for path in sorted(WORKFLOWS.glob("*.yml")):
+    paths = workflow_paths()
+    assert paths, (
+        f"no workflow files found under {WORKFLOWS}; this gate iterates an "
+        "empty list and passes without checking anything"
+    )
+    for path in paths:
         permissions = _load(path.name).get("permissions") or {}
         assert "packages" not in permissions, (
             f"{path.name} grants `packages` at workflow level; every job "
@@ -152,9 +176,7 @@ def test_only_the_publishing_job_can_write_to_the_registry() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "workflow_file", sorted(p.name for p in WORKFLOWS.glob("*.yml"))
-)
+@pytest.mark.parametrize("workflow_file", [p.name for p in workflow_paths()])
 def test_pypi_publish_action_is_pinned_to_a_commit(workflow_file: str) -> None:
     """`@release/v1` is a branch: its tip decides what runs under OIDC."""
     for line in (WORKFLOWS / workflow_file).read_text().splitlines():

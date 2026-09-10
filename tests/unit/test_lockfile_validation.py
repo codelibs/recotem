@@ -65,10 +65,25 @@ def _strip_comments(text: str) -> str:
     return re.sub(r"\\\s*\n\s*", " ", body)
 
 
+def _workflow_paths() -> list[Path]:
+    """Every file GitHub Actions will run from `.github/workflows`.
+
+    Both extensions: GitHub's workflow-syntax reference says a workflow file
+    "must have either a `.yml` or `.yaml` file extension".  A `*.yml` glob
+    silently skips a `.yaml` workflow, so a `uv sync --frozen` added in one
+    would never reach the assertion below.
+    """
+    return sorted(
+        path
+        for path in _WORKFLOWS.iterdir()
+        if path.is_file() and path.suffix in {".yml", ".yaml"}
+    )
+
+
 def _workflow_sync_commands() -> list[tuple[str, str, str]]:
     """(workflow, job, command) for every `uv sync` in every workflow."""
     found: list[tuple[str, str, str]] = []
-    for path in sorted(_WORKFLOWS.glob("*.yml")):
+    for path in _workflow_paths():
         workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
         for job, spec in (workflow.get("jobs") or {}).items():
             for step in spec.get("steps") or []:

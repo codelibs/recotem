@@ -4,9 +4,10 @@ Design (Watcher loop):
 - Runs as a daemon thread; started once during app lifespan.
 - Polls every ``watch_interval`` seconds with +-10% jitter.
 - For each known recipe, stats the artifact pointer via fsspec.
-- If the pointer (mtime / ETag) has changed, reads the entire artifact once
-  into memory, computes sha256, HMAC-verifies, deserializes, then atomically
-  replaces the registry entry.
+- If the pointer's change-marker (ETag, or mtime/size plus — for a
+  pointer-sized file — a digest of its contents) has changed, reads the entire
+  artifact once into memory, computes sha256, HMAC-verifies, deserializes,
+  then atomically replaces the registry entry.
 - Concurrent stat() calls are bounded at 16 in-flight.
 - Rescans the recipes directory each cycle: new YAML files are added; removed
   YAML files cause the entry to be dropped from the registry.
@@ -123,10 +124,62 @@ def _read_artifact_bytes(path: str, max_bytes: int) -> bytes:
         raise ArtifactError(f"cannot read artifact '{path}': {exc}") from exc
 
 
+#: Upper bound on the size of a watched file whose *contents* are folded into
+#: the change marker.  Mirrors the pointer cap in
+#: ``recotem.artifact.io.resolve_artifact_pointer``: nothing larger can be a
+#: pointer, and no real artifact is anywhere near this small (the signed
+#: container's header JSON alone is bigger), so this read never touches an
+#: artifact payload — at worst it reads a few hundred bytes of a truncated file.
+_POINTER_PROBE_MAX_BYTES = 512
+
+
+def _pointer_content_digest(
+    fs: fsspec.AbstractFileSystem, fpath: str, size: Any
+) -> str | None:
+    """Return a digest of *fpath*'s contents when it is small enough to be a pointer.
+
+    Under ``versioning: append_sha`` — the documented default — the path the
+    watcher polls is not the artifact but a pointer file whose whole content is
+    ``<stem>.<sha8>.recotem``.  ``sha8`` is always 8 hex characters, so every
+    pointer for a given stem has the *same size*: the size half of the
+    ``(mtime, size)`` marker can never discriminate between two of them, and
+    change detection collapses onto mtime alone.  A rewrite that does not
+    advance the mtime — a coarse-granularity filesystem, or mtime-preserving
+    deploy tooling such as ``rsync -t`` / ``cp -p`` / a snapshot restore — is
+    then missed permanently and silently.
+
+    Folding the pointer's contents into the marker closes that gap for the cost
+    of one 512-byte-capped read per poll, and only for files that are
+    pointer-sized.  Files larger than :data:`_POINTER_PROBE_MAX_BYTES` (every real
+    artifact, which is what ``versioning: always_overwrite`` puts at this path)
+    return ``None`` and keep the previous ``(mtime, size)`` behaviour — hashing
+    those on every tick would mean re-reading up to ``max_artifact_bytes`` per
+    recipe per poll, which is exactly what the watcher's design avoids.
+
+    Returns ``None`` when the file is too large, when the size is unusable, or
+    when the read fails (a pointer deleted between ``info()`` and ``open()``, a
+    permission error).  ``None`` degrades the marker to what it was before this
+    check existed; it never fabricates a change.
+    """
+    try:
+        size_bytes = int(size)
+    except (TypeError, ValueError):
+        return None
+    if size_bytes < 0 or size_bytes > _POINTER_PROBE_MAX_BYTES:
+        return None
+    try:
+        with fs.open(fpath, "rb") as fh:
+            return _sha256_bytes(fh.read(_POINTER_PROBE_MAX_BYTES))
+    except Exception:
+        return None
+
+
 def _stat_marker(path: str, recipe_name: str = "<unknown>") -> Any:
     """Return an opaque change-marker for *path*.
 
-    For local filesystem: (mtime, size) tuple.
+    For local filesystem: ``(mtime, size, content_digest)``, where
+    ``content_digest`` is filled in only for pointer-sized files
+    (see :func:`_pointer_content_digest`) and is ``None`` otherwise.
     For object stores: ETag or VersionId from fsspec info.
 
     Returns ``None`` when the file does not exist (``FileNotFoundError``).
@@ -163,7 +216,10 @@ def _stat_marker_with_error(
             return etag, None
         mtime = info.get("mtime") or info.get("LastModified")
         size = info.get("size") or info.get("Size") or 0
-        return (mtime, size), None
+        # An append_sha pointer's size is a constant, so (mtime, size) alone
+        # cannot tell two pointers apart.  Fold the contents in for files small
+        # enough to be a pointer; larger paths keep the (mtime, size) marker.
+        return (mtime, size, _pointer_content_digest(fs, fpath, size)), None
     except FileNotFoundError:
         return None, None
     except Exception as exc:
@@ -984,7 +1040,10 @@ class ArtifactWatcher(threading.Thread):
         state._last_stat_error_class = None
 
         if marker == state.last_marker:
-            # Fast path: pointer/mtime unchanged.  For append_sha
+            # Fast path: the change marker is unchanged.  For a pointer-sized
+            # path that includes a digest of the pointer's contents, so a
+            # rewrite that did not advance the mtime has already been caught
+            # above and does not reach here.  For append_sha
             # artifacts we additionally check the cheap ``.sha256``
             # sidecar pointer file so the watcher can skip the full
             # artifact stat on the *resolved* target when neither the

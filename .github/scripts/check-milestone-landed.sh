@@ -160,15 +160,25 @@ if [ "${MILESTONE_EXISTS}" = "0" ]; then
 fi
 
 # `--limit` is a cap, not a request: `gh pr list` returns at most that many rows
-# and says nothing when there were more.  Measured: `--limit 5` on milestone
-# 2.1.0 returns 5 rows with an empty stderr, and `--limit 1100` against a
-# repository with more merged PRs than that returns exactly 1000 -- the search
-# API's own ceiling, also silent.  So the previous `--limit 200` would have
-# checked the 200 most recent PRs of a larger milestone and printed the same
-# "OK: every merged PR ... is an ancestor" line about the rest, which is the
-# vacuous-check shape this file's header refuses everywhere else.  Milestone
-# 2.1.0 carries 151 merged PRs today, so the old cap was 49 away from silently
-# under-reporting.
+# and says nothing when there were more.  Measured: `--limit 5` on a milestone
+# with more merged PRs than that returns 5 rows with an empty stderr, and
+# `--limit 1100` against a repository with more merged PRs than that returns
+# exactly 1000 -- the search API's own ceiling, also silent.  So a cap below the
+# size of the milestone checks its most recent PRs and prints the same "OK:
+# every merged PR ... is an ancestor" line about the rest, which is the
+# vacuous-check shape this file's header refuses everywhere else.  That was not
+# hypothetical: the previous `--limit 200` was already smaller than this
+# project's largest milestone by the time it was replaced, so the gate had
+# started under-reporting before anyone raised the number.
+#
+# No count is quoted here, deliberately.  A milestone's merged total only grows,
+# so a number written into a comment is exact on the day it is typed and
+# misleading from then on -- and the sentence built on it ("N away from
+# truncating") invites a reader to reason about headroom that has since been
+# spent.  That is what happened to the number this paragraph replaced.  The
+# guard below is what makes the question unnecessary: it refuses at
+# `count >= PR_LIMIT`, so truncation is reported when it happens rather than
+# predicted in advance.
 #
 # 1000 is chosen because it is where `gh pr list --search` truncates anyway, so
 # the guard below fires exactly when truncation starts rather than at an

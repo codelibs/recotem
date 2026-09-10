@@ -55,6 +55,12 @@ VERSION_PY="${REPO_ROOT}/src/recotem/version.py"
 CHART="${REPO_ROOT}/helm/recotem/Chart.yaml"
 VALUES="${REPO_ROOT}/helm/recotem/values.yaml"
 
+# The roots sections 4b and 4c read.  Declared here rather than beside those
+# sections because section 2b runs first and has to watch every path this
+# script reads -- see the comment there for why that matters, and section 4b
+# for what these are scanned for.
+SITE_ROOTS=(src tests examples helm .claude .github README.md CLAUDE.md CONTRIBUTING.md pyproject.toml)
+
 fail() {
     echo "::error::$1"
     shift
@@ -141,6 +147,19 @@ EXPECTED="${TAG#v}"
 # scratch file elsewhere cannot change the verdict, and refusing on one would
 # train operators to look past this gate.
 #
+# "The paths this script reads" is the whole of SITE_ROOTS, not just the
+# version declarations.  It used to be the declarations and `examples/` alone,
+# while sections 4b and 4c read eight further roots -- so the defect 2b exists
+# to prevent survived intact in every one of them.  Measured: commit a stale
+# `recotem.org/` URL in README.md, repair the working tree only, and this
+# script exits 0 while printing "every recotem.org/ documentation URL in the
+# tree names the <line> line" and "Those files are committed, so the lines
+# above describe the tree <tag> would publish".  Both false.  SITE_ROOTS
+# already contains pyproject.toml, `src` (version.py), `helm` (Chart.yaml and
+# values.yaml) and `examples`, so it is a superset of the old list; the four
+# specific files stay spelled out below so that shrinking SITE_ROOTS cannot
+# quietly stop watching them.
+#
 # GIT_TOPLEVEL is computed once here and reused by section 5.  Skipped outside
 # a git work tree, and when the enclosing repository is not this tree -- the
 # unit tests build synthetic trees in tmp dirs, which may sit inside some
@@ -154,6 +173,7 @@ if [ -n "${GIT_TOPLEVEL}" ] && [ "${GIT_TOPLEVEL}" = "${REPO_ROOT}" ]; then
             helm/recotem/Chart.yaml \
             helm/recotem/values.yaml \
             examples \
+            "${SITE_ROOTS[@]}" \
             2>/dev/null || true
     )"
     if [ -n "${DIRTY}" ]; then
@@ -179,15 +199,42 @@ fi
 # ---------------------------------------------------------------------------
 # 3. Every in-tree version declaration must equal the tag
 # ---------------------------------------------------------------------------
+# Every failure here is named rather than traced.  Both readers already failed
+# CLOSED -- `set -e` aborts the script when the substitution does -- but a
+# malformed manifest surfaced as a bare
+#
+#   Traceback (most recent call last):
+#     File "<stdin>", line 5, in <module>
+#   KeyError: 'version'
+#
+# which names neither the file nor the key, and reads like a broken gate rather
+# than a broken pyproject.toml.  A gate an operator cannot act on is one they
+# learn to work around.
 PYPROJECT_VERSION="$(
     python3 - "${PYPROJECT}" <<'PYEOF'
 import sys
 import tomllib
 
-with open(sys.argv[1], "rb") as handle:
-    print(tomllib.load(handle)["project"]["version"])
+path = sys.argv[1]
+try:
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+except OSError as exc:
+    raise SystemExit(f"cannot open pyproject.toml: {exc}")
+except tomllib.TOMLDecodeError as exc:
+    raise SystemExit(f"pyproject.toml is not valid TOML: {exc}")
+
+try:
+    print(data["project"]["version"])
+except (KeyError, TypeError):
+    raise SystemExit("pyproject.toml declares no [project] version")
 PYEOF
-)"
+)" || fail "Cannot read the project version from pyproject.toml." \
+     "The reason is printed above." \
+     "" \
+     "[project] version is the version the wheel carries, so a tag cannot be" \
+     "checked against it while it is unreadable.  Refused rather than skipped:" \
+     "an unreadable declaration must not be mistaken for a matching one."
 
 # Parsed textually rather than imported: importing recotem here would pull in
 # the whole dependency tree just to read a string literal.
@@ -196,7 +243,13 @@ VERSION_PY_VERSION="$(
 import ast
 import sys
 
-tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read(), filename=path)
+except (OSError, UnicodeDecodeError, SyntaxError, ValueError) as exc:
+    raise SystemExit(f"src/recotem/version.py cannot be read: {exc}")
+
 found = None
 for node in tree.body:
     if isinstance(node, ast.Assign) and any(
@@ -210,7 +263,12 @@ if found is None:
     raise SystemExit("no __version__ assignment found")
 print(found)
 PYEOF
-)"
+)" || fail "Cannot read __version__ from src/recotem/version.py." \
+     "The reason is printed above." \
+     "" \
+     "__version__ is what 'import recotem' reports, so a tag cannot be checked" \
+     "against it while it is unreadable.  Refused rather than skipped, for the" \
+     "same reason as pyproject.toml above."
 
 # The Helm chart's version keys are deployment pins rather than package
 # metadata, but they must track the release for the same reason the wheel must:
@@ -474,7 +532,8 @@ while IFS= read -r hit; do classify "${hit}" label; done < <(printf '%s\n' "${LA
 # at the DEV bump (Phase 5), not at release -- the opposite cadence to the
 # deployment pins above -- which is exactly why a release-time gate is the
 # thing that notices when the bump was skipped.
-SITE_ROOTS=(src tests examples helm .claude .github README.md CLAUDE.md CONTRIBUTING.md pyproject.toml)
+# SITE_ROOTS is declared at the top of this file: section 2b's dirty check has
+# to cover the same paths, and it runs before this one.
 SITE_RE='recotem\.org/[0-9]+\.[0-9]+/'
 # -I and the __pycache__ exclusion, for the same reason the bump command in
 # references/version-locations.md carries them: *.pyc embeds these URLs in
@@ -489,6 +548,113 @@ SITE_RE='recotem\.org/[0-9]+\.[0-9]+/'
 SITE_HITS="$(cd "${REPO_ROOT}" && grep -rnoE "${GREP_SKIP_BYTECODE[@]}" "${SITE_RE}" \
   "${SITE_ROOTS[@]}" 2>/dev/null || true)"
 
+# grep reads one line at a time, and Python folds implicit string
+# concatenation -- so a URL written across a wrap point is a value no LINE of
+# the file contains, while the user receives it whole.  Measured: with
+#
+#     "https://recotem.org/2."
+#     "0/docs/data-sources/csv.html"
+#
+# in a DataSourceError, `grep -rnoE 'recotem\.org/2\.0/'` over every root above
+# returns nothing and this script exits 0, still printing "every recotem.org/
+# documentation URL in the tree names the <line> line".  The same URL on one
+# line is refused.  Nothing exotic produces this shape: any formatter that
+# wraps a long error string can, and the tree already carries one such URL (in
+# `src/recotem/training/features.py`, split after `.html` and before its
+# `#anchor`, which is why it happens to be innocent).
+#
+# So the URLs a .py file BUILDS are read by parsing rather than by matching
+# lines, and fed to the same two checks below.  Only the ones no line carries
+# are printed: everything else is already a grep hit, and reporting it twice
+# would name one offence twice.  The line number reported is where the string
+# EXPRESSION starts, not where the URL's own fragment sits -- there is no
+# single line to point at, which is the whole problem.
+#
+# Not covered, and not claimed to be: a version segment that is computed rather
+# than written (`f".../{MAJOR_MINOR}/..."`).  An interpolated part stands in as
+# a byte no URL can contain, so such a URL matches neither pattern -- the same
+# blind spot grep has, kept deliberately, because this file's own test fixtures
+# build their URLs that way and must not be read as naming a stale line.
+ASSEMBLED_HITS="$(
+    cd "${REPO_ROOT}" && python3 - . "${SITE_ROOTS[@]}" <<'PYEOF'
+import ast
+import os
+import re
+import sys
+
+SEGMENT_RE = re.compile(r"recotem\.org/[0-9]+\.[0-9]+/")
+URL_RE = re.compile(
+    r"(?:https://)?recotem\.org/[0-9]+\.[0-9]+/[A-Za-z0-9_/-]+(?:\.html)?"
+)
+PLACEHOLDER = "\x00"
+
+root = sys.argv[1]
+
+
+def py_files(rel):
+    path = os.path.join(root, rel)
+    if os.path.isfile(path):
+        if path.endswith(".py"):
+            yield path
+        return
+    for dirpath, dirnames, filenames in os.walk(path):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        for name in sorted(filenames):
+            if name.endswith(".py"):
+                yield os.path.join(dirpath, name)
+
+
+def string_values(tree):
+    """Every string a module builds from literals, folded as Python folds it."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            yield node.lineno, node.value
+        elif isinstance(node, ast.JoinedStr):
+            yield node.lineno, "".join(
+                piece.value
+                if isinstance(piece, ast.Constant) and isinstance(piece.value, str)
+                else PLACEHOLDER
+                for piece in node.values
+            )
+
+
+seen = set()
+for rel in sys.argv[2:]:
+    for path in py_files(rel):
+        shown = os.path.relpath(path, root)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                source = handle.read()
+            tree = ast.parse(source, filename=path)
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError) as exc:
+            raise SystemExit(
+                f"{shown}: cannot be parsed, so the documentation URLs it "
+                f"builds cannot be read ({exc})"
+            )
+        lines = source.splitlines()
+        for lineno, value in string_values(tree):
+            for kind, pattern in (("segment", SEGMENT_RE), ("url", URL_RE)):
+                for match in pattern.finditer(value):
+                    text = match.group(0)
+                    if any(text in line for line in lines):
+                        continue
+                    hit = f"{kind} {shown}:{lineno}:{text}"
+                    if hit in seen:
+                        continue
+                    seen.add(hit)
+                    print(hit)
+PYEOF
+)" || fail "Cannot read the documentation URLs the Python sources build." \
+     "The reason is printed above." \
+     "" \
+     "Sections 4b and 4c match lines, so a URL assembled across a line break is" \
+     "invisible to them; this scan parses instead.  Refused rather than skipped:" \
+     "a scan that could not run must not be mistaken for a scan that found" \
+     "nothing to report."
+
+ASSEMBLED_SITE_HITS="$(printf '%s\n' "${ASSEMBLED_HITS}" | sed -n 's/^segment //p')"
+ASSEMBLED_URL_HITS="$(printf '%s\n' "${ASSEMBLED_HITS}" | sed -n 's/^url //p')"
+
 EXPECTED_MM="${EXPECTED%.*}"
 VERSION_SITE_COUNT=0
 STALE_SITE_URLS=()
@@ -498,7 +664,7 @@ while IFS= read -r hit; do
     HIT_MM="${hit##*recotem.org/}"
     HIT_MM="${HIT_MM%/}"
     [ "${HIT_MM}" = "${EXPECTED_MM}" ] || STALE_SITE_URLS+=("  ${hit}")
-done < <(printf '%s\n' "${SITE_HITS}")
+done < <(printf '%s\n' "${SITE_HITS}" "${ASSEMBLED_SITE_HITS}")
 
 # The same vacuity guard as the two above, and for the same reason: this scan
 # replaced the values.yaml-excerpt scan that died with docs/, so a silent zero
@@ -543,6 +709,11 @@ done < <(printf '%s\n' "${SITE_HITS}")
 # assertion keeps passing after the product string is corrected, and stops
 # being able to catch the regression it was written for.
 SUFFIX_RE='(https://)?recotem\.org/[0-9]+\.[0-9]+/[A-Za-z0-9_/-]+(\.html)?'
+
+# The assembled hits collected in 4b are checked here too.  Those carry a
+# `path:lineno:` prefix, which the grep hits do not (`-h`): a URL no line
+# contains cannot be found again with `git grep`, so the one place it is
+# reported is the only place its location can come from.
 SUFFIX_HITS="$(cd "${REPO_ROOT}" && grep -rIhoE "${SUFFIX_RE}" "${SITE_ROOTS[@]}" 2>/dev/null || true)"
 
 SUFFIX_COUNT=0
@@ -554,7 +725,7 @@ while IFS= read -r url; do
         */|*.html) ;;
         *) EXTLESS_SITE_URLS+=("  ${url}") ;;
     esac
-done < <(printf '%s\n' "${SUFFIX_HITS}" | sort -u)
+done < <(printf '%s\n' "${SUFFIX_HITS}" "${ASSEMBLED_URL_HITS}" | sort -u)
 
 # Vacuity guard, for the same reason as every other scan in this section.
 [ "${SUFFIX_COUNT}" -gt 0 ] || \
@@ -718,7 +889,7 @@ if [ "${#EXTLESS_SITE_URLS[@]}" -gt 0 ]; then
              "same artefacts as above, which nobody can correct after the upload." \
              "" \
              "Append '.html' to the page name, keeping any '#anchor' after it:" \
-             "  https://recotem.org/${EXPECTED_MM}/docs/security.html#kid-rotation" \
+             "  https://recotem.org/${EXPECTED_MM}/docs/operations.html#signing-key-rotation" \
              "" \
              "Directory URLs ('.../docs/', '.../guide/') resolve to index.html and are" \
              "correct without it; they are not reported here." \
@@ -737,11 +908,21 @@ if [ -n "${BRANCH_PROBLEM}" ]; then
 fi
 
 if [ "${#REPORT[@]}" -gt 0 ]; then
-    # Clauses joined rather than concatenated by hand, so adding a fourth class
+    # Clauses joined rather than concatenated by hand, so adding a fifth class
     # of failure later does not require rewriting the sentence.
+    #
+    # Every class that can populate REPORT gets a clause.  The two URL classes
+    # had none, so a tree whose only fault was a documentation URL failed under
+    # the headline `::error::Tag 'v2.1.0'.` -- a sentence with no predicate,
+    # and the one line an operator reads first.  The detail was always in the
+    # body; the summary said nothing.
     CLAUSES=()
     [ "${#STALE_PINS[@]}" -eq 0 ] || \
         CLAUSES+=("does not match every deployment pin")
+    [ "${#STALE_SITE_URLS[@]}" -eq 0 ] || \
+        CLAUSES+=("names another documentation line")
+    [ "${#EXTLESS_SITE_URLS[@]}" -eq 0 ] || \
+        CLAUSES+=("carries a documentation URL that cannot resolve")
     [ -z "${MISMATCH}" ] || \
         CLAUSES+=("does not match the project version: ${MISMATCH}")
     [ -z "${BRANCH_PROBLEM}" ] || \

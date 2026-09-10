@@ -852,42 +852,80 @@ def test_drain_seconds_used_as_uvicorn_graceful_shutdown_timeout(
     """The drain_seconds from ServeConfig is forwarded to uvicorn as
     timeout_graceful_shutdown so in-flight requests have time to complete.
 
-    We verify this structurally via the CLI module rather than actually
-    starting uvicorn (which would bind a real port).
+    Asserted on the keyword uvicorn actually receives, with ``uvicorn.run``
+    patched so no port is bound.  This used to grep ``inspect.getsource`` for
+    the two names, which stayed green when the argument was commented out --
+    and nothing else in the suite covers this wiring, so the drain window could
+    be silently disconnected from uvicorn's graceful shutdown.
     """
-    import inspect
+    from unittest.mock import patch
 
-    from recotem.cli import serve as serve_command
+    from typer.testing import CliRunner
 
-    source = inspect.getsource(serve_command)
-    assert "timeout_graceful_shutdown" in source, (
-        "cli.serve must pass drain_seconds to uvicorn.run "
-        "as timeout_graceful_shutdown so in-flight requests are drained on SIGTERM"
+    from recotem.cli import app as cli_app
+
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    monkeypatch.setenv("RECOTEM_SIGNING_KEYS", "active:" + "aa" * 32)
+    monkeypatch.setenv("RECOTEM_ENV", "test")
+    monkeypatch.setenv("RECOTEM_DRAIN_SECONDS", "17")
+
+    with patch("uvicorn.run") as run_mock:
+        result = CliRunner().invoke(
+            cli_app,
+            ["serve", "--recipes", str(recipes_dir), "--insecure-no-auth"],
+        )
+
+    assert result.exit_code == 0, f"serve exited {result.exit_code}: {result.stdout}"
+    assert run_mock.call_count == 1, (
+        f"cli.serve must call uvicorn.run exactly once; got {run_mock.call_count}"
     )
-    assert "drain_seconds" in source, (
-        "cli.serve must reference cfg.drain_seconds when calling uvicorn.run"
+    assert run_mock.call_args.kwargs.get("timeout_graceful_shutdown") == 17, (
+        "cli.serve must forward cfg.drain_seconds to uvicorn as "
+        f"timeout_graceful_shutdown; got {run_mock.call_args.kwargs!r}"
     )
 
 
-def test_watcher_join_timeout_uses_drain_seconds_clamped(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("drain_seconds", "expected_timeout"),
+    [(300, 5.0), (3, 3.0), (1, 1.0)],
+)
+def test_watcher_join_timeout_uses_drain_seconds_clamped(
+    tmp_path: Path, drain_seconds: int, expected_timeout: float
+) -> None:
     """The watcher join timeout is clamped to max(1, min(5, drain_seconds)).
 
-    This test verifies that very large drain_seconds values (e.g. 300s) are
-    clamped so the watcher join does not block process exit indefinitely.
+    Asserted on the timeout ``ArtifactWatcher.join`` actually receives across
+    the whole formula: the upper clamp (300 -> 5), the pass-through (3 -> 3)
+    and the lower clamp (1 -> 1).  This used to grep ``inspect.getsource`` for
+    the literal ``min(5.0``, which stayed green with the upper bound deleted --
+    and nothing else in the suite covers the clamp, so a 300 s drain window
+    could have blocked process exit for 300 s past the orchestrator's grace
+    period.
     """
-    # Confirm the formula is applied in app.py source
-    import inspect
+    from unittest.mock import patch
 
-    from recotem.serving import app as app_mod
+    from fastapi.testclient import TestClient
 
-    source = inspect.getsource(app_mod.create_app)
-    # The clamp logic should reference min/max around 5.0 and drain_seconds
-    assert "min(5.0" in source or "min(5," in source, (
-        "Watcher join timeout must be clamped with min(5.0, ...) "
-        "to prevent blocking process exit on large drain_seconds"
+    from recotem.serving.app import create_app
+    from recotem.serving.watcher import ArtifactWatcher
+
+    cfg = _minimal_config(tmp_path)
+    cfg.drain_seconds = drain_seconds
+
+    app = create_app(cfg)
+
+    with patch.object(ArtifactWatcher, "join", autospec=True) as join_mock:
+        with TestClient(app):
+            pass
+
+    assert join_mock.call_count == 1, (
+        f"the watcher must be joined exactly once on shutdown; "
+        f"got {join_mock.call_count}"
     )
-    assert "drain_seconds" in source, (
-        "Watcher join timeout must reference drain_seconds"
+    assert join_mock.call_args.kwargs.get("timeout") == expected_timeout, (
+        f"drain_seconds={drain_seconds} must clamp the watcher join timeout to "
+        f"{expected_timeout}; got {join_mock.call_args.kwargs!r}"
     )
 
 

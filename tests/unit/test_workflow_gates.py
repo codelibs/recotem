@@ -270,25 +270,27 @@ def test_reland_record_rows_are_well_formed() -> None:
 # ---------------------------------------------------------------------------
 # The PR trigger must cover the trees the suite reads
 #
-# Much of this suite resolves REPO_ROOT and asserts against the *real* docs/,
+# Much of this suite resolves REPO_ROOT and asserts against the *real*
 # examples/, helm/ and .github/ trees rather than a fixture.  A `paths:` filter
 # that omits one of those makes those tests unfalsifiable at PR time for
 # precisely the change they exist to police -- the suite is green because it
 # never ran, which is indistinguishable from green because it passed.
 #
-# Measured on PR #214, which changed a single file under docs/:
-# `repos/codelibs/recotem/commits/<head>/check-runs` reports total_count=2,
+# Measured on PR #214, which changed a single file under the docs/ tree of the
+# day: `repos/codelibs/recotem/commits/<head>/check-runs` reports total_count=2,
 # both CodeQL.  No pytest, no ruff, no manifests, no e2e.
 #
 # That is how `ghcr.io/codelibs/recotem:2.0.0` reached docs/upgrading.md and
 # made the v2.1.0 tag unreachable through the documented release procedure
-# while every check was green.
+# while every check was green.  #385 has since moved that tree out of this
+# repository, so docs/ has no row below and no entry in the filter: the table
+# names trees a test on main actually reads, and a row for a path that cannot
+# exist would pass whatever the filter said.
 # ---------------------------------------------------------------------------
 
 # One real path per tree, with a test on main that reads it.  The point is the
 # tree, not the file: each entry stands for every test that reaches into it.
 _TREES_THE_SUITE_READS = [
-    ("docs/upgrading.md", "test_packaging_claims.py rglobs docs/*.md"),
     ("examples/k8s/cronjob.yaml", "test_k8s_manifests.py reads examples/k8s/"),
     ("helm/recotem/values.yaml", "test_k8s_manifests.py renders the real chart"),
     (".github/scripts/check-release-tag.sh", "test_check_release_tag.py runs it"),

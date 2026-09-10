@@ -5126,55 +5126,67 @@ def test_sidecar_enoent_still_returns_false(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# C4: sidecar_unsupported resets when recipe YAML mtime changes
+# C4: sidecar_unsupported resets when the recipe YAML is re-parsed
 # ---------------------------------------------------------------------------
 
 
-def test_sidecar_unsupported_clears_on_yaml_mtime_change(
+def test_sidecar_unsupported_is_never_cleared_by_the_sidecar_check_itself(
     tmp_path: Path,
 ) -> None:
-    """When sidecar_unsupported=True and the recipe YAML mtime changes,
-    _check_sidecar_changed must clear the flag and re-evaluate (C4)."""
-    from unittest.mock import MagicMock, patch
+    """C4 recovery belongs to the rescan, and must not move back in here.
 
+    This test used to build the state around a ``MagicMock`` carrying a
+    ``_yaml_path`` attribute and assert that ``_check_sidecar_changed`` cleared
+    the latch once that file's mtime moved.  It passed, and it proved nothing:
+    ``Recipe`` is a pydantic model with ``extra="forbid"`` and no private
+    attributes, so no real recipe has ever carried ``_yaml_path`` or
+    ``yaml_path``.  The ``getattr`` chain answered ``None`` for every recipe
+    that has ever existed, the guard it fed always declined, and the recovery
+    never ran once in a live server -- the double was the only object in
+    existence for which the code worked.
+
+    The clearing now happens where the watcher already decides the YAML
+    changed, in ``_scan_recipes_dir``;
+    ``tests/unit/test_watcher_live_recipe_body.py`` covers the recovery itself
+    against a real recipe.  Pinned here is the other half of that split: with a
+    real recipe, this function declines and leaves the latch alone however the
+    YAML moves underneath it, so a reintroduced mtime probe would fail here.
+    """
+    import os
+
+    from recotem.recipe.loader import load_recipe
     from recotem.serving.watcher import _check_sidecar_changed, _RecipeWatchState
 
-    yaml_path = tmp_path / "recipe.yaml"
-    yaml_path.write_text("name: test\n")
-    artifact_path = str(tmp_path / "model.recotem")
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    artifact_path = tmp_path / "model.recotem"
+    yaml_path = _write_recipe_yaml(recipes_dir, "c4_test", artifact_path)
 
-    recipe = MagicMock()
-    recipe.name = "c4_test"
-    recipe._yaml_path = yaml_path
-
-    initial_mtime = yaml_path.stat().st_mtime
+    # A sidecar that exists and has genuinely changed, so a "False" below can
+    # only be the latch and not an absent or unchanged file.
+    sidecar_path = Path(str(artifact_path) + ".sha256")
+    sidecar_path.write_text("sha_v2\n")
 
     state = _RecipeWatchState(
-        recipe=recipe,
-        artifact_path=artifact_path,
+        recipe=load_recipe(yaml_path),
+        artifact_path=str(artifact_path),
+        last_sidecar_contents="sha_v1\n",
         sidecar_unsupported=True,
-        sidecar_unsupported_at_mtime=initial_mtime,
     )
 
-    # With same mtime, still unsupported — returns False immediately.
-    result = _check_sidecar_changed(state)
-    assert result is False, "No mtime change → sidecar_unsupported stays True"
+    assert _check_sidecar_changed(state) is False
     assert state.sidecar_unsupported is True
 
-    # Simulate mtime change by patching os.stat to return a newer mtime.
-    new_mtime = initial_mtime + 1.0
+    bumped = os.stat(yaml_path).st_mtime + 10
+    os.utime(yaml_path, (bumped, bumped))
 
-    class _FakeStat:
-        st_mtime = new_mtime
-
-    with patch("os.stat", return_value=_FakeStat()):
-        result2 = _check_sidecar_changed(state)
-
-    # After mtime change, sidecar_unsupported must be cleared.
-    assert state.sidecar_unsupported is False, (
-        "sidecar_unsupported must be cleared when recipe YAML mtime changes"
+    assert _check_sidecar_changed(state) is False, (
+        "the sidecar check has no view of the recipe file and must not grow one"
     )
-    assert state.sidecar_unsupported_at_mtime is None
+    assert state.sidecar_unsupported is True, (
+        "only the rescan clears the latch; clearing it here would need a recipe "
+        "attribute that no Recipe can carry"
+    )
 
 
 # ---------------------------------------------------------------------------

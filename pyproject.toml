@@ -68,7 +68,7 @@ dependencies = [
     # that cannot be installed anywhere.  6.0.1 installs on 3.12/3.13/3.14;
     # 6.0.3 is the first with a wheel for all three.
     "pyyaml>=6.0.1,<7",
-    "structlog>=24,<26",
+    "structlog>=24,<27",
     "fsspec>=2024.6,<2026",
     "pandas>=3.0.3,<4",
     "pyarrow>=15,<26",

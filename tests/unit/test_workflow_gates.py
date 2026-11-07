@@ -140,6 +140,18 @@ def test_docker_push_waits_on_the_test_suite() -> None:
     )
 
 
+def test_trivy_skips_pull_requests_without_skipping_build() -> None:
+    """A base-image CVE must not turn every open PR red.
+
+    `trivy` is skipped on pull_request, and a skipped `needs` dependency would
+    skip `build` too unless `build` has its own `if:`.
+    """
+    jobs = _load("docker.yml")["jobs"]
+    assert jobs["trivy"].get("if") == "github.event_name != 'pull_request'"
+    assert "trivy" in _needs(jobs["build"])
+    assert "failure()" in str(jobs["build"].get("if", ""))
+
+
 def test_no_workflow_grants_packages_write_by_default() -> None:
     """A workflow-level grant reaches every job that declares no block.
 

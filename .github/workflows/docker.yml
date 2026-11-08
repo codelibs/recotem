@@ -10,7 +10,8 @@ name: recotem / docker
 #           └──> test ────────────────────────────────┘
 # Nothing is pushed until the release-tag guard, the test suite, the runtime
 # smoke test and the vulnerability scan have all passed.  `build` is the only
-# job that logs in to GHCR.
+# job that logs in to GHCR.  The vulnerability scan runs on pushes to main and
+# on version tags only, not on pull requests.
 #
 # `build` gates the push by gating the whole job: the registry login and the
 # `push: true` build are steps inside it, so a failed dependency skips `build`
@@ -414,10 +415,15 @@ jobs:
   # This job used to run `needs: build`, so a fixable HIGH/CRITICAL turned the
   # run red only once the image — and the mutable `latest` tag — was already
   # live on GHCR.  It now sits between `smoke` and `build`.
+  #
+  # Not run on pull requests.  A new CVE in the base image turns this red on
+  # every open PR, whatever the PR changed, with no remedy inside the PR.  It
+  # still gates the push to main and version tags, which is where it matters.
   trivy:
     name: trivy vulnerability scan
     runs-on: ubuntu-24.04
     needs: smoke
+    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       security-events: write
@@ -483,6 +489,10 @@ jobs:
     name: docker build
     runs-on: ubuntu-24.04
     needs: [test, smoke, trivy]
+    # `trivy` is skipped on pull requests, and a skipped dependency would skip
+    # this job too.  `!failure()` runs it when every dependency succeeded or was
+    # skipped, and still skips it when any of them failed.
+    if: ${{ !cancelled() && !failure() }}
     # The only job that logs in to GHCR, and so the only one granted write.
     permissions:
       contents: read

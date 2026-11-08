@@ -265,7 +265,7 @@ Operator-facing version: https://recotem.org/2.2/docs/environment-variables.html
 `.github/workflows/`:
 - `test.yml` — ruff + pytest unit/integration + e2e + secrets-in-logs grep
 - `docker.yml` — build + push multi-arch image to ghcr.io on main + tags;
-  build-only on PRs
+  build-only on PRs (the trivy scan runs on main + tags, not on PRs)
 - `codeql.yml` — Python CodeQL, push/PR + weekly schedule
 
 ## Reference docs

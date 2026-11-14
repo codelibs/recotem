@@ -85,7 +85,7 @@ dependencies = [
     # does not close it -- two installs inside the range can still differ.  The
     # irspack version-skew guard does NOT cover the sklearn axis.
     "scikit-learn>=1.8,<1.10",
-    "optuna>=4.1,<5",
+    "optuna>=4.1,<6",
     "rich>=13,<16",
 ]
 

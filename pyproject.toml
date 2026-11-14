@@ -51,7 +51,7 @@ dependencies = [
     # FileResponse).  FastAPI <0.120 caps starlette below 0.49, so we also
     # bump the FastAPI floor to 0.120.
     "starlette>=1.0.0,<1.4",
-    "uvicorn[standard]>=0.30,<0.53",
+    "uvicorn[standard]>=0.30,<0.55",
     "pydantic>=2.7,<3",
     # Floor measured, not guessed.  0.12.0-0.12.3 cannot build this CLI at
     # all: `env_var` in cli.py is annotated `list[str] | None` and those

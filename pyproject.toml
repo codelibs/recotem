@@ -61,7 +61,7 @@ dependencies = [
     # every command dies in `Parameter.make_metavar()`.  0.15.4 is the
     # first release a fresh `pip install recotem` resolves into a working
     # CLI.  tests/unit/test_packaging_metadata.py pins the measurement.
-    "typer>=0.15.4,<0.27",
+    "typer>=0.15.4,<0.30",
     "urllib3>=2.7.0,<3",  # CVE-2026-44431, CVE-2026-44432
     # 6.0 publishes no wheel for any interpreter this project supports and
     # its sdist no longer builds (Cython 3), so `>=6.0` named a version
